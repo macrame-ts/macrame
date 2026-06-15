@@ -35,6 +35,10 @@ Core scaffolding in `main.cpp` and `scheduler.h` (scheduler.cpp is empty placeho
 - Worker threads set `thread_local Scheduler* current_scheduler` — subsequents submitted inline from worker
 - `subsequents_closed_` flag handles the race between `then()` called before vs after task completion
 
+## VS Project
+
+`task_system.vcxproj` must be kept in sync manually — VS does not auto-discover files. Whenever you create a new `.cpp` or `.h` file, add it to the appropriate `<ItemGroup>` in `task_system.vcxproj`: `<ClCompile>` for `.cpp`, `<ClInclude>` for `.h`.
+
 ## Session Guidance
 
 - Multiple sessions will work on different aspects — read this file for context each time
