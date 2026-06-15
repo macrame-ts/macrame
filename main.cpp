@@ -29,7 +29,6 @@ private:
     { return l.priority_ > r.priority_; });
     std::priority_queue<Task_skeleton, std::vector<Task_skeleton>, Cmp> task_queue;
     std::mutex queue_mutex;
-    std::condition_variable queue_cv;
 
     std::jthread worker_;
     std::atomic<bool> quit_ = false;
@@ -42,33 +41,23 @@ public:
 
     ~Scheduler()
     {
-        {
-            std::lock_guard lock(queue_mutex);
-            quit_.store(true, std::memory_order_release);
-        }
-        queue_cv.notify_one();
+        quit_.store(true, std::memory_order_release);
     }
 
     void submit(Task_func_ptr func, void* data, Priority priority = Priority::normal) 
     {
-        {
-            std::lock_guard lock(queue_mutex);
-            task_queue.emplace(func, data, priority);
-        }
-        queue_cv.notify_one();
+            
+        std::lock_guard lock(queue_mutex);
+        task_queue.emplace(func, data, priority);
     }
 
     void worker_main()
     {
         current_scheduler = this;
 
-        std::unique_lock lock(queue_mutex);
         while (true)
         {
-            queue_cv.wait(lock, [this] {
-                return quit_.load(std::memory_order_acquire) || !task_queue.empty();
-            });
-
+            std::unique_lock lock(queue_mutex);
             if (quit_.load(std::memory_order_acquire) && task_queue.empty())
                 break;
 
@@ -80,8 +69,6 @@ public:
             lock.unlock();
 
             task.func_(task.data_);
-
-            lock.lock();
         }
 
         current_scheduler = nullptr;
@@ -124,7 +111,7 @@ private:
     std::move_only_function<void()> task_func_;
     Priority priority_;
 
-    std::binary_semaphore sem_ = std::binary_semaphore(0);
+    std::binary_semaphore sem_{ 0 };
 
 public:
     Awaitable_task(std::move_only_function<void()> task_func, Priority priority = Priority::normal)
