@@ -1,79 +1,10 @@
+#include "scheduler.h"
+
 #include <functional>
-#include <queue>
 #include <iostream>
-#include <thread>
 #include <mutex>
-#include <condition_variable>
-#include <chrono>
 #include <semaphore>
-
-using namespace std::chrono_literals;
-
-enum class Priority { high, normal, low };
-
-using Task_func_ptr = void(*)(void* data);
-
-class Scheduler;
-thread_local Scheduler* current_scheduler = nullptr;
-
-class Scheduler {
-private:
-    struct Task_skeleton 
-    {
-        Task_func_ptr func_;
-        void* data_;
-        Priority priority_;
-    };
-
-    using Cmp = decltype([](const Task_skeleton& l, const Task_skeleton r) 
-    { return l.priority_ > r.priority_; });
-    std::priority_queue<Task_skeleton, std::vector<Task_skeleton>, Cmp> task_queue;
-    std::mutex queue_mutex;
-
-    std::jthread worker_;
-    std::atomic<bool> quit_ = false;
-
-public:
-    Scheduler()
-    {
-        worker_ = std::jthread{ [this]{ worker_main(); } };
-    }
-
-    ~Scheduler()
-    {
-        quit_.store(true, std::memory_order_release);
-    }
-
-    void submit(Task_func_ptr func, void* data, Priority priority = Priority::normal) 
-    {
-            
-        std::lock_guard lock(queue_mutex);
-        task_queue.emplace(func, data, priority);
-    }
-
-    void worker_main()
-    {
-        current_scheduler = this;
-
-        while (true)
-        {
-            std::unique_lock lock(queue_mutex);
-            if (quit_.load(std::memory_order_acquire) && task_queue.empty())
-                break;
-
-            if (task_queue.empty())
-                continue;
-
-            auto task = task_queue.top();
-            task_queue.pop();
-            lock.unlock();
-
-            task.func_(task.data_);
-        }
-
-        current_scheduler = nullptr;
-    }
-};
+#include <vector>
 
 template<typename Task_func_t>
 struct Static_task 
