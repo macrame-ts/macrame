@@ -20,7 +20,8 @@ Awaitable_task::Awaitable_task(std::move_only_function<void()> task_func, Priori
 
 void Awaitable_task::submit(Scheduler& scheduler)
 {
-    auto trampoline = [](void* data) {
+    auto trampoline = [](void* data)
+    {
         auto task = reinterpret_cast<Awaitable_task*>(data);
         task->task_func_();
         task->sem_.release();

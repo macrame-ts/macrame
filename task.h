@@ -14,7 +14,8 @@ struct Static_task
     Task_func_t task_func_;
     Priority priority_ = Priority::normal;
 
-    void submit(Scheduler& scheduler) {
+    void submit(Scheduler& scheduler)
+    {
         auto trampoline = [](void* data)
         {
             reinterpret_cast<Static_task*>(data)->task_func_();
@@ -50,7 +51,7 @@ template <typename T>
 class Ref_counted_base
 {
 private:
-    mutable std::atomic<uint32_t> ref_count_{0};
+    mutable std::atomic<uint32_t> ref_count_{ 0 };
 
 protected:
     ~Ref_counted_base() = default;
@@ -61,8 +62,11 @@ public:
     Ref_counted_base(const Ref_counted_base&) noexcept
         : ref_count_(0)
     {}
+
     Ref_counted_base& operator=(const Ref_counted_base&) noexcept
-    { return *this; }
+    {
+        return *this;
+    }
 
     void add_ref() const noexcept
     {
@@ -146,10 +150,25 @@ public:
         return *this;
     }
 
-    T* get() const noexcept { return ptr_; }
-    T* operator->() const noexcept { return ptr_; }
-    T& operator*() const noexcept { return *ptr_; }
-    explicit operator bool() const noexcept { return ptr_ != nullptr; }
+    T* get() const noexcept
+    {
+        return ptr_;
+    }
+
+    T* operator->() const noexcept
+    {
+        return ptr_;
+    }
+
+    T& operator*() const noexcept
+    {
+        return *ptr_;
+    }
+
+    explicit operator bool() const noexcept
+    {
+        return ptr_ != nullptr;
+    }
 };
 
 struct Ref_counted_task_impl : public Ref_counted_base<Ref_counted_task_impl>

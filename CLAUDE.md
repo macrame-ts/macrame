@@ -44,4 +44,4 @@ Core scaffolding in `main.cpp` and `scheduler.h` (scheduler.cpp is empty placeho
 - Multiple sessions will work on different aspects — read this file for context each time
 - Propose design options with tradeoffs before implementing non-trivial changes
 - Perf matters: flag any change that adds allocations or contention on hot paths
-- Code style: `Snake_case` for types, `snake_case` for members/locals, trailing `_` for private members
+- Code style: `Snake_case` for types, `snake_case` for members/locals, trailing `_` for private members, Allman braces (opening `{` always on its own line, including namespaces and class/struct declarations)
