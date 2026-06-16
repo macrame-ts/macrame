@@ -25,7 +25,13 @@ void Worker_thread::main(Scheduler& scheduler)
             break;
 
         if (scheduler.task_queue_.empty())
+        {
+            // spin mode reaches here on an empty queue; yield instead of
+            // re-locking immediately and starving submitters
+            lock.unlock();
+            std::this_thread::yield();
             continue;
+        }
 
         auto task = scheduler.task_queue_.top();
         scheduler.task_queue_.pop();

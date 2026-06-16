@@ -7,6 +7,7 @@
 #include <semaphore>
 #include <vector>
 
+// declaration order defines scheduling priority (high pops first); Task_queue_cmp depends on it
 enum class Priority { high, normal, low };
 
 enum class Idle_policy
@@ -57,6 +58,9 @@ class Scheduler
 public:
     Scheduler(Scheduler_config config = {});
     ~Scheduler();
+
+    Scheduler(const Scheduler&) = delete;
+    Scheduler& operator=(const Scheduler&) = delete;
 
     void submit(Task_func_ptr func, void* data, Priority priority = Priority::normal);
 

@@ -18,7 +18,7 @@ struct Static_task
     {
         auto trampoline = [](void* data)
         {
-            reinterpret_cast<Static_task*>(data)->task_func_();
+            static_cast<Static_task*>(data)->task_func_();
         };
         scheduler.submit(trampoline, this, priority_);
     }

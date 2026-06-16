@@ -6,7 +6,7 @@ void Dynamic_task::submit(Scheduler& scheduler)
 {
     auto trampoline = [](void* data)
     {
-        reinterpret_cast<Dynamic_task*>(data)->task_func_();
+        static_cast<Dynamic_task*>(data)->task_func_();
     };
     scheduler.submit(trampoline, this, priority_);
 }
@@ -22,7 +22,7 @@ void Awaitable_task::submit(Scheduler& scheduler)
 {
     auto trampoline = [](void* data)
     {
-        auto task = reinterpret_cast<Awaitable_task*>(data);
+        auto task = static_cast<Awaitable_task*>(data);
         task->task_func_();
         task->sem_.release();
     };
@@ -45,7 +45,7 @@ void Ref_counted_task_impl::submit(Scheduler& scheduler)
 {
     auto func = [](void* data)
     {
-        auto task = reinterpret_cast<Ref_counted_task_impl*>(data);
+        auto task = static_cast<Ref_counted_task_impl*>(data);
         task->task_func_();
         task->release();
     };
@@ -80,7 +80,7 @@ void Dependable_task_impl::submit(Scheduler& scheduler)
     add_ref();
     auto func = [](void* data)
     {
-        auto task = reinterpret_cast<Dependable_task_impl*>(data);
+        auto task = static_cast<Dependable_task_impl*>(data);
         task->task_func_();
 
         decltype(task->subsequents_) subsequents;
