@@ -1,5 +1,6 @@
 #include "thread_safe_tests.h"
 #include "thread_safe.h"
+#include "static_task_graph.h"
 
 #include <atomic>
 #include <chrono>
@@ -137,6 +138,78 @@ bool test_writer_exclusion()
     return ok;
 }
 
+// then() chains continuations: read -> double -> +1, plus a void sink.
+bool test_continuations()
+{
+    ts::Thread_safe<int> data{ 21 };
+
+    ts::Task<int> chained =
+        data.async([](const int& v) { return v; })
+            .then([](int v) { return v * 2; })
+            .then([](int v) { return v + 1; });
+
+    int v = chained.get();
+
+    std::atomic<int> sink{ 0 };
+    data.async([](const int& x) { return x; })
+        .then([&sink](int x) { sink.store(x + 100); })
+        .get();
+
+    bool ok = (v == 43) && (sink.load() == 121);
+    std::printf("  continuations: chain = %d (expected 43), sink = %d (expected 121) -> %s\n",
+        v, sink.load(), ok ? "ok" : "FAIL");
+    return ok;
+}
+
+int read_value(ts::Thread_safe<int>& data)
+{
+    return data.async([](const int& v) { return v; }).get();
+}
+
+// Access conflicts derive ordering: sim(W a) < build(R a, W b) < draw(R a, R b, W c).
+bool test_graph_access_ordering()
+{
+    ts::Thread_safe<int> a{ 0 }, b{ 0 }, c{ 0 };
+
+    ts::Static_task_graph g;
+    g.add_node([](int& x) { x = 1; }, a);
+    g.add_node([](const int& x, int& y) { y = x * 10; }, a, b);
+    g.add_node([](const int& x, const int& y, int& z) { z = x + y; }, a, b, c);
+    g.compile();
+
+    g.execute().get();
+    int av = read_value(a), bv = read_value(b), cv = read_value(c);
+
+    g.execute().get();   // re-run: deterministic
+    int cv2 = read_value(c);
+
+    bool ok = av == 1 && bv == 10 && cv == 11 && cv2 == 11;
+    std::printf("  graph access ordering: a=%d b=%d c=%d (1/10/11), rerun c=%d -> %s\n",
+        av, bv, cv, cv2, ok ? "ok" : "FAIL");
+    return ok;
+}
+
+// Explicit after() orders two otherwise-independent nodes.
+bool test_graph_explicit_ordering()
+{
+    ts::Thread_safe<int> p{ 0 }, q{ 0 };
+    std::atomic<int> seq{ 0 };
+    std::atomic<int> p_order{ 0 }, q_order{ 0 };
+
+    ts::Static_task_graph g;
+    ts::Task<void> np = g.add_node([&seq, &p_order](int&) { p_order.store(++seq); }, p);
+    ts::Task<void> nq = g.add_node([&seq, &q_order](int&) { q_order.store(++seq); }, q);
+    nq.after(np);
+    g.compile();
+
+    g.execute().get();
+
+    bool ok = p_order.load() == 1 && q_order.load() == 2;
+    std::printf("  graph explicit ordering: p=%d q=%d (1/2) -> %s\n",
+        p_order.load(), q_order.load(), ok ? "ok" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 void run_thread_safe_tests()
@@ -147,6 +220,9 @@ void run_thread_safe_tests()
     ok &= test_serial_correctness();
     ok &= test_concurrent_readers();
     ok &= test_writer_exclusion();
+    ok &= test_continuations();
+    ok &= test_graph_access_ordering();
+    ok &= test_graph_explicit_ordering();
 
     std::printf("  [thread_safe] %s\n", ok ? "ALL OK" : "FAILURES");
 }

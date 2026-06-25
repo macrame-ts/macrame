@@ -11,6 +11,20 @@ Scheduler& default_scheduler()
 
 namespace detail
 {
+
+void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closure)
+{
+    auto* held = new std::move_only_function<void()>(std::move(closure));
+    scheduler.submit(
+        [](void* data)
+        {
+            auto* fn = static_cast<std::move_only_function<void()>*>(data);
+            (*fn)();
+            delete fn;
+        },
+        held);
+}
+
 namespace
 {
 
@@ -21,7 +35,7 @@ void dispatch(Scheduler& scheduler, Pipe& pipe);
 // in parallel; a writer runs alone.
 void submit_job(Scheduler& scheduler, Pipe& pipe, Job job)
 {
-    auto* held = new std::move_only_function<void()>(
+    submit_closure(scheduler,
         [&scheduler, &pipe, job = std::move(job)]() mutable
         {
             job.fn();
@@ -37,15 +51,6 @@ void submit_job(Scheduler& scheduler, Pipe& pipe, Job job)
             if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
                 pipe.idle.notify_all();
         });
-
-    scheduler.submit(
-        [](void* data)
-        {
-            auto* fn = static_cast<std::move_only_function<void()>*>(data);
-            (*fn)();
-            delete fn;
-        },
-        held);
 }
 
 // Admit as many front jobs as the reader/writer rules allow. Caller holds pipe.mutex.
