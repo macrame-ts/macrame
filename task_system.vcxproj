@@ -19,16 +19,24 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="access.cpp" />
+    <ClCompile Include="benchmarks.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="scheduler.cpp" />
     <ClCompile Include="task.cpp" />
     <ClCompile Include="tests.cpp" />
+    <ClCompile Include="thread_safe.cpp" />
+    <ClCompile Include="thread_safe_tests.cpp" />
     <ClCompile Include="worker_thread.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="access.h" />
+    <ClInclude Include="benchmarks.h" />
     <ClInclude Include="scheduler.h" />
     <ClInclude Include="task.h" />
     <ClInclude Include="tests.h" />
+    <ClInclude Include="thread_safe.h" />
+    <ClInclude Include="thread_safe_tests.h" />
     <ClInclude Include="worker_thread.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">

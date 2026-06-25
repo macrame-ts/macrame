@@ -44,4 +44,14 @@ Core scaffolding in `main.cpp` and `scheduler.h` (scheduler.cpp is empty placeho
 - Multiple sessions will work on different aspects — read this file for context each time
 - Propose design options with tradeoffs before implementing non-trivial changes
 - Perf matters: flag any change that adds allocations or contention on hot paths
-- Code style: `Snake_case` for types, `snake_case` for members/locals, trailing `_` for private members, Allman braces (opening `{` always on its own line, including namespaces and class/struct declarations)
+- Code style:
+  - Type names are `Snake_case`: capitalized first letter, underscores between words — `Static_task_graph`, `Access_context`, `Thread_safe`, `Task`. This applies to all types including class templates (`Task<R>`, not `task<R>`).
+  - `snake_case` for members/locals/functions; trailing `_` for private members.
+  - Allman braces (opening `{` always on its own line, including namespaces, class/struct declarations, and lambdas):
+    ```
+    auto lambda = []()
+    {
+    };
+    ```
+    Short lambdas may stay one-liners (`[](int x){ return x + 1; }`); use Allman only when the body spans multiple lines.
+  - Never align code or comments with padding spaces (no aligning `=`, parameters, trailing args/comments, or braces across lines). Single space only.
