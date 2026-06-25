@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <semaphore>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -273,6 +274,55 @@ private:
     std::shared_ptr<detail::Task_state<R>> state_;
     detail::Graph_node_ref node_ref_;
 };
+
+namespace detail
+{
+
+template<typename... Rs>
+void when_all_finish(const std::shared_ptr<std::tuple<std::optional<Rs>...>>& slots,
+                     const std::shared_ptr<Task_state<std::tuple<Rs...>>>& next)
+{
+    [&]<std::size_t... J>(std::index_sequence<J...>)
+    {
+        next->complete(std::tuple<Rs...>(std::move(*std::get<J>(*slots))...));
+    }(std::index_sequence_for<Rs...>{});
+}
+
+template<std::size_t... I, typename... Rs>
+void when_all_attach(std::index_sequence<I...>,
+                     std::shared_ptr<std::tuple<std::optional<Rs>...>> slots,
+                     std::shared_ptr<std::atomic<int>> remaining,
+                     std::shared_ptr<Task_state<std::tuple<Rs...>>> next,
+                     Task<Rs>... prerequisites)
+{
+    (prerequisites.then([slots, remaining, next](Rs& value)
+    {
+        std::get<I>(*slots) = value;
+        if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1)
+            when_all_finish<Rs...>(slots, next);
+    }), ...);
+}
+
+} // namespace detail
+
+// Typed join: completes when every prerequisite completes, carrying their
+// results as a tuple into the subsequent (consume with .then). Prerequisite
+// result types must be non-void and copyable. (Apply-style unpacking of the
+// tuple into separate continuation args is future work; see docs/TODO.md.)
+template<typename... Rs>
+Task<std::tuple<Rs...>> when_all(Task<Rs>... prerequisites)
+{
+    static_assert(sizeof...(Rs) > 0, "when_all needs at least one task");
+
+    auto slots = std::make_shared<std::tuple<std::optional<Rs>...>>();
+    auto remaining = std::make_shared<std::atomic<int>>(static_cast<int>(sizeof...(Rs)));
+    auto next = std::make_shared<detail::Task_state<std::tuple<Rs...>>>();
+
+    detail::when_all_attach(std::index_sequence_for<Rs...>{},
+        slots, remaining, next, std::move(prerequisites)...);
+
+    return Task<std::tuple<Rs...>>(next);
+}
 
 // The only sanctioned way to touch a T across threads. You never receive a bare
 // T&; you hand a functor to async() and it runs once access has been granted.

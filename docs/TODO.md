@@ -3,7 +3,10 @@
 Future work, captured as it comes up. Not ordered by priority.
 
 ## Task chaining / results
-- **Typed prerequisite -> subsequent chaining**: let the result of a prerequisite task become an input to the subsequent task, in both the dynamic path and `Static_task_graph` (graph nodes are void-only for now).
+- Typed prerequisite -> subsequent chaining (dynamic path): **done** — `Task::then` (single) and `when_all` (multi, results as a tuple).
+- Apply-style `when_all`: unpack the result tuple into separate continuation args (`fn(r1, r2, ...)`) instead of `then([](tuple&){...})`.
+- `when_all` with void prerequisites (pure-ordering joins) and move-only / non-copyable results (currently results must be copyable).
+- Typed chaining in `Static_task_graph` (graph nodes are void-only for now): let a node consume prerequisite-node results.
 - `Task`: define get()/then() interaction (currently get() consumes the result; mixing with then() is unsupported); allow multiple waiters; cancellation.
 
 ## Thread_safe / access

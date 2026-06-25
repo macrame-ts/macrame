@@ -210,6 +210,25 @@ bool test_graph_explicit_ordering()
     return ok;
 }
 
+// when_all joins typed prerequisites; their results feed the subsequent.
+bool test_when_all()
+{
+    ts::Thread_safe<int> a{ 10 }, b{ 32 };
+
+    ts::Task<int> ta = a.async([](const int& v) { return v; });
+    ts::Task<int> tb = b.async([](const int& v) { return v; });
+
+    ts::Task<int> sum = ts::when_all(ta, tb).then([](std::tuple<int, int>& r)
+    {
+        return std::get<0>(r) + std::get<1>(r);
+    });
+
+    int s = sum.get();
+    bool ok = (s == 42);
+    std::printf("  when_all: sum = %d (expected 42) -> %s\n", s, ok ? "ok" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 void run_thread_safe_tests()
@@ -223,6 +242,7 @@ void run_thread_safe_tests()
     ok &= test_continuations();
     ok &= test_graph_access_ordering();
     ok &= test_graph_explicit_ordering();
+    ok &= test_when_all();
 
     std::printf("  [thread_safe] %s\n", ok ? "ALL OK" : "FAILURES");
 }
