@@ -1,8 +1,7 @@
 #include "static_task_graph.h"
+#include "fatal.h"
 
 #include <atomic>
-#include <cstdio>
-#include <cstdlib>
 #include <deque>
 #include <set>
 
@@ -98,10 +97,7 @@ void Static_task_graph::detect_cycles() const
     }
 
     if (visited != nodes_.size())
-    {
-        std::fprintf(stderr, "ts: Static_task_graph has a cycle\n");
-        std::abort();
-    }
+        ts::fatal("Static_task_graph has a cycle");
 }
 
 void Static_task_graph::run_node(const std::shared_ptr<Run_state>& run, int index)
@@ -122,10 +118,7 @@ void Static_task_graph::run_node(const std::shared_ptr<Run_state>& run, int inde
 Task<void> Static_task_graph::execute(Scheduler& scheduler)
 {
     if (!compiled_)
-    {
-        std::fprintf(stderr, "ts: Static_task_graph::execute called before compile()\n");
-        std::abort();
-    }
+        ts::fatal("Static_task_graph::execute called before compile()");
 
     auto run = std::make_shared<Run_state>(nodes_.size());
     run->graph = this;

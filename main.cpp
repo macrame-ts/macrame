@@ -1,10 +1,23 @@
 #include "tests.h"
 #include "benchmarks.h"
 #include "thread_safe_tests.h"
+#include "harness.h"
 
-int main()
+#include <cstring>
+
+int main(int argc, char** argv)
 {
+    // Death-test child: run one fatal scenario (it is expected to abort).
+    if (argc >= 3 && std::strcmp(argv[1], "--death") == 0)
+    {
+        ts::test::prepare_death_child();
+        run_death_scenario(argv[2]);
+        return 0;   // reaching here means the scenario failed to abort
+    }
+
     run_tests();
     run_thread_safe_tests();
     run_benchmarks();
+
+    return ts::test::summary();
 }

@@ -31,7 +31,7 @@ public:
     template<typename... Rs> Task& after(const Task<Rs>&... prerequisites);
     template<typename... Rs> Task& before(const Task<Rs>&... successors);
 
-    bool is_ready() const;
+    bool is_done() const;
 
     // Block until ready. Discouraged inside a worker task (stalls / can deadlock):
     // an optional strict mode asserts if called from within a task. Prefer then().

@@ -4,6 +4,7 @@
 #include "scheduler.h"
 
 #include <atomic>
+#include <concepts>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -196,7 +197,7 @@ public:
         , node_ref_(node_ref)
     {}
 
-    bool is_ready() const noexcept
+    bool is_done() const noexcept
     {
         return state_ && state_->ready.load(std::memory_order_acquire);
     }
@@ -337,7 +338,10 @@ class Thread_safe
     friend class Static_task_graph;
 
 public:
+    // Constrained so it never shadows the (deleted) copy/move constructors:
+    // disabled unless T is actually constructible from the args.
     template<typename... Args>
+        requires std::constructible_from<T, Args...>
     explicit Thread_safe(Args&&... args)
         : instance_(std::forward<Args>(args)...)
     {}

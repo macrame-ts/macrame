@@ -9,7 +9,14 @@ Future work, captured as it comes up. Not ordered by priority.
 - Typed chaining in `Static_task_graph` (graph nodes are void-only for now): let a node consume prerequisite-node results.
 - `Task`: define get()/then() interaction (currently get() consumes the result; mixing with then() is unsupported); allow multiple waiters; cancellation.
 
+## Task types
+- Unify the handle returned from `Static_task_graph::add_node` with regular async `Task`s (currently the graph node is a state-less `Task<void>` carrying a `Graph_node_ref`; the dynamic `Task` carries result state). One coherent task type / hierarchy.
+- Reusable tasks + a task builder: construct a task once, configure prerequisites/access, run it repeatedly (ties into the graph's build-once/run-many model and reusable node handles).
+
 ## Thread_safe / access
+- `Thread_safe<T>` adopting an **existing** instance (reference/adopt) instead of always constructing T in place. Design ownership/lifetime (borrowed vs owned).
+- Pipe FIFO semantics: think hard about whether strict FIFO is the right ordering guarantee, and what it costs.
+- Reader/writer prioritisation policy for max throughput (e.g. batch readers vs. favor writers vs. fairness), potentially configurable per `Thread_safe` instance.
 - **Dynamic multi-object `async(fn, objs...)`** with canonical-order acquisition (deadlock-free; never incremental). Static graph already covers the declared/multi-object case.
 - Deferred / command-buffer write option (read snapshot, apply writes at a sync point) as an alternative to in-place serialized writes.
 - Harness: sub-object / region ownership. Currently guards only top-level wrapped systems; a `Body&` handed out by a system isn't covered.

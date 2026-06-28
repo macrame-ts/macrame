@@ -1,7 +1,7 @@
 #include "access.h"
+#include "fatal.h"
 
 #include <cstdio>
-#include <cstdlib>
 
 namespace ts
 {
@@ -33,10 +33,11 @@ thread_local const Access_context* current_access = nullptr;
 
 void access_violation(const char* type_name, Access mode) noexcept
 {
-    std::fprintf(stderr,
-        "ts: access violation: %s accessed for %s without declared access\n",
+    char message[256];
+    std::snprintf(message, sizeof message,
+        "access violation: %s accessed for %s without declared access",
         type_name, mode == Access::read_write ? "read_write" : "read_only");
-    std::abort();
+    ts::fatal(message);
 }
 
 } // namespace detail

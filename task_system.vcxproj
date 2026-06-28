@@ -21,6 +21,8 @@
   <ItemGroup>
     <ClCompile Include="access.cpp" />
     <ClCompile Include="benchmarks.cpp" />
+    <ClCompile Include="fatal.cpp" />
+    <ClCompile Include="harness.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="scheduler.cpp" />
     <ClCompile Include="static_task_graph.cpp" />
@@ -33,6 +35,8 @@
   <ItemGroup>
     <ClInclude Include="access.h" />
     <ClInclude Include="benchmarks.h" />
+    <ClInclude Include="fatal.h" />
+    <ClInclude Include="harness.h" />
     <ClInclude Include="scheduler.h" />
     <ClInclude Include="static_task_graph.h" />
     <ClInclude Include="task.h" />
@@ -131,9 +135,10 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
+      <ExceptionHandling>false</ExceptionHandling>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -149,9 +154,10 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
+      <ExceptionHandling>false</ExceptionHandling>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
