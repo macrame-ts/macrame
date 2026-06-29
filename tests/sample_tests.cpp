@@ -1,4 +1,4 @@
-#include "tests.h"
+#include "sample_tests.h"
 #include "task.h"
 
 #include <iostream>
@@ -9,7 +9,7 @@ static void print_task(const char* task_name)
     std::cout << std::this_thread::get_id() << ": " << task_name << "\n";
 }
 
-void run_tests()
+void run_sample_tests()
 {
     Scheduler scheduler;
 

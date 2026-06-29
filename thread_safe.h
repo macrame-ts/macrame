@@ -338,10 +338,16 @@ class Thread_safe
     friend class Static_task_graph;
 
 public:
+    // Non-explicit default ctor (value-initializes T) so arrays of Thread_safe
+    // work; the forwarding ctor below handles explicit argument construction.
+    Thread_safe() requires std::default_initializable<T>
+        : instance_()
+    {}
+
     // Constrained so it never shadows the (deleted) copy/move constructors:
-    // disabled unless T is actually constructible from the args.
+    // 1+ args, and only when T is actually constructible from them.
     template<typename... Args>
-        requires std::constructible_from<T, Args...>
+        requires (sizeof...(Args) >= 1) && std::constructible_from<T, Args...>
     explicit Thread_safe(Args&&... args)
         : instance_(std::forward<Args>(args)...)
     {}

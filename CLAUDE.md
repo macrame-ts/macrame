@@ -37,7 +37,11 @@ Core scaffolding in `main.cpp` and `scheduler.h` (scheduler.cpp is empty placeho
 
 ## VS Project
 
-`task_system.vcxproj` must be kept in sync manually — VS does not auto-discover files. Whenever you create a new `.cpp` or `.h` file, add it to the appropriate `<ItemGroup>` in `task_system.vcxproj`: `<ClCompile>` for `.cpp`, `<ClInclude>` for `.h`.
+`task_system.vcxproj` must be kept in sync manually — VS does not auto-discover files. Whenever you create a new `.cpp` or `.h` file, add it to the appropriate `<ItemGroup>` in `task_system.vcxproj`: `<ClCompile>` for `.cpp`, `<ClInclude>` for `.h` (use the path including subfolder, e.g. `tests\foo.cpp`).
+
+Layout: core sources at the repo root, tests in `tests/`, benchmarks in `benchmarks/`. The x64 configs set `AdditionalIncludeDirectories` to the root + `tests` + `benchmarks`, so `#include "x.h"` resolves regardless of which folder the file lives in.
+
+Tests use the harness in `tests/harness.h`: `TS_CHECK(cond)` (non-fatal, prints a stacktrace on failure), `run(name, fn)`, `summary()`. Each group lives in its own `tests/<group>_tests.{h,cpp}` with a `run_<group>_tests()` entry, wired into `run_all_tests()` in `tests/tests.cpp`. Fatal paths are exercised via subprocess death tests (`ts::test::expect_death("<scenario>")` + a case in `run_death_scenario`).
 
 ## Session Guidance
 

@@ -20,30 +20,43 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="access.cpp" />
-    <ClCompile Include="benchmarks.cpp" />
     <ClCompile Include="fatal.cpp" />
-    <ClCompile Include="harness.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="scheduler.cpp" />
     <ClCompile Include="static_task_graph.cpp" />
     <ClCompile Include="task.cpp" />
-    <ClCompile Include="tests.cpp" />
     <ClCompile Include="thread_safe.cpp" />
-    <ClCompile Include="thread_safe_tests.cpp" />
     <ClCompile Include="worker_thread.cpp" />
+    <ClCompile Include="benchmarks\benchmarks.cpp" />
+    <ClCompile Include="tests\access_tests.cpp" />
+    <ClCompile Include="tests\graph_tests.cpp" />
+    <ClCompile Include="tests\harness.cpp" />
+    <ClCompile Include="tests\integration_tests.cpp" />
+    <ClCompile Include="tests\sample_tests.cpp" />
+    <ClCompile Include="tests\scheduler_tests.cpp" />
+    <ClCompile Include="tests\task_tests.cpp" />
+    <ClCompile Include="tests\tests.cpp" />
+    <ClCompile Include="tests\thread_safe_tests.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="access.h" />
-    <ClInclude Include="benchmarks.h" />
     <ClInclude Include="fatal.h" />
-    <ClInclude Include="harness.h" />
     <ClInclude Include="scheduler.h" />
     <ClInclude Include="static_task_graph.h" />
     <ClInclude Include="task.h" />
-    <ClInclude Include="tests.h" />
     <ClInclude Include="thread_safe.h" />
-    <ClInclude Include="thread_safe_tests.h" />
     <ClInclude Include="worker_thread.h" />
+    <ClInclude Include="benchmarks\benchmarks.h" />
+    <ClInclude Include="tests\access_tests.h" />
+    <ClInclude Include="tests\graph_tests.h" />
+    <ClInclude Include="tests\harness.h" />
+    <ClInclude Include="tests\integration_tests.h" />
+    <ClInclude Include="tests\sample_tests.h" />
+    <ClInclude Include="tests\scheduler_tests.h" />
+    <ClInclude Include="tests\task_tests.h" />
+    <ClInclude Include="tests\tests.h" />
+    <ClInclude Include="tests\test_util.h" />
+    <ClInclude Include="tests\thread_safe_tests.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>
@@ -139,6 +152,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ExceptionHandling>false</ExceptionHandling>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)tests;$(ProjectDir)benchmarks;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -158,6 +172,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ExceptionHandling>false</ExceptionHandling>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)tests;$(ProjectDir)benchmarks;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>

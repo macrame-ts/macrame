@@ -1,6 +1,6 @@
 #include "tests.h"
+#include "sample_tests.h"
 #include "benchmarks.h"
-#include "thread_safe_tests.h"
 #include "harness.h"
 
 #include <cstring>
@@ -15,8 +15,8 @@ int main(int argc, char** argv)
         return 0;   // reaching here means the scenario failed to abort
     }
 
-    run_tests();
-    run_thread_safe_tests();
+    run_sample_tests();
+    run_all_tests();
     run_benchmarks();
 
     return ts::test::summary();
