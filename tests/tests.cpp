@@ -53,8 +53,8 @@ void run_death_scenario(const char* name)
     {
         ts::Thread_safe<int> a{ 0 }, b{ 0 };
         ts::Static_task_graph g;
-        ts::Task<void> na = g.add_node([](int&) {}, a);
-        ts::Task<void> nb = g.add_node([](int&) {}, b);
+        ts::Graph_node na = g.add_node([](int&) {}, a);
+        ts::Graph_node nb = g.add_node([](int&) {}, b);
         na.after(nb);
         nb.after(na);
         g.compile();     // cycle -> fatal

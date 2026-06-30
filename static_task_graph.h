@@ -35,19 +35,51 @@ struct Function_traits<R(*)(A...)> { using args = std::tuple<A...>; };
 
 } // namespace detail
 
+class Static_task_graph;
+
+// Handle to a node in a `Static_task_graph`, returned by `add_node`. Identifies
+// the node for explicit ordering edges (`after`/`before`). It is build-time
+// identity, not a completion handle: the graph is build-once / run-many, so a
+// node has no single result (consume a graph run via the `Task<void>` from
+// `execute()`). Default-constructed handles are inert.
+class Graph_node
+{
+public:
+    Graph_node() = default;
+
+    // `this` runs after `prerequisite` / before `successor` (same graph).
+    Graph_node& after(const Graph_node& prerequisite);
+    Graph_node& before(const Graph_node& successor);
+
+    int index() const noexcept { return index_; }
+
+private:
+    friend class Static_task_graph;
+
+    Graph_node(Static_task_graph* graph, int index) noexcept
+        : graph_(graph)
+        , index_(index)
+    {}
+
+    Static_task_graph* graph_ = nullptr;
+    int index_ = -1;
+};
+
 // Build once, execute many. Nodes declare access to `Thread_safe<>` systems and,
 // optionally, explicit ordering edges. `compile()` turns access conflicts (plus
 // explicit edges) into a DAG; `execute()` runs it, parallelizing independent
 // nodes. Nodes are void (they mutate the systems they access).
 class Static_task_graph
 {
+    friend class Graph_node;
+
 public:
     // Add a node: functor + the `Thread_safe<>` instances it accesses. Per-object
     // access mode is deduced from the functor's parameter const-ness
     //   add_node([](Physics& p, const Nav& n){ ... }, physics, nav);   // p:write, n:read
-    // Returns a `Task<void>` usable only as an ordering handle (`after`/`before`).
+    // Returns a `Graph_node` ordering handle (`after`/`before`).
     template<typename Fn, typename... Ts>
-    Task<void> add_node(Fn&& fn, Thread_safe<Ts>&... access)
+    Graph_node add_node(Fn&& fn, Thread_safe<Ts>&... access)
     {
         using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
         static_assert(std::tuple_size_v<Args> == sizeof...(Ts),
@@ -60,7 +92,7 @@ public:
         nodes_.push_back(std::move(node));
         compiled_ = false;
 
-        return Task<void>(nullptr, detail::Graph_node_ref{ this, index, &link_edge });
+        return Graph_node(this, index);
     }
 
     // Resolve access conflicts + explicit edges into a DAG; detect cycles.
@@ -111,7 +143,6 @@ private:
     }
 
     void add_edge(int prerequisite, int successor);
-    static void link_edge(void* graph, int prerequisite, int successor);
     static bool conflicts(const Node& a, const Node& b);
     void detect_cycles() const;
     static void run_node(const std::shared_ptr<Run_state>& run, int index);

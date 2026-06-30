@@ -29,15 +29,6 @@ namespace detail
 // Submit a closure to the scheduler (bridges to the raw func-ptr API).
 void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closure);
 
-// Back-reference a graph node carries so `Task::after`/`before` can add edges
-// without `Task` knowing the concrete graph type.
-struct Graph_node_ref
-{
-    void* graph = nullptr;
-    int index = -1;
-    void (*link)(void* graph, int prerequisite, int successor) = nullptr;
-};
-
 struct Job
 {
     Access mode;
@@ -191,32 +182,9 @@ public:
         : state_(std::move(state))
     {}
 
-    // Graph-node handle: no result state, carries the edge back-reference.
-    Task(std::shared_ptr<detail::Task_state<R>> state, detail::Graph_node_ref node_ref) noexcept
-        : state_(std::move(state))
-        , node_ref_(node_ref)
-    {}
-
     bool is_done() const noexcept
     {
         return state_ && state_->ready.load(std::memory_order_acquire);
-    }
-
-    // Ordering edges for `Static_task_graph` nodes (no-op on dynamic tasks).
-    template<typename R2>
-    Task& after(const Task<R2>& prerequisite)
-    {
-        if (node_ref_.link && node_ref_.graph == prerequisite.node_ref_.graph)
-            node_ref_.link(node_ref_.graph, prerequisite.node_ref_.index, node_ref_.index);
-        return *this;
-    }
-
-    template<typename R2>
-    Task& before(const Task<R2>& successor)
-    {
-        if (node_ref_.link && node_ref_.graph == successor.node_ref_.graph)
-            node_ref_.link(node_ref_.graph, node_ref_.index, successor.node_ref_.index);
-        return *this;
     }
 
     // Blocks until the task completes and returns its result. Call once.
@@ -270,10 +238,7 @@ public:
     }
 
 private:
-    template<typename> friend class Task;
-
     std::shared_ptr<detail::Task_state<R>> state_;
-    detail::Graph_node_ref node_ref_;
 };
 
 namespace detail

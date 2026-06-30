@@ -27,9 +27,18 @@ void Static_task_graph::add_edge(int prerequisite, int successor)
     compiled_ = false;
 }
 
-void Static_task_graph::link_edge(void* graph, int prerequisite, int successor)
+Graph_node& Graph_node::after(const Graph_node& prerequisite)
 {
-    static_cast<Static_task_graph*>(graph)->add_edge(prerequisite, successor);
+    if (graph_ && graph_ == prerequisite.graph_)
+        graph_->add_edge(prerequisite.index_, index_);
+    return *this;
+}
+
+Graph_node& Graph_node::before(const Graph_node& successor)
+{
+    if (graph_ && graph_ == successor.graph_)
+        graph_->add_edge(index_, successor.index_);
+    return *this;
 }
 
 // Two nodes conflict if they touch a common instance and at least one wants write.

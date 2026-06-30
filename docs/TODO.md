@@ -10,7 +10,7 @@ Future work, captured as it comes up. Not ordered by priority.
 - `Task`: define get()/then() interaction (currently get() consumes the result; mixing with then() is unsupported); allow multiple waiters; cancellation.
 
 ## Task types
-- Unify the handle returned from `Static_task_graph::add_node` with regular async `Task`s (currently the graph node is a state-less `Task<void>` carrying a `Graph_node_ref`; the dynamic `Task` carries result state). One coherent task type / hierarchy.
+- Unify the handle returned from `Static_task_graph::add_node` with regular async `Task`s: **done** — split, not merged. `add_node` now returns a distinct `Graph_node` (build-time ordering identity: `after`/`before`); `Task<R>` is purely a completion handle (`get`/`then`/`is_done`/`when_all`/`execute`). The run-many model means a node has no single result, so it can't be a single-shot `Task`. Revisit when typed graph chaining lands (a `Graph_node` may then mint a per-run `Task<R>`).
 - Reusable tasks + a task builder: construct a task once, configure prerequisites/access, run it repeatedly (ties into the graph's build-once/run-many model and reusable node handles).
 
 ## Thread_safe / access

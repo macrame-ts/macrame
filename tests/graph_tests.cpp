@@ -49,8 +49,8 @@ void test_explicit_ordering()
     std::atomic<int> p_order{ 0 }, q_order{ 0 };
 
     ts::Static_task_graph g;
-    ts::Task<void> np = g.add_node([&seq, &p_order](int&) { p_order.store(++seq); }, p);
-    ts::Task<void> nq = g.add_node([&seq, &q_order](int&) { q_order.store(++seq); }, q);
+    ts::Graph_node np = g.add_node([&seq, &p_order](int&) { p_order.store(++seq); }, p);
+    ts::Graph_node nq = g.add_node([&seq, &q_order](int&) { q_order.store(++seq); }, q);
     nq.after(np);
     g.compile();
 
