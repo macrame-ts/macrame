@@ -37,24 +37,46 @@ private:
     std::vector<float> data_;
 };
 
-// The ECS mock: a handful of component stores, each access-controlled. Systems
-// declare which stores they read/write; the frame graph derives ordering from
-// that. (Skeleton subset; more stores are added as systems are filled in.)
+// The ECS mock. Every store is access-controlled; each written store has a single
+// writer system, so the frame graph derives a clean DAG from the declarations.
+//
+// Transforms are double-buffered: early systems (gameplay/AI/nav) read last
+// frame's `world_xf_prev`; transform propagation writes this frame's `world_xf`,
+// which the late systems (cloth/culling/particles/audio/render) read; the swap
+// system copies world_xf -> world_xf_prev for the next frame. This is what lets
+// many systems read transforms without serializing against the writer.
 struct World
 {
-    explicit World(int entities)
-        : skeletons{ entities }
-        , local_xf{ entities }
-        , velocities{ entities }
-        , bodies{ entities }
-        , world_xf{ entities }
+    explicit World(int n)
+        : skeletons{ n }, nav{ n }, renderables{ n }, velocities{ n }
+        , input{ n }, net{ n }, assets{ n }, game_state{ n }, paths{ n }, intents{ n }
+        , local_xf{ n }, bodies{ n }, world_xf{ n }, world_xf_prev{ n }
+        , cloth{ n }, visibility{ n }, particles{ n }, audio_out{ n }, draw_lists{ n }, ui{ n }
     {}
 
-    ts::Thread_safe<Float_store> skeletons;   // anim input
-    ts::Thread_safe<Float_store> local_xf;    // anim output
-    ts::Thread_safe<Float_store> velocities;  // input output / physics input
-    ts::Thread_safe<Float_store> bodies;      // physics output
-    ts::Thread_safe<Float_store> world_xf;    // composed; read-hot
+    // read-only static inputs (no system writes them this frame)
+    ts::Thread_safe<Float_store> skeletons;
+    ts::Thread_safe<Float_store> nav;
+    ts::Thread_safe<Float_store> renderables;
+    ts::Thread_safe<Float_store> velocities;
+
+    // single-writer outputs
+    ts::Thread_safe<Float_store> input;          // Input
+    ts::Thread_safe<Float_store> net;            // Networking
+    ts::Thread_safe<Float_store> assets;         // Streaming
+    ts::Thread_safe<Float_store> game_state;     // Gameplay
+    ts::Thread_safe<Float_store> paths;          // Navigation
+    ts::Thread_safe<Float_store> intents;        // AI
+    ts::Thread_safe<Float_store> local_xf;       // Animation
+    ts::Thread_safe<Float_store> bodies;         // Physics
+    ts::Thread_safe<Float_store> world_xf;       // Transform propagation (read-hot)
+    ts::Thread_safe<Float_store> world_xf_prev;  // Swap (last frame's transforms)
+    ts::Thread_safe<Float_store> cloth;          // Cloth
+    ts::Thread_safe<Float_store> visibility;     // Culling
+    ts::Thread_safe<Float_store> particles;      // Particles
+    ts::Thread_safe<Float_store> audio_out;      // Audio
+    ts::Thread_safe<Float_store> draw_lists;     // Render
+    ts::Thread_safe<Float_store> ui;             // UI
 };
 
 } // namespace sample

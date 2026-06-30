@@ -69,6 +69,8 @@ public:
     // Run the compiled graph; returns a completion handle. Re-runnable.
     Task<void> execute(Scheduler& scheduler = default_scheduler());
 
+    int node_count() const { return static_cast<int>(nodes_.size()); }
+
 private:
     struct Node
     {

@@ -24,9 +24,11 @@ void run_sample(int frames, float scale)
     double total_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
 
     double serial = serial_budget_ms() * scale;
-    std::printf("\n[sample] %d frames, %d entities, scale %.2f\n", frames, entities, scale);
+    double per_frame = total_ms / frames;
+    std::printf("\n[sample] %d systems, %d frames, %d entities, scale %.2f\n",
+        graph.node_count(), frames, entities, scale);
     std::printf("  %.2f ms/frame  (serial budget %.2f ms -> %.2fx speedup)\n",
-        total_ms / frames, serial, serial / (total_ms / frames));
+        per_frame, serial, serial / per_frame);
 }
 
 } // namespace sample
