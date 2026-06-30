@@ -26,37 +26,55 @@ void parallel_for(int chunks, Fn chunk_fn)
 {
     const ts::Access_context* ctx = ts::detail::current_access;
 
-    std::atomic<int> next{ 0 };
-    std::atomic<int> completed{ 0 };
+    // The chunk counters must outlive every helper: the caller returns as soon as
+    // `completed == chunks`, but a helper that ran the last chunk still does one
+    // more `next.fetch_add` to find there's no work left. Heap them via shared_ptr
+    // (helpers hold a ref) so that final touch never lands on a freed stack slot.
+    struct Counters
+    {
+        std::atomic<int> next{ 0 };
+        std::atomic<int> completed{ 0 };
+    };
+    auto counters = std::make_shared<Counters>();
 
-    auto drain = [&]
+    auto drain = [&chunk_fn, chunks](Counters& c)
     {
         int i;
-        while ((i = next.fetch_add(1, std::memory_order_relaxed)) < chunks)
+        while ((i = c.next.fetch_add(1, std::memory_order_relaxed)) < chunks)
         {
             chunk_fn(i);
-            completed.fetch_add(1, std::memory_order_release);
+            c.completed.fetch_add(1, std::memory_order_release);
         }
-    };
-
-    auto helper = [&]
-    {
-        if (ctx)
-        {
-            ts::Access_scope scope(*ctx);   // inherit the node's access grant
-            drain();
-        }
-        else
-            drain();
     };
 
     int helpers = std::min(chunks, static_cast<int>(std::thread::hardware_concurrency())) - 1;
     for (int h = 0; h < helpers; ++h)
-        ts::detail::submit_closure(ts::default_scheduler(), helper);
+        ts::detail::submit_closure(ts::default_scheduler(), [counters, ctx, chunk_fn, chunks]
+        {
+            // chunk_fn / ctx are only touched while claiming a chunk (i < chunks),
+            // which can only happen before the caller returns -- so capturing them
+            // is safe even though the helper may outlive parallel_for.
+            auto run = [&]
+            {
+                int i;
+                while ((i = counters->next.fetch_add(1, std::memory_order_relaxed)) < chunks)
+                {
+                    chunk_fn(i);
+                    counters->completed.fetch_add(1, std::memory_order_release);
+                }
+            };
+            if (ctx)
+            {
+                ts::Access_scope scope(*ctx);   // inherit the node's access grant
+                run();
+            }
+            else
+                run();
+        });
 
-    drain();   // the calling thread participates; its context is already installed
+    drain(*counters);   // the calling thread participates; its context is already installed
 
-    while (completed.load(std::memory_order_acquire) < chunks)
+    while (counters->completed.load(std::memory_order_acquire) < chunks)
         std::this_thread::yield();
 }
 

@@ -16,6 +16,25 @@ int main(int argc, char** argv)
         return 0;   // reaching here means the scenario failed to abort
     }
 
+    // Stress entry: just the sample, many frames, fast scale (for sanitizers).
+    if (argc >= 2 && std::strcmp(argv[1], "--stress") == 0)
+    {
+        sample::run_sample(2000, 0.2f);
+        return 0;
+    }
+
+    // Isolation entries (for narrowing down a flaky crash).
+    if (argc >= 2 && std::strcmp(argv[1], "--bench") == 0)
+    {
+        run_benchmarks();
+        return 0;
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--tests") == 0)
+    {
+        run_all_tests();
+        return ts::test::summary();
+    }
+
     run_sample_tests();
     run_all_tests();
     sample::run_sample();

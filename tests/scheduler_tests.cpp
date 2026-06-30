@@ -49,8 +49,12 @@ struct Rec { std::atomic<int>* idx; int* order; int tag; };
 void rec_fn(void* p)
 {
     auto* r = static_cast<Rec*>(p);
-    int i = r->idx->fetch_add(1);
+    // Write the slot BEFORE publishing the index, so a reader that observes the
+    // new index (with acquire) is guaranteed to see the slot. (Single worker, so
+    // the load is unraced.)
+    int i = r->idx->load(std::memory_order_relaxed);
     r->order[i] = r->tag;
+    r->idx->store(i + 1, std::memory_order_release);
 }
 
 // With one worker, a held worker lets us enqueue all three before any runs, so
