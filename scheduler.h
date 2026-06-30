@@ -12,7 +12,7 @@ enum class Priority { high, normal, low };
 
 enum class Idle_policy
 {
-    spin,   // busy-spin; lowest wake latency, burns a core per idle worker
+    spin,   // spin-wait on the queue; lowest wake latency, burns a core per idle worker
     block,  // sleep on a counting semaphore while the queue is empty
 };
 

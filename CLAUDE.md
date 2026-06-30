@@ -28,6 +28,13 @@ Core scaffolding in `main.cpp` and `scheduler.h` (scheduler.cpp is empty placeho
   - `Dependable_task` / `Dependable_task_impl` — prerequisite counting + subsequent chain, `then()` API
 - `Ref_counted_base<T>` / `Ref_counted_ptr<T>` — intrusive smart pointer utilities
 
+## Terminology
+
+Use these terms precisely, in code and discussion:
+
+- **spin waiting** — yielding in a loop until a condition holds (e.g. the worker idling on an empty queue, or a fixed-duration `spin()`). Does no other work.
+- **busy waiting** — doing *unrelated* work while waiting, e.g. a thread that pops and executes other queued tasks while waiting for a specific task to complete. Usually a bad idea (stack growth, latency, priority inversion). Not the same as spin waiting.
+
 ## Design Principles
 
 - Prefer intrusive ref-counting over `shared_ptr` for tasks (cache locality, explicit control)

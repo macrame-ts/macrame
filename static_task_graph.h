@@ -29,6 +29,10 @@ struct Function_traits<R(C::*)(A...)> { using args = std::tuple<A...>; };
 template<typename C, typename R, typename... A>
 struct Function_traits<R(C::*)(A...) const> { using args = std::tuple<A...>; };
 
+// free functions / function pointers
+template<typename R, typename... A>
+struct Function_traits<R(*)(A...)> { using args = std::tuple<A...>; };
+
 } // namespace detail
 
 // Build once, execute many. Nodes declare access to Thread_safe<> systems and,

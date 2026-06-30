@@ -2,6 +2,7 @@
 #include "sample_tests.h"
 #include "benchmarks.h"
 #include "harness.h"
+#include "engine.h"
 
 #include <cstring>
 
@@ -17,6 +18,7 @@ int main(int argc, char** argv)
 
     run_sample_tests();
     run_all_tests();
+    sample::run_sample();
     run_benchmarks();
 
     return ts::test::summary();

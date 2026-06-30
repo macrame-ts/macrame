@@ -7,6 +7,9 @@
     <Filter Include="benchmarks">
       <UniqueIdentifier>{b2222222-2222-2222-2222-222222222222}</UniqueIdentifier>
     </Filter>
+    <Filter Include="sample">
+      <UniqueIdentifier>{c3333333-3333-3333-3333-333333333333}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="access.cpp" />
@@ -19,6 +22,15 @@
     <ClCompile Include="worker_thread.cpp" />
     <ClCompile Include="benchmarks\benchmarks.cpp">
       <Filter>benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="sample\engine.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
+    <ClCompile Include="sample\frame.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
+    <ClCompile Include="sample\systems.cpp">
+      <Filter>sample</Filter>
     </ClCompile>
     <ClCompile Include="tests\access_tests.cpp">
       <Filter>tests</Filter>
@@ -58,6 +70,18 @@
     <ClInclude Include="worker_thread.h" />
     <ClInclude Include="benchmarks\benchmarks.h">
       <Filter>benchmarks</Filter>
+    </ClInclude>
+    <ClInclude Include="sample\engine.h">
+      <Filter>sample</Filter>
+    </ClInclude>
+    <ClInclude Include="sample\frame.h">
+      <Filter>sample</Filter>
+    </ClInclude>
+    <ClInclude Include="sample\systems.h">
+      <Filter>sample</Filter>
+    </ClInclude>
+    <ClInclude Include="sample\world.h">
+      <Filter>sample</Filter>
     </ClInclude>
     <ClInclude Include="tests\access_tests.h">
       <Filter>tests</Filter>

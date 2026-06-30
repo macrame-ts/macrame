@@ -28,6 +28,9 @@
     <ClCompile Include="thread_safe.cpp" />
     <ClCompile Include="worker_thread.cpp" />
     <ClCompile Include="benchmarks\benchmarks.cpp" />
+    <ClCompile Include="sample\engine.cpp" />
+    <ClCompile Include="sample\frame.cpp" />
+    <ClCompile Include="sample\systems.cpp" />
     <ClCompile Include="tests\access_tests.cpp" />
     <ClCompile Include="tests\graph_tests.cpp" />
     <ClCompile Include="tests\harness.cpp" />
@@ -47,6 +50,10 @@
     <ClInclude Include="thread_safe.h" />
     <ClInclude Include="worker_thread.h" />
     <ClInclude Include="benchmarks\benchmarks.h" />
+    <ClInclude Include="sample\engine.h" />
+    <ClInclude Include="sample\frame.h" />
+    <ClInclude Include="sample\systems.h" />
+    <ClInclude Include="sample\world.h" />
     <ClInclude Include="tests\access_tests.h" />
     <ClInclude Include="tests\graph_tests.h" />
     <ClInclude Include="tests\harness.h" />
@@ -152,7 +159,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ExceptionHandling>false</ExceptionHandling>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)tests;$(ProjectDir)benchmarks;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -172,7 +179,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ExceptionHandling>false</ExceptionHandling>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)tests;$(ProjectDir)benchmarks;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
