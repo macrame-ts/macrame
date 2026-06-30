@@ -1,12 +1,17 @@
 #include "benchmarks.h"
 #include "scheduler.h"
+#include "thread_safe.h"
+#include "static_task_graph.h"
+#include "access.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace
@@ -14,8 +19,10 @@ namespace
 
 using Clock = std::chrono::steady_clock;
 
-constexpr auto target = std::chrono::milliseconds(500);
-constexpr int reps = 5;
+// ~1 s per benchmark (warmup + reps measured rounds), median reported -- the
+// numbers are stable enough to track for regression monitoring.
+constexpr auto target = std::chrono::milliseconds(200);
+constexpr int reps = 4;
 constexpr int warmup = 1;
 
 // run `work` (returns ops completed per call) repeatedly until `target` elapses,
@@ -139,6 +146,106 @@ std::vector<double> bench_contention(Idle_policy policy, unsigned producers)
     return ops_per_sec;
 }
 
+// --- public feature benchmarks --------------------------------------------
+
+// Thread_safe write: serialized async writes through one object's pipe.
+std::vector<double> bench_ts_write()
+{
+    ts::Thread_safe<uint64_t> obj{ 0 };
+    constexpr uint64_t batch = 20000;
+    return measure([&]() -> uint64_t
+    {
+        for (uint64_t i = 0; i < batch; ++i)
+            obj.async([](uint64_t& v) { ++v; });
+        obj.async([](const uint64_t& v) { return v; }).get();   // FIFO drain
+        return batch;
+    });
+}
+
+// Thread_safe read: concurrent async reads through the reader/writer pipe.
+std::vector<double> bench_ts_read()
+{
+    ts::Thread_safe<uint64_t> obj{ 7 };
+    std::atomic<uint64_t> done{ 0 };
+    constexpr uint64_t batch = 20000;
+    return measure([&]() -> uint64_t
+    {
+        uint64_t base = done.load(std::memory_order_relaxed);
+        for (uint64_t i = 0; i < batch; ++i)
+            obj.async([&done](const uint64_t& v) { done.fetch_add(1, std::memory_order_relaxed); return v; });
+        while (done.load(std::memory_order_acquire) < base + batch)
+            std::this_thread::yield();
+        return batch;
+    });
+}
+
+// Task::then: continuation chain length K fired off one producer.
+std::vector<double> bench_then()
+{
+    ts::Thread_safe<int> obj{ 0 };
+    constexpr int chain = 50;
+    return measure([&]() -> uint64_t
+    {
+        ts::Task<int> t = obj.async([](const int& v) { return v; });
+        for (int k = 0; k < chain; ++k)
+            t = t.then([](int v) { return v + 1; });
+        t.get();
+        return chain;
+    });
+}
+
+// when_all: typed join over 4 prerequisites + a consuming continuation.
+std::vector<double> bench_when_all()
+{
+    ts::Thread_safe<int> a{ 1 }, b{ 2 }, c{ 3 }, d{ 4 };
+    auto read = [](const int& v) { return v; };
+    return measure([&]() -> uint64_t
+    {
+        ts::when_all(a.async(read), b.async(read), c.async(read), d.async(read))
+            .then([](std::tuple<int, int, int, int>& r) { return std::get<0>(r); })
+            .get();
+        return 1;
+    });
+}
+
+// Static_task_graph: per-execute() dispatch + sync cost (8 independent nodes).
+std::vector<double> bench_graph_execute()
+{
+    constexpr int nodes = 8;
+    std::array<ts::Thread_safe<int>, nodes> stores{};
+    ts::Static_task_graph g;
+    for (auto& s : stores)
+        g.add_node([](int& v) { ++v; }, s);
+    g.compile();
+    return measure([&]() -> uint64_t
+    {
+        g.execute().get();
+        return 1;
+    });
+}
+
+// Access harness: cost of a guarded method call (TS_CHECK_ACCESS).
+struct Guarded
+{
+    int v = 0;
+    void touch() { TS_CHECK_ACCESS(); ++v; }
+};
+
+std::vector<double> bench_harness()
+{
+    Guarded g;
+    ts::Access_context ctx;
+    ctx.add(&g, ts::Access::read_write);
+    constexpr uint64_t calls = 200000;
+    return measure([&]() -> uint64_t
+    {
+        ts::Access_scope scope(ctx);
+        for (uint64_t i = 0; i < calls; ++i)
+            g.touch();
+        return calls;
+    });
+}
+
 } // namespace
 
 void run_benchmarks()
@@ -158,4 +265,12 @@ void run_benchmarks()
     std::printf("\ncontention (%u producers):\n", hw);
     report("block", bench_contention(Idle_policy::block, hw));
     report("spin",  bench_contention(Idle_policy::spin, hw));
+
+    std::printf("\nfeatures:\n");
+    report("ts_write", bench_ts_write());
+    report("ts_read", bench_ts_read());
+    report("then", bench_then());
+    report("when_all", bench_when_all());
+    report("graph", bench_graph_execute());
+    report("harness", bench_harness());
 }
