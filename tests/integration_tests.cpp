@@ -3,6 +3,7 @@
 #include "static_task_graph.h"
 #include "harness.h"
 #include "test_util.h"
+#include "engine.h"
 
 #include <atomic>
 #include <chrono>
@@ -95,6 +96,26 @@ void test_repeat_stress()
     TS_CHECK(all);
 }
 
+// Drive the whole mock engine (graph + internal parallelism + Thread_safe::async
+// + then/when_all) and assert frame-level invariants. Reaching the assertions at
+// all proves no deadlock and -- since the access harness is live -- zero access
+// violations (a violation would have aborted the process).
+void test_engine_frame()
+{
+    sample::Frame_stats s = sample::run_frames(10, 1.0f);
+
+    TS_CHECK(s.frames == 10);                    // every frame completed
+    TS_CHECK(s.world_xf_value == 5.0f);          // deterministic, correct output (2 + 3)
+    TS_CHECK(s.avg_ms * 1.3 < s.serial_ms);      // the graph actually parallelized (>1.3x)
+}
+
+void test_engine_determinism()
+{
+    sample::Frame_stats a = sample::run_frames(5, 0.3f);
+    sample::Frame_stats b = sample::run_frames(5, 0.3f);
+    TS_CHECK(a.world_xf_value == b.world_xf_value);
+}
+
 } // namespace
 
 void run_integration_tests()
@@ -104,4 +125,6 @@ void run_integration_tests()
     run("when_all into graph", test_when_all_into_graph);
     run("graph then dynamic", test_graph_then_dynamic);
     run("repeat stress x20", test_repeat_stress);
+    run("engine frame invariants", test_engine_frame);
+    run("engine determinism", test_engine_determinism);
 }
