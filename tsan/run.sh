@@ -17,4 +17,10 @@ SRC="scheduler.cpp worker_thread.cpp thread_safe.cpp static_task_graph.cpp acces
 "$CXX" -std=c++23 -fsanitize=thread -fno-exceptions -O1 -g -pthread \
     -I. -Isample $SRC -o "$OUT"
 
-TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1" "$OUT"
+# Symbolize reports (file:line) if llvm-symbolizer is available -- `sudo apt
+# install -y llvm`. Without it, reports still fire but show addresses only.
+OPTS="halt_on_error=1 second_deadlock_stack=1"
+SYM="$(command -v llvm-symbolizer || true)"
+[ -n "$SYM" ] && OPTS="$OPTS external_symbolizer_path=$SYM"
+
+TSAN_OPTIONS="$OPTS" "$OUT"

@@ -36,3 +36,7 @@ libstdc++ on Ubuntu 26.04 (WSL).
   Windows checkout. WSL clears `/tmp` when the distro idles, so build + run in one
   invocation (the script does); the binary builds to `/tmp` to avoid the slow 9p
   mount.
+- For symbolized stacks (file:line) in race reports, install `llvm-symbolizer`:
+  `sudo apt install -y llvm`. `run.sh` uses it automatically when present;
+  without it, reports still fire but show addresses + BuildId only. Verified that
+  TSan catches a deliberate publish-index-before-write-slot race (exit 66).
