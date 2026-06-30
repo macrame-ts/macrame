@@ -28,6 +28,9 @@ Future work, captured as it comes up. Not ordered by priority.
 - Pipelined / concurrent execution (more than one execute() in flight) for frame overlap.
 - Profiler-guided graph optimization (reorder/rebucket from measured task durations).
 
+## Fork-join / parallel_for
+- Promote a `parallel_for` / fork-join to the core. The sample's `sample/parallel.h` is deadlock-free by having the caller participate (spin-wait), but a core version should use scheduler oversubscription (a standby worker wakes when a task blocks) instead, so a waiting node doesn't tie up a worker. Subtasks must inherit the parent's access context (as the sample's does) so the harness passes.
+
 ## Scheduler
 - Spin-then-block hybrid idle (UE-style: spin N cycles, then park on an EventCount) instead of the binary spin/block policy.
 - Per-worker work-stealing deques + lock-free global overflow queue to replace the single mutex-guarded priority queue (the known scaling bottleneck per benchmarks).

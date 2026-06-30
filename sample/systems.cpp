@@ -1,4 +1,5 @@
 #include "systems.h"
+#include "parallel.h"
 
 #include <chrono>
 #include <thread>
@@ -42,6 +43,23 @@ void copy(const Float_store& from, Float_store& to)
 {
     for (int i = 0, n = to.size(); i < n; ++i)
         to.set(i, from.get(i));
+}
+
+// Heavy systems split their per-entity work across chunks. The cost spin is
+// divided too, so wall time ~ total_ms / chunks (bounded by free workers).
+constexpr int parallel_chunks = 8;
+
+void parallel_fill(Float_store& out, float v, double total_ms)
+{
+    int n = out.size();
+    parallel_for(parallel_chunks, [&out, v, total_ms, n](int c)
+    {
+        int begin = c * n / parallel_chunks;
+        int end = (c + 1) * n / parallel_chunks;
+        for (int i = begin; i < end; ++i)
+            out.set(i, v);
+        spin(total_ms / parallel_chunks);
+    });
 }
 
 } // namespace
@@ -98,16 +116,14 @@ void tick_animation(const Float_store& skeletons, const Float_store& intents, Fl
 {
     read_all(skeletons);
     read_all(intents);
-    fill(local_xf, 2.0f);
-    spin(3.0);
+    parallel_fill(local_xf, 2.0f, 3.0);   // internal parallelism: per-skeleton
 }
 
 void tick_physics(const Float_store& velocities, const Float_store& game_state, Float_store& bodies)
 {
     read_all(velocities);
     read_all(game_state);
-    fill(bodies, 3.0f);
-    spin(3.0);
+    parallel_fill(bodies, 3.0f, 3.0);     // internal parallelism: per-island
 }
 
 void tick_propagation(const Float_store& local_xf, const Float_store& bodies, Float_store& world_xf)
@@ -128,15 +144,13 @@ void tick_culling(const Float_store& world_xf, const Float_store& renderables, F
 {
     read_all(world_xf);
     read_all(renderables);
-    fill(visibility, 1.0f);
-    spin(1.5);
+    parallel_fill(visibility, 1.0f, 1.5);   // internal parallelism: per-view
 }
 
 void tick_particles(const Float_store& world_xf, Float_store& particles)
 {
     read_all(world_xf);
-    fill(particles, 1.0f);
-    spin(1.5);
+    parallel_fill(particles, 1.0f, 1.5);    // internal parallelism: per-system
 }
 
 void tick_audio(const Float_store& world_xf, Float_store& audio_out)
@@ -152,8 +166,7 @@ void tick_render(const Float_store& world_xf, const Float_store& visibility,
     read_all(world_xf);
     read_all(visibility);
     read_all(particles);
-    fill(draw_lists, 1.0f);
-    spin(2.5);
+    parallel_fill(draw_lists, 1.0f, 2.5);   // internal parallelism: per-pass
 }
 
 void tick_ui(const Float_store& game_state, Float_store& ui)

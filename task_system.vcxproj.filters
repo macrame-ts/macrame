@@ -77,6 +77,9 @@
     <ClInclude Include="sample\frame.h">
       <Filter>sample</Filter>
     </ClInclude>
+    <ClInclude Include="sample\parallel.h">
+      <Filter>sample</Filter>
+    </ClInclude>
     <ClInclude Include="sample\systems.h">
       <Filter>sample</Filter>
     </ClInclude>
