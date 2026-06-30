@@ -52,7 +52,7 @@ void report(const char* name, std::vector<double> ops)
         name, md / 1e6, mn / 1e6, mx / 1e6, 1e9 / md);
 }
 
-// task bodies operate on a shared atomic passed as void* — no per-task allocation
+// task bodies operate on a shared atomic passed as `void*` — no per-task allocation
 void count_down(void* p) { static_cast<std::atomic<uint64_t>*>(p)->fetch_sub(1, std::memory_order_release); }
 void count_up(void* p)   { static_cast<std::atomic<uint64_t>*>(p)->fetch_add(1, std::memory_order_release); }
 
@@ -75,7 +75,7 @@ std::vector<double> bench_throughput(Idle_policy policy)
 }
 
 // one task in flight at a time; ns/op is the submit->execute round trip.
-// in block mode the pool re-sleeps between pings, so this captures wake latency.
+// in `block` mode the pool re-sleeps between pings, so this captures wake latency.
 std::vector<double> bench_wake_latency(Idle_policy policy)
 {
     Scheduler sched{ { .idle_policy = policy } };
@@ -91,7 +91,7 @@ std::vector<double> bench_wake_latency(Idle_policy policy)
     });
 }
 
-// N producer threads hammer submit concurrently; measures queue_mutex_ contention
+// N producer threads hammer submit concurrently; measures `queue_mutex_` contention
 std::vector<double> bench_contention(Idle_policy policy, unsigned producers)
 {
     Scheduler sched{ { .idle_policy = policy } };

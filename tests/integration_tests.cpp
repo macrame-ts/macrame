@@ -23,7 +23,7 @@ int read_value(ts::Thread_safe<int>& d)
     return d.async([](const int& v) { return v; }).get();
 }
 
-// then() chained off the graph's execute() completion handle.
+// `then()` chained off the graph's `execute()` completion handle.
 void test_then_off_graph_completion()
 {
     ts::Thread_safe<int> a{ 0 };
@@ -38,7 +38,7 @@ void test_then_off_graph_completion()
     TS_CHECK(read_value(a) == 5);
 }
 
-// when_all over async results, feeding a value into a graph run.
+// `when_all` over async results, feeding a value into a graph run.
 void test_when_all_into_graph()
 {
     ts::Thread_safe<int> a{ 2 }, b{ 3 };

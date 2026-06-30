@@ -7,7 +7,7 @@
 #include <semaphore>
 #include <vector>
 
-// declaration order defines scheduling priority (high pops first); Task_queue_cmp depends on it
+// declaration order defines scheduling priority (high pops first); `Task_queue_cmp` depends on it
 enum class Priority { high, normal, low };
 
 enum class Idle_policy
@@ -18,7 +18,7 @@ enum class Idle_policy
 
 struct Scheduler_config
 {
-    uint32_t num_threads = 0;                    // 0 -> std::thread::hardware_concurrency()
+    uint32_t num_threads = 0;                    // 0 -> `std::thread::hardware_concurrency()`
     Idle_policy idle_policy = Idle_policy::block;
 };
 

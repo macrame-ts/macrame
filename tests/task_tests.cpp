@@ -21,7 +21,7 @@ ts::Task<int> read_async(ts::Thread_safe<int>& d)
     return d.async([](const int& v) { return v; });
 }
 
-// --- E: get / is_done / then ----------------------------------------------
+// --- E: `get` / `is_done` / `then` ----------------------------------------
 
 void test_get_void()
 {
@@ -88,7 +88,7 @@ void test_then_after_completion()
     TS_CHECK(r == 30);
 }
 
-// --- F: when_all ----------------------------------------------------------
+// --- F: `when_all` --------------------------------------------------------
 
 void test_when_all_two()
 {

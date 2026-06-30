@@ -66,3 +66,4 @@ Tests use the harness in `tests/harness.h`: `TS_CHECK(cond)` (non-fatal, prints 
     ```
     Short lambdas may stay one-liners (`[](int x){ return x + 1; }`); use Allman only when the body spans multiple lines.
   - Never align code or comments with padding spaces (no aligning `=`, parameters, trailing args/comments, or braces across lines). Single space only.
+  - In comments, wrap references to code identifiers (type, function, variable, member names) in backticks: `Thread_safe`, `pipe_enqueue`, `current_access`.

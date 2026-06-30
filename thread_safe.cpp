@@ -53,7 +53,7 @@ void submit_job(Scheduler& scheduler, Pipe& pipe, Job job)
         });
 }
 
-// Admit as many front jobs as the reader/writer rules allow. Caller holds pipe.mutex.
+// Admit as many front jobs as the reader/writer rules allow. Caller holds `pipe.mutex`.
 //   - readers: any number may run concurrently, but not alongside a writer
 //   - writer: runs alone (no readers, no other writer)
 //   - FIFO: a writer at the front holds back later jobs until prior readers drain

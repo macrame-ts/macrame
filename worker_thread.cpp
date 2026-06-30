@@ -14,9 +14,9 @@ void Worker_thread::main(Scheduler& scheduler)
 
     while (true)
     {
-        // block mode: sleep until a permit is available. permit count tracks
+        // `block` mode: sleep until a permit is available. permit count tracks
         // queued tasks, so a successful acquire implies work (or a shutdown
-        // wake, caught by the quit check below).
+        // wake, caught by the `quit_` check below).
         if (scheduler.idle_policy_ == Idle_policy::block)
             scheduler.work_available_.acquire();
 
@@ -26,7 +26,7 @@ void Worker_thread::main(Scheduler& scheduler)
 
         if (scheduler.task_queue_.empty())
         {
-            // spin mode reaches here on an empty queue; yield instead of
+            // `spin` mode reaches here on an empty queue; yield instead of
             // re-locking immediately and starving submitters
             lock.unlock();
             std::this_thread::yield();

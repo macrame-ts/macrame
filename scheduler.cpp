@@ -22,7 +22,7 @@ Scheduler::~Scheduler()
 {
     quit_.store(true, std::memory_order_release);
 
-    // wake every blocked worker so it observes quit_ and drains/exits
+    // wake every blocked worker so it observes `quit_` and drains/exits
     if (idle_policy_ == Idle_policy::block)
         work_available_.release(static_cast<std::ptrdiff_t>(workers_.size()));
 }

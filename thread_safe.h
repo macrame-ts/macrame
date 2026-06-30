@@ -20,7 +20,7 @@
 namespace ts
 {
 
-// Ambient scheduler used by async() (v1: a process-wide default).
+// Ambient scheduler used by `async()` (v1: a process-wide default).
 Scheduler& default_scheduler();
 
 namespace detail
@@ -29,8 +29,8 @@ namespace detail
 // Submit a closure to the scheduler (bridges to the raw func-ptr API).
 void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closure);
 
-// Back-reference a graph node carries so Task::after/before can add edges
-// without Task knowing the concrete graph type.
+// Back-reference a graph node carries so `Task::after`/`before` can add edges
+// without `Task` knowing the concrete graph type.
 struct Graph_node_ref
 {
     void* graph = nullptr;
@@ -71,11 +71,11 @@ void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_
 
 // --- Task completion state -------------------------------------------------
 //
-// Holds the result plus a list of continuations attached via Task::then().
+// Holds the result plus a list of continuations attached via `Task::then()`.
 // Continuations fire when the producer completes (inline on the completing
 // worker); a continuation attached after completion runs inline on the caller.
-// Note: mixing get() and then() on the same task, or calling get() twice, is
-// unsupported (get() moves the result out).
+// Note: mixing `get()` and `then()` on the same task, or calling `get()` twice, is
+// unsupported (`get()` moves the result out).
 
 template<typename R>
 struct Task_state
@@ -179,7 +179,7 @@ struct Task_state<void>
 
 } // namespace detail
 
-// Handle to an async result. get() blocks for the result (call once); then()
+// Handle to an async result. `get()` blocks for the result (call once); `then()`
 // chains a continuation that runs when this task completes.
 template<typename R>
 class Task
@@ -202,7 +202,7 @@ public:
         return state_ && state_->ready.load(std::memory_order_acquire);
     }
 
-    // Ordering edges for Static_task_graph nodes (no-op on dynamic tasks).
+    // Ordering edges for `Static_task_graph` nodes (no-op on dynamic tasks).
     template<typename R2>
     Task& after(const Task<R2>& prerequisite)
     {
@@ -226,7 +226,7 @@ public:
     }
 
     // Chains a continuation. For a non-void producer the continuation receives
-    // the result by reference; for void it takes no argument. Returns a Task for
+    // the result by reference; for void it takes no argument. Returns a `Task` for
     // the continuation's own result.
     template<typename Fn>
     auto then(Fn&& fn)
@@ -307,7 +307,7 @@ void when_all_attach(std::index_sequence<I...>,
 } // namespace detail
 
 // Typed join: completes when every prerequisite completes, carrying their
-// results as a tuple into the subsequent (consume with .then). Prerequisite
+// results as a tuple into the subsequent (consume with `.then`). Prerequisite
 // result types must be non-void and copyable. (Apply-style unpacking of the
 // tuple into separate continuation args is future work; see docs/TODO.md.)
 template<typename... Rs>
@@ -325,11 +325,11 @@ Task<std::tuple<Rs...>> when_all(Task<Rs>... prerequisites)
     return Task<std::tuple<Rs...>>(next);
 }
 
-// The only sanctioned way to touch a T across threads. You never receive a bare
-// T&; you hand a functor to async() and it runs once access has been granted.
+// The only sanctioned way to touch a `T` across threads. You never receive a bare
+// `T&`; you hand a functor to `async()` and it runs once access has been granted.
 // Access mode is deduced from the functor's parameter const-ness:
-//   functor(T&)        -> read_write
-//   functor(const T&)  -> read_only
+//   `functor(T&)`       -> `read_write`
+//   `functor(const T&)` -> `read_only`
 class Static_task_graph;
 
 template<typename T>
@@ -338,7 +338,7 @@ class Thread_safe
     friend class Static_task_graph;
 
 public:
-    // Non-explicit default ctor (value-initializes T) so arrays of Thread_safe
+    // Non-explicit default ctor (value-initializes `T`) so arrays of `Thread_safe`
     // work; the forwarding ctor below handles explicit argument construction.
     Thread_safe() requires std::default_initializable<T>
         : instance_()
@@ -362,7 +362,7 @@ public:
     Thread_safe(const Thread_safe&) = delete;
     Thread_safe& operator=(const Thread_safe&) = delete;
 
-    // read_write: functor takes T& (and not const T&)
+    // `read_write`: functor takes `T&` (and not `const T&`)
     template<typename Fn>
         requires std::invocable<Fn, T&> && (!std::invocable<Fn, const T&>)
     auto async(Fn&& fn) -> Task<std::invoke_result_t<Fn, T&>>
@@ -371,7 +371,7 @@ public:
             &instance_, std::forward<Fn>(fn));
     }
 
-    // read_only: functor takes const T&
+    // `read_only`: functor takes `const T&`
     template<typename Fn>
         requires std::invocable<Fn, const T&>
     auto async(Fn&& fn) const -> Task<std::invoke_result_t<Fn, const T&>>

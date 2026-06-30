@@ -10,16 +10,16 @@
 namespace sample
 {
 
-// Fork-join over `chunks`, invoking chunk_fn(chunk_index). Helpers run on the
+// Fork-join over `chunks`, invoking `chunk_fn(chunk_index)`. Helpers run on the
 // default scheduler and the calling thread participates, so it is deadlock-free
 // regardless of worker availability (the caller alone can drain every chunk;
 // helpers only accelerate). Chunks are handed out dynamically, so the work
 // load-balances.
 //
 // Subtasks run under the calling node's access context, so guarded store access
-// inside chunk_fn passes the harness. This is the intended pattern: a node with
-// exclusive (read_write) access to a store parallelizes over its disjoint
-// elements. (A general parallel_for in the core, with proper oversubscription
+// inside `chunk_fn` passes the harness. This is the intended pattern: a node with
+// exclusive (`read_write`) access to a store parallelizes over its disjoint
+// elements. (A general `parallel_for` in the core, with proper oversubscription
 // instead of a participating spin-wait, is future work -- see docs/TODO.md.)
 template<typename Fn>
 void parallel_for(int chunks, Fn chunk_fn)

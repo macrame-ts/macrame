@@ -43,8 +43,8 @@ private:
 // Transforms are double-buffered: early systems (gameplay/AI/nav) read last
 // frame's `world_xf_prev`; transform propagation writes this frame's `world_xf`,
 // which the late systems (cloth/culling/particles/audio/render) read; the swap
-// system copies world_xf -> world_xf_prev for the next frame. This is what lets
-// many systems read transforms without serializing against the writer.
+// system copies `world_xf` -> `world_xf_prev` for the next frame. This is what
+// lets many systems read transforms without serializing against the writer.
 struct World
 {
     explicit World(int n)

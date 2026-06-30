@@ -45,8 +45,8 @@ extern thread_local const Access_context* current_access;
 
 // The harness. Overloaded on this-const-ness, so read/write is deduced from the
 // calling method's own const-ness:
-//   non-const method -> this is T*       -> needs read_write
-//   const     method -> this is const T* -> needs read_only
+//   non-const method -> this is `T*`       -> needs `read_write`
+//   const     method -> this is `const T*` -> needs `read_only`
 template<typename T>
 inline void access_check(T* self) noexcept
 {

@@ -5,8 +5,8 @@ namespace sample
 {
 
 // Nodes are added in frame order so the conflict tiebreak (declaration index)
-// matches intent: early readers of world_xf_prev run before the swap; transform
-// propagation runs before the late readers of world_xf. All ordering is derived
+// matches intent: early readers of `world_xf_prev` run before the swap; transform
+// propagation runs before the late readers of `world_xf`. All ordering is derived
 // from store access — no explicit edges needed here.
 ts::Static_task_graph build_frame_graph(World& w)
 {
@@ -17,7 +17,14 @@ ts::Static_task_graph build_frame_graph(World& w)
     g.add_node(&tick_streaming, w.input, w.assets);
     g.add_node(&tick_gameplay, w.world_xf_prev, w.input, w.net, w.game_state);
     g.add_node(&tick_navigation, w.nav, w.world_xf_prev, w.paths);
-    g.add_node(&tick_ai, w.world_xf_prev, w.paths, w.game_state, w.intents);
+    // AI also issues concurrent `nav` queries (`Thread_safe::async`) outside the
+    // declared edges, so its node captures the `nav` wrapper; graph access is
+    // still just the four declared stores.
+    g.add_node([&w](const Float_store& world_xf_prev, const Float_store& paths,
+                    const Float_store& game_state, Float_store& intents)
+    {
+        tick_ai(w.nav, world_xf_prev, paths, game_state, intents);
+    }, w.world_xf_prev, w.paths, w.game_state, w.intents);
     g.add_node(&tick_animation, w.skeletons, w.intents, w.local_xf);
     g.add_node(&tick_physics, w.velocities, w.game_state, w.bodies);
     g.add_node(&tick_propagation, w.local_xf, w.bodies, w.world_xf);

@@ -19,7 +19,7 @@ bool Access_context::grants(const void* instance, Access mode) const noexcept
         if (entries_[i].instance != instance)
             continue;
 
-        // read_only is satisfied by any held mode; read_write needs read_write.
+        // `read_only` is satisfied by any held mode; `read_write` needs `read_write`.
         if (mode == Access::read_only || entries_[i].mode == Access::read_write)
             return true;
     }

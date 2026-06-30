@@ -16,6 +16,7 @@ void run_sample(int frames, float scale)
 
     World world{ entities };
     ts::Static_task_graph graph = build_frame_graph(world);
+    reset_stats();
 
     using clock = std::chrono::steady_clock;
     auto t0 = clock::now();
@@ -29,6 +30,8 @@ void run_sample(int frames, float scale)
         graph.node_count(), frames, entities, scale);
     std::printf("  %.2f ms/frame  (serial budget %.2f ms -> %.2fx speedup)\n",
         per_frame, serial, serial / per_frame);
+    std::printf("  peak %d concurrent nav queries (Thread_safe::async during AI)\n",
+        observed_nav_concurrency());
 }
 
 } // namespace sample

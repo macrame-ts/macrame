@@ -1,6 +1,7 @@
 #include "systems.h"
 #include "parallel.h"
 
+#include <atomic>
 #include <chrono>
 #include <thread>
 
@@ -12,8 +13,18 @@ float time_scale = 1.0f;
 namespace
 {
 
+// `Thread_safe::async` demo instrumentation: concurrent `nav` queries in flight.
+std::atomic<int> nav_active{ 0 };
+std::atomic<int> nav_peak{ 0 };
+
+void update_max(std::atomic<int>& max, int value)
+{
+    int prev = max.load();
+    while (value > prev && !max.compare_exchange_weak(prev, value)) {}
+}
+
 // Mock a system's CPU cost: spin-wait for the budget. Precise (unlike
-// std::this_thread::sleep_for, which rounds sub-ms waits up to the ~15 ms Windows
+// `std::this_thread::sleep_for`, which rounds sub-ms waits up to the ~15 ms Windows
 // timer tick) and, like real compute, it occupies the worker for the duration so
 // graph parallelism is measurable. (I/O-bound systems will use a real sleep later.)
 void spin(double ms)
@@ -102,14 +113,37 @@ void tick_navigation(const Float_store& nav, const Float_store& world_xf_prev, F
     spin(1.0);
 }
 
-void tick_ai(const Float_store& world_xf_prev, const Float_store& paths,
+void tick_ai(ts::Thread_safe<Float_store>& nav,
+             const Float_store& world_xf_prev, const Float_store& paths,
              const Float_store& game_state, Float_store& intents)
 {
     read_all(world_xf_prev);
     read_all(paths);
     read_all(game_state);
+
+    // Per-agent path queries against the read-only `nav` service via the
+    // `Thread_safe::async` path: fired concurrently, they run as concurrent
+    // readers on `nav`'s pipe (on other workers, overlapping AI's own logic
+    // below). Safe because `nav` has no writer this frame -- the legitimate use of
+    // async access outside the static graph's declared edges.
+    //
+    // Fire-and-forget: AI does NOT block on the results. Consuming them would mean
+    // blocking inside a graph node (the anti-pattern we avoid -- it ties up a
+    // worker and risks deadlock); doing it cleanly needs continuations feeding a
+    // downstream node (future work).
+    constexpr int queries = 6;
+    for (int q = 0; q < queries; ++q)
+        nav.async([](const Float_store& n)
+        {
+            update_max(nav_peak, nav_active.fetch_add(1) + 1);
+            spin(0.25);
+            float v = n.size() > 0 ? n.get(0) : 0.0f;
+            nav_active.fetch_sub(1);
+            return v;
+        });
+
+    spin(1.5);   // AI's own logic, overlapping the async nav queries
     fill(intents, 1.0f);
-    spin(1.5);
 }
 
 void tick_animation(const Float_store& skeletons, const Float_store& intents, Float_store& local_xf)
@@ -193,6 +227,17 @@ double serial_budget_ms()
 {
     return 0.1 + 0.5 + 0.5 + 2.0 + 1.0 + 1.5 + 3.0 + 3.0 + 1.0
          + 1.0 + 1.5 + 1.5 + 0.5 + 2.5 + 0.5 + 0.2 + 0.1;
+}
+
+void reset_stats()
+{
+    nav_active.store(0);
+    nav_peak.store(0);
+}
+
+int observed_nav_concurrency()
+{
+    return nav_peak.load();
 }
 
 } // namespace sample

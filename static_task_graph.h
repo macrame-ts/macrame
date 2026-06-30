@@ -17,8 +17,8 @@ namespace ts
 namespace detail
 {
 
-// Extracts the parameter type list of a callable's operator(). Works for
-// non-generic lambdas, functors, and function pointers; generic lambdas (auto&)
+// Extracts the parameter type list of a callable's `operator()`. Works for
+// non-generic lambdas, functors, and function pointers; generic lambdas (`auto&`)
 // are not introspectable and are unsupported here (see docs/TODO.md).
 template<typename T>
 struct Function_traits : Function_traits<decltype(&T::operator())> {};
@@ -35,17 +35,17 @@ struct Function_traits<R(*)(A...)> { using args = std::tuple<A...>; };
 
 } // namespace detail
 
-// Build once, execute many. Nodes declare access to Thread_safe<> systems and,
-// optionally, explicit ordering edges. compile() turns access conflicts (plus
-// explicit edges) into a DAG; execute() runs it, parallelizing independent nodes.
-// Nodes are void (they mutate the systems they access).
+// Build once, execute many. Nodes declare access to `Thread_safe<>` systems and,
+// optionally, explicit ordering edges. `compile()` turns access conflicts (plus
+// explicit edges) into a DAG; `execute()` runs it, parallelizing independent
+// nodes. Nodes are void (they mutate the systems they access).
 class Static_task_graph
 {
 public:
-    // Add a node: functor + the Thread_safe<> instances it accesses. Per-object
+    // Add a node: functor + the `Thread_safe<>` instances it accesses. Per-object
     // access mode is deduced from the functor's parameter const-ness
     //   add_node([](Physics& p, const Nav& n){ ... }, physics, nav);   // p:write, n:read
-    // Returns a Task<void> usable only as an ordering handle (after/before).
+    // Returns a `Task<void>` usable only as an ordering handle (`after`/`before`).
     template<typename Fn, typename... Ts>
     Task<void> add_node(Fn&& fn, Thread_safe<Ts>&... access)
     {
