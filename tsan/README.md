@@ -14,12 +14,15 @@ harness-free stress driver so the portable core (scheduler, `Thread_safe` pipe,
 
 ## Run (after every major change)
 
+From the repo root, in WSL:
+
 ```sh
 bash tsan/run.sh
 ```
 
-Clean exit + `tsan: done (no races)` = no races found in the workloads. A race
-prints a report and exits nonzero (`halt_on_error=1`).
+Clean exit + `tsan: done (no races)` = no races found. A race prints a report
+and exits nonzero (`halt_on_error=1`). **Verified clean** with clang 21 +
+libstdc++ on Ubuntu 26.04 (WSL).
 
 ## Notes
 
@@ -29,6 +32,7 @@ prints a report and exits nonzero (`halt_on_error=1`).
   don't. Extend it as new concurrent features land.
 - `fatal.cpp` is built without `<stacktrace>` where the stdlib lacks it; TSan's
   own backtrace covers reports.
-- **Status: first-run-unverified** — written on a Windows-only host with no Linux
-  toolchain available. Expect to fix include/stdlib-version issues on the first
-  real run; the source is portable C++23 by construction.
+- `.gitattributes` forces `*.sh` to LF so the script runs in WSL despite the
+  Windows checkout. WSL clears `/tmp` when the distro idles, so build + run in one
+  invocation (the script does); the binary builds to `/tmp` to avoid the slow 9p
+  mount.
