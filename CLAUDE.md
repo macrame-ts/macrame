@@ -50,6 +50,8 @@ Layout: core sources at the repo root, tests in `tests/`, benchmarks in `benchma
 
 Tests use the harness in `tests/harness.h`: `TS_CHECK(cond)` (non-fatal, prints a stacktrace on failure), `run(name, fn)`, `summary()`. Each group lives in its own `tests/<group>_tests.{h,cpp}` with a `run_<group>_tests()` entry, wired into `run_all_tests()` in `tests/tests.cpp`. Fatal paths are exercised via subprocess death tests (`ts::test::expect_death("<scenario>")` + a case in `run_death_scenario`).
 
+`main` takes isolation/stress args (no arg = run everything): `--tests` (suite only, returns the failure count as exit code), `--bench` (benchmarks only), `--stress` (sample only, many frames at a fast scale — dense workload for sanitizers), `--death <scenario>` (internal, the death-test child). These exist to localize flaky failures: run one component in a loop, categorizing exit codes (1 = a `TS_CHECK` failure via `summary()`; `0xC0000005` = an actual access violation), and build with `/p:EnableASAN=true` to get the faulting stack rather than guessing.
+
 ## Session Guidance
 
 - Multiple sessions will work on different aspects — read this file for context each time
