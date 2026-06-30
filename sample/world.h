@@ -48,7 +48,7 @@ private:
 struct World
 {
     explicit World(int n)
-        : skeletons{ n }, nav{ n }, renderables{ n }, velocities{ n }
+        : skeletons{ n }, nav{ n }, renderables{ n }, velocities{ n }, asset_source{ n }
         , input{ n }, net{ n }, assets{ n }, game_state{ n }, paths{ n }, intents{ n }
         , local_xf{ n }, bodies{ n }, world_xf{ n }, world_xf_prev{ n }
         , cloth{ n }, visibility{ n }, particles{ n }, audio_out{ n }, draw_lists{ n }, ui{ n }
@@ -59,6 +59,7 @@ struct World
     ts::Thread_safe<Float_store> nav;
     ts::Thread_safe<Float_store> renderables;
     ts::Thread_safe<Float_store> velocities;
+    ts::Thread_safe<Float_store> asset_source;   // Streaming loads from this
 
     // single-writer outputs
     ts::Thread_safe<Float_store> input;          // Input

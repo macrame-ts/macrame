@@ -32,6 +32,8 @@ void run_sample(int frames, float scale)
         per_frame, serial, serial / per_frame);
     std::printf("  peak %d concurrent nav queries (Thread_safe::async during AI)\n",
         observed_nav_concurrency());
+    std::printf("  streamed %d assets via then, %d batches via when_all\n",
+        assets_streamed(), batches_streamed());
 }
 
 } // namespace sample

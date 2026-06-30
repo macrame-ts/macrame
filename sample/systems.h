@@ -15,7 +15,11 @@ extern float time_scale;
 
 void tick_input(Float_store& input);                                                   // 0.1
 void tick_networking(const Float_store& input, Float_store& net);                      // 0.5
-void tick_streaming(const Float_store& input, Float_store& assets);                    // 0.5
+// Streaming loads assets from a read-only source via `Thread_safe::async`, then
+// processes each with `then` and fires a batch finalize with `when_all` -- so it
+// takes the source wrapper, not an unwrapped store.
+void tick_streaming(ts::Thread_safe<Float_store>& asset_source,
+                    const Float_store& input, Float_store& assets);                    // 0.5
 void tick_gameplay(const Float_store& world_xf_prev, const Float_store& input,
                    const Float_store& net, Float_store& game_state);                   // 2.0
 void tick_navigation(const Float_store& nav, const Float_store& world_xf_prev,
@@ -45,9 +49,10 @@ void tick_swap(const Float_store& world_xf, Float_store& world_xf_prev);        
 // Sum of all budgets (ms) at scale 1.0 — the serial baseline to beat.
 double serial_budget_ms();
 
-// Reset per-run instrumentation; peak concurrent `nav` queries observed
-// (`Thread_safe::async` demo).
+// Reset per-run instrumentation.
 void reset_stats();
-int observed_nav_concurrency();
+int observed_nav_concurrency();   // peak concurrent `nav` queries (`Thread_safe::async`)
+int assets_streamed();            // asset loads finished via a `then` continuation
+int batches_streamed();           // load batches finished via a `when_all` continuation
 
 } // namespace sample

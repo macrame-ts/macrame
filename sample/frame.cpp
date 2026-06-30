@@ -14,7 +14,12 @@ ts::Static_task_graph build_frame_graph(World& w)
 
     g.add_node(&tick_input, w.input);
     g.add_node(&tick_networking, w.input, w.net);
-    g.add_node(&tick_streaming, w.input, w.assets);
+    // Streaming issues async loads with then/when_all continuations (outside the
+    // declared edges), so its node captures the source wrapper.
+    g.add_node([&w](const Float_store& input, Float_store& assets)
+    {
+        tick_streaming(w.asset_source, input, assets);
+    }, w.input, w.assets);
     g.add_node(&tick_gameplay, w.world_xf_prev, w.input, w.net, w.game_state);
     g.add_node(&tick_navigation, w.nav, w.world_xf_prev, w.paths);
     // AI also issues concurrent `nav` queries (`Thread_safe::async`) outside the

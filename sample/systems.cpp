@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include <tuple>
 
 namespace sample
 {
@@ -16,6 +17,10 @@ namespace
 // `Thread_safe::async` demo instrumentation: concurrent `nav` queries in flight.
 std::atomic<int> nav_active{ 0 };
 std::atomic<int> nav_peak{ 0 };
+
+// Streaming demo instrumentation: assets processed via `then`, batches via `when_all`.
+std::atomic<int> streamed{ 0 };
+std::atomic<int> batches{ 0 };
 
 void update_max(std::atomic<int>& max, int value)
 {
@@ -88,11 +93,36 @@ void tick_networking(const Float_store& input, Float_store& net)
     spin(0.5);
 }
 
-void tick_streaming(const Float_store& input, Float_store& assets)
+void tick_streaming(ts::Thread_safe<Float_store>& asset_source,
+                    const Float_store& input, Float_store& assets)
 {
     read_all(input);
     fill(assets, 1.0f);
-    spin(0.5);
+
+    // Stream a batch of assets from the read-only source via `Thread_safe::async`,
+    // fire-and-forget. Each load is processed by a `then` continuation; a `when_all`
+    // over the batch fires a finalize continuation once every load is in. The
+    // continuations run on workers (not blocking this node), like the nav demo --
+    // the chain stays alive via the loads' pipe jobs.
+    auto load = [](const Float_store& src) { spin(0.2); return src.size() > 0 ? src.get(0) : 1.0f; };
+    auto process = [](float) { streamed.fetch_add(1, std::memory_order_relaxed); };
+
+    ts::Task<float> a = asset_source.async(load);
+    ts::Task<float> b = asset_source.async(load);
+    ts::Task<float> c = asset_source.async(load);
+    ts::Task<float> d = asset_source.async(load);
+
+    a.then(process);
+    b.then(process);
+    c.then(process);
+    d.then(process);
+
+    ts::when_all(a, b, c, d).then([](std::tuple<float, float, float, float>&)
+    {
+        batches.fetch_add(1, std::memory_order_relaxed);
+    });
+
+    spin(0.5);   // the node's own cost, overlapping the async loads
 }
 
 void tick_gameplay(const Float_store& world_xf_prev, const Float_store& input,
@@ -233,11 +263,23 @@ void reset_stats()
 {
     nav_active.store(0);
     nav_peak.store(0);
+    streamed.store(0);
+    batches.store(0);
 }
 
 int observed_nav_concurrency()
 {
     return nav_peak.load();
+}
+
+int assets_streamed()
+{
+    return streamed.load();
+}
+
+int batches_streamed()
+{
+    return batches.load();
 }
 
 } // namespace sample
