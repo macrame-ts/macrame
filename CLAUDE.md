@@ -60,6 +60,7 @@ Tests use the harness in `tests/harness.h`: `TS_CHECK(cond)` (non-fatal, prints 
 - Multiple sessions will work on different aspects — read this file for context each time
 - Propose design options with tradeoffs before implementing non-trivial changes
 - Perf matters: flag any change that adds allocations or contention on hot paths
+- After any change to concurrent code (scheduler, `Thread_safe` pipe, graph, `parallel_for`), verify with ThreadSanitizer: `bash tsan/run.sh` on a Linux host (TSan has no Windows runtime — see `tsan/README.md`). On Windows, ASan (`/p:EnableASAN=true`) + stress loops are the fallback (they catch memory bugs/UAF, not pure data races).
 - Code style:
   - Type names are `Snake_case`: capitalized first letter, underscores between words — `Static_task_graph`, `Access_context`, `Thread_safe`, `Task`. This applies to all types including class templates (`Task<R>`, not `task<R>`).
   - `snake_case` for members/locals/functions; trailing `_` for private members.
