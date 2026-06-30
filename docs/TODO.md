@@ -34,3 +34,8 @@ Future work, captured as it comes up. Not ordered by priority.
 ## Scheduler
 - Spin-then-block hybrid idle (UE-style: spin N cycles, then park on an EventCount) instead of the binary spin/block policy.
 - Per-worker work-stealing deques + lock-free global overflow queue to replace the single mutex-guarded priority queue (the known scaling bottleneck per benchmarks).
+
+## Tooling / infra
+- Benchmark regression monitoring: `benchmarks/` prints a stable median ns/op per public feature (`--bench`). Wire a baseline + compare step (store the numbers, fail/flag on a regression beyond a threshold) so changes are tracked over time.
+- Sanitizer build configs: ASan is reachable via `/p:EnableASAN=true`; add a proper config. TSan has no Windows runtime — would need a portable (WSL/clang) build of the non-Windows-specific parts to catch data races.
+- `TS_SAFETY_CHECKS=0` smoke build (confirm the guards compile out).

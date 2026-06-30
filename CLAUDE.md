@@ -14,19 +14,20 @@ Experienced engine programmer. Designed and implemented UE Tasks System at Epic 
 - No external dependencies
 - Lock-free/low-contention concurrency preferred
 
-## Current State (as of 2026-06)
+## Current State
 
-Core scaffolding in `main.cpp` and `scheduler.h` (scheduler.cpp is empty placeholder):
+Four layers, all built and tested (the harness suite, the sample, and the benchmarks all pass). Sources: core at repo root, plus `tests/`, `benchmarks/`, `sample/`.
 
-- `Scheduler` — priority queue + single worker thread (`std::jthread`), busy-spin (no condition variable, removed intentionally)
-- `Priority` enum — high / normal / low
-- Task variants explored so far:
-  - `Static_task<F>` — zero-alloc, function pointer trampoline
-  - `Dynamic_task` — `move_only_function`, heap body
-  - `Awaitable_task` — adds `binary_semaphore` wait
-  - `Ref_counted_task` / `Ref_counted_task_impl` — intrusive ref-count, self-submits and self-destructs
-  - `Dependable_task` / `Dependable_task_impl` — prerequisite counting + subsequent chain, `then()` API
-- `Ref_counted_base<T>` / `Ref_counted_ptr<T>` — intrusive smart pointer utilities
+- **`Scheduler`** (`scheduler.{h,cpp}`, `worker_thread.{h,cpp}`) — priority queue + `std::jthread` worker pool. Per-instance `Idle_policy` via `Scheduler_config` at construction (block = sleep on a counting semaphore, woken by `submit`; spin = yield-loop on the queue). Runtime, not templated — the `thread_local Scheduler* current_scheduler` rules out templating `Scheduler`. The single mutex-guarded `std::priority_queue` is the known scaling bottleneck (benchmarks confirm).
+- **`Thread_safe<T>`** (`thread_safe.{h,cpp}`) — the access-controlled wrapper; the only sanctioned way to touch a thread-unsafe `T` across threads. `async(fn)` runs `fn(T&)` (write) or `fn(const T&)` (read) on a per-object **reader/writer pipe** (concurrent readers, exclusive writer, FIFO, non-blocking completion-driven dispatch). Access mode is deduced from the functor's parameter const-ness. Constructs `T` in place; adopting an existing instance is future work.
+- **`Task<R>`** (`thread_safe.h`) — async result handle: `get()` (call once), `is_done()`, `then(fn)` (continuation, fires inline at completion), `after`/`before` (graph ordering edges). `when_all(tasks...)` joins typed prerequisites into `Task<tuple<...>>` (results must be non-void + copyable).
+- **`Static_task_graph`** (`static_task_graph.{h,cpp}`) — build-once / run-many DAG. `add_node(fn, Thread_safe<>&...)` deduces per-arg access from the functor's parameter const-ness (via `Function_traits`; non-generic lambdas / function pointers only). `compile()` derives edges from access conflicts (shared instance + at least one writer, ordered by declaration index) plus explicit `after`/`before`, dedups, Kahn cycle-checks. `execute()` runs the DAG in parallel via atomic indegree counts; re-runnable; returns a completion `Task<void>`.
+- **Access harness** (`access.{h,cpp}`) — `TS_CHECK_ACCESS()` at the top of every guarded method checks `this` against a thread-local `Access_context` the scheduler/pipe installs per task; a violation routes to `ts::fatal`. ~1 ns/call. Subtasks (e.g. `parallel_for` chunks) inherit the parent node's context. Gated by `TS_SAFETY_CHECKS`.
+- **`fatal.{h,cpp}`** — exceptions are disabled project-wide; all non-recoverable failures call `ts::fatal` (message + `std::stacktrace` + `abort`). Tests are the one place failures are non-fatal (the harness records and continues); fatal paths are checked via subprocess death tests.
+- **Sample** (`sample/`) — a 17-system mock game-engine frame exercising all four layers; `run_frames` returns `Frame_stats` for the integration assertions. ~3x speedup over the serial budget at 60 fps.
+- **Legacy**: `task.{h,cpp}` (`Static_task`, `Dynamic_task`, `Awaitable_task`, `Ref_counted_task`, `Dependable_task`, `Ref_counted_ptr`) are the original exploration, kept only as a printf demo in `tests/sample_tests.cpp` (`run_sample_tests`). Superseded by the above — don't build on them.
+
+Roadmap and open design questions live in `docs/TODO.md`; the engine-comparison research in `docs/task-systems-comparison.md`; the original interface sketch in `design/thread_safe_sketch.h`.
 
 ## Terminology
 
@@ -35,12 +36,14 @@ Use these terms precisely, in code and discussion:
 - **spin waiting** — yielding in a loop until a condition holds (e.g. the worker idling on an empty queue, or a fixed-duration `spin()`). Does no other work.
 - **busy waiting** — doing *unrelated* work while waiting, e.g. a thread that pops and executes other queued tasks while waiting for a specific task to complete. Usually a bad idea (stack growth, latency, priority inversion). Not the same as spin waiting.
 
-## Design Principles
+## Design Principles & Lessons
 
-- Prefer intrusive ref-counting over `shared_ptr` for tasks (cache locality, explicit control)
-- Avoid virtual dispatch on hot paths
-- Worker threads set `thread_local Scheduler* current_scheduler` — subsequents submitted inline from worker
-- `subsequents_closed_` flag handles the race between `then()` called before vs after task completion
+- **Granularity decides parallelism.** Whole-object (system-level) access serializes every reader against any writer, collapsing the DAG toward sequential. Shard mutable state — the sample double-buffers transforms (`world_xf_prev` read by early systems, `world_xf` written by propagation and read by late systems, swapped per frame) so many readers don't contend with the writer. The central tension: static safety wants coarse access sets, performance wants fine ones.
+- **Completeness hazard.** The graph's safety holds only if its access declarations are *complete*. A manual task or an escaped reference touching a system the graph believes it owns races — and the graph can *promote* a latent bug to a live one by manufacturing parallelism around it. The harness is the runtime oracle for undeclared access.
+- **Never block inside a graph node / task.** Cross-system async access is fire-and-forget; consuming a result needs a continuation into a downstream node, not a `get()` inside the node. Blocking ties up a worker and risks deadlock under worker exhaustion.
+- **Sync state shared across threads must outlive every participant** — heap it (`shared_ptr`), never leave it on a stack frame the initiator may unwind first. (This cost a real use-after-free in `parallel_for`: the caller returned on `completed == chunks` and unwound while a helper still touched the stack counters.)
+- Prefer per-instance runtime config over templating when a `thread_local` singleton would fracture across instantiations. Prefer a counting semaphore over a condition variable for worker wake (decouples from the queue mutex; survives a future lock-free queue). Prefer intrusive / zero-alloc on hot paths; avoid virtual dispatch.
+- **Debugging flaky crashes**: localize with `main`'s `--tests` / `--bench` / `--stress`, categorize exit codes (1 = a `TS_CHECK` failure via `summary()`; `0xC0000005` = an access violation), and build `/p:EnableASAN=true` to get the faulting stack. Get the stack before theorizing — inspection alone misled twice.
 
 ## VS Project
 
