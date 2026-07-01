@@ -187,6 +187,35 @@ void test_early_release_frees_object_mid_run()
     TS_CHECK(x_async_ms.load() + 20 < run_ms);     // and well before the 60ms run finished
 }
 
+// Lazy acquire: an object touched only by a LATE node (after a slow predecessor) is
+// reserved only when that node is dispatched, so async on it runs during the early
+// part of the frame instead of blocking on the whole run.
+void test_lazy_acquire_late_object_free_early()
+{
+    using clock = std::chrono::steady_clock;
+    auto ms_since = [](clock::time_point t0)
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count();
+    };
+
+    ts::Thread_safe<int> y{ 0 }, x{ 0 };
+    ts::Static_task_graph g;
+    ts::Graph_node a = g.add_node([](int& v) { std::this_thread::sleep_for(60ms); v = 1; }, y);
+    ts::Graph_node b = g.add_node([](int& v) { v = 1; }, x);   // x touched only after a
+    b.after(a);
+    g.compile();
+
+    auto t0 = clock::now();
+    auto run = g.execute();
+    std::atomic<long long> x_async_ms{ -1 };
+    x.async([&](int&) { x_async_ms.store(ms_since(t0)); });
+    run.get();
+    long long run_ms = ms_since(t0);
+
+    TS_CHECK(x_async_ms.load() >= 0);
+    TS_CHECK(x_async_ms.load() + 30 < run_ms);     // x was free while the 60ms node ran
+}
+
 // J: repeat a concurrency-sensitive workload to catch flakiness.
 void test_repeat_stress()
 {
@@ -245,6 +274,7 @@ void run_integration_tests()
     run("graph/async no overlap (before)", test_async_before_graph_no_overlap);
     run("graph/async contention", test_graph_async_stress);
     run("early release frees object mid-run", test_early_release_frees_object_mid_run);
+    run("lazy acquire keeps late object free", test_lazy_acquire_late_object_free_early);
     run("repeat stress x20", test_repeat_stress);
     run("engine frame invariants", test_engine_frame);
     run("engine determinism", test_engine_determinism);

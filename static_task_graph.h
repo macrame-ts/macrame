@@ -149,13 +149,19 @@ private:
     void add_edge(int prerequisite, int successor);
     static bool conflicts(const Node& a, const Node& b);
     void detect_cycles() const;
-    static void start_roots(const std::shared_ptr<Run_state>& run);
+
+    // Lazy reservation: a node's objects are reserved when it becomes data-ready, and
+    // the node runs once its data deps AND its object reservations are all satisfied.
+    static void on_data_ready(const std::shared_ptr<Run_state>& run, int index);
+    static void ensure_reserved(const std::shared_ptr<Run_state>& run, int pipe_index);
+    static void on_object_reserved(const std::shared_ptr<Run_state>& run, int pipe_index);
+    static void maybe_run(const std::shared_ptr<Run_state>& run, int index);
     static void run_node(const std::shared_ptr<Run_state>& run, int index);
 
     std::vector<Node> nodes_;
     std::vector<std::pair<int, int>> explicit_edges_;
-    std::vector<detail::Pipe*> distinct_pipes_;   // every object the graph touches (for reservation)
-    std::vector<int> pipe_accessor_counts_;       // # nodes accessing each distinct pipe (per-run init)
+    std::vector<detail::Pipe*> distinct_pipes_;        // every object the graph touches (for reservation)
+    std::vector<std::vector<int>> pipe_accessors_;     // per distinct pipe: node indices that access it
     bool compiled_ = false;
 };
 

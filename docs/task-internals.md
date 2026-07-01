@@ -295,34 +295,45 @@ both sides hold a valid declared `Access_context`, and the harness only catches
 *undeclared* access, never two-declared-concurrent. So the race is silent
 (TSan/ASan only) — which is exactly why it needs a structural fix.
 
-**Mechanism (implemented):** a run *reserves* every object it touches before
-running any node, and releases them at completion.
-- `pipe_reserve(pipe, on_acquired)` holds the pipe as an exclusive writer that does
-  **not** auto-complete. If the pipe is idle it's acquired synchronously (returns
-  true); otherwise the reservation queues behind pending work (FIFO) and
-  `on_acquired` fires when admitted. Async jobs queue behind a held reservation.
-- `execute()` reserves every distinct pipe; nodes start only once **all** are held
-  (`pending_reservations` reaches 0).
-- **Per-object early release:** each object is freed by its *last accessor*, not at
-  whole-run completion. `compile()` counts, per distinct pipe, how many nodes touch
-  it (`pipe_accessor_counts_`) and records each node's pipe indices; `run_node`
-  decrements the per-run `remaining_accessors[pipe]` and calls `pipe_release` when it
-  hits 0. Safe because the count reaches 0 only after every node accessing that
-  object has completed — no node touches it afterward.
+**Mechanism (implemented):** `pipe_reserve(pipe, on_acquired)` holds a pipe as an
+exclusive writer that does **not** auto-complete — idle → acquired synchronously
+(returns true); else the reservation queues behind pending work (FIFO) and
+`on_acquired` fires when admitted. Async jobs queue behind a held reservation, so
+`X.async(...)` concurrent with a run touching `X` runs *after* the run's use of `X`,
+never alongside a node. One authority per object per frame.
 
-So `X.async(...)` concurrent with a run touching `X` **waits behind the run's use of
-`X`** and executes as soon as the last `X`-node finishes — never alongside a node,
-but no longer blocked on the whole frame. This enforces *one authority per object
-per frame* through the pipe. Deadlock-freedom rests on the run being the **sole
-multi-object acquirer** (single-object async can't cycle against it).
+Reservation is **lazy on acquire and early on release**, so an object is held only
+for `[first accessor's dispatch, last accessor's completion]` — not the whole run:
 
-**Still coarse on the *acquire* side:** all objects are reserved before *any* node
-runs, so a run can't start until every object's pipe drains — a contended shared
-object stalls the whole graph start. Lazy per-node reservation (reserve an object
-just before its first accessor; a node runs when indegree 0 **and** its objects are
-reserved) would fix that, and is deadlock-free while the run is the sole multi-object
-acquirer. But it only helps when a graph object is *also* async-contended at start
-(rare — most objects have idle pipes and reserve synchronously), so it's deferred.
+- **Lazy acquire.** An object is reserved when its *first data-ready accessor* is
+  dispatched — not up front. A node runs only once **two** gates are open: its data
+  prerequisites (`remaining_deps`) *and* its object reservations
+  (`remaining_objects`). When a node becomes data-ready (`on_data_ready`) it
+  `ensure_reserved`s each of its objects (a per-pipe `object_initiated` CAS makes the
+  first accessor the sole initiator); when a pipe is acquired (`on_object_reserved`)
+  every accessor's `remaining_objects` drops and `maybe_run` re-checks both gates
+  (a run-once `launched` guard). So a late-touched object (e.g. `audio`, written at
+  end of tick) stays free for async through the early frame.
+- **Early release.** Each object is freed by its *last accessor*, not at run
+  completion: `run_node` decrements `remaining_accessors[pipe]` (initialized to the
+  accessor count from `pipe_accessors_`) and calls `pipe_release` at 0. Safe — 0 is
+  reached only after every accessor has completed.
+
+**Deadlock-freedom** no longer needs "reserve all up front / sole multi-object
+acquirer": reservation is **run-level and shared** (a pipe is reserved once per run;
+a node needing an already-reserved object just proceeds — it never waits for a holder
+to release), and acquiring a reservation only ever waits on *that pipe's own* queued
+async, which is single-object and independent. No cross-object hold-and-wait, so no
+cycle — even without a canonical order. (The one real deadlock remains blocking on a
+same-object async *inside* a node; see below.)
+
+**Gaps:** the window is `[first accessor, last accessor]` *including* any interior
+gap where no node touches the object — a mid-run gap still holds the reservation
+(async blocked through it), because "last accessor" is the release trigger and
+releasing/re-acquiring mid-run could then delay the object's later node (and gaps
+aren't statically precise under parallelism). The way to *shrink* gaps is
+**compile-time grouping** — scheduling an object's accessors close together — which
+trades against parallelism and is a follow-up.
 
 Note there is **no** class of objects that async can't reach: `async()` is public on
 every `Thread_safe`, so any graph object is potentially async-reachable — you can't
@@ -360,12 +371,14 @@ async inside a node, and complete access declarations.**
 ## Open items
 
 - **Done:** `Task_state → Task_control_block` rename; idempotent `complete()`;
-  `Signal` (bodyless triggerable `Task<void>`); graph↔async pipe reservation with
-  per-object early release (§10).
-- Reservation follow-ups: lazy per-node *acquire* (start before all objects reserved
-  — deferred, niche; §10); cheaper idle-pipe reserve (lock-free flag vs mutex) if the
-  ~2-mutex-ops/object/run cost matters; detect nested/concurrent-run reservation
-  deadlock (§10 scenarios 2–3) instead of hanging.
+  `Signal` (bodyless triggerable `Task<void>`); graph↔async pipe reservation, lazy on
+  acquire + early on release — window `[first accessor, last accessor]` (§10).
+- **Compile-time grouping:** schedule an object's accessors close together to shrink
+  its reservation window (fewer interior gaps), where the DAG allows — trades against
+  parallelism / critical path, so profiling-guided.
+- Reservation follow-ups: cheaper idle-pipe reserve (lock-free flag vs mutex) if the
+  per-object mutex cost matters; detect nested/concurrent-run reservation deadlock
+  (§10 scenarios 2–3) instead of hanging.
 - Move the erased body *into* the block (currently in the scheduler/pipe
   submission) — required only for retraction; the monomorphic-on-`R` / no-virtual
   property already holds (§2.1).

@@ -13,15 +13,20 @@ struct Static_task_graph::Run_state
 {
     Run_state(size_t node_count, size_t pipe_count)
         : remaining_deps(node_count)
+        , remaining_objects(node_count)
+        , launched(node_count)
         , remaining_accessors(pipe_count)
+        , object_initiated(pipe_count)
     {}
 
     Static_task_graph* graph = nullptr;
     Scheduler* scheduler = nullptr;
-    std::vector<std::atomic<int>> remaining_deps;
-    std::vector<std::atomic<int>> remaining_accessors;   // per distinct pipe; release at 0
+    std::vector<std::atomic<int>> remaining_deps;        // per node: unmet data prerequisites
+    std::vector<std::atomic<int>> remaining_objects;     // per node: not-yet-reserved objects
+    std::vector<std::atomic<int>> launched;              // per node: run-once guard (0/1)
+    std::vector<std::atomic<int>> remaining_accessors;   // per pipe: accessors yet to complete (release at 0)
+    std::vector<std::atomic<int>> object_initiated;      // per pipe: reservation initiated (0/1)
     std::atomic<int> remaining_nodes{ 0 };
-    std::atomic<int> pending_reservations{ 0 };
     std::shared_ptr<detail::Task_control_block<void>> done;
 };
 
@@ -91,21 +96,21 @@ void Static_task_graph::compile()
     distinct_pipes_.assign(pipes.begin(), pipes.end());
 
     // Map each pipe to its index, then record per node the (deduped) pipe indices it
-    // touches and, per pipe, how many nodes touch it (the per-run accessor count that
-    // drives early release).
+    // touches and, per pipe, the list of nodes that access it (drives reservation and
+    // early release).
     std::map<detail::Pipe*, int> index_of;
     for (int i = 0; i < static_cast<int>(distinct_pipes_.size()); ++i)
         index_of[distinct_pipes_[i]] = i;
 
-    pipe_accessor_counts_.assign(distinct_pipes_.size(), 0);
-    for (Node& node : nodes_)
+    pipe_accessors_.assign(distinct_pipes_.size(), {});
+    for (int n = 0; n < static_cast<int>(nodes_.size()); ++n)
     {
         std::set<int> indices;   // dedup: a node counts once per pipe even if it lists it twice
-        for (detail::Pipe* p : node.pipes)
+        for (detail::Pipe* p : nodes_[n].pipes)
             indices.insert(index_of[p]);
-        node.pipe_indices.assign(indices.begin(), indices.end());
-        for (int idx : node.pipe_indices)
-            ++pipe_accessor_counts_[idx];
+        nodes_[n].pipe_indices.assign(indices.begin(), indices.end());
+        for (int idx : nodes_[n].pipe_indices)
+            pipe_accessors_[idx].push_back(n);
     }
 
     detect_cycles();
@@ -138,6 +143,52 @@ void Static_task_graph::detect_cycles() const
         ts::fatal("Static_task_graph has a cycle");
 }
 
+// A node has become data-ready (all data prerequisites met). Lazily reserve the
+// objects it touches (the first data-ready accessor of each object triggers its
+// reservation), then check whether the node can run.
+void Static_task_graph::on_data_ready(const std::shared_ptr<Run_state>& run, int index)
+{
+    for (int pi : run->graph->nodes_[index].pipe_indices)
+        ensure_reserved(run, pi);
+    maybe_run(run, index);
+}
+
+// Reserve a pipe once (whichever data-ready accessor gets here first). When acquired,
+// notify every accessor so their reservation counts drop.
+void Static_task_graph::ensure_reserved(const std::shared_ptr<Run_state>& run, int pipe_index)
+{
+    if (run->object_initiated[pipe_index].exchange(1, std::memory_order_acq_rel) != 0)
+        return;   // another accessor already initiated it
+
+    bool acquired = detail::pipe_reserve(*run->scheduler, *run->graph->distinct_pipes_[pipe_index],
+        [run, pipe_index] { on_object_reserved(run, pipe_index); });
+
+    if (acquired)
+        on_object_reserved(run, pipe_index);
+}
+
+// A pipe's reservation is now held: every node that accesses it has one fewer
+// outstanding reservation, and may become runnable.
+void Static_task_graph::on_object_reserved(const std::shared_ptr<Run_state>& run, int pipe_index)
+{
+    for (int node : run->graph->pipe_accessors_[pipe_index])
+    {
+        run->remaining_objects[node].fetch_sub(1, std::memory_order_acq_rel);
+        maybe_run(run, node);
+    }
+}
+
+// Run the node iff both gates are open (data deps met and all its objects reserved),
+// exactly once.
+void Static_task_graph::maybe_run(const std::shared_ptr<Run_state>& run, int index)
+{
+    if (run->remaining_deps[index].load(std::memory_order_acquire) != 0
+        || run->remaining_objects[index].load(std::memory_order_acquire) != 0)
+        return;
+    if (run->launched[index].exchange(1, std::memory_order_acq_rel) == 0)
+        run_node(run, index);
+}
+
 void Static_task_graph::run_node(const std::shared_ptr<Run_state>& run, int index)
 {
     detail::submit_closure(*run->scheduler, [run, index]
@@ -146,28 +197,19 @@ void Static_task_graph::run_node(const std::shared_ptr<Run_state>& run, int inde
         node.run();
 
         // Early release: free each object this node was the last to touch, so queued
-        // async on it can run without waiting for the whole graph. Safe -- the count
-        // hits 0 only after every node accessing that object has completed.
+        // async on it can run. Safe -- the count hits 0 only after every node
+        // accessing that object has completed.
         for (int pi : node.pipe_indices)
             if (run->remaining_accessors[pi].fetch_sub(1, std::memory_order_acq_rel) == 1)
                 detail::pipe_release(*run->scheduler, *run->graph->distinct_pipes_[pi]);
 
         for (int successor : node.successors)
             if (run->remaining_deps[successor].fetch_sub(1, std::memory_order_acq_rel) == 1)
-                run_node(run, successor);
+                on_data_ready(run, successor);
 
         if (run->remaining_nodes.fetch_sub(1, std::memory_order_acq_rel) == 1)
             run->done->complete();
     });
-}
-
-// Start every root (indegree-0) node. Called once all object reservations are held.
-void Static_task_graph::start_roots(const std::shared_ptr<Run_state>& run)
-{
-    const Static_task_graph* graph = run->graph;
-    for (size_t i = 0; i < graph->nodes_.size(); ++i)
-        if (graph->nodes_[i].indegree == 0)
-            run_node(run, static_cast<int>(i));
 }
 
 Task<void> Static_task_graph::execute(Scheduler& scheduler)
@@ -179,9 +221,12 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler)
     run->graph = this;
     run->scheduler = &scheduler;
     for (size_t i = 0; i < nodes_.size(); ++i)
+    {
         run->remaining_deps[i].store(nodes_[i].indegree, std::memory_order_relaxed);
+        run->remaining_objects[i].store(static_cast<int>(nodes_[i].pipe_indices.size()), std::memory_order_relaxed);
+    }
     for (size_t i = 0; i < distinct_pipes_.size(); ++i)
-        run->remaining_accessors[i].store(pipe_accessor_counts_[i], std::memory_order_relaxed);
+        run->remaining_accessors[i].store(static_cast<int>(pipe_accessors_[i].size()), std::memory_order_relaxed);
     run->remaining_nodes.store(static_cast<int>(nodes_.size()), std::memory_order_relaxed);
     run->done = std::make_shared<detail::Task_control_block<void>>();
 
@@ -193,31 +238,12 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler)
         return result;
     }
 
-    // Reserve every object the graph touches before running any node, so a node's
-    // direct (pipe-bypassing) access can't race a dynamic `async` on the same object.
-    // Nodes start only once all reservations are held; each object is released early,
-    // by its last accessor (see run_node), not at whole-run completion. A pipe
-    // reserved synchronously counts down inline; a deferred one from its callback.
-    run->pending_reservations.store(static_cast<int>(distinct_pipes_.size()), std::memory_order_relaxed);
-
-    if (distinct_pipes_.empty())
-    {
-        start_roots(run);
-        return result;
-    }
-
-    for (detail::Pipe* p : distinct_pipes_)
-    {
-        bool acquired = detail::pipe_reserve(scheduler, *p, [run]
-        {
-            if (run->pending_reservations.fetch_sub(1, std::memory_order_acq_rel) == 1)
-                start_roots(run);
-        });
-
-        if (acquired
-            && run->pending_reservations.fetch_sub(1, std::memory_order_acq_rel) == 1)
-            start_roots(run);
-    }
+    // Objects are reserved lazily (see on_data_ready), so a graph object is held only
+    // from its first accessor's dispatch to its last accessor's completion -- not the
+    // whole run. Kick off every root (indegree 0).
+    for (size_t i = 0; i < nodes_.size(); ++i)
+        if (nodes_[i].indegree == 0)
+            on_data_ready(run, static_cast<int>(i));
 
     return result;
 }
