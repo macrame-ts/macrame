@@ -17,7 +17,7 @@ are the incremental steps toward it.
 
 ## Task types
 - Unify the handle returned from `Static_task_graph::add_node` with regular async `Task`s: **done** — split, not merged. `add_node` now returns a distinct `Graph_node` (build-time ordering identity: `after`/`before`); `Task<R>` is purely a completion handle (`get`/`then`/`is_done`/`when_all`/`execute`). The run-many model means a node has no single result, so it can't be a single-shot `Task`. Revisit when typed graph chaining lands (a `Graph_node` may then mint a per-run `Task<R>`).
-- Reusable tasks + a task builder: construct a task once, configure prerequisites/access, run it repeatedly (ties into the graph's build-once/run-many model and reusable node handles).
+- Reusable tasks (**in design**): a `Reusable_task<R> : Task<R>` (the `Signal` pattern) configured once (body + target) that reuses its control block across runs via `reset()`/`run()` to avoid re-allocation — the `Reusable_task` *is* the handle (no per-run `Task<R>` to dangle), single run in flight, prerequisites/continuations re-established each run. `Task_control_block::reset()` re-arms in place (also gives a resettable `Signal`). Blocked on the "body in the control block" work (see task-internals §2.1 / the standalone-Task discussion). Pooling doesn't help — reuse is the point. Timed-task launch is under Scheduler.
 
 ## Thread_safe / access
 - `Thread_safe<T>` adopting an **existing** instance (reference/adopt) instead of always constructing T in place. Design ownership/lifetime (borrowed vs owned).
@@ -40,6 +40,8 @@ are the incremental steps toward it.
 ## Scheduler
 - Spin-then-block hybrid idle (UE-style: spin N cycles, then park on an EventCount) instead of the binary spin/block policy.
 - Per-worker work-stealing deques + lock-free global overflow queue to replace the single mutex-guarded priority queue (the known scaling bottleneck per benchmarks).
+- **Run-on-all-workers**: submit a functor to run once on *every* worker thread (broadcast). Uses: per-thread init/teardown, flushing thread-local state, per-worker warm-up. Needs a way to fan out to N workers and join.
+- **Timed / delayed tasks**: "run this in 300ms" — a delay queue (min-heap by fire-time or a timing wheel) that launches a task when due; one-shot vs periodic; cancellable pending timer; interacts with `Reusable_task` (re-arm on a timer).
 
 ## Tooling / infra
 - Benchmark regression monitoring: `benchmarks/` prints a stable median ns/op per public feature (`--bench`). Wire a baseline + compare step (store the numbers, fail/flag on a regression beyond a threshold) so changes are tracked over time.

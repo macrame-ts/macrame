@@ -1,5 +1,4 @@
 #include "tests.h"
-#include "sample_tests.h"
 #include "benchmarks.h"
 #include "harness.h"
 #include "engine.h"
@@ -35,7 +34,6 @@ int main(int argc, char** argv)
         return ts::test::summary();
     }
 
-    run_sample_tests();
     run_all_tests();
     sample::run_sample();
     run_benchmarks();

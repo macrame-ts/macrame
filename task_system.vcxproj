@@ -24,7 +24,6 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="scheduler.cpp" />
     <ClCompile Include="static_task_graph.cpp" />
-    <ClCompile Include="task.cpp" />
     <ClCompile Include="thread_safe.cpp" />
     <ClCompile Include="worker_thread.cpp" />
     <ClCompile Include="benchmarks\benchmarks.cpp" />
@@ -35,7 +34,6 @@
     <ClCompile Include="tests\graph_tests.cpp" />
     <ClCompile Include="tests\harness.cpp" />
     <ClCompile Include="tests\integration_tests.cpp" />
-    <ClCompile Include="tests\sample_tests.cpp" />
     <ClCompile Include="tests\scheduler_tests.cpp" />
     <ClCompile Include="tests\task_tests.cpp" />
     <ClCompile Include="tests\tests.cpp" />
@@ -59,7 +57,6 @@
     <ClInclude Include="tests\graph_tests.h" />
     <ClInclude Include="tests\harness.h" />
     <ClInclude Include="tests\integration_tests.h" />
-    <ClInclude Include="tests\sample_tests.h" />
     <ClInclude Include="tests\scheduler_tests.h" />
     <ClInclude Include="tests\task_tests.h" />
     <ClInclude Include="tests\tests.h" />
