@@ -42,86 +42,81 @@ inheriting a task base class.
 
 Three types on the Task tier; two private, two public handles (one shared).
 
-- **`Task_control_block<R>`** (private) — the refcounted core: completion signal,
-  result, successors, prerequisite/nested backlinks, the lock-counter, and an
-  **optional type-erased body** (`std::move_only_function<void()>`, empty for a
-  bodyless block). **One monomorphic type** — parameterized on `R` only; the
-  closure type is erased at the entry point and never reaches it (see §2.1). The
-  dependency machinery only ever traffics in `Task_control_block<R>*`, so bodyless
-  blocks and executable tasks interoperate as prerequisites/successors with no
-  special-casing.
+- **`Task_control_block`** (private) — **fully monomorphic** (not templated at all):
+  the refcounted completion/dependency core — completion signal, `ready`/`cancelled`,
+  successors, prerequisite/nested backlinks, the lock-counter — plus two type-erased
+  hooks: `void* result_ptr` (nullptr ⇒ no result: `void` or bodyless) and
+  `void (*execute)(Task_control_block*)` (nullptr ⇒ no body: bodyless). Continuations
+  are stored erased too (`move_only_function<void(void* result, bool cancelled)>`).
+  All the heavy logic is compiled **once**, regardless of how many result/body types
+  exist. The dependency machinery only ever traffics in `Task_control_block*`.
+
+- **Storage wrappers** (private, per instantiation) — everything that carries a type
+  is composed *around* the block, not into it:
+  - `Result_block<R>  { Task_control_block core; std::optional<R> result; }` — for
+    results with no body (`then`, `when_all`, a promise).
+  - `Executable<Body,R> { Task_control_block core; std::optional<R> result; Body body; }`
+    — for `async` / `launch`.
+  - a bodyless resultless block (`Signal`, a pure join) is just `Task_control_block`.
+
+  The wrapper is allocated with `make_shared`; the handle is a `shared_ptr`
+  **aliasing** `&wrapper.core`, so the one refcount owns the whole wrapper (result +
+  body destroyed with it) while everything downstream sees only the monomorphic
+  block. `core.result_ptr` points at the wrapper's `result` (or null); `core.execute`
+  points at a per-`Body` thunk that `static_cast`s the block back to `Executable`
+  (block is the first member) and runs the body.
 
 - **`Task<R>`** (public) — the consumer handle (a future): `get()`, `is_done()`,
-  `then()`, and use as a prerequisite. Same type whether the block is executable
-  (from `async`/`then`/graph) or bodyless (a `Signal`).
+  `then()`, use as a prerequisite. `get()` does `static_cast<R*>(core->result_ptr)`
+  and moves out — the cast is always to the right `R` (storage + handle are created
+  together at one site, both on the same `R`; confined to `detail`).
 
 - **`Signal`** (public) — a bodyless `Task<void>` completed by hand: `trigger()`.
-  Both producer and consumer in one handle — the consumer side (`get`/`wait`,
-  `is_done`, `then`, use-as-prerequisite) is inherited from `Task<void>`, the
-  producer side is `trigger()`. Copyable; copies share one block. `trigger()` is
-  idempotent (first call wins). This is UE's `FTaskEvent`: real usage is
-  overwhelmingly a `void` done-signal / barrier / pipeline-phase gate, passed
-  around as one handle that some code triggers and other code waits on — which is
-  why it is *not* a producer-only `Promise` and *not* a promise/future pair.
-  `trigger()` lives only on `Signal`, so a task with a body cannot be completed by
-  hand. (Value-carrying out-of-band completion is deferred; add `set_value` /
-  revisit a promise/future split if it is ever needed — genuine usage is all void.)
+  Consumer side inherited from `Task<void>` (`get`/`wait`, `is_done`, `then`,
+  prerequisite); `trigger()` is the producer side, idempotent. UE's `FTaskEvent`:
+  a done-signal / barrier / phase gate. Allocates just the bare block (no result, no
+  body).
 
-### 2.1 One monomorphic type, no inheritance, no virtual
+### 2.1 Fully monomorphic block, no inheritance, no virtual, no result/body tax
 
-The "bodyless core vs body" distinction is **conceptual**, not a base/derived
-template hierarchy. UE implements it by inheritance (`FTaskBase` +
-`TExecutableTask<Body>` + a `virtual ExecuteTask`), which forces a virtual
-destructor and, per closure-typed `TExecutableTask` instantiation, a vtable +
-typeinfo + the Itanium destructor triple (D0/D1/D2) — plus any templated-derived
-code duplicated per body type. That is the per-closure code / i-cache blowup UE
-hit.
+UE splits body from core by **inheritance** (`FTaskBase` + `TExecutableTask<Body>` +
+`virtual ExecuteTask`), which keeps bodyless `FTaskEvent`s small but forces, per
+closure-typed `TExecutableTask`, a vtable + typeinfo + the Itanium destructor triple
+(D0/D1/D2), plus virtual dispatch — the per-body code / i-cache blowup, against our
+"avoid virtual" grain.
 
-We avoid it entirely: the body is a **type-erased member** of a single
-non-polymorphic `Task_control_block`. Consequences:
+We get UE's small-events property **without** that: composition + a single `execute`
+function pointer + `shared_ptr` aliasing (above). And we go further than "erase the
+body" — **erase the result too**, so the block is parameterized on *nothing*:
 
-- No polymorphism → no virtual destructor, no vtable, no typeinfo, no D0/D1/D2
-  triple. The block's destructor is emitted **once** and destroys the erased body
-  via the `move_only_function`'s own manager.
-- Per-closure codegen collapses to the `move_only_function`'s ~2 thunks
-  (invoke, move/destroy) — the irreducible minimum for any type-erased callable.
-- All the heavy logic (lock-counter, retraction, `Close`, successor walking,
-  scheduling) stays **monomorphic** — emitted once, not per closure type. This is
-  the actual i-cache win, and it is better than the inheritance model on that axis.
-- Body invocation is one indirect call through the erased function pointer — same
-  cost as a virtual call, negligible next to the body.
+- **No polymorphism** → no virtual dtor, no vtable, no typeinfo, no D0/D1/D2 triple.
+  Destroy is handled by `make_shared`'s deleter for the wrapper (one per wrapper
+  type, unavoidable).
+- **Per-instantiation codegen** collapses to the wrapper struct + its `execute` thunk
+  (~1–2 functions per body/result type) — no `R` on the block, so the heavy machinery
+  (lock-counter, retraction, close, successor walking, scheduling) is emitted **once**.
+- **No `<void>` specialization.** Today two near-identical blocks exist
+  (`Task_control_block<R>` and the `<void>` one); monomorphizing collapses them to
+  one. `void` = `result_ptr == nullptr`; bodyless = `execute == nullptr`.
+- **Bodyless / `void` pay nothing** — no `optional<R>`, no body slot; a `Signal` is
+  the bare block.
+- One indirect call to run the body (through `execute`) — same cost as a virtual call,
+  negligible next to the body.
 
-**The discipline that keeps it bounded:** erase the closure at the entry point.
-`async`/`then` are templated on the closure only long enough to wrap it into the
-erased body and call a non-templated launch path; the persistent types
-(`Task_control_block`, `Task<R>`) are parameterized on **`R` only**, so the number
-of instantiations is bounded by the number of *result types*, not closure types.
-The closure type never leaks past the entry point.
+`R`/`Body` appear only in: the thin `Task<R>` handle, the wrapper structs, the
+`execute` thunk, and the `then`-closures (which cast `result_ptr`). Everything else
+is monomorphic.
 
-*Current status:* the erased body already lives outside the type system (today the
-closure is a `move_only_function` captured in the scheduler/pipe submission, not a
-member of the block). Moving it *into* the block is only required for retraction
-(the waiter reaches the un-executed body through the block) and lands with that
-work; the no-virtual / monomorphic-on-`R` property already holds.
+### The body / no-body seam (and why the *body* still can't be split from an executable)
 
-*Event size note:* a bodyless block carries an unused body slot (~the
-`move_only_function` SBO). Acceptable with a pooled block allocator; if event
-density ever makes it matter, split events into a smaller type using a manual
-`destroy`/`execute` function-pointer pair (still no C++ virtual). Do not
-pre-optimize.
-
-### The body / no-body seam
-
-The closure is an *add-on* to the bodyless core, not an intrinsic field. This is
-why a bodyless block pays no closure cost — and events are used constantly as sync
-points, so that cost is systematic.
-
-It is also the *one* place separation is safe. The general rule (§6) is that work
-and completion must stay fused, because a retracting waiter reaches from the
-completion handle into the un-executed closure. A bodyless block has no closure
-and is never executed, so that constraint vanishes — bodyless is not "an
-executable task with its work split off" (still forbidden), it is a node with no
-work to split.
+The body is composed into the *executable's* wrapper, reachable from the block via
+`execute`. This is safe precisely because it's the **one** separation the retraction
+rule (§6) allows: a bodyless block has no body and is never executed, so nothing
+reaches for a body that isn't there. For an *executable* task the body and the block
+stay in one allocation (the wrapper) — a retracting waiter holding the block reaches
+the body through `execute` + the cast, so the body must not live in separately-owned
+memory. Composition-in-one-wrapper keeps that invariant while still costing bodyless
+blocks nothing.
 
 ---
 

@@ -129,23 +129,36 @@ private:
     template<typename R, Access mode, typename Inst, typename Fn>
     Task<R> launch(Inst* inst, Fn&& fn, Cancellation_token token) const
     {
-        auto state = std::make_shared<detail::Task_control_block<R>>();
-
-        detail::pipe_enqueue(default_scheduler(), pipe_, mode,
-            [inst, state, fn = std::forward<Fn>(fn), token]() mutable
-            {
-                if (token.is_cancel_requested())   // skip the body; settle as cancelled
+        if constexpr (std::is_void_v<R>)
+        {
+            auto core = std::make_shared<detail::Task_control_block>();
+            detail::pipe_enqueue(default_scheduler(), pipe_, mode,
+                [inst, core, fn = std::forward<Fn>(fn), token]() mutable
                 {
-                    state->cancel();
-                    return;
-                }
-                Access_context ctx;
-                ctx.add(inst, mode);
-                Access_scope scope(ctx);
-                state->run(fn, *inst);
-            });
-
-        return Task<R>(std::move(state));
+                    if (token.is_cancel_requested()) { core->cancel(); return; }   // skip body
+                    Access_context ctx;
+                    ctx.add(inst, mode);
+                    Access_scope scope(ctx);
+                    fn(*inst);
+                    core->complete();
+                });
+            return Task<R>(std::move(core));
+        }
+        else
+        {
+            auto [core, wrapper] = detail::make_block<R>();
+            detail::pipe_enqueue(default_scheduler(), pipe_, mode,
+                [inst, wrapper, fn = std::forward<Fn>(fn), token]() mutable
+                {
+                    if (token.is_cancel_requested()) { wrapper->core.cancel(); return; }   // skip body
+                    Access_context ctx;
+                    ctx.add(inst, mode);
+                    Access_scope scope(ctx);
+                    wrapper->store(fn(*inst));
+                    wrapper->core.complete();
+                });
+            return Task<R>(std::move(core));
+        }
     }
 
     T instance_;

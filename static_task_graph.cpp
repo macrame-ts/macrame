@@ -28,7 +28,7 @@ struct Static_task_graph::Run_state
     std::vector<std::atomic<int>> remaining_accessors;   // per pipe: accessors yet to complete (release at 0)
     std::vector<std::atomic<int>> object_initiated;      // per pipe: reservation initiated (0/1)
     std::atomic<int> remaining_nodes{ 0 };
-    std::shared_ptr<detail::Task_control_block<void>> done;
+    std::shared_ptr<detail::Task_control_block> done;
 };
 
 void Static_task_graph::add_edge(int prerequisite, int successor)
@@ -237,7 +237,7 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token t
     for (size_t i = 0; i < distinct_pipes_.size(); ++i)
         run->remaining_accessors[i].store(static_cast<int>(pipe_accessors_[i].size()), std::memory_order_relaxed);
     run->remaining_nodes.store(static_cast<int>(nodes_.size()), std::memory_order_relaxed);
-    run->done = std::make_shared<detail::Task_control_block<void>>();
+    run->done = std::make_shared<detail::Task_control_block>();
 
     Task<void> result(run->done);
 
