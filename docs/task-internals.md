@@ -322,9 +322,15 @@ object stalls the whole graph start. Lazy per-node reservation (reserve an objec
 just before its first accessor; a node runs when indegree 0 **and** its objects are
 reserved) would fix that, and is deadlock-free while the run is the sole multi-object
 acquirer. But it only helps when a graph object is *also* async-contended at start
-(rare — most objects are graph-exclusive and reserve synchronously), so it's
-deferred. Skipping reservation on objects no async ever touches is a separate,
-higher-value optimization but needs a way to know which objects async can reach.
+(rare — most objects have idle pipes and reserve synchronously), so it's deferred.
+
+Note there is **no** class of objects that async can't reach: `async()` is public on
+every `Thread_safe`, so any graph object is potentially async-reachable — you can't
+statically skip reservation for "async-free" objects. A per-object user assertion
+("graph-exclusive, never async'd during a run") could skip it, but that trades the
+safety guarantee for ~2 mutex ops per object per run (the reservation cost on an idle
+pipe) and reintroduces the silent race if violated — not worth it. If the overhead
+ever matters, make the idle-pipe reserve lock-free rather than skipping it.
 
 ### Scenarios where the model can still break
 
@@ -357,8 +363,9 @@ async inside a node, and complete access declarations.**
   `Signal` (bodyless triggerable `Task<void>`); graph↔async pipe reservation with
   per-object early release (§10).
 - Reservation follow-ups: lazy per-node *acquire* (start before all objects reserved
-  — deferred, niche; §10); skip reserving objects no async can reach; detect
-  nested/concurrent-run reservation deadlock (§10 scenarios 2–3) instead of hanging.
+  — deferred, niche; §10); cheaper idle-pipe reserve (lock-free flag vs mutex) if the
+  ~2-mutex-ops/object/run cost matters; detect nested/concurrent-run reservation
+  deadlock (§10 scenarios 2–3) instead of hanging.
 - Move the erased body *into* the block (currently in the scheduler/pipe
   submission) — required only for retraction; the monomorphic-on-`R` / no-virtual
   property already holds (§2.1).
