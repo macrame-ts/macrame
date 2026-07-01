@@ -25,6 +25,20 @@ void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closur
         held);
 }
 
+// A block whose prerequisites are all met: schedule it to run (its body, or, if
+// bodyless, just complete). Bridges task.h's lock-counter to the scheduler.
+void submit_ready(std::shared_ptr<Task_control_block> block)
+{
+    submit_closure(default_scheduler(),
+        [block = std::move(block)]
+        {
+            if (block->execute)
+                block->execute(block.get());
+            else
+                block->complete();
+        });
+}
+
 namespace
 {
 

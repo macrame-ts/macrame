@@ -411,6 +411,54 @@ void test_launch_cancelled()
     TS_CHECK(!ran.load());
 }
 
+// --- J: prerequisites (ts::task(...).after(...).launch()) ------------------
+
+void test_task_after_single()
+{
+    std::atomic<int> order{ 0 };
+    std::atomic<int> a_order{ 0 }, b_order{ 0 };
+    ts::Task<void> a = ts::launch([&] { a_order.store(++order); });
+    ts::Task<void> b = ts::task([&] { b_order.store(++order); }).after(a).launch();
+    b.get();
+    TS_CHECK(a_order.load() == 1 && b_order.load() == 2);   // a ran before b
+}
+
+void test_task_after_multiple()
+{
+    std::atomic<int> prereqs_done{ 0 };
+    std::atomic<int> seen{ -1 };
+    ts::Task<void> a = ts::launch([&] { std::this_thread::sleep_for(3ms); prereqs_done.fetch_add(1); });
+    ts::Task<void> b = ts::launch([&] { std::this_thread::sleep_for(3ms); prereqs_done.fetch_add(1); });
+    ts::task([&] { seen.store(prereqs_done.load()); }).after(a, b).launch().get();
+    TS_CHECK(seen.load() == 2);   // ran only after BOTH prerequisites settled
+}
+
+void test_task_value_after()
+{
+    ts::Task<int> a = ts::launch([] { return 10; });
+    ts::Task<int> b = ts::task([] { return 32; }).after(a).launch();
+    TS_CHECK(a.get() + b.get() == 42);
+}
+
+void test_task_after_already_completed()
+{
+    ts::Task<int> a = ts::launch([] { return 5; });
+    a.get();   // a already settled
+    ts::Task<int> b = ts::task([] { return 7; }).after(a).launch();
+    TS_CHECK(b.get() == 7);   // still runs
+}
+
+void test_task_after_cancelled_prereq()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();
+    ts::Task<void> a = ts::launch([] {}, src.token());   // cancelled prerequisite
+    std::atomic<bool> ran{ false };
+    ts::task([&] { ran.store(true); }).after(a).launch().get();
+    TS_CHECK(ran.load());            // `after` is ordering-only: a cancelled prereq releases
+    TS_CHECK(a.is_cancelled());
+}
+
 } // namespace
 
 void run_task_tests()
@@ -451,4 +499,9 @@ void run_task_tests()
     run("launch void", test_launch_void);
     run("launch then", test_launch_then);
     run("launch cancelled", test_launch_cancelled);
+    run("task after single", test_task_after_single);
+    run("task after multiple", test_task_after_multiple);
+    run("task value after", test_task_value_after);
+    run("task after already completed", test_task_after_already_completed);
+    run("task after cancelled prereq", test_task_after_cancelled_prereq);
 }

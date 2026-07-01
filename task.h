@@ -6,6 +6,7 @@
 #include <atomic>
 #include <concepts>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -17,6 +18,8 @@
 
 namespace ts
 {
+
+template<typename R> class Task;
 
 // Cooperative cancellation. A `Cancellation_source` owns the request flag; hand its
 // `token()` to `async`/`then`/`Static_task_graph::execute`. Cancellation is checked
@@ -59,6 +62,13 @@ private:
 namespace detail
 {
 
+struct Task_control_block;
+
+// Submit a block whose prerequisites are all met to run (defined in the scheduler
+// layer; task.h stays scheduler-independent). Runs `execute` if it has a body, else
+// `complete`s it.
+void submit_ready(std::shared_ptr<Task_control_block> block);
+
 // --- Task control block ----------------------------------------------------
 //
 // The refcounted completion/dependency core behind a `Task<R>` handle. FULLY
@@ -79,14 +89,27 @@ struct Task_control_block
     bool cancelled = false;
     void* result_ptr = nullptr;        // -> the wrapper's stored R (set before complete), or null
     void (*execute)(Task_control_block*) = nullptr;   // run the body (bodyless => null)
+    Cancellation_token token;          // checked by `execute` before running the body
+    std::atomic<std::uint32_t> num_locks{ 0 };   // outstanding prerequisites (0 => ready)
+    std::vector<std::shared_ptr<Task_control_block>> successors;   // decremented on completion
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
     void complete() { settle(false); }
     void cancel()   { settle(true); }
 
+    // A prerequisite settled (completed OR cancelled — `after` is ordering-only, so a
+    // cancelled prerequisite still releases its successors). Decrement and, at zero,
+    // schedule. Caller must hold a live ref to `succ`.
+    static void release(const std::shared_ptr<Task_control_block>& succ)
+    {
+        if (succ->num_locks.fetch_sub(1, std::memory_order_acq_rel) == 1)
+            submit_ready(succ);
+    }
+
     void settle(bool cancel_)
     {
         std::vector<std::move_only_function<void(void*, bool)>> conts;
+        std::vector<std::shared_ptr<Task_control_block>> succs;
         {
             std::scoped_lock lock(mutex);
             if (completed)
@@ -94,12 +117,15 @@ struct Task_control_block
             completed = true;
             cancelled = cancel_;
             conts = std::move(continuations);
+            succs = std::move(successors);
         }
         ready.store(true, std::memory_order_release);
         done_cv.notify_all();   // `completed` set under the lock above: no lost wakeup
         void* r = cancel_ ? nullptr : result_ptr;
         for (auto& c : conts)
             c(r, cancel_);
+        for (auto& s : succs)
+            release(s);
     }
 
     void attach(std::move_only_function<void(void*, bool)> cont)
@@ -171,16 +197,15 @@ struct Executable
     Task_control_block core;   // MUST be first
     Result_storage<R> storage;   // empty for void
     Body body;
-    Cancellation_token token;
 
-    Executable(Body b, Cancellation_token t)
-        : body(std::move(b)), token(std::move(t))
+    explicit Executable(Body b)
+        : body(std::move(b))
     {}
 
     static void run(Task_control_block* c)
     {
         auto* self = reinterpret_cast<Executable*>(c);
-        if (self->token.is_cancel_requested())   // not-yet-started: skip body, settle cancelled
+        if (c->token.is_cancel_requested())   // not-yet-started: skip body, settle cancelled
         {
             c->cancel();
             return;
@@ -205,8 +230,9 @@ template<typename R, typename Body>
 std::shared_ptr<Task_control_block> make_executable(Body&& body, Cancellation_token token)
 {
     using Exec = Executable<std::decay_t<Body>, R>;
-    auto exec = std::make_shared<Exec>(std::forward<Body>(body), token);
+    auto exec = std::make_shared<Exec>(std::forward<Body>(body));
     exec->core.execute = &Exec::run;
+    exec->core.token = std::move(token);
     return std::shared_ptr<Task_control_block>(exec, &exec->core);   // aliasing
 }
 
@@ -230,6 +256,10 @@ inline constexpr bool use_apply_v =
 
 template<typename Fn, typename Tuple>
 using Apply_result_t = decltype(std::apply(std::declval<Fn&>(), std::declval<Tuple&>()));
+
+// The control block behind a `Task` handle (used to wire prerequisites).
+template<typename R>
+std::shared_ptr<Task_control_block> core_of(const Task<R>& t) noexcept;
 
 } // namespace detail
 
@@ -313,6 +343,9 @@ protected:
     detail::Task_control_block* control() const noexcept { return core_.get(); }
 
 private:
+    template<typename R2>
+    friend std::shared_ptr<detail::Task_control_block> detail::core_of(const Task<R2>&) noexcept;
+
     // Attach a continuation that produces R2 (via `produce(result_ptr)`) into a fresh
     // block, propagating cancellation. Returns the `Task<R2>` handle.
     template<typename R2, typename Produce>
@@ -344,6 +377,72 @@ private:
 
     std::shared_ptr<detail::Task_control_block> core_;
 };
+
+namespace detail
+{
+
+template<typename R>
+std::shared_ptr<Task_control_block> core_of(const Task<R>& t) noexcept { return t.core_; }
+
+// Register `succ` as a successor of `prereq` (bumping its lock count), unless `prereq`
+// has already settled. `after` is ordering-only — a cancelled prerequisite releases
+// its successors just like a completed one.
+inline void add_prerequisite(const std::shared_ptr<Task_control_block>& prereq,
+                             const std::shared_ptr<Task_control_block>& succ)
+{
+    std::scoped_lock lock(prereq->mutex);
+    if (!prereq->completed)
+    {
+        succ->num_locks.fetch_add(1, std::memory_order_relaxed);
+        prereq->successors.push_back(succ);
+    }
+}
+
+} // namespace detail
+
+// A configured-but-not-launched task: attach prerequisites, then `launch()`. Built by
+// `ts::task(fn)`; owns the executable block until launched. `launch()` removes the
+// "not launched" lock, so the task runs once every prerequisite has settled.
+template<typename R>
+class Task_builder
+{
+public:
+    // Run after each prerequisite settles. Call before `launch()`.
+    template<typename... Ps>
+    Task_builder& after(const Task<Ps>&... prerequisites)
+    {
+        (detail::add_prerequisite(detail::core_of(prerequisites), core_), ...);
+        return *this;
+    }
+
+    Task<R> launch(Cancellation_token token = {})
+    {
+        core_->token = std::move(token);
+        detail::Task_control_block::release(core_);   // remove the launch lock
+        return Task<R>(core_);
+    }
+
+private:
+    template<typename Fn> friend auto task(Fn&& fn);
+
+    explicit Task_builder(std::shared_ptr<detail::Task_control_block> core) noexcept
+        : core_(std::move(core))
+    {}
+
+    std::shared_ptr<detail::Task_control_block> core_;
+};
+
+// Configure a standalone task (body + prerequisites) to launch later. `fn` takes no
+// arguments (a bare scheduler task). Runs once all prerequisites (added via
+// `.after(...)`) have settled.
+template<typename Fn>
+auto task(Fn&& fn)
+{
+    using R = std::invoke_result_t<Fn>;
+    auto core = detail::make_executable<R>(std::forward<Fn>(fn), {});
+    core->num_locks.store(1, std::memory_order_relaxed);   // the "not launched" lock
+    return Task_builder<R>(std::move(core));
+}
 
 namespace detail
 {

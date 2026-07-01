@@ -144,6 +144,25 @@ void stress_launch()
     (void)sum;
 }
 
+// Prerequisites: prereqs complete on worker threads while `.after()` registers them
+// and `.launch()` arms the dependent -- racing add_prerequisite against settle (the
+// per-block mutex) and concurrent num_locks decrements from several prereqs.
+void stress_prereq()
+{
+    for (int i = 0; i < 1500; ++i)
+    {
+        std::atomic<int> done{ 0 };
+        auto a = ts::launch([&] { done.fetch_add(1, std::memory_order_relaxed); });
+        auto b = ts::launch([&] { done.fetch_add(1, std::memory_order_relaxed); });
+        auto c = ts::launch([&] { done.fetch_add(1, std::memory_order_relaxed); });
+
+        std::atomic<int> seen{ -1 };
+        ts::task([&] { seen.store(done.load(std::memory_order_relaxed), std::memory_order_relaxed); })
+            .after(a, b, c).launch().get();
+        assert(seen.load() == 3);   // dependent ran only after all three prerequisites
+    }
+}
+
 // Cancellation racing execution: request_cancel (a store) concurrent with the body's
 // token check (a load) and with then-propagation; the block must settle exactly once.
 void stress_cancel()
@@ -215,6 +234,7 @@ int main()
     std::puts("tsan: signal stress");       stress_signal();
     std::puts("tsan: when_all stress");      stress_when_all();
     std::puts("tsan: launch stress");        stress_launch();
+    std::puts("tsan: prereq stress");        stress_prereq();
     std::puts("tsan: cancel stress");        stress_cancel();
     std::puts("tsan: graph stress");        stress_graph();
     std::puts("tsan: graph+async stress");  stress_graph_async();
