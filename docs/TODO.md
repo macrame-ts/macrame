@@ -9,8 +9,8 @@ are the incremental steps toward it.
 
 ## Task chaining / results
 - Typed prerequisite -> subsequent chaining (dynamic path): **done** — `Task::then` (single) and `when_all` (multi, results as a tuple).
-- Apply-style `when_all`: unpack the result tuple into separate continuation args (`fn(r1, r2, ...)`) instead of `then([](tuple&){...})`.
-- `when_all` with void prerequisites (pure-ordering joins) and move-only / non-copyable results (currently results must be copyable).
+- Apply-style `when_all`: **done** — `then` unpacks a tuple result into separate continuation args (`then([](A& a, B& b){...})`) when the functor doesn't take the tuple by reference; falls back to the tuple form otherwise.
+- `when_all` with void prerequisites and move-only results: **done** — void prerequisites act as pure ordering and drop out of the result (all-void → `Task<void>`); non-void results are carried in a tuple and **moved** (move-only supported). The consumer of a prerequisite's result is `when_all` (results move out), consistent with the single-consumer model.
 - Typed chaining in `Static_task_graph` (graph nodes are void-only for now): let a node consume prerequisite-node results.
 - `Task`: define get()/then() interaction (currently get() consumes the result; mixing with then() is unsupported); cancellation. Multiple concurrent blocking `get()` waiters: **done for `void`** (`Task_control_block<void>` wakes N waiters via a condition variable — a `Signal` is a barrier); the value overload stays single-consumer by design (a moved result can't go to two waiters).
 

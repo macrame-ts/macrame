@@ -3,6 +3,7 @@
 #include "access.h"
 #include "scheduler.h"
 
+#include <array>
 #include <atomic>
 #include <concepts>
 #include <condition_variable>
@@ -192,6 +193,27 @@ struct Task_control_block<void>
     }
 };
 
+// --- apply-style continuation detection -----------------------------------
+//
+// A `then` off a tuple-valued task may take the tuple by reference (`then([](tuple&
+// t){...})`) or, apply-style, its elements unpacked (`then([](A& a, B& b){...})`).
+
+template<typename> inline constexpr bool is_tuple_v = false;
+template<typename... Ts> inline constexpr bool is_tuple_v<std::tuple<Ts...>> = true;
+
+template<typename Fn, typename Tuple> struct Apply_invocable : std::false_type {};
+template<typename Fn, typename... Ts>
+struct Apply_invocable<Fn, std::tuple<Ts...>> : std::bool_constant<std::is_invocable_v<Fn, Ts&...>> {};
+
+// `then(fn)` unpacks when the producer is a tuple, `fn` does NOT take the tuple by
+// reference, but it IS invocable with the tuple's elements.
+template<typename Fn, typename R>
+inline constexpr bool use_apply_v =
+    is_tuple_v<R> && !std::is_invocable_v<Fn, R&> && Apply_invocable<Fn, R>::value;
+
+template<typename Fn, typename Tuple>
+using Apply_result_t = decltype(std::apply(std::declval<Fn&>(), std::declval<Tuple&>()));
+
 } // namespace detail
 
 // Handle to an async result. `get()` blocks for the result (call once); `then()`
@@ -241,6 +263,25 @@ public:
             });
             return Task<R2>(std::move(next));
         }
+        else if constexpr (detail::use_apply_v<Fn, R>)
+        {
+            // Apply-style: unpack the tuple result into `fn`'s arguments.
+            using R2 = detail::Apply_result_t<Fn, R>;
+            auto next = std::make_shared<detail::Task_control_block<R2>>();
+            state_->attach([next, fn = std::forward<Fn>(fn)](R& r) mutable
+            {
+                if constexpr (std::is_void_v<R2>)
+                {
+                    std::apply(fn, r);
+                    next->complete();
+                }
+                else
+                {
+                    next->complete(std::apply(fn, r));
+                }
+            });
+            return Task<R2>(std::move(next));
+        }
         else
         {
             using R2 = std::invoke_result_t<Fn, R&>;
@@ -271,50 +312,98 @@ private:
 namespace detail
 {
 
+// The tuple of the non-void prerequisite results (voids drop out).
 template<typename... Rs>
-void when_all_finish(const std::shared_ptr<std::tuple<std::optional<Rs>...>>& slots,
-                     const std::shared_ptr<Task_control_block<std::tuple<Rs...>>>& next)
+using Kept_tuple_t = decltype(std::tuple_cat(
+    std::declval<std::conditional_t<std::is_void_v<Rs>, std::tuple<>, std::tuple<Rs>>>()...));
+
+// `when_all` result: void when nothing is kept (all prerequisites void), else the
+// kept tuple.
+template<typename... Rs>
+using When_all_result_t = std::conditional_t<
+    std::tuple_size_v<Kept_tuple_t<Rs...>> == 0, void, Kept_tuple_t<Rs...>>;
+
+template<typename> struct To_optionals;
+template<typename... Ts> struct To_optionals<std::tuple<Ts...>>
 {
-    [&]<std::size_t... J>(std::index_sequence<J...>)
-    {
-        next->complete(std::tuple<Rs...>(std::move(*std::get<J>(*slots))...));
-    }(std::index_sequence_for<Rs...>{});
+    using type = std::tuple<std::optional<Ts>...>;
+};
+
+// Slot index of each prerequisite in the kept tuple (-1 for a void prerequisite).
+template<typename... Rs>
+constexpr std::array<int, sizeof...(Rs)> when_all_slots()
+{
+    std::array<bool, sizeof...(Rs)> is_void{ std::is_void_v<Rs>... };
+    std::array<int, sizeof...(Rs)> slot{};
+    int next = 0;
+    for (std::size_t i = 0; i < sizeof...(Rs); ++i)
+        slot[i] = is_void[i] ? -1 : next++;
+    return slot;
 }
 
-template<std::size_t... I, typename... Rs>
-void when_all_attach(std::index_sequence<I...>,
-                     std::shared_ptr<std::tuple<std::optional<Rs>...>> slots,
-                     std::shared_ptr<std::atomic<int>> remaining,
-                     std::shared_ptr<Task_control_block<std::tuple<Rs...>>> next,
-                     Task<Rs>... prerequisites)
+template<typename Slots, typename R_result>
+void when_all_finish(const std::shared_ptr<Slots>& slots,
+                     const std::shared_ptr<Task_control_block<R_result>>& next)
 {
-    (prerequisites.then([slots, remaining, next](Rs& value)
-    {
-        std::get<I>(*slots) = value;
-        if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1)
-            when_all_finish<Rs...>(slots, next);
-    }), ...);
+    if constexpr (std::is_void_v<R_result>)
+        next->complete();
+    else
+        [&]<std::size_t... J>(std::index_sequence<J...>)
+        {
+            next->complete(R_result(std::move(*std::get<J>(*slots))...));   // move (supports move-only)
+        }(std::make_index_sequence<std::tuple_size_v<Slots>>{});
+}
+
+template<int Slot, typename R, typename Slots, typename R_result>
+void when_all_attach_one(Task<R> prereq,
+                         std::shared_ptr<Slots> slots,
+                         std::shared_ptr<std::atomic<int>> remaining,
+                         std::shared_ptr<Task_control_block<R_result>> next)
+{
+    if constexpr (std::is_void_v<R>)
+        prereq.then([slots, remaining, next]
+        {
+            if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1)
+                when_all_finish(slots, next);
+        });
+    else
+        prereq.then([slots, remaining, next](R& value)
+        {
+            std::get<Slot>(*slots).emplace(std::move(value));   // move out of the prerequisite
+            if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1)
+                when_all_finish(slots, next);
+        });
 }
 
 } // namespace detail
 
-// Typed join: completes when every prerequisite completes, carrying their
-// results as a tuple into the subsequent (consume with `.then`). Prerequisite
-// result types must be non-void and copyable. (Apply-style unpacking of the
-// tuple into separate continuation args is future work; see docs/TODO.md.)
+// Typed join: completes when every prerequisite completes. Void prerequisites act as
+// pure ordering (they drop out of the result); the results of the non-void ones are
+// carried as a tuple (as `void` if all prerequisites are void). Results may be
+// move-only. Consume with `.then` — either the tuple, or, apply-style, its elements
+// unpacked (`then([](A& a, B& b){ ... })`).
 template<typename... Rs>
-Task<std::tuple<Rs...>> when_all(Task<Rs>... prerequisites)
+Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
 {
     static_assert(sizeof...(Rs) > 0, "when_all needs at least one task");
 
-    auto slots = std::make_shared<std::tuple<std::optional<Rs>...>>();
+    using Result = detail::When_all_result_t<Rs...>;
+    using Slots = typename detail::To_optionals<detail::Kept_tuple_t<Rs...>>::type;
+
+    auto slots = std::make_shared<Slots>();
     auto remaining = std::make_shared<std::atomic<int>>(static_cast<int>(sizeof...(Rs)));
-    auto next = std::make_shared<detail::Task_control_block<std::tuple<Rs...>>>();
+    auto next = std::make_shared<detail::Task_control_block<Result>>();
 
-    detail::when_all_attach(std::index_sequence_for<Rs...>{},
-        slots, remaining, next, std::move(prerequisites)...);
+    constexpr auto slot = detail::when_all_slots<Rs...>();
+    auto prereqs = std::make_tuple(std::move(prerequisites)...);
 
-    return Task<std::tuple<Rs...>>(next);
+    [&]<std::size_t... I>(std::index_sequence<I...>)
+    {
+        (detail::when_all_attach_one<slot[I]>(
+             std::get<I>(std::move(prereqs)), slots, remaining, next), ...);
+    }(std::index_sequence_for<Rs...>{});
+
+    return Task<Result>(next);
 }
 
 // A manually-completed synchronization point: a bodyless `Task<void>` (no work is

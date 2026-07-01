@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstdio>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -101,6 +102,27 @@ void stress_graph()
         g.execute().get();
 }
 
+// when_all joining prerequisites that complete on different worker threads: mixed
+// void + non-void + move-only, consumed apply-style. Exercises the join's remaining
+// counter, slot moves, and finish across threads.
+void stress_when_all()
+{
+    ts::Thread_safe<int> a{ 3 }, b{ 4 }, c{ 5 };
+    std::atomic<int> total{ 0 };
+    for (int i = 0; i < 3000; ++i)
+    {
+        ts::Task<void> v = a.async([](int& x) { ++x; });                          // void
+        ts::Task<int> r = b.async([](const int& x) { return x; });               // value
+        ts::Task<std::unique_ptr<int>> m = c.async([](const int& x) { return std::make_unique<int>(x); }); // move-only
+
+        int s = ts::when_all(v, r, m)
+            .then([](int rv, std::unique_ptr<int>& mv) { return rv + *mv; })      // apply-style, void dropped
+            .get();
+        total.fetch_add(s, std::memory_order_relaxed);
+    }
+    assert(total.load() == 3000 * 9);
+}
+
 // A graph node accessing an object directly while other threads fire async on the
 // SAME object: the per-run pipe reservation must keep them from overlapping.
 void stress_graph_async()
@@ -135,6 +157,7 @@ int main()
     std::puts("tsan: scheduler stress");   stress_scheduler();
     std::puts("tsan: thread_safe stress");  stress_thread_safe();
     std::puts("tsan: signal stress");       stress_signal();
+    std::puts("tsan: when_all stress");      stress_when_all();
     std::puts("tsan: graph stress");        stress_graph();
     std::puts("tsan: graph+async stress");  stress_graph_async();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <memory>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -158,6 +159,69 @@ void test_when_all_nested()
     TS_CHECK(s == 6);
 }
 
+// --- F2: `when_all` completeness (void, move-only, apply-style) ------------
+
+void test_when_all_void_prereq()
+{
+    ts::Thread_safe<int> a{ 10 }, b{ 32 };
+    std::atomic<int> side{ 0 };
+    ts::Task<void> v = a.async([&side](int& x) { side.store(x); });   // void prerequisite
+    ts::Task<int> r = b.async([](const int& x) { return x; });
+
+    int got = ts::when_all(v, r).then([](std::tuple<int>& t) { return std::get<0>(t); }).get();
+    TS_CHECK(got == 32);            // only the non-void result is carried
+    TS_CHECK(side.load() == 10);    // the void prerequisite ran
+}
+
+void test_when_all_all_void()
+{
+    ts::Thread_safe<int> a{ 0 }, b{ 0 };
+    std::atomic<int> count{ 0 };
+    ts::Task<void> ta = a.async([&count](int&) { count.fetch_add(1); });
+    ts::Task<void> tb = b.async([&count](int&) { count.fetch_add(1); });
+
+    ts::when_all(ta, tb).get();     // all-void join -> Task<void>
+    TS_CHECK(count.load() == 2);
+}
+
+void test_when_all_move_only()
+{
+    ts::Thread_safe<int> a{ 5 }, b{ 7 };
+    ts::Task<std::unique_ptr<int>> pa = a.async([](const int& x) { return std::make_unique<int>(x); });
+    ts::Task<std::unique_ptr<int>> pb = b.async([](const int& x) { return std::make_unique<int>(x); });
+
+    int sum = ts::when_all(pa, pb)
+        .then([](std::tuple<std::unique_ptr<int>, std::unique_ptr<int>>& t)
+        {
+            return *std::get<0>(t) + *std::get<1>(t);
+        })
+        .get();
+    TS_CHECK(sum == 12);
+}
+
+void test_when_all_apply_style()
+{
+    ts::Thread_safe<int> a{ 10 }, b{ 32 };
+    int sum = ts::when_all(
+            a.async([](const int& x) { return x; }),
+            b.async([](const int& x) { return x; }))
+        .then([](int x, int y) { return x + y; })   // unpacked, not a tuple
+        .get();
+    TS_CHECK(sum == 42);
+}
+
+void test_when_all_apply_void()
+{
+    ts::Thread_safe<int> a{ 1 }, b{ 2 };
+    std::atomic<int> sink{ 0 };
+    ts::when_all(
+            a.async([](const int& x) { return x; }),
+            b.async([](const int& x) { return x; }))
+        .then([&sink](int x, int y) { sink.store(x + y); })   // unpacked, void result
+        .get();
+    TS_CHECK(sink.load() == 3);
+}
+
 // --- G: `Signal` ----------------------------------------------------------
 
 void test_signal_trigger_then_wait()
@@ -263,6 +327,11 @@ void run_task_tests()
     run("when_all out of order", test_when_all_out_of_order);
     run("when_all already complete", test_when_all_already_complete);
     run("when_all nested", test_when_all_nested);
+    run("when_all void prereq", test_when_all_void_prereq);
+    run("when_all all void", test_when_all_all_void);
+    run("when_all move-only", test_when_all_move_only);
+    run("when_all apply style", test_when_all_apply_style);
+    run("when_all apply void", test_when_all_apply_void);
     run("signal trigger then wait", test_signal_trigger_then_wait);
     run("signal wait then trigger", test_signal_wait_then_trigger);
     run("signal then", test_signal_then);
