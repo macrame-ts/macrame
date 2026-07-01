@@ -78,7 +78,14 @@ void dispatch(Scheduler& scheduler, Pipe& pipe)
 
         Job job = std::move(front);
         pipe.jobs.pop_front();
-        submit_job(scheduler, pipe, std::move(job));
+
+        if (job.reservation)
+            // Signal the holder that it now owns the pipe; leave `writer_active` set
+            // (the reservation is released explicitly via `pipe_release`, not on the
+            // callback's completion).
+            submit_closure(scheduler, std::move(job.fn));
+        else
+            submit_job(scheduler, pipe, std::move(job));
     }
 }
 
@@ -89,6 +96,29 @@ void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_
     std::scoped_lock lock(pipe.mutex);
     pipe.jobs.push_back(Job{ mode, std::move(fn) });
     dispatch(scheduler, pipe);
+}
+
+bool pipe_reserve(Scheduler& scheduler, Pipe& pipe, std::move_only_function<void()> on_acquired)
+{
+    std::scoped_lock lock(pipe.mutex);
+    if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
+    {
+        pipe.writer_active = true;   // acquired now; hold as an exclusive writer
+        return true;
+    }
+    // Deferred: sit behind the queued/active work; admitted (FIFO) when it drains.
+    // No dispatch here -- something is active, so a writer can't be admitted yet.
+    pipe.jobs.push_back(Job{ Access::read_write, std::move(on_acquired), /*reservation*/ true });
+    return false;
+}
+
+void pipe_release(Scheduler& scheduler, Pipe& pipe)
+{
+    std::scoped_lock lock(pipe.mutex);
+    pipe.writer_active = false;
+    dispatch(scheduler, pipe);
+    if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
+        pipe.idle.notify_all();
 }
 
 } // namespace detail

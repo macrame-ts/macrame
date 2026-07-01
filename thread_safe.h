@@ -33,6 +33,7 @@ struct Job
 {
     Access mode;
     std::move_only_function<void()> fn;
+    bool reservation = false;   // if set, `fn` is an on-acquired callback; see `pipe_reserve`
 };
 
 // A per-object reader/writer pipe. Jobs are admitted in FIFO order; consecutive
@@ -59,6 +60,17 @@ struct Pipe
 };
 
 void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> fn);
+
+// Reserve a pipe for exclusive out-of-band use (a `Static_task_graph` run accesses
+// its objects directly, bypassing the pipe, so it must hold the pipe to keep async
+// jobs from racing that direct access). Behaves as an exclusive (writer) holder that
+// does not auto-complete: async jobs queue behind it until `pipe_release`.
+// Returns true if acquired synchronously (pipe was idle); false if deferred, in which
+// case `on_acquired` runs once the pipe drains to the reservation.
+bool pipe_reserve(Scheduler& scheduler, Pipe& pipe, std::move_only_function<void()> on_acquired);
+
+// Release a reservation taken by `pipe_reserve`; admits queued jobs.
+void pipe_release(Scheduler& scheduler, Pipe& pipe);
 
 // --- Task control block ----------------------------------------------------
 //

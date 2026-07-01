@@ -18,6 +18,7 @@ struct Static_task_graph::Run_state
     Scheduler* scheduler = nullptr;
     std::vector<std::atomic<int>> remaining_deps;
     std::atomic<int> remaining_nodes{ 0 };
+    std::atomic<int> pending_reservations{ 0 };
     std::shared_ptr<detail::Task_control_block<void>> done;
 };
 
@@ -79,6 +80,13 @@ void Static_task_graph::compile()
         ++nodes_[to].indegree;
     }
 
+    // Distinct set of pipes the graph touches, for per-run reservation (see execute()).
+    std::set<detail::Pipe*> pipes;
+    for (const Node& node : nodes_)
+        for (detail::Pipe* p : node.pipes)
+            pipes.insert(p);
+    distinct_pipes_.assign(pipes.begin(), pipes.end());
+
     detect_cycles();
     compiled_ = true;
 }
@@ -120,8 +128,22 @@ void Static_task_graph::run_node(const std::shared_ptr<Run_state>& run, int inde
                 run_node(run, successor);
 
         if (run->remaining_nodes.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        {
+            // Whole run done: release every reserved object so queued async can run.
+            for (detail::Pipe* p : run->graph->distinct_pipes_)
+                detail::pipe_release(*run->scheduler, *p);
             run->done->complete();
+        }
     });
+}
+
+// Start every root (indegree-0) node. Called once all object reservations are held.
+void Static_task_graph::start_roots(const std::shared_ptr<Run_state>& run)
+{
+    const Static_task_graph* graph = run->graph;
+    for (size_t i = 0; i < graph->nodes_.size(); ++i)
+        if (graph->nodes_[i].indegree == 0)
+            run_node(run, static_cast<int>(i));
 }
 
 Task<void> Static_task_graph::execute(Scheduler& scheduler)
@@ -145,9 +167,31 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler)
         return result;
     }
 
-    for (size_t i = 0; i < nodes_.size(); ++i)
-        if (nodes_[i].indegree == 0)
-            run_node(run, static_cast<int>(i));
+    // Reserve every object the graph touches before running any node, so a node's
+    // direct (pipe-bypassing) access can't race a dynamic `async` on the same object.
+    // Nodes start only once all reservations are held; the run releases them at
+    // completion (see run_node). A pipe reserved synchronously counts down inline;
+    // a deferred one counts down from its on-acquired callback.
+    run->pending_reservations.store(static_cast<int>(distinct_pipes_.size()), std::memory_order_relaxed);
+
+    if (distinct_pipes_.empty())
+    {
+        start_roots(run);
+        return result;
+    }
+
+    for (detail::Pipe* p : distinct_pipes_)
+    {
+        bool acquired = detail::pipe_reserve(scheduler, *p, [run]
+        {
+            if (run->pending_reservations.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                start_roots(run);
+        });
+
+        if (acquired
+            && run->pending_reservations.fetch_sub(1, std::memory_order_acq_rel) == 1)
+            start_roots(run);
+    }
 
     return result;
 }

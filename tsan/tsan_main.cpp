@@ -101,6 +101,32 @@ void stress_graph()
         g.execute().get();
 }
 
+// A graph node accessing an object directly while other threads fire async on the
+// SAME object: the per-run pipe reservation must keep them from overlapping.
+void stress_graph_async()
+{
+    ts::Thread_safe<int> x{ 0 };
+    ts::Static_task_graph g;
+    g.add_node([](int& v) { ++v; }, x);
+    g.compile();
+
+    std::atomic<bool> stop{ false };
+    {
+        std::vector<std::jthread> firers;
+        for (int t = 0; t < 4; ++t)
+            firers.emplace_back([&]
+            {
+                while (!stop.load(std::memory_order_relaxed))
+                    x.async([](int& v) { ++v; }).get();
+            });
+
+        for (int i = 0; i < 300; ++i)
+            g.execute().get();
+
+        stop.store(true, std::memory_order_relaxed);
+    }   // join firers
+}
+
 } // namespace
 
 int main()
@@ -110,6 +136,7 @@ int main()
     std::puts("tsan: thread_safe stress");  stress_thread_safe();
     std::puts("tsan: signal stress");       stress_signal();
     std::puts("tsan: graph stress");        stress_graph();
+    std::puts("tsan: graph+async stress");  stress_graph_async();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);
     std::puts("tsan: done (no races)");
     return 0;

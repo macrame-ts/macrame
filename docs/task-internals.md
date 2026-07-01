@@ -285,10 +285,68 @@ comparison hard.
 
 ---
 
+## 10. Graph ↔ dynamic `async` coexistence (pipe reservation)
+
+Graph nodes access their objects **directly** (bypassing the pipe), ordered among
+themselves by conflict edges. `Thread_safe::async` goes through the **pipe**. Two
+independent serializers over one object → a node and an async on the same object
+would run concurrently → **data race**. The access harness does **not** catch this:
+both sides hold a valid declared `Access_context`, and the harness only catches
+*undeclared* access, never two-declared-concurrent. So the race is silent
+(TSan/ASan only) — which is exactly why it needs a structural fix.
+
+**Mechanism (implemented):** a run *reserves* every object it touches before
+running any node, and releases them at completion.
+- `pipe_reserve(pipe, on_acquired)` holds the pipe as an exclusive writer that does
+  **not** auto-complete. If the pipe is idle it's acquired synchronously (returns
+  true); otherwise the reservation queues behind pending work (FIFO) and
+  `on_acquired` fires when admitted. Async jobs queue behind a held reservation.
+- `execute()` reserves every distinct pipe; nodes start only once **all** are held
+  (`pending_reservations` reaches 0). `run_node` calls `pipe_release` on every pipe
+  at run completion, admitting the queued async.
+
+So `X.async(...)` concurrent with a run touching `X` **waits behind the run** and
+executes after — never alongside a node. This enforces *one authority per object
+per frame* through the pipe. Deadlock-freedom rests on the run being the **sole
+multi-object acquirer** (single-object async can't cycle against it).
+
+**This cut is coarse:** all reservations are held for the whole run, so async to any
+graph object waits for the whole frame. Per-object early release (free `X` when the
+run's last `X`-accessor completes) and skipping reservation on objects no async ever
+touches are future optimizations.
+
+### Scenarios where the model can still break
+
+Reservation + single-resource async closes the common race, but these remain sharp:
+
+1. **Blocking on a same-object async inside a node** → deadlock: the async sits
+   behind the run's reservation (released only at run end) while the node `.get()`s
+   it. (Reinforces "never block inside a node.")
+2. **Two runs over overlapping objects, concurrently** → reservation deadlock (two
+   multi-object acquirers, opposite orders). One run per object-set at a time.
+3. **Nested `execute()` on a reserved object** → the inner run's reservation waits
+   for the outer's release, which waits for the triggering node → deadlock.
+4. **Incomplete access declaration** → a node touching `Y` but declaring only `X`
+   doesn't reserve `Y`; async to `Y` races the node's undeclared `Y` access. The
+   reservation is only as complete as the declaration.
+5. **Escaped reference** → a raw pointer into `X` used with no `Access_context`
+   bypasses both reservation and harness. The classic completeness hazard.
+6. **Ordering / latency (not races):** whether the graph observes a pre-run async's
+   write depends on enqueue timing (nondeterministic); coarse release backs up async
+   to a graph object for the whole frame.
+
+Contract, therefore: **one run per object-set at a time, no blocking on same-object
+async inside a node, and complete access declarations.**
+
+---
+
 ## Open items
 
 - **Done:** `Task_state → Task_control_block` rename; idempotent `complete()`;
-  `Signal` (bodyless triggerable `Task<void>`).
+  `Signal` (bodyless triggerable `Task<void>`); graph↔async pipe reservation (§10).
+- Reservation follow-ups: per-object early release (free `X` at its last accessor,
+  not run end); skip reserving objects no async touches; detect nested/concurrent-run
+  reservation deadlock (§10 scenarios 2–3) instead of hanging.
 - Move the erased body *into* the block (currently in the scheduler/pipe
   submission) — required only for retraction; the monomorphic-on-`R` / no-virtual
   property already holds (§2.1).

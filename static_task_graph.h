@@ -108,6 +108,7 @@ private:
     {
         std::move_only_function<void()> run;
         std::vector<std::pair<const void*, Access>> access;
+        std::vector<detail::Pipe*> pipes;   // the pipes of the objects this node accesses
         std::vector<int> successors;
         int indegree = 0;
     };
@@ -132,6 +133,8 @@ private:
             }...
         };
 
+        node.pipes = { (&access.pipe_)... };
+
         node.run = [fn = std::forward<Fn>(fn), instances]() mutable
         {
             Access_context ctx;
@@ -145,10 +148,12 @@ private:
     void add_edge(int prerequisite, int successor);
     static bool conflicts(const Node& a, const Node& b);
     void detect_cycles() const;
+    static void start_roots(const std::shared_ptr<Run_state>& run);
     static void run_node(const std::shared_ptr<Run_state>& run, int index);
 
     std::vector<Node> nodes_;
     std::vector<std::pair<int, int>> explicit_edges_;
+    std::vector<detail::Pipe*> distinct_pipes_;   // every object the graph touches (for reservation)
     bool compiled_ = false;
 };
 

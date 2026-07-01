@@ -70,6 +70,96 @@ void test_graph_then_dynamic()
     TS_CHECK(read_value(a) == 7);
 }
 
+// Detects overlapping access: any two touches running at once push `peak` to 2.
+// (The access harness would NOT catch a graph-node vs. async race -- both sides hold
+// a valid declared context; only the reservation keeps them apart. So we measure
+// concurrency directly.)
+struct Guarded
+{
+    std::atomic<int> live{ 0 };
+    std::atomic<int> peak{ 0 };
+    std::atomic<int> total{ 0 };
+
+    void touch()
+    {
+        record_max(peak, live.fetch_add(1) + 1);
+        std::this_thread::sleep_for(100us);
+        total.fetch_add(1);
+        live.fetch_sub(1);
+    }
+};
+
+int peak_of(ts::Thread_safe<Guarded>& x) { return x.async([](const Guarded& g) { return g.peak.load(); }).get(); }
+int total_of(ts::Thread_safe<Guarded>& x) { return x.async([](const Guarded& g) { return g.total.load(); }).get(); }
+
+// Static node access + dynamic async on the SAME object must not overlap: the run
+// reserves the object, so the asyncs queue behind the node. (`execute()` reserves
+// synchronously here -- the pipe is idle -- so the asyncs are enqueued behind the
+// held reservation.)
+void test_graph_async_no_overlap_during()
+{
+    ts::Thread_safe<Guarded> x;
+    ts::Static_task_graph g;
+    g.add_node([](Guarded& gg) { gg.touch(); }, x);
+    g.compile();
+
+    auto run = g.execute();
+    std::vector<ts::Task<void>> asyncs;
+    for (int i = 0; i < 4; ++i)
+        asyncs.push_back(x.async([](Guarded& gg) { gg.touch(); }));
+    run.get();
+    for (auto& a : asyncs)
+        a.get();
+
+    TS_CHECK(peak_of(x) == 1);        // never concurrent
+    TS_CHECK(total_of(x) == 5);       // node + 4 asyncs all ran
+}
+
+// A pending async before the run: the reservation is taken via the deferred path
+// (pipe not idle) and waits behind the async; the node runs after it.
+void test_async_before_graph_no_overlap()
+{
+    ts::Thread_safe<Guarded> x;
+    auto pending = x.async([](Guarded& gg) { gg.touch(); });
+
+    ts::Static_task_graph g;
+    g.add_node([](Guarded& gg) { gg.touch(); }, x);
+    g.compile();
+    g.execute().get();
+    pending.get();
+
+    TS_CHECK(peak_of(x) == 1);
+    TS_CHECK(total_of(x) == 2);
+}
+
+// Contention: threads hammer async on an object while the graph re-runs. A broken
+// reservation would let a node and an async overlap -> peak == 2.
+void test_graph_async_stress()
+{
+    ts::Thread_safe<Guarded> x;
+    ts::Static_task_graph g;
+    g.add_node([](Guarded& gg) { gg.touch(); }, x);
+    g.compile();
+
+    std::atomic<bool> stop{ false };
+    {
+        std::vector<std::jthread> firers;
+        for (int t = 0; t < 4; ++t)
+            firers.emplace_back([&]
+            {
+                while (!stop.load(std::memory_order_relaxed))
+                    x.async([](Guarded& gg) { gg.touch(); }).get();
+            });
+
+        for (int i = 0; i < 20; ++i)
+            g.execute().get();
+
+        stop.store(true, std::memory_order_relaxed);
+    }   // join firers
+
+    TS_CHECK(peak_of(x) == 1);
+}
+
 // J: repeat a concurrency-sensitive workload to catch flakiness.
 void test_repeat_stress()
 {
@@ -124,6 +214,9 @@ void run_integration_tests()
     run("then off graph completion", test_then_off_graph_completion);
     run("when_all into graph", test_when_all_into_graph);
     run("graph then dynamic", test_graph_then_dynamic);
+    run("graph/async no overlap (during)", test_graph_async_no_overlap_during);
+    run("graph/async no overlap (before)", test_async_before_graph_no_overlap);
+    run("graph/async contention", test_graph_async_stress);
     run("repeat stress x20", test_repeat_stress);
     run("engine frame invariants", test_engine_frame);
     run("engine determinism", test_engine_determinism);
