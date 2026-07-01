@@ -459,6 +459,60 @@ void test_task_after_cancelled_prereq()
     TS_CHECK(a.is_cancelled());
 }
 
+// --- K: nested tasks -------------------------------------------------------
+
+// A nested task launched inside a parent's body gates the parent's completion.
+void test_nested_gates_parent()
+{
+    std::atomic<int> nested_done{ 0 };
+    ts::Task<void> parent = ts::launch([&]
+    {
+        ts::nested([&] { std::this_thread::sleep_for(10ms); nested_done.fetch_add(1); });
+        // parent body returns now, but the task must not complete until nested does
+    });
+    parent.get();
+    TS_CHECK(nested_done.load() == 1);   // nested finished before the parent completed
+}
+
+void test_nested_multiple()
+{
+    std::atomic<int> count{ 0 };
+    ts::launch([&]
+    {
+        for (int i = 0; i < 3; ++i)
+            ts::nested([&] { std::this_thread::sleep_for(5ms); count.fetch_add(1); });
+    }).get();
+    TS_CHECK(count.load() == 3);   // all nested tasks done before the parent completed
+}
+
+void test_add_nested_existing()
+{
+    std::atomic<bool> done{ false };
+    ts::launch([&]
+    {
+        ts::Task<void> child = ts::launch([&] { std::this_thread::sleep_for(10ms); done.store(true); });
+        ts::add_nested(child);   // nest an already-launched task
+    }).get();
+    TS_CHECK(done.load());
+}
+
+// The parent's continuation fires only after the parent completes — i.e. after nested.
+void test_nested_then_after()
+{
+    std::atomic<int> order{ 0 };
+    std::atomic<int> nested_order{ 0 }, then_order{ 0 };
+    ts::launch([&]
+    {
+        ts::nested([&] { std::this_thread::sleep_for(10ms); nested_order.store(++order); });
+    }).then([&] { then_order.store(++order); }).get();
+    TS_CHECK(nested_order.load() == 1 && then_order.load() == 2);
+}
+
+void test_death_add_nested_outside()
+{
+    TS_CHECK(ts::test::expect_death("add_nested_outside"));   // no running task
+}
+
 } // namespace
 
 void run_task_tests()
@@ -504,4 +558,9 @@ void run_task_tests()
     run("task value after", test_task_value_after);
     run("task after already completed", test_task_after_already_completed);
     run("task after cancelled prereq", test_task_after_cancelled_prereq);
+    run("nested gates parent", test_nested_gates_parent);
+    run("nested multiple", test_nested_multiple);
+    run("add nested existing", test_add_nested_existing);
+    run("nested then after", test_nested_then_after);
+    run("death: add_nested outside", test_death_add_nested_outside);
 }

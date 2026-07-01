@@ -139,7 +139,7 @@ private:
         };
         auto core = detail::make_executable<R>(std::move(body), token);
         detail::pipe_enqueue(default_scheduler(), pipe_, mode,
-            [core] { core->execute(core.get()); });
+            [core] { core->execute(core); });
         return Task<R>(core);
     }
 
@@ -155,8 +155,19 @@ auto launch(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t
 {
     using R = std::invoke_result_t<Fn>;
     auto core = detail::make_executable<R>(std::forward<Fn>(fn), token);
-    detail::submit_closure(default_scheduler(), [core] { core->execute(core.get()); });
+    detail::submit_closure(default_scheduler(), [core] { core->execute(core); });
     return Task<R>(core);
+}
+
+// Launch a task and attach it as a nested task of the currently-executing task (its
+// completion gates the parent's). Sugar for `launch` + `add_nested`; call from within
+// a task body.
+template<typename Fn>
+auto nested(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t<Fn>>
+{
+    auto t = launch(std::forward<Fn>(fn), token);
+    add_nested(t);
+    return t;
 }
 
 } // namespace ts

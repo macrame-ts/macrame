@@ -409,7 +409,10 @@ also future work.
   `successors` on the block, with dynamic prerequisites via
   `ts::task(fn).after(x,y).launch()` (a settled prerequisite — completed *or*
   cancelled — releases; `after` is ordering-only). `submit_ready` bridges the counter
-  to the scheduler.
+  to the scheduler. The **post-execution half** too (§7): the `execution_flag` mode
+  bit — a running body sets flag + a self-lock; `ts::nested(fn)` / `ts::add_nested(t)`
+  (via `current_task` TLS) add completion-locks; the parent completes only once its
+  self-lock and all nested tasks have released.
 - **when_all cancellation:** make the internal join cancel-aware so a cancelled
   prerequisite cancels the join instead of stalling it (§11).
 - **Cancel callback:** notify (a continuation) when cancellation is requested.
@@ -419,9 +422,6 @@ also future work.
 - Reservation follow-ups: cheaper idle-pipe reserve (lock-free flag vs mutex) if the
   per-object mutex cost matters; detect nested/concurrent-run reservation deadlock
   (§10 scenarios 2–3) instead of hanging.
-- The lock-counter's **post-execution half** — the `execution_flag` mode bit (§4): once
-  the body starts, `num_locks` switches from counting prerequisites to counting nested
-  tasks (gates completion, not execution). This is nested-task support (§7).
 - **Re-base the graph and `when_all` onto the block's lock-counter** — the graph's
   `remaining_deps`/`Node.successors` and `when_all`'s counter are now the *same*
   mechanism as `num_locks`/`successors`; fold them in so there's one implementation

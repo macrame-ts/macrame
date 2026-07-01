@@ -163,6 +163,24 @@ void stress_prereq()
     }
 }
 
+// Nested tasks: a parent spawns several nested tasks; the parent must not complete
+// until all settle. Stresses the execution_flag mode switch, add_nested's fetch_add
+// racing nested completion (release reaching execution_flag), and the body-end
+// self-lock drop racing those completions.
+void stress_nested()
+{
+    for (int i = 0; i < 1500; ++i)
+    {
+        std::atomic<int> count{ 0 };
+        ts::launch([&]
+        {
+            for (int k = 0; k < 4; ++k)
+                ts::nested([&] { count.fetch_add(1, std::memory_order_relaxed); });
+        }).get();
+        assert(count.load() == 4);   // all nested done before the parent completed
+    }
+}
+
 // Cancellation racing execution: request_cancel (a store) concurrent with the body's
 // token check (a load) and with then-propagation; the block must settle exactly once.
 void stress_cancel()
@@ -235,6 +253,7 @@ int main()
     std::puts("tsan: when_all stress");      stress_when_all();
     std::puts("tsan: launch stress");        stress_launch();
     std::puts("tsan: prereq stress");        stress_prereq();
+    std::puts("tsan: nested stress");        stress_nested();
     std::puts("tsan: cancel stress");        stress_cancel();
     std::puts("tsan: graph stress");        stress_graph();
     std::puts("tsan: graph+async stress");  stress_graph_async();

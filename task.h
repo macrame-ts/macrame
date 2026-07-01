@@ -88,22 +88,29 @@ struct Task_control_block
     bool completed = false;
     bool cancelled = false;
     void* result_ptr = nullptr;        // -> the wrapper's stored R (set before complete), or null
-    void (*execute)(Task_control_block*) = nullptr;   // run the body (bodyless => null)
+    void (*execute)(const std::shared_ptr<Task_control_block>&) = nullptr;   // run the body (null => bodyless)
     Cancellation_token token;          // checked by `execute` before running the body
-    std::atomic<std::uint32_t> num_locks{ 0 };   // outstanding prerequisites (0 => ready)
-    std::vector<std::shared_ptr<Task_control_block>> successors;   // decremented on completion
+    // `num_locks`: below `execution_flag` it counts unmet PREREQUISITES (gate
+    // execution); once the body starts the flag is set and it counts pending NESTED
+    // tasks (gate completion). See docs/task-internals.md §4/§7.
+    static constexpr std::uint32_t execution_flag = 0x8000'0000u;
+    std::atomic<std::uint32_t> num_locks{ 0 };
+    std::vector<std::shared_ptr<Task_control_block>> successors;   // decremented on settle
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
     void complete() { settle(false); }
     void cancel()   { settle(true); }
 
-    // A prerequisite settled (completed OR cancelled — `after` is ordering-only, so a
-    // cancelled prerequisite still releases its successors). Decrement and, at zero,
-    // schedule. Caller must hold a live ref to `succ`.
-    static void release(const std::shared_ptr<Task_control_block>& succ)
+    // A prerequisite or nested task settled (`after`/nesting are ordering-only, so a
+    // cancelled one still releases). Decrement `blk`'s lock count and, when the last
+    // lock drops, schedule it (prerequisites met) or complete it (nested done).
+    static void release(const std::shared_ptr<Task_control_block>& blk)
     {
-        if (succ->num_locks.fetch_sub(1, std::memory_order_acq_rel) == 1)
-            submit_ready(succ);
+        std::uint32_t now = blk->num_locks.fetch_sub(1, std::memory_order_acq_rel) - 1;
+        if (now == 0)
+            submit_ready(blk);            // pre-execution: prerequisites met -> schedule
+        else if (now == execution_flag)
+            blk->complete();              // post-execution: nested done -> complete
     }
 
     void settle(bool cancel_)
@@ -181,6 +188,11 @@ auto make_block()
     }
 }
 
+// The task currently executing on this thread (for nested-task attachment). A
+// shared_ptr so a nested child can register the parent as its successor and keep it
+// alive until the child completes.
+inline thread_local std::shared_ptr<Task_control_block> current_task;
+
 // Empty for `void`, so an executable `void` task pays nothing for a result.
 template<typename R> struct Result_storage { std::optional<R> result; };
 template<> struct Result_storage<void> {};
@@ -202,25 +214,35 @@ struct Executable
         : body(std::move(b))
     {}
 
-    static void run(Task_control_block* c)
+    static void run(const std::shared_ptr<Task_control_block>& c)
     {
-        auto* self = reinterpret_cast<Executable*>(c);
+        auto* self = reinterpret_cast<Executable*>(c.get());
         if (c->token.is_cancel_requested())   // not-yet-started: skip body, settle cancelled
         {
             c->cancel();
             return;
         }
+
+        // Switch the counter to completion-lock mode: the flag + a self-lock held for
+        // the body. Nested tasks launched during the body add more locks.
+        c->num_locks.store(Task_control_block::execution_flag + 1, std::memory_order_relaxed);
+        auto prev = std::move(current_task);
+        current_task = c;
+
         if constexpr (std::is_void_v<R>)
-        {
             self->body();
-            c->complete();
-        }
         else
         {
             self->storage.result.emplace(self->body());
             c->result_ptr = &*self->storage.result;
-            c->complete();
         }
+
+        current_task = std::move(prev);
+
+        // Drop the self-lock. If it was the only remaining lock, no nested tasks are
+        // pending -> complete now; otherwise the last nested task will complete us.
+        if (c->num_locks.fetch_sub(1, std::memory_order_acq_rel) == Task_control_block::execution_flag + 1)
+            c->complete();
     }
 };
 
@@ -442,6 +464,31 @@ auto task(Fn&& fn)
     auto core = detail::make_executable<R>(std::forward<Fn>(fn), {});
     core->num_locks.store(1, std::memory_order_relaxed);   // the "not launched" lock
     return Task_builder<R>(std::move(core));
+}
+
+// Attach `child` as a NESTED task of the currently-executing task: that task will not
+// complete until `child` settles (completed or cancelled). Call from within a task
+// body (async / launch / task); fatal if there is no running task. `child` can be
+// launched any way — nesting is a completion dependency, orthogonal to how it runs.
+template<typename R>
+void add_nested(const Task<R>& child)
+{
+    std::shared_ptr<detail::Task_control_block> parent = detail::current_task;
+    if (!parent)
+        ts::fatal("add_nested called outside a running task");
+
+    parent->num_locks.fetch_add(1, std::memory_order_relaxed);   // a completion lock on the parent
+
+    std::shared_ptr<detail::Task_control_block> child_core = detail::core_of(child);
+    {
+        std::scoped_lock lock(child_core->mutex);
+        if (!child_core->completed)
+        {
+            child_core->successors.push_back(std::move(parent));   // child releases parent when it settles
+            return;
+        }
+    }
+    detail::Task_control_block::release(parent);   // child already settled -> release the lock now
 }
 
 namespace detail

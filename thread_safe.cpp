@@ -33,7 +33,7 @@ void submit_ready(std::shared_ptr<Task_control_block> block)
         [block = std::move(block)]
         {
             if (block->execute)
-                block->execute(block.get());
+                block->execute(block);
             else
                 block->complete();
         });

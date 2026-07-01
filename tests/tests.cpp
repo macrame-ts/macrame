@@ -83,5 +83,11 @@ void run_death_scenario(const char* name)
         while (!t.is_done()) std::this_thread::yield();
         t.get();   // cancelled value task has no result -> fatal
     }
+    else if (std::strcmp(name, "add_nested_outside") == 0)
+    {
+        ts::Task<int> t = ts::launch([] { return 1; });
+        t.get();
+        ts::add_nested(t);   // no currently-executing task -> fatal
+    }
     // unknown scenario: return without dying -> parent's expect_death fails
 }
