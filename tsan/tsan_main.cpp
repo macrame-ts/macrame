@@ -11,6 +11,7 @@
 #include "static_task_graph.h"
 #include "thread_safe.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstdio>
@@ -163,6 +164,32 @@ void stress_prereq()
     }
 }
 
+// Retraction under oversubscription: nested fork-join where the outer tasks saturate
+// the workers and block on inner get()s. Retraction runs the un-started inner tasks
+// inline -- stressing the `started` claim (retractor vs worker) and inline execution
+// racing worker execution and completion.
+void stress_retraction()
+{
+    const int outer = 2 * static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+    for (int i = 0; i < 200; ++i)
+    {
+        std::atomic<int> total{ 0 };
+        std::vector<ts::Task<void>> tasks;
+        for (int o = 0; o < outer; ++o)
+            tasks.push_back(ts::launch([&]
+            {
+                std::vector<ts::Task<void>> inner;
+                for (int k = 0; k < 4; ++k)
+                    inner.push_back(ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); }));
+                for (auto& t : inner)
+                    t.get();
+            }));
+        for (auto& t : tasks)
+            t.get();
+        assert(total.load() == outer * 4);
+    }
+}
+
 // Nested tasks: a parent spawns several nested tasks; the parent must not complete
 // until all settle. Stresses the execution_flag mode switch, add_nested's fetch_add
 // racing nested completion (release reaching execution_flag), and the body-end
@@ -254,6 +281,7 @@ int main()
     std::puts("tsan: launch stress");        stress_launch();
     std::puts("tsan: prereq stress");        stress_prereq();
     std::puts("tsan: nested stress");        stress_nested();
+    std::puts("tsan: retraction stress");    stress_retraction();
     std::puts("tsan: cancel stress");        stress_cancel();
     std::puts("tsan: graph stress");        stress_graph();
     std::puts("tsan: graph+async stress");  stress_graph_async();

@@ -412,7 +412,11 @@ also future work.
   to the scheduler. The **post-execution half** too (§7): the `execution_flag` mode
   bit — a running body sets flag + a self-lock; `ts::nested(fn)` / `ts::add_nested(t)`
   (via `current_task` TLS) add completion-locks; the parent completes only once its
-  self-lock and all nested tasks have released.
+  self-lock and all nested tasks have released. **Retraction** (§6): a blocking
+  `get()` on a *retractable* (bare-scheduler), ready, not-yet-started task runs it
+  **inline** on the waiting thread — the `started` claim (`exchange`) ensures a worker
+  and a retractor never both run it. This breaks the oversubscription deadlock (nested
+  fork-join where parents block all workers while children queue).
 - **when_all cancellation:** make the internal join cancel-aware so a cancelled
   prerequisite cancels the join instead of stalling it (§11).
 - **Cancel callback:** notify (a continuation) when cancellation is requested.
@@ -426,7 +430,11 @@ also future work.
   `remaining_deps`/`Node.successors` and `when_all`'s counter are now the *same*
   mechanism as `num_locks`/`successors`; fold them in so there's one implementation
   (the graph↔dynamic unification, realized).
-- Retraction (the claim CAS is specified; the waiter-side walk is not built).
+- **Deep retraction:** currently retraction only runs a *ready* task inline. Extend it
+  to walk a not-ready task's prerequisites and retract *them* first (so a `get()` on a
+  join retracts its inputs), and to retractable **pipe/async** tasks (needs re-entering
+  the pipe's access serialization inline — today only bare-scheduler tasks are marked
+  `retractable`).
 - Nested tasks + `current_task` TLS; re-base `parallel_for`'s rich mode on them.
 - Group latch tier for the default `parallel_for`.
 - Pooled block allocator + the one microbenchmark.

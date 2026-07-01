@@ -95,6 +95,8 @@ struct Task_control_block
     // tasks (gate completion). See docs/task-internals.md §4/§7.
     static constexpr std::uint32_t execution_flag = 0x8000'0000u;
     std::atomic<std::uint32_t> num_locks{ 0 };
+    std::atomic<bool> started{ false };   // claim: only one of {worker, retractor} runs the body
+    bool retractable = false;             // safe to run inline from a waiter (no pipe/access binding)
     std::vector<std::shared_ptr<Task_control_block>> successors;   // decremented on settle
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
@@ -152,6 +154,23 @@ struct Task_control_block
     {
         std::unique_lock lock(mutex);
         done_cv.wait(lock, [this] { return completed; });
+    }
+
+    // Retraction: if this task is retractable, ready (prerequisites met), and not yet
+    // started, run it inline on the *calling* thread instead of parking — so a waiter
+    // under worker exhaustion (nested fork-join) makes progress rather than deadlocking.
+    // `execute` claims via `started`, so a worker and a retractor never both run the
+    // body. Then block until settled (ours-inline, or a worker that beat us to it).
+    static void retract_or_wait(const std::shared_ptr<Task_control_block>& blk)
+    {
+        if (blk->retractable
+            && blk->execute
+            && !blk->ready.load(std::memory_order_acquire)
+            && blk->num_locks.load(std::memory_order_acquire) == 0)
+        {
+            blk->execute(blk);
+        }
+        blk->wait();
     }
 };
 
@@ -216,6 +235,9 @@ struct Executable
 
     static void run(const std::shared_ptr<Task_control_block>& c)
     {
+        if (c->started.exchange(true, std::memory_order_acq_rel))
+            return;   // already claimed by a worker or a retractor
+
         auto* self = reinterpret_cast<Executable*>(c.get());
         if (c->token.is_cancel_requested())   // not-yet-started: skip body, settle cancelled
         {
@@ -314,7 +336,7 @@ public:
     // a cancelled `void` get() simply returns.
     R get()
     {
-        core_->wait();
+        detail::Task_control_block::retract_or_wait(core_);
         if constexpr (std::is_void_v<R>)
         {
             return;
@@ -463,6 +485,7 @@ auto task(Fn&& fn)
     using R = std::invoke_result_t<Fn>;
     auto core = detail::make_executable<R>(std::forward<Fn>(fn), {});
     core->num_locks.store(1, std::memory_order_relaxed);   // the "not launched" lock
+    core->retractable = true;   // bare scheduler task: safe to run inline from a waiter
     return Task_builder<R>(std::move(core));
 }
 

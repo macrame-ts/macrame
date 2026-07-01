@@ -155,6 +155,7 @@ auto launch(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t
 {
     using R = std::invoke_result_t<Fn>;
     auto core = detail::make_executable<R>(std::forward<Fn>(fn), token);
+    core->retractable = true;   // bare scheduler task (no pipe/access): safe to run inline from a waiter
     detail::submit_closure(default_scheduler(), [core] { core->execute(core); });
     return Task<R>(core);
 }

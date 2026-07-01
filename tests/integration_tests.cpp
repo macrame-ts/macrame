@@ -5,6 +5,7 @@
 #include "test_util.h"
 #include "engine.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -262,6 +263,51 @@ void test_engine_determinism()
     TS_CHECK(a.world_xf_value == b.world_xf_value);
 }
 
+// A naive blocking fork-join: launch a task per item, then get() each.
+template<typename Fn>
+void naive_parallel_for(int n, Fn fn)
+{
+    std::vector<ts::Task<void>> tasks;
+    for (int i = 0; i < n; ++i)
+        tasks.push_back(ts::launch([fn, i] { fn(i); }));
+    for (auto& t : tasks)
+        t.get();
+}
+
+// Nested parallel-for → oversubscription deadlock. The outer tasks saturate every
+// worker and each blocks in a get() waiting on its inner tasks; the inner tasks sit in
+// the queue with no free worker to run them → classic deadlock. Retraction breaks it:
+// a blocked get() runs the un-started task inline on the waiting thread instead of
+// parking. Watchdog'd so a deadlock fails the test rather than hanging forever (this
+// test runs last, so a poisoned scheduler doesn't affect the others).
+void test_oversubscription_no_deadlock()
+{
+    std::atomic<int> total{ 0 };
+    std::atomic<bool> done{ false };
+    const int outer = 2 * static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+
+    std::thread runner([&]
+    {
+        naive_parallel_for(outer, [&](int)
+        {
+            naive_parallel_for(4, [&](int) { total.fetch_add(1); });
+        });
+        done.store(true);
+    });
+
+    for (int i = 0; i < 300 && !done.load(); ++i)
+        std::this_thread::sleep_for(10ms);   // up to ~3s
+
+    TS_CHECK(done.load());   // false => oversubscription deadlock (retraction not working)
+    if (done.load())
+    {
+        runner.join();
+        TS_CHECK(total.load() == outer * 4);
+    }
+    else
+        runner.detach();     // deadlocked; leak the stuck thread
+}
+
 } // namespace
 
 void run_integration_tests()
@@ -278,4 +324,5 @@ void run_integration_tests()
     run("repeat stress x20", test_repeat_stress);
     run("engine frame invariants", test_engine_frame);
     run("engine determinism", test_engine_determinism);
+    run("oversubscription no deadlock", test_oversubscription_no_deadlock);
 }
