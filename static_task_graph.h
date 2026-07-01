@@ -109,6 +109,7 @@ private:
         std::move_only_function<void()> run;
         std::vector<std::pair<const void*, Access>> access;
         std::vector<detail::Pipe*> pipes;   // the pipes of the objects this node accesses
+        std::vector<int> pipe_indices;      // those pipes as indices into distinct_pipes_ (deduped)
         std::vector<int> successors;
         int indegree = 0;
     };
@@ -154,6 +155,7 @@ private:
     std::vector<Node> nodes_;
     std::vector<std::pair<int, int>> explicit_edges_;
     std::vector<detail::Pipe*> distinct_pipes_;   // every object the graph touches (for reservation)
+    std::vector<int> pipe_accessor_counts_;       // # nodes accessing each distinct pipe (per-run init)
     bool compiled_ = false;
 };
 

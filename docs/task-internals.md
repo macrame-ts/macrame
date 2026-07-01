@@ -302,18 +302,29 @@ running any node, and releases them at completion.
   true); otherwise the reservation queues behind pending work (FIFO) and
   `on_acquired` fires when admitted. Async jobs queue behind a held reservation.
 - `execute()` reserves every distinct pipe; nodes start only once **all** are held
-  (`pending_reservations` reaches 0). `run_node` calls `pipe_release` on every pipe
-  at run completion, admitting the queued async.
+  (`pending_reservations` reaches 0).
+- **Per-object early release:** each object is freed by its *last accessor*, not at
+  whole-run completion. `compile()` counts, per distinct pipe, how many nodes touch
+  it (`pipe_accessor_counts_`) and records each node's pipe indices; `run_node`
+  decrements the per-run `remaining_accessors[pipe]` and calls `pipe_release` when it
+  hits 0. Safe because the count reaches 0 only after every node accessing that
+  object has completed — no node touches it afterward.
 
-So `X.async(...)` concurrent with a run touching `X` **waits behind the run** and
-executes after — never alongside a node. This enforces *one authority per object
+So `X.async(...)` concurrent with a run touching `X` **waits behind the run's use of
+`X`** and executes as soon as the last `X`-node finishes — never alongside a node,
+but no longer blocked on the whole frame. This enforces *one authority per object
 per frame* through the pipe. Deadlock-freedom rests on the run being the **sole
 multi-object acquirer** (single-object async can't cycle against it).
 
-**This cut is coarse:** all reservations are held for the whole run, so async to any
-graph object waits for the whole frame. Per-object early release (free `X` when the
-run's last `X`-accessor completes) and skipping reservation on objects no async ever
-touches are future optimizations.
+**Still coarse on the *acquire* side:** all objects are reserved before *any* node
+runs, so a run can't start until every object's pipe drains — a contended shared
+object stalls the whole graph start. Lazy per-node reservation (reserve an object
+just before its first accessor; a node runs when indegree 0 **and** its objects are
+reserved) would fix that, and is deadlock-free while the run is the sole multi-object
+acquirer. But it only helps when a graph object is *also* async-contended at start
+(rare — most objects are graph-exclusive and reserve synchronously), so it's
+deferred. Skipping reservation on objects no async ever touches is a separate,
+higher-value optimization but needs a way to know which objects async can reach.
 
 ### Scenarios where the model can still break
 
@@ -343,10 +354,11 @@ async inside a node, and complete access declarations.**
 ## Open items
 
 - **Done:** `Task_state → Task_control_block` rename; idempotent `complete()`;
-  `Signal` (bodyless triggerable `Task<void>`); graph↔async pipe reservation (§10).
-- Reservation follow-ups: per-object early release (free `X` at its last accessor,
-  not run end); skip reserving objects no async touches; detect nested/concurrent-run
-  reservation deadlock (§10 scenarios 2–3) instead of hanging.
+  `Signal` (bodyless triggerable `Task<void>`); graph↔async pipe reservation with
+  per-object early release (§10).
+- Reservation follow-ups: lazy per-node *acquire* (start before all objects reserved
+  — deferred, niche; §10); skip reserving objects no async can reach; detect
+  nested/concurrent-run reservation deadlock (§10 scenarios 2–3) instead of hanging.
 - Move the erased body *into* the block (currently in the scheduler/pipe
   submission) — required only for retraction; the monomorphic-on-`R` / no-virtual
   property already holds (§2.1).

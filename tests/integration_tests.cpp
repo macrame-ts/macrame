@@ -160,6 +160,33 @@ void test_graph_async_stress()
     TS_CHECK(peak_of(x) == 1);
 }
 
+// Early release: an object touched only by a fast node is freed while a slow node
+// (on a different object) still runs, so async on it runs well before run completion.
+void test_early_release_frees_object_mid_run()
+{
+    using clock = std::chrono::steady_clock;
+    auto ms_since = [](clock::time_point t0)
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count();
+    };
+
+    ts::Thread_safe<int> x{ 0 }, y{ 0 };
+    ts::Static_task_graph g;
+    g.add_node([](int& v) { v = 1; }, x);                                    // fast: sole accessor of x
+    g.add_node([](int& v) { std::this_thread::sleep_for(60ms); v = 1; }, y); // slow: sole accessor of y
+    g.compile();
+
+    auto t0 = clock::now();
+    auto run = g.execute();
+    std::atomic<long long> x_async_ms{ -1 };
+    x.async([&](int&) { x_async_ms.store(ms_since(t0)); });
+    run.get();
+    long long run_ms = ms_since(t0);
+
+    TS_CHECK(x_async_ms.load() >= 0);              // the async ran
+    TS_CHECK(x_async_ms.load() + 20 < run_ms);     // and well before the 60ms run finished
+}
+
 // J: repeat a concurrency-sensitive workload to catch flakiness.
 void test_repeat_stress()
 {
@@ -217,6 +244,7 @@ void run_integration_tests()
     run("graph/async no overlap (during)", test_graph_async_no_overlap_during);
     run("graph/async no overlap (before)", test_async_before_graph_no_overlap);
     run("graph/async contention", test_graph_async_stress);
+    run("early release frees object mid-run", test_early_release_frees_object_mid_run);
     run("repeat stress x20", test_repeat_stress);
     run("engine frame invariants", test_engine_frame);
     run("engine determinism", test_engine_determinism);
