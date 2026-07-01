@@ -129,40 +129,34 @@ private:
     template<typename R, Access mode, typename Inst, typename Fn>
     Task<R> launch(Inst* inst, Fn&& fn, Cancellation_token token) const
     {
-        if constexpr (std::is_void_v<R>)
+        // The body (stored in the block) runs `fn` under this object's access scope.
+        auto body = [inst, fn = std::forward<Fn>(fn)]() mutable -> R
         {
-            auto core = std::make_shared<detail::Task_control_block>();
-            detail::pipe_enqueue(default_scheduler(), pipe_, mode,
-                [inst, core, fn = std::forward<Fn>(fn), token]() mutable
-                {
-                    if (token.is_cancel_requested()) { core->cancel(); return; }   // skip body
-                    Access_context ctx;
-                    ctx.add(inst, mode);
-                    Access_scope scope(ctx);
-                    fn(*inst);
-                    core->complete();
-                });
-            return Task<R>(std::move(core));
-        }
-        else
-        {
-            auto [core, wrapper] = detail::make_block<R>();
-            detail::pipe_enqueue(default_scheduler(), pipe_, mode,
-                [inst, wrapper, fn = std::forward<Fn>(fn), token]() mutable
-                {
-                    if (token.is_cancel_requested()) { wrapper->core.cancel(); return; }   // skip body
-                    Access_context ctx;
-                    ctx.add(inst, mode);
-                    Access_scope scope(ctx);
-                    wrapper->store(fn(*inst));
-                    wrapper->core.complete();
-                });
-            return Task<R>(std::move(core));
-        }
+            Access_context ctx;
+            ctx.add(inst, mode);
+            Access_scope scope(ctx);
+            return fn(*inst);
+        };
+        auto core = detail::make_executable<R>(std::move(body), token);
+        detail::pipe_enqueue(default_scheduler(), pipe_, mode,
+            [core] { core->execute(core.get()); });
+        return Task<R>(core);
     }
 
     T instance_;
     mutable detail::Pipe pipe_;
 };
+
+// Launch a standalone task on the scheduler — a bare functor with no access target
+// (the primitive `async` for work that touches no guarded object). Returns a `Task<R>`;
+// pass a `Cancellation_token` to make it skippable before it runs.
+template<typename Fn>
+auto launch(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t<Fn>>
+{
+    using R = std::invoke_result_t<Fn>;
+    auto core = detail::make_executable<R>(std::forward<Fn>(fn), token);
+    detail::submit_closure(default_scheduler(), [core] { core->execute(core.get()); });
+    return Task<R>(core);
+}
 
 } // namespace ts

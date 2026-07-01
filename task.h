@@ -78,6 +78,7 @@ struct Task_control_block
     bool completed = false;
     bool cancelled = false;
     void* result_ptr = nullptr;        // -> the wrapper's stored R (set before complete), or null
+    void (*execute)(Task_control_block*) = nullptr;   // run the body (bodyless => null)
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
     void complete() { settle(false); }
@@ -152,6 +153,61 @@ auto make_block()
         std::shared_ptr<Task_control_block> core(wrapper, &wrapper->core);   // aliasing
         return std::pair{ std::move(core), std::move(wrapper) };
     }
+}
+
+// Empty for `void`, so an executable `void` task pays nothing for a result.
+template<typename R> struct Result_storage { std::optional<R> result; };
+template<> struct Result_storage<void> {};
+
+// An executable task: the monomorphic block (FIRST member, so a `Task_control_block*`
+// aliases / `reinterpret_cast`s back to it) + result storage + the body + a token.
+// `run` is wired into `core.execute`; the scheduler/pipe invokes it via
+// `block->execute(block)`. The body lives here (reachable from the block for future
+// reuse/retraction); its type is erased behind the `execute` function pointer, so the
+// block and everything downstream stay monomorphic.
+template<typename Body, typename R>
+struct Executable
+{
+    Task_control_block core;   // MUST be first
+    Result_storage<R> storage;   // empty for void
+    Body body;
+    Cancellation_token token;
+
+    Executable(Body b, Cancellation_token t)
+        : body(std::move(b)), token(std::move(t))
+    {}
+
+    static void run(Task_control_block* c)
+    {
+        auto* self = reinterpret_cast<Executable*>(c);
+        if (self->token.is_cancel_requested())   // not-yet-started: skip body, settle cancelled
+        {
+            c->cancel();
+            return;
+        }
+        if constexpr (std::is_void_v<R>)
+        {
+            self->body();
+            c->complete();
+        }
+        else
+        {
+            self->storage.result.emplace(self->body());
+            c->result_ptr = &*self->storage.result;
+            c->complete();
+        }
+    }
+};
+
+// Build an executable task; returns the handle core with `execute` wired up. Submit
+// `[core]{ core->execute(core.get()); }` (to the scheduler or a pipe) to run it.
+template<typename R, typename Body>
+std::shared_ptr<Task_control_block> make_executable(Body&& body, Cancellation_token token)
+{
+    using Exec = Executable<std::decay_t<Body>, R>;
+    auto exec = std::make_shared<Exec>(std::forward<Body>(body), token);
+    exec->core.execute = &Exec::run;
+    return std::shared_ptr<Task_control_block>(exec, &exec->core);   // aliasing
 }
 
 // --- apply-style continuation detection -----------------------------------

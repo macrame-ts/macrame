@@ -380,6 +380,37 @@ void test_death_cancelled_value_get()
     TS_CHECK(ts::test::expect_death("cancelled_value_get"));   // get() on a cancelled value task
 }
 
+// --- I: standalone `launch` (bare scheduler task, body in the block) --------
+
+void test_launch_value()
+{
+    TS_CHECK(ts::launch([] { return 6 * 7; }).get() == 42);
+}
+
+void test_launch_void()
+{
+    std::atomic<int> ran{ 0 };
+    ts::launch([&ran] { ran.fetch_add(1); }).get();
+    TS_CHECK(ran.load() == 1);
+}
+
+void test_launch_then()
+{
+    int r = ts::launch([] { return 20; }).then([](int v) { return v + 1; }).get();
+    TS_CHECK(r == 21);
+}
+
+void test_launch_cancelled()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();
+    std::atomic<bool> ran{ false };
+    ts::Task<int> t = ts::launch([&ran] { ran.store(true); return 1; }, src.token());
+    wait_until([&] { return t.is_done(); });
+    TS_CHECK(t.is_cancelled());
+    TS_CHECK(!ran.load());
+}
+
 } // namespace
 
 void run_task_tests()
@@ -416,4 +447,8 @@ void run_task_tests()
     run("cancel void get unblocks", test_cancel_void_get_unblocks);
     run("not cancelled normally", test_not_cancelled_normally);
     run("death: cancelled value get", test_death_cancelled_value_get);
+    run("launch value", test_launch_value);
+    run("launch void", test_launch_void);
+    run("launch then", test_launch_then);
+    run("launch cancelled", test_launch_cancelled);
 }

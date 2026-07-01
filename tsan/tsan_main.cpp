@@ -123,6 +123,27 @@ void stress_when_all()
     assert(total.load() == 3000 * 9);
 }
 
+// Many external threads launching standalone tasks (body-in-block) concurrently,
+// each chained and awaited.
+void stress_launch()
+{
+    constexpr int threads = 6, per = 1500;
+    std::atomic<int> sum{ 0 };
+    {
+        std::vector<std::jthread> ps;
+        for (int t = 0; t < threads; ++t)
+            ps.emplace_back([&]
+            {
+                for (int k = 0; k < per; ++k)
+                {
+                    int v = ts::launch([k] { return k; }).then([](int x) { return x + 1; }).get();
+                    sum.fetch_add(v, std::memory_order_relaxed);
+                }
+            });
+    }   // join
+    (void)sum;
+}
+
 // Cancellation racing execution: request_cancel (a store) concurrent with the body's
 // token check (a load) and with then-propagation; the block must settle exactly once.
 void stress_cancel()
@@ -193,6 +214,7 @@ int main()
     std::puts("tsan: thread_safe stress");  stress_thread_safe();
     std::puts("tsan: signal stress");       stress_signal();
     std::puts("tsan: when_all stress");      stress_when_all();
+    std::puts("tsan: launch stress");        stress_launch();
     std::puts("tsan: cancel stress");        stress_cancel();
     std::puts("tsan: graph stress");        stress_graph();
     std::puts("tsan: graph+async stress");  stress_graph_async();
