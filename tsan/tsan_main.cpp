@@ -123,6 +123,41 @@ void stress_when_all()
     assert(total.load() == 3000 * 9);
 }
 
+// Cancellation racing execution: request_cancel (a store) concurrent with the body's
+// token check (a load) and with then-propagation; the block must settle exactly once.
+void stress_cancel()
+{
+    ts::Thread_safe<int> d{ 0 };
+
+    for (int i = 0; i < 2000; ++i)
+    {
+        ts::Cancellation_source src;
+        ts::Task<int> t = d.async([](const int& v) { return v; }, src.token());
+        ts::Task<int> u = t.then([](int v) { return v + 1; });   // propagates settle either way
+
+        std::jthread canceller([&] { src.request_cancel(); });   // race the body
+        canceller.join();
+
+        while (!u.is_done())
+            std::this_thread::yield();
+        assert(u.is_done());   // settled exactly once, whether completed or cancelled
+    }
+
+    // Graph cancellation racing the run.
+    ts::Thread_safe<int> a{ 0 }, b{ 0 };
+    ts::Static_task_graph g;
+    g.add_node([](int& v) { ++v; }, a);
+    g.add_node([](const int& x, int& y) { y = x; }, a, b);
+    g.compile();
+    for (int i = 0; i < 500; ++i)
+    {
+        ts::Cancellation_source src;
+        std::jthread canceller([&] { src.request_cancel(); });
+        g.execute(ts::default_scheduler(), src.token()).get();
+        canceller.join();
+    }
+}
+
 // A graph node accessing an object directly while other threads fire async on the
 // SAME object: the per-run pipe reservation must keep them from overlapping.
 void stress_graph_async()
@@ -158,6 +193,7 @@ int main()
     std::puts("tsan: thread_safe stress");  stress_thread_safe();
     std::puts("tsan: signal stress");       stress_signal();
     std::puts("tsan: when_all stress");      stress_when_all();
+    std::puts("tsan: cancel stress");        stress_cancel();
     std::puts("tsan: graph stress");        stress_graph();
     std::puts("tsan: graph+async stress");  stress_graph_async();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);

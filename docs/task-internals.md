@@ -368,11 +368,50 @@ async inside a node, and complete access declarations.**
 
 ---
 
+## 11. Cancellation
+
+Cooperative, no exceptions. `Cancellation_source` owns an `atomic<bool>` flag; its
+`token()` is handed to `async` / `then` / `execute`. **Cancellation is a completion
+state**, not a separate channel: a settled task is either completed or cancelled.
+
+- **Checked when work is about to run.** `async`'s body and each graph `run_node`
+  check the token first; if cancelled, the body is **skipped** and the block settles
+  as cancelled. Already-running work is *not* interrupted (a long body can poll the
+  token cooperatively). So cancellation skips *not-yet-started* work.
+- **Propagates automatically.** Continuations carry the outcome — `void(bool
+  cancelled)` for `void`, `void(R*)` (nullptr = cancelled) for a value. `complete`
+  fires them with the result; `cancel` fires them with the cancel signal, and each
+  continuation's closure then cancels *its* subsequent. So cancelling one task
+  cancels the whole downstream chain, and a cancelled prerequisite cancels its
+  continuations even if they weren't given the token. `then(fn, token)` also lets the
+  token cancel *at that link* even when the producer succeeded.
+- **Graph:** `execute(scheduler, token)` — pending nodes skip (the DAG still drains so
+  the run settles), and the completion `Task<void>` is cancelled. In-flight nodes
+  finish.
+- **`get()`:** a cancelled `void` `get()` unblocks (query `is_cancelled()`); a
+  cancelled *value* `get()` is **fatal** — there is no result, so check
+  `is_cancelled()` first. (No exceptions, so this is a precondition, not a throw.)
+
+The token flag is atomic and `settle` is idempotent under the block's mutex, so
+`request_cancel` racing a body's check or a completion is race-free (verified under
+TSan): the block settles exactly once, either way.
+
+**Not covered:** cancelling a `when_all` prerequisite — its internal join
+continuations aren't cancel-aware, so a cancelled prerequisite would stall the join
+(the remaining counter never reaches 0). A cancel *callback* (notify on request) is
+also future work.
+
+---
+
 ## Open items
 
 - **Done:** `Task_state → Task_control_block` rename; idempotent `complete()`;
   `Signal` (bodyless triggerable `Task<void>`); graph↔async pipe reservation, lazy on
-  acquire + early on release — window `[first accessor, last accessor]` (§10).
+  acquire + early on release — window `[first accessor, last accessor]` (§10);
+  cooperative cancellation (§11).
+- **when_all cancellation:** make the internal join cancel-aware so a cancelled
+  prerequisite cancels the join instead of stalling it (§11).
+- **Cancel callback:** notify (a continuation) when cancellation is requested.
 - **Compile-time grouping:** schedule an object's accessors close together to shrink
   its reservation window (fewer interior gaps), where the DAG allows — trades against
   parallelism / critical path, so profiling-guided.

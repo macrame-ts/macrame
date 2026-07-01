@@ -1,6 +1,7 @@
 #pragma once
 
 #include "access.h"
+#include "fatal.h"
 #include "scheduler.h"
 
 #include <array>
@@ -23,6 +24,44 @@ namespace ts
 
 // Ambient scheduler used by `async()` (v1: a process-wide default).
 Scheduler& default_scheduler();
+
+// Cooperative cancellation. A `Cancellation_source` owns the request flag; hand its
+// `token()` to `async`/`then`/`Static_task_graph::execute`. Cancellation is checked
+// when a task/node is about to run (not-yet-started work is skipped) and propagates
+// down continuations and graph successors as a completion state (see `is_cancelled`).
+// A default-constructed token is never cancelled.
+class Cancellation_token
+{
+public:
+    Cancellation_token() = default;
+
+    explicit Cancellation_token(std::shared_ptr<std::atomic<bool>> flag) noexcept
+        : flag_(std::move(flag))
+    {}
+
+    bool is_cancel_requested() const noexcept
+    {
+        return flag_ && flag_->load(std::memory_order_acquire);
+    }
+
+private:
+    std::shared_ptr<std::atomic<bool>> flag_;
+};
+
+class Cancellation_source
+{
+public:
+    Cancellation_source()
+        : flag_(std::make_shared<std::atomic<bool>>(false))
+    {}
+
+    void request_cancel() noexcept { flag_->store(true, std::memory_order_release); }
+    bool is_cancel_requested() const noexcept { return flag_->load(std::memory_order_acquire); }
+    Cancellation_token token() const noexcept { return Cancellation_token(flag_); }
+
+private:
+    std::shared_ptr<std::atomic<bool>> flag_;
+};
 
 namespace detail
 {
@@ -93,8 +132,11 @@ struct Task_control_block
     std::binary_semaphore done{ 0 };
     std::atomic<bool> ready{ false };
     bool completed = false;
+    bool cancelled = false;
     std::optional<R> result;
-    std::vector<std::move_only_function<void(R&)>> continuations;
+    // Continuations receive `&result` on success, `nullptr` on cancellation (so they
+    // propagate cancellation to their own subsequent).
+    std::vector<std::move_only_function<void(R*)>> continuations;
 
     template<typename Fn, typename Arg>
     void run(Fn& fn, Arg& arg)
@@ -104,10 +146,10 @@ struct Task_control_block
 
     void complete(R value)
     {
-        std::vector<std::move_only_function<void(R&)>> conts;
+        std::vector<std::move_only_function<void(R*)>> conts;
         {
             std::scoped_lock lock(mutex);
-            if (completed)   // idempotent: first completion wins
+            if (completed)   // idempotent: first settle wins
                 return;
             result.emplace(std::move(value));
             completed = true;
@@ -116,10 +158,27 @@ struct Task_control_block
         ready.store(true, std::memory_order_release);
         done.release();
         for (auto& c : conts)
-            c(*result);
+            c(&*result);
     }
 
-    void attach(std::move_only_function<void(R&)> cont)
+    void cancel()
+    {
+        std::vector<std::move_only_function<void(R*)>> conts;
+        {
+            std::scoped_lock lock(mutex);
+            if (completed)
+                return;
+            completed = true;
+            cancelled = true;
+            conts = std::move(continuations);
+        }
+        ready.store(true, std::memory_order_release);
+        done.release();
+        for (auto& c : conts)
+            c(nullptr);
+    }
+
+    void attach(std::move_only_function<void(R*)> cont)
     {
         {
             std::scoped_lock lock(mutex);
@@ -129,12 +188,14 @@ struct Task_control_block
                 return;
             }
         }
-        cont(*result);
+        cont(cancelled ? nullptr : &*result);
     }
 
     R get()
     {
         done.acquire();
+        if (cancelled)
+            ts::fatal("Task::get() on a cancelled task; check is_cancelled() first");
         return std::move(*result);
     }
 };
@@ -146,7 +207,9 @@ struct Task_control_block<void>
     std::condition_variable done_cv;   // wakes N waiters (a `Signal` is a barrier)
     std::atomic<bool> ready{ false };
     bool completed = false;
-    std::vector<std::move_only_function<void()>> continuations;
+    bool cancelled = false;
+    // Continuations receive the cancellation flag so they propagate it downstream.
+    std::vector<std::move_only_function<void(bool)>> continuations;
 
     template<typename Fn, typename Arg>
     void run(Fn& fn, Arg& arg)
@@ -155,23 +218,27 @@ struct Task_control_block<void>
         complete();
     }
 
-    void complete()
+    void complete() { settle(false); }
+    void cancel()   { settle(true); }
+
+    void settle(bool cancel_)
     {
-        std::vector<std::move_only_function<void()>> conts;
+        std::vector<std::move_only_function<void(bool)>> conts;
         {
             std::scoped_lock lock(mutex);
-            if (completed)   // idempotent: first completion wins (Signal::trigger)
+            if (completed)   // idempotent: first settle wins (Signal::trigger)
                 return;
             completed = true;
+            cancelled = cancel_;
             conts = std::move(continuations);
         }
         ready.store(true, std::memory_order_release);
         done_cv.notify_all();   // `completed` was set under the lock above: no lost wakeup
         for (auto& c : conts)
-            c();
+            c(cancelled);
     }
 
-    void attach(std::move_only_function<void()> cont)
+    void attach(std::move_only_function<void(bool)> cont)
     {
         {
             std::scoped_lock lock(mutex);
@@ -181,11 +248,12 @@ struct Task_control_block<void>
                 return;
             }
         }
-        cont();
+        cont(cancelled);
     }
 
-    // Blocks until completion. Unlike the value overload, supports any number of
-    // concurrent waiters (a `Signal` fans out to many).
+    // Blocks until settled. Unlike the value overload, supports any number of
+    // concurrent waiters (a `Signal` fans out to many). Cancellation is queried via
+    // `Task::is_cancelled()`; a cancelled `void` get() simply returns.
     void get()
     {
         std::unique_lock lock(mutex);
@@ -233,33 +301,38 @@ public:
         return state_ && state_->ready.load(std::memory_order_acquire);
     }
 
-    // Blocks until the task completes and returns its result. Call once.
+    // True once the task has settled as cancelled (its body was skipped, or an
+    // upstream cancellation propagated to it).
+    bool is_cancelled() const noexcept
+    {
+        return state_ && state_->ready.load(std::memory_order_acquire) && state_->cancelled;
+    }
+
+    // Blocks until the task settles and returns its result. Call once. Fatal if the
+    // task was cancelled (no result) — check `is_cancelled()` first.
     R get()
     {
         return state_->get();
     }
 
-    // Chains a continuation. For a non-void producer the continuation receives
-    // the result by reference; for void it takes no argument. Returns a `Task` for
-    // the continuation's own result.
+    // Chains a continuation. Runs `fn` when this task completes; if this task is
+    // cancelled (or `token` is cancelled when the continuation fires), `fn` is skipped
+    // and the cancellation propagates to the returned task. For a non-void producer
+    // `fn` receives the result by reference (or, for a tuple, apply-style); for void
+    // it takes no argument.
     template<typename Fn>
-    auto then(Fn&& fn)
+    auto then(Fn&& fn, Cancellation_token token = {})
     {
         if constexpr (std::is_void_v<R>)
         {
             using R2 = std::invoke_result_t<Fn>;
             auto next = std::make_shared<detail::Task_control_block<R2>>();
-            state_->attach([next, fn = std::forward<Fn>(fn)]() mutable
+            state_->attach([next, fn = std::forward<Fn>(fn), token](bool cancelled) mutable
             {
-                if constexpr (std::is_void_v<R2>)
-                {
-                    fn();
-                    next->complete();
-                }
-                else
-                {
-                    next->complete(fn());
-                }
+                if (cancelled || token.is_cancel_requested())
+                    next->cancel();
+                else if constexpr (std::is_void_v<R2>) { fn(); next->complete(); }
+                else next->complete(fn());
             });
             return Task<R2>(std::move(next));
         }
@@ -268,17 +341,12 @@ public:
             // Apply-style: unpack the tuple result into `fn`'s arguments.
             using R2 = detail::Apply_result_t<Fn, R>;
             auto next = std::make_shared<detail::Task_control_block<R2>>();
-            state_->attach([next, fn = std::forward<Fn>(fn)](R& r) mutable
+            state_->attach([next, fn = std::forward<Fn>(fn), token](R* r) mutable
             {
-                if constexpr (std::is_void_v<R2>)
-                {
-                    std::apply(fn, r);
-                    next->complete();
-                }
-                else
-                {
-                    next->complete(std::apply(fn, r));
-                }
+                if (!r || token.is_cancel_requested())
+                    next->cancel();
+                else if constexpr (std::is_void_v<R2>) { std::apply(fn, *r); next->complete(); }
+                else next->complete(std::apply(fn, *r));
             });
             return Task<R2>(std::move(next));
         }
@@ -286,17 +354,12 @@ public:
         {
             using R2 = std::invoke_result_t<Fn, R&>;
             auto next = std::make_shared<detail::Task_control_block<R2>>();
-            state_->attach([next, fn = std::forward<Fn>(fn)](R& r) mutable
+            state_->attach([next, fn = std::forward<Fn>(fn), token](R* r) mutable
             {
-                if constexpr (std::is_void_v<R2>)
-                {
-                    fn(r);
-                    next->complete();
-                }
-                else
-                {
-                    next->complete(fn(r));
-                }
+                if (!r || token.is_cancel_requested())
+                    next->cancel();
+                else if constexpr (std::is_void_v<R2>) { fn(*r); next->complete(); }
+                else next->complete(fn(*r));
             });
             return Task<R2>(std::move(next));
         }
@@ -467,30 +530,35 @@ public:
     // `read_write`: functor takes `T&` (and not `const T&`)
     template<typename Fn>
         requires std::invocable<Fn, T&> && (!std::invocable<Fn, const T&>)
-    auto async(Fn&& fn) -> Task<std::invoke_result_t<Fn, T&>>
+    auto async(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t<Fn, T&>>
     {
         return launch<std::invoke_result_t<Fn, T&>, Access::read_write>(
-            &instance_, std::forward<Fn>(fn));
+            &instance_, std::forward<Fn>(fn), token);
     }
 
     // `read_only`: functor takes `const T&`
     template<typename Fn>
         requires std::invocable<Fn, const T&>
-    auto async(Fn&& fn) const -> Task<std::invoke_result_t<Fn, const T&>>
+    auto async(Fn&& fn, Cancellation_token token = {}) const -> Task<std::invoke_result_t<Fn, const T&>>
     {
         return launch<std::invoke_result_t<Fn, const T&>, Access::read_only>(
-            &instance_, std::forward<Fn>(fn));
+            &instance_, std::forward<Fn>(fn), token);
     }
 
 private:
     template<typename R, Access mode, typename Inst, typename Fn>
-    Task<R> launch(Inst* inst, Fn&& fn) const
+    Task<R> launch(Inst* inst, Fn&& fn, Cancellation_token token) const
     {
         auto state = std::make_shared<detail::Task_control_block<R>>();
 
         detail::pipe_enqueue(default_scheduler(), pipe_, mode,
-            [inst, state, fn = std::forward<Fn>(fn)]() mutable
+            [inst, state, fn = std::forward<Fn>(fn), token]() mutable
             {
+                if (token.is_cancel_requested())   // skip the body; settle as cancelled
+                {
+                    state->cancel();
+                    return;
+                }
                 Access_context ctx;
                 ctx.add(inst, mode);
                 Access_scope scope(ctx);

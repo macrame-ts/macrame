@@ -98,8 +98,10 @@ public:
     // Resolve access conflicts + explicit edges into a DAG; detect cycles.
     void compile();
 
-    // Run the compiled graph; returns a completion handle. Re-runnable.
-    Task<void> execute(Scheduler& scheduler = default_scheduler());
+    // Run the compiled graph; returns a completion handle. Re-runnable. If `token` is
+    // cancelled, not-yet-started nodes are skipped and the completion is cancelled
+    // (query with `Task::is_cancelled()`); in-flight nodes still finish.
+    Task<void> execute(Scheduler& scheduler = default_scheduler(), Cancellation_token token = {});
 
     int node_count() const { return static_cast<int>(nodes_.size()); }
 

@@ -21,6 +21,7 @@ struct Static_task_graph::Run_state
 
     Static_task_graph* graph = nullptr;
     Scheduler* scheduler = nullptr;
+    Cancellation_token token;
     std::vector<std::atomic<int>> remaining_deps;        // per node: unmet data prerequisites
     std::vector<std::atomic<int>> remaining_objects;     // per node: not-yet-reserved objects
     std::vector<std::atomic<int>> launched;              // per node: run-once guard (0/1)
@@ -194,7 +195,9 @@ void Static_task_graph::run_node(const std::shared_ptr<Run_state>& run, int inde
     detail::submit_closure(*run->scheduler, [run, index]
     {
         Node& node = run->graph->nodes_[index];
-        node.run();
+
+        if (!run->token.is_cancel_requested())   // cancelled: skip the body, keep draining
+            node.run();
 
         // Early release: free each object this node was the last to touch, so queued
         // async on it can run. Safe -- the count hits 0 only after every node
@@ -208,11 +211,16 @@ void Static_task_graph::run_node(const std::shared_ptr<Run_state>& run, int inde
                 on_data_ready(run, successor);
 
         if (run->remaining_nodes.fetch_sub(1, std::memory_order_acq_rel) == 1)
-            run->done->complete();
+        {
+            if (run->token.is_cancel_requested())
+                run->done->cancel();
+            else
+                run->done->complete();
+        }
     });
 }
 
-Task<void> Static_task_graph::execute(Scheduler& scheduler)
+Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token token)
 {
     if (!compiled_)
         ts::fatal("Static_task_graph::execute called before compile()");
@@ -220,6 +228,7 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler)
     auto run = std::make_shared<Run_state>(nodes_.size(), distinct_pipes_.size());
     run->graph = this;
     run->scheduler = &scheduler;
+    run->token = token;
     for (size_t i = 0; i < nodes_.size(); ++i)
     {
         run->remaining_deps[i].store(nodes_[i].indegree, std::memory_order_relaxed);

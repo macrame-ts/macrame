@@ -309,6 +309,77 @@ void test_signal_multiple_waiters()
     TS_CHECK(woke.load() == 8);
 }
 
+// --- H: cancellation ------------------------------------------------------
+
+void test_cancel_before_run()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();               // cancelled before the task is dispatched
+
+    ts::Thread_safe<int> d{ 0 };
+    std::atomic<bool> ran{ false };
+    ts::Task<int> t = d.async([&ran](int& v) { ran.store(true); return v; }, src.token());
+
+    wait_until([&] { return t.is_done(); });
+    TS_CHECK(t.is_cancelled());
+    TS_CHECK(!ran.load());              // body skipped
+}
+
+void test_cancel_propagates_through_then()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();
+
+    ts::Thread_safe<int> d{ 5 };
+    ts::Task<int> t = d.async([](const int& v) { return v; }, src.token());   // cancelled
+    std::atomic<bool> then_ran{ false };
+    ts::Task<int> u = t.then([&then_ran](int v) { then_ran.store(true); return v + 1; });
+
+    wait_until([&] { return u.is_done(); });
+    TS_CHECK(u.is_cancelled());         // cancellation propagated downstream
+    TS_CHECK(!then_ran.load());
+}
+
+void test_cancel_at_then_via_token()
+{
+    ts::Thread_safe<int> d{ 5 };
+    ts::Task<int> t = d.async([](const int& v) { return v; });   // completes normally
+    wait_until([&] { return t.is_done(); });
+
+    ts::Cancellation_source src;
+    src.request_cancel();
+    std::atomic<bool> then_ran{ false };
+    ts::Task<int> u = t.then([&then_ran](int v) { then_ran.store(true); return v; }, src.token());
+
+    wait_until([&] { return u.is_done(); });
+    TS_CHECK(u.is_cancelled());         // token cancelled the continuation even though t succeeded
+    TS_CHECK(!then_ran.load());
+}
+
+void test_cancel_void_get_unblocks()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();
+
+    ts::Thread_safe<int> d{ 0 };
+    ts::Task<void> t = d.async([](int& v) { v = 1; }, src.token());
+    t.get();                            // void: unblocks, no fatal
+    TS_CHECK(t.is_cancelled());
+}
+
+void test_not_cancelled_normally()
+{
+    ts::Thread_safe<int> d{ 7 };
+    ts::Task<int> t = d.async([](const int& v) { return v; });
+    TS_CHECK(t.get() == 7);
+    TS_CHECK(!t.is_cancelled());
+}
+
+void test_death_cancelled_value_get()
+{
+    TS_CHECK(ts::test::expect_death("cancelled_value_get"));   // get() on a cancelled value task
+}
+
 } // namespace
 
 void run_task_tests()
@@ -339,4 +410,10 @@ void run_task_tests()
     run("signal idempotent trigger", test_signal_idempotent_trigger);
     run("signal copies share state", test_signal_copies_share_state);
     run("signal multiple waiters", test_signal_multiple_waiters);
+    run("cancel before run", test_cancel_before_run);
+    run("cancel propagates through then", test_cancel_propagates_through_then);
+    run("cancel at then via token", test_cancel_at_then_via_token);
+    run("cancel void get unblocks", test_cancel_void_get_unblocks);
+    run("not cancelled normally", test_not_cancelled_normally);
+    run("death: cancelled value get", test_death_cancelled_value_get);
 }

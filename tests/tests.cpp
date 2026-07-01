@@ -12,6 +12,7 @@
 #include "integration_tests.h"
 
 #include <cstring>
+#include <thread>
 
 void run_all_tests()
 {
@@ -72,6 +73,15 @@ void run_death_scenario(const char* name)
         g.add_node([&outside](int&) { outside.increment(); }, a);   // touches undeclared `outside`
         g.compile();
         g.execute().get();   // node runs -> violation
+    }
+    else if (std::strcmp(name, "cancelled_value_get") == 0)
+    {
+        ts::Cancellation_source src;
+        src.request_cancel();
+        ts::Thread_safe<int> d{ 0 };
+        ts::Task<int> t = d.async([](const int& v) { return v; }, src.token());
+        while (!t.is_done()) std::this_thread::yield();
+        t.get();   // cancelled value task has no result -> fatal
     }
     // unknown scenario: return without dying -> parent's expect_death fails
 }

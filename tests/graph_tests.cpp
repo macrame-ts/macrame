@@ -154,6 +154,25 @@ void test_graph_stress()
     TS_CHECK(all);
 }
 
+void test_cancel_skips_nodes()
+{
+    std::array<ts::Thread_safe<int>, wide> data{};
+    std::atomic<int> ran{ 0 };
+
+    ts::Static_task_graph g;
+    for (auto& d : data)
+        g.add_node([&ran](int& v) { ran.fetch_add(1); v = 1; }, d);
+    g.compile();
+
+    ts::Cancellation_source src;
+    src.request_cancel();               // cancel before running
+    ts::Task<void> run = g.execute(ts::default_scheduler(), src.token());
+    run.get();
+
+    TS_CHECK(run.is_cancelled());
+    TS_CHECK(ran.load() == 0);          // every node skipped
+}
+
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
@@ -172,6 +191,7 @@ void run_graph_tests()
     run("diamond", test_diamond);
     run("completion after all", test_completion_after_all);
     run("graph stress", test_graph_stress);
+    run("cancel skips nodes", test_cancel_skips_nodes);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);
