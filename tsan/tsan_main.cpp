@@ -66,6 +66,28 @@ void stress_thread_safe()
     assert(final == threads * per / 2);
 }
 
+// Many threads triggering one Signal concurrently while others wait / attach
+// continuations: idempotent `complete()` must fire exactly once with no race.
+void stress_signal()
+{
+    constexpr int rounds = 2000, triggerers = 6;
+    for (int r = 0; r < rounds; ++r)
+    {
+        ts::Signal sig;
+        std::atomic<int> fired{ 0 };
+        sig.then([&fired] { fired.fetch_add(1, std::memory_order_relaxed); });
+
+        {
+            std::vector<std::jthread> threads;
+            for (int t = 0; t < triggerers; ++t)
+                threads.emplace_back([&] { sig.trigger(); });
+            threads.emplace_back([&] { sig.get(); });   // a concurrent waiter
+        }   // join
+        sig.get();
+        assert(fired.load() == 1);
+    }
+}
+
 // Graph with internal parallel bands, re-executed in a loop.
 void stress_graph()
 {
@@ -83,8 +105,10 @@ void stress_graph()
 
 int main()
 {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered: last stage is visible if it hangs
     std::puts("tsan: scheduler stress");   stress_scheduler();
     std::puts("tsan: thread_safe stress");  stress_thread_safe();
+    std::puts("tsan: signal stress");       stress_signal();
     std::puts("tsan: graph stress");        stress_graph();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);
     std::puts("tsan: done (no races)");

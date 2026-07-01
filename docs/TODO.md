@@ -2,12 +2,17 @@
 
 Future work, captured as it comes up. Not ordered by priority.
 
+The dynamic-task internal design (three-type model, lifecycle, unified
+lock-counter, retraction, nested tasks, access invariant, allocation) is speced
+in `docs/task-internals.md` — the items below under "Task types" / "Task chaining"
+are the incremental steps toward it.
+
 ## Task chaining / results
 - Typed prerequisite -> subsequent chaining (dynamic path): **done** — `Task::then` (single) and `when_all` (multi, results as a tuple).
 - Apply-style `when_all`: unpack the result tuple into separate continuation args (`fn(r1, r2, ...)`) instead of `then([](tuple&){...})`.
 - `when_all` with void prerequisites (pure-ordering joins) and move-only / non-copyable results (currently results must be copyable).
 - Typed chaining in `Static_task_graph` (graph nodes are void-only for now): let a node consume prerequisite-node results.
-- `Task`: define get()/then() interaction (currently get() consumes the result; mixing with then() is unsupported); allow multiple waiters; cancellation.
+- `Task`: define get()/then() interaction (currently get() consumes the result; mixing with then() is unsupported); cancellation. Multiple concurrent blocking `get()` waiters: **done for `void`** (`Task_control_block<void>` wakes N waiters via a condition variable — a `Signal` is a barrier); the value overload stays single-consumer by design (a moved result can't go to two waiters).
 
 ## Task types
 - Unify the handle returned from `Static_task_graph::add_node` with regular async `Task`s: **done** — split, not merged. `add_node` now returns a distinct `Graph_node` (build-time ordering identity: `after`/`before`); `Task<R>` is purely a completion handle (`get`/`then`/`is_done`/`when_all`/`execute`). The run-many model means a node has no single result, so it can't be a single-shot `Task`. Revisit when typed graph chaining lands (a `Graph_node` may then mint a per-run `Task<R>`).

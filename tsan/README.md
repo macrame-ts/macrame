@@ -20,9 +20,23 @@ From the repo root, in WSL:
 bash tsan/run.sh
 ```
 
+From Windows (PowerShell), invoke a **non-interactive** shell — never `-lic`
+(an interactive login shell blocks on a tty and never runs the script):
+
+```powershell
+wsl.exe -e bash -c "bash /mnt/c/src/task_system/tsan/run.sh"
+```
+
 Clean exit + `tsan: done (no races)` = no races found. A race prints a report
 and exits nonzero (`halt_on_error=1`). **Verified clean** with clang 21 +
 libstdc++ on Ubuntu 26.04 (WSL).
+
+**Read the exit code directly** — do not pipe the run through `tail`/`head` when
+you care about pass/fail: a pipeline returns the *last* command's status, which
+hid a killed run as "exit 0" once. The script has a watchdog (`timeout`,
+`TSAN_TIMEOUT` seconds, default 180) so a deadlock/livelock fails fast instead of
+sitting at ~0% CPU forever, and it kills+removes any stale `ts_tsan` before
+building so a hung previous run can't block the next build.
 
 ## Notes
 

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <thread>
 #include <tuple>
+#include <vector>
 
 using namespace std::chrono_literals;
 using ts::test::run;
@@ -157,6 +158,93 @@ void test_when_all_nested()
     TS_CHECK(s == 6);
 }
 
+// --- G: `Signal` ----------------------------------------------------------
+
+void test_signal_trigger_then_wait()
+{
+    ts::Signal s;
+    TS_CHECK(!s.is_done());
+    s.trigger();
+    s.get();                    // does not block: already triggered
+    TS_CHECK(s.is_done());
+}
+
+void test_signal_wait_then_trigger()
+{
+    ts::Signal s;
+    std::atomic<bool> woke{ false };
+    std::jthread producer([&]
+    {
+        std::this_thread::sleep_for(10ms);
+        s.trigger();
+    });
+
+    s.get();                    // blocks until triggered on the other thread
+    woke.store(true);
+    TS_CHECK(woke.load());
+    TS_CHECK(s.is_done());
+}
+
+void test_signal_then()
+{
+    ts::Signal s;
+    std::atomic<int> sink{ 0 };
+    ts::Task<void> t = s.then([&sink] { sink.store(42); });
+    TS_CHECK(sink.load() == 0);  // continuation waits for the trigger
+    s.trigger();
+    t.get();
+    TS_CHECK(sink.load() == 42);
+}
+
+void test_signal_then_after_trigger()
+{
+    ts::Signal s;
+    s.trigger();
+    std::atomic<int> sink{ 0 };
+    s.then([&sink] { sink.store(7); }).get();   // attached after completion: runs inline
+    TS_CHECK(sink.load() == 7);
+}
+
+void test_signal_idempotent_trigger()
+{
+    ts::Signal s;
+    std::atomic<int> fired{ 0 };
+    s.then([&fired] { fired.fetch_add(1); });
+
+    // Many concurrent triggers must complete the signal exactly once.
+    {
+        std::vector<std::jthread> threads;
+        for (int i = 0; i < 8; ++i)
+            threads.emplace_back([&] { s.trigger(); });
+    }
+    s.get();
+    TS_CHECK(fired.load() == 1);
+}
+
+void test_signal_copies_share_state()
+{
+    ts::Signal s;
+    ts::Signal copy = s;        // shares one control block
+    s.trigger();
+    copy.get();
+    TS_CHECK(copy.is_done() && s.is_done());
+}
+
+void test_signal_multiple_waiters()
+{
+    ts::Signal s;
+    std::atomic<int> woke{ 0 };
+    {
+        std::vector<std::jthread> waiters;
+        for (int i = 0; i < 8; ++i)
+            waiters.emplace_back([&] { s.get(); woke.fetch_add(1); });   // all block on one signal
+        std::this_thread::sleep_for(5ms);   // let them park
+        TS_CHECK(woke.load() == 0);
+        s.trigger();
+    }   // join: every waiter must have woken
+    TS_CHECK(woke.load() == 8);
+}
+
 } // namespace
 
 void run_task_tests()
@@ -175,4 +263,11 @@ void run_task_tests()
     run("when_all out of order", test_when_all_out_of_order);
     run("when_all already complete", test_when_all_already_complete);
     run("when_all nested", test_when_all_nested);
+    run("signal trigger then wait", test_signal_trigger_then_wait);
+    run("signal wait then trigger", test_signal_wait_then_trigger);
+    run("signal then", test_signal_then);
+    run("signal then after trigger", test_signal_then_after_trigger);
+    run("signal idempotent trigger", test_signal_idempotent_trigger);
+    run("signal copies share state", test_signal_copies_share_state);
+    run("signal multiple waiters", test_signal_multiple_waiters);
 }

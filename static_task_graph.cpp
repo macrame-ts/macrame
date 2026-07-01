@@ -18,7 +18,7 @@ struct Static_task_graph::Run_state
     Scheduler* scheduler = nullptr;
     std::vector<std::atomic<int>> remaining_deps;
     std::atomic<int> remaining_nodes{ 0 };
-    std::shared_ptr<detail::Task_state<void>> done;
+    std::shared_ptr<detail::Task_control_block<void>> done;
 };
 
 void Static_task_graph::add_edge(int prerequisite, int successor)
@@ -135,7 +135,7 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler)
     for (size_t i = 0; i < nodes_.size(); ++i)
         run->remaining_deps[i].store(nodes_[i].indegree, std::memory_order_relaxed);
     run->remaining_nodes.store(static_cast<int>(nodes_.size()), std::memory_order_relaxed);
-    run->done = std::make_shared<detail::Task_state<void>>();
+    run->done = std::make_shared<detail::Task_control_block<void>>();
 
     Task<void> result(run->done);
 

@@ -60,16 +60,21 @@ struct Pipe
 
 void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> fn);
 
-// --- Task completion state -------------------------------------------------
+// --- Task control block ----------------------------------------------------
 //
-// Holds the result plus a list of continuations attached via `Task::then()`.
-// Continuations fire when the producer completes (inline on the completing
-// worker); a continuation attached after completion runs inline on the caller.
+// The refcounted completion/dependency core behind a `Task<R>` handle. Holds the
+// result plus a list of continuations attached via `Task::then()`. Continuations
+// fire when the producer completes (inline on the completing worker); a
+// continuation attached after completion runs inline on the caller. Monomorphic on
+// `R` only — the closure type is erased at the entry point (`Thread_safe::launch`)
+// and never reaches here, so there is no per-closure instantiation, no vtable, and
+// no virtual dispatch (see docs/task-internals.md §2).
 // Note: mixing `get()` and `then()` on the same task, or calling `get()` twice, is
-// unsupported (`get()` moves the result out).
+// unsupported (`get()` moves the result out). `complete()` is idempotent so a
+// bodyless block can be triggered (see `Signal`); the first completion wins.
 
 template<typename R>
-struct Task_state
+struct Task_control_block
 {
     std::mutex mutex;
     std::binary_semaphore done{ 0 };
@@ -89,6 +94,8 @@ struct Task_state
         std::vector<std::move_only_function<void(R&)>> conts;
         {
             std::scoped_lock lock(mutex);
+            if (completed)   // idempotent: first completion wins
+                return;
             result.emplace(std::move(value));
             completed = true;
             conts = std::move(continuations);
@@ -120,10 +127,10 @@ struct Task_state
 };
 
 template<>
-struct Task_state<void>
+struct Task_control_block<void>
 {
     std::mutex mutex;
-    std::binary_semaphore done{ 0 };
+    std::condition_variable done_cv;   // wakes N waiters (a `Signal` is a barrier)
     std::atomic<bool> ready{ false };
     bool completed = false;
     std::vector<std::move_only_function<void()>> continuations;
@@ -140,11 +147,13 @@ struct Task_state<void>
         std::vector<std::move_only_function<void()>> conts;
         {
             std::scoped_lock lock(mutex);
+            if (completed)   // idempotent: first completion wins (Signal::trigger)
+                return;
             completed = true;
             conts = std::move(continuations);
         }
         ready.store(true, std::memory_order_release);
-        done.release();
+        done_cv.notify_all();   // `completed` was set under the lock above: no lost wakeup
         for (auto& c : conts)
             c();
     }
@@ -162,9 +171,12 @@ struct Task_state<void>
         cont();
     }
 
+    // Blocks until completion. Unlike the value overload, supports any number of
+    // concurrent waiters (a `Signal` fans out to many).
     void get()
     {
-        done.acquire();
+        std::unique_lock lock(mutex);
+        done_cv.wait(lock, [this] { return completed; });
     }
 };
 
@@ -178,7 +190,7 @@ class Task
 public:
     Task() = default;
 
-    explicit Task(std::shared_ptr<detail::Task_state<R>> state) noexcept
+    explicit Task(std::shared_ptr<detail::Task_control_block<R>> state) noexcept
         : state_(std::move(state))
     {}
 
@@ -202,7 +214,7 @@ public:
         if constexpr (std::is_void_v<R>)
         {
             using R2 = std::invoke_result_t<Fn>;
-            auto next = std::make_shared<detail::Task_state<R2>>();
+            auto next = std::make_shared<detail::Task_control_block<R2>>();
             state_->attach([next, fn = std::forward<Fn>(fn)]() mutable
             {
                 if constexpr (std::is_void_v<R2>)
@@ -220,7 +232,7 @@ public:
         else
         {
             using R2 = std::invoke_result_t<Fn, R&>;
-            auto next = std::make_shared<detail::Task_state<R2>>();
+            auto next = std::make_shared<detail::Task_control_block<R2>>();
             state_->attach([next, fn = std::forward<Fn>(fn)](R& r) mutable
             {
                 if constexpr (std::is_void_v<R2>)
@@ -237,8 +249,11 @@ public:
         }
     }
 
+protected:
+    detail::Task_control_block<R>* control() const noexcept { return state_.get(); }
+
 private:
-    std::shared_ptr<detail::Task_state<R>> state_;
+    std::shared_ptr<detail::Task_control_block<R>> state_;
 };
 
 namespace detail
@@ -246,7 +261,7 @@ namespace detail
 
 template<typename... Rs>
 void when_all_finish(const std::shared_ptr<std::tuple<std::optional<Rs>...>>& slots,
-                     const std::shared_ptr<Task_state<std::tuple<Rs...>>>& next)
+                     const std::shared_ptr<Task_control_block<std::tuple<Rs...>>>& next)
 {
     [&]<std::size_t... J>(std::index_sequence<J...>)
     {
@@ -258,7 +273,7 @@ template<std::size_t... I, typename... Rs>
 void when_all_attach(std::index_sequence<I...>,
                      std::shared_ptr<std::tuple<std::optional<Rs>...>> slots,
                      std::shared_ptr<std::atomic<int>> remaining,
-                     std::shared_ptr<Task_state<std::tuple<Rs...>>> next,
+                     std::shared_ptr<Task_control_block<std::tuple<Rs...>>> next,
                      Task<Rs>... prerequisites)
 {
     (prerequisites.then([slots, remaining, next](Rs& value)
@@ -282,13 +297,34 @@ Task<std::tuple<Rs...>> when_all(Task<Rs>... prerequisites)
 
     auto slots = std::make_shared<std::tuple<std::optional<Rs>...>>();
     auto remaining = std::make_shared<std::atomic<int>>(static_cast<int>(sizeof...(Rs)));
-    auto next = std::make_shared<detail::Task_state<std::tuple<Rs...>>>();
+    auto next = std::make_shared<detail::Task_control_block<std::tuple<Rs...>>>();
 
     detail::when_all_attach(std::index_sequence_for<Rs...>{},
         slots, remaining, next, std::move(prerequisites)...);
 
     return Task<std::tuple<Rs...>>(next);
 }
+
+// A manually-completed synchronization point: a bodyless `Task<void>` (no work is
+// scheduled or executed) that you `trigger()` by hand. It is both producer and
+// consumer in one handle — the consumer side is inherited from `Task<void>`
+// (`get`/`wait`, `is_done`, `then`), the producer side is `trigger()`. Copyable;
+// copies share one control block. Used as a done-signal, a barrier / pipeline-phase
+// gate, or an inter-task signal (the integrated equivalent of a manual-reset event
+// / a promise+future fused). `trigger()` is idempotent (first call wins), so it is
+// safe to trigger from multiple threads or more than once.
+class Signal : public Task<void>
+{
+public:
+    Signal()
+        : Task<void>(std::make_shared<detail::Task_control_block<void>>())
+    {}
+
+    void trigger()
+    {
+        control()->complete();
+    }
+};
 
 // The only sanctioned way to touch a `T` across threads. You never receive a bare
 // `T&`; you hand a functor to `async()` and it runs once access has been granted.
@@ -349,7 +385,7 @@ private:
     template<typename R, Access mode, typename Inst, typename Fn>
     Task<R> launch(Inst* inst, Fn&& fn) const
     {
-        auto state = std::make_shared<detail::Task_state<R>>();
+        auto state = std::make_shared<detail::Task_control_block<R>>();
 
         detail::pipe_enqueue(default_scheduler(), pipe_, mode,
             [inst, state, fn = std::forward<Fn>(fn)]() mutable
