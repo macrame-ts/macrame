@@ -147,38 +147,7 @@ private:
     mutable detail::Pipe pipe_;
 };
 
-// Launch a standalone task on the scheduler — a bare functor with no access target
-// (the primitive `async` for work that touches no guarded object). Returns a `Task<R>`;
-// pass a `Cancellation_token` to make it skippable before it runs.
-template<typename Fn>
-auto launch(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t<Fn>>
-{
-    using R = std::invoke_result_t<Fn>;
-    // Inherit the launcher's access grant (if any), by value: sub-work launched from a
-    // task body (see `nested`) then runs under the launcher's permissions, so it may
-    // touch the guarded data the launcher owns -- e.g. a graph node fanning dynamic
-    // sub-work over the store it holds. The copy is independent of the launcher's stack,
-    // so it is valid after the launcher unwinds and on whatever worker runs the body.
-    auto body = [fn = std::forward<Fn>(fn), ctx = detail::snapshot_access()]() mutable -> R
-    {
-        detail::Inherited_access_scope scope(ctx);
-        return fn();
-    };
-    auto core = detail::make_executable<R>(std::move(body), token);
-    core->retractable = true;   // bare scheduler task (no pipe binding): safe to run inline from a waiter
-    detail::submit_closure(default_scheduler(), [core, gen = core->generation()] { core->execute(core, gen); });
-    return Task<R>(core);
-}
-
-// Launch a task and attach it as a nested task of the currently-executing task (its
-// completion gates the parent's). Sugar for `launch` + `add_nested`; call from within
-// a task body.
-template<typename Fn>
-auto nested(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t<Fn>>
-{
-    auto t = launch(std::forward<Fn>(fn), token);
-    add_nested(t);
-    return t;
-}
+// `ts::launch` / `ts::nested` (bare scheduler tasks) live in task.h now — they dispatch
+// through the `submit_ready` bridge and need no pipe, so they belong with the task core.
 
 } // namespace ts

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "access.h"   // grant inheritance for launched/nested sub-work (snapshot_access)
 #include "fatal.h"
 
 #include <array>
@@ -338,6 +339,22 @@ std::shared_ptr<Task_control_block> make_executable(Body&& body, Cancellation_to
     return std::shared_ptr<Task_control_block>(exec, &exec->core);   // aliasing
 }
 
+// Wrap `fn` so the task runs under the access grant active where it was BUILT (see
+// access.h): sub-work launched from a task body inherits the launcher's permissions and
+// may touch the launcher's guarded data. The snapshot is by value, so it is valid after
+// the launcher unwinds and on whatever worker (or retractor) runs the body; a top-level
+// build (no active grant) captures nothing, so the scope is a no-op. Shared by
+// `ts::launch` and `ts::task` so both the eager and the builder path inherit alike.
+template<typename R, typename Fn>
+auto with_inherited_access(Fn&& fn)
+{
+    return [fn = std::forward<Fn>(fn), ctx = snapshot_access()]() mutable -> R
+    {
+        Inherited_access_scope scope(ctx);
+        return fn();
+    };
+}
+
 // --- apply-style continuation detection -----------------------------------
 //
 // A `then` off a tuple-valued task may take the tuple by reference (`then([](tuple&
@@ -581,15 +598,31 @@ private:
 
 // Configure a standalone task (body + prerequisites) to launch later. `fn` takes no
 // arguments (a bare scheduler task). Runs once all prerequisites (added via
-// `.after(...)`) have settled.
+// `.after(...)`) have settled. Inherits the launcher's access grant (like `ts::launch`),
+// so a builder task used as nested sub-work may touch the parent's guarded data.
 template<typename Fn>
 auto task(Fn&& fn)
 {
     using R = std::invoke_result_t<Fn>;
-    auto core = detail::make_executable<R>(std::forward<Fn>(fn), {});
+    auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), {});
     core->num_locks.store(1, std::memory_order_relaxed);   // the "not launched" lock
     core->retractable = true;   // bare scheduler task: safe to run inline from a waiter
     return Task_builder<R>(std::move(core));
+}
+
+// Launch a standalone task on the scheduler — a bare functor with no access target (the
+// primitive `async` for work that touches no guarded object). Returns a `Task<R>`; pass a
+// `Cancellation_token` to make it skippable before it runs. Dispatches through the
+// `submit_ready` bridge (so this stays scheduler-independent) and inherits the launcher's
+// access grant, so sub-work launched from a task body may touch the launcher's data.
+template<typename Fn>
+auto launch(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t<Fn>>
+{
+    using R = std::invoke_result_t<Fn>;
+    auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), std::move(token));
+    core->retractable = true;   // bare scheduler task (no pipe binding): safe to run inline from a waiter
+    detail::submit_ready(core);
+    return Task<R>(core);
 }
 
 // Attach `child` as a NESTED task of the currently-executing task: that task will not
@@ -615,6 +648,17 @@ void add_nested(const Task<R>& child)
         }
     }
     detail::Task_control_block::release(parent);   // child already settled -> release the lock now
+}
+
+// Launch a task and attach it as a nested task of the currently-executing task (its
+// completion gates the parent's). Sugar for `launch` + `add_nested`; call from within a
+// task body.
+template<typename Fn>
+auto nested(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t<Fn>>
+{
+    auto t = launch(std::forward<Fn>(fn), std::move(token));
+    add_nested(t);
+    return t;
 }
 
 namespace detail
