@@ -89,5 +89,10 @@ void run_death_scenario(const char* name)
         t.get();
         ts::add_nested(t);   // no currently-executing task -> fatal
     }
+    else if (std::strcmp(name, "reset_unsettled") == 0)
+    {
+        auto t = ts::task([] { return 1; });   // built, not launched -> not settled
+        t.reset();   // reset before the task has settled -> fatal
+    }
     // unknown scenario: return without dying -> parent's expect_death fails
 }

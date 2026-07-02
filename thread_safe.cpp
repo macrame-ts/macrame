@@ -29,12 +29,16 @@ void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closur
 // bodyless, just complete). Bridges task.h's lock-counter to the scheduler.
 void submit_ready(std::shared_ptr<Task_control_block> block)
 {
+    // Capture the reuse generation: a dispatch left stale by a `reset` (retraction can
+    // queue a duplicate) must not re-run the body against the new run. `claim(gen)`
+    // (inside execute, or here for a bodyless block) is the atomic gate. See task.h.
+    std::uint64_t gen = block->generation();
     submit_closure(default_scheduler(),
-        [block = std::move(block)]
+        [block = std::move(block), gen]
         {
             if (block->execute)
-                block->execute(block);
-            else
+                block->execute(block, gen);      // claims `gen` internally (dedup + stale-skip)
+            else if (block->claim(gen))          // bodyless: claim so a stale/duplicate no-ops
                 block->complete();
         });
 }

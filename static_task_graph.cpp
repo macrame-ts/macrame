@@ -247,7 +247,7 @@ void Static_task_graph::run_node(Run_state& run, int index)
 void Static_task_graph::node_trampoline(void* node)
 {
     auto* n = static_cast<Node*>(node);
-    n->block->execute(n->block);
+    n->block->execute(n->block, n->block->generation());
 }
 
 // The node block's `execute`. Mirrors `Executable::run`, but reaches the body via
@@ -257,11 +257,11 @@ void Static_task_graph::node_trampoline(void* node)
 // and all nested tasks release. The block carries the run's `token`, so a cancelled node
 // skips its body (settling cancelled) -- `on_complete` still fires, keeping the drain
 // going.
-void Static_task_graph::run_graph_node(const std::shared_ptr<detail::Task_control_block>& block)
+void Static_task_graph::run_graph_node(const std::shared_ptr<detail::Task_control_block>& block, std::uint64_t gen)
 {
     using Block = detail::Task_control_block;
 
-    if (block->started.exchange(true, std::memory_order_acq_rel))
+    if (!block->claim(gen))
         return;   // already claimed (belt-and-suspenders; graph nodes dispatch once)
 
     auto* self = reinterpret_cast<Graph_node_block*>(block.get());
@@ -349,7 +349,7 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token t
         auto* w = reinterpret_cast<Graph_node_block*>(nodes_[i].block.get());
         w->graph = this;   // refresh back pointer too (see above)
         detail::Task_control_block& b = w->core;
-        b.started.store(false, std::memory_order_relaxed);
+        b.run_state.store(0, std::memory_order_relaxed);   // generation 0, unclaimed (nodes aren't reset())
         b.completed = false;
         b.cancelled = false;
         b.ready.store(false, std::memory_order_relaxed);

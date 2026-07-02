@@ -88,7 +88,7 @@ struct Task_control_block
     bool completed = false;
     bool cancelled = false;
     void* result_ptr = nullptr;        // -> the wrapper's stored R (set before complete), or null
-    void (*execute)(const std::shared_ptr<Task_control_block>&) = nullptr;   // run the body (null => bodyless)
+    void (*execute)(const std::shared_ptr<Task_control_block>&, std::uint64_t generation) = nullptr;   // run the body (null => bodyless)
     // Fired once at `settle` (completed OR cancelled), after continuations/successors.
     // Unlike a continuation it is NOT consumed, so a reused block (e.g. a re-armed graph
     // node) keeps it across runs -- an alloc-free completion hook. Null for most tasks.
@@ -99,8 +99,27 @@ struct Task_control_block
     // tasks (gate completion). See docs/task-internals.md §4/§7.
     static constexpr std::uint32_t execution_flag = 0x8000'0000u;
     std::atomic<std::uint32_t> num_locks{ 0 };
-    std::atomic<bool> started{ false };   // claim: only one of {worker, retractor} runs the body
+    // One-runner claim + reuse generation fused into ONE atomic, so a stale dispatch and
+    // a concurrent `reset()` can't be observed out of order (two separate atomics could,
+    // letting a stale dispatch see the old generation but the new unclaimed state and
+    // wrongly run). Bits [63:1] = generation (bumped by `reset`), bit [0] = body claimed.
+    // A dispatch captures the generation it was queued for and calls `claim(gen)`: exactly
+    // one caller (worker or retractor) wins per generation; a dispatch left stale by a
+    // `reset` (retraction queues a duplicate the reset would otherwise let re-run the
+    // body) fails the CAS and skips.
+    std::atomic<std::uint64_t> run_state{ 0 };
     bool retractable = false;             // safe to run inline from a waiter (no pipe/access binding)
+
+    std::uint64_t generation() const noexcept { return run_state.load(std::memory_order_relaxed) >> 1; }
+
+    // Claim the body for `gen`; true if this caller should run it. Fails if already
+    // claimed (another runner) or if `gen` is no longer current (re-armed by `reset`).
+    bool claim(std::uint64_t gen) noexcept
+    {
+        std::uint64_t expected = gen << 1;
+        return run_state.compare_exchange_strong(
+            expected, (gen << 1) | 1u, std::memory_order_acq_rel, std::memory_order_relaxed);
+    }
     std::vector<std::shared_ptr<Task_control_block>> successors;      // decremented on settle
     std::vector<std::shared_ptr<Task_control_block>> prerequisites;   // backward links, for deep retraction
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
@@ -165,11 +184,28 @@ struct Task_control_block
         done_cv.wait(lock, [this] { return completed; });
     }
 
+    // Re-arm this settled block for another run (reuse — see `Task_builder::reset` /
+    // `Signal::reset`). `successors`/`prerequisites`/`continuations` were drained by
+    // `settle`, and the result storage is overwritten by the next run's body, so only
+    // the completion scalars reset here. Leaves `num_locks` at 0 (the caller re-applies
+    // any launch lock). Precondition: settled and quiescent — one run in flight, prior
+    // result consumed; the `ready` gate rejects re-arming a task that has not settled.
+    void reset()
+    {
+        if (!ready.load(std::memory_order_acquire))
+            ts::fatal("Task_control_block::reset() on a task that has not settled");
+        run_state.store((generation() + 1) << 1, std::memory_order_relaxed);   // next generation, unclaimed
+        completed = false;
+        cancelled = false;
+        num_locks.store(0, std::memory_order_relaxed);
+        ready.store(false, std::memory_order_release);
+    }
+
     // Deep retraction: run the un-started part of `blk`'s dependency subtree inline on
     // the *calling* thread instead of parking on it — so a waiter under worker
     // exhaustion (nested fork-join) makes progress rather than deadlocking. Retract
     // `blk`'s prerequisites first (recursively), then, once its prerequisites are met
-    // and it hasn't started, run its body inline. `execute` claims via `started`, so a
+    // and it hasn't started, run its body inline. `execute` claims via `run_state`, so a
     // worker and a retractor never both run a body; non-retractable prerequisites
     // (pipe tasks, externally-triggered `Signal`s) are left to complete on their own.
     static void retract(const std::shared_ptr<Task_control_block>& blk)
@@ -186,7 +222,7 @@ struct Task_control_block
             retract(p);
 
         if (blk->execute && blk->num_locks.load(std::memory_order_acquire) == 0)
-            blk->execute(blk);   // ready & not started -> run inline (no-op if a worker beat us)
+            blk->execute(blk, blk->generation());   // ready & not started -> run inline (no-op if a worker beat us)
     }
 
     static void retract_or_wait(const std::shared_ptr<Task_control_block>& blk)
@@ -255,10 +291,10 @@ struct Executable
         : body(std::move(b))
     {}
 
-    static void run(const std::shared_ptr<Task_control_block>& c)
+    static void run(const std::shared_ptr<Task_control_block>& c, std::uint64_t gen)
     {
-        if (c->started.exchange(true, std::memory_order_acq_rel))
-            return;   // already claimed by a worker or a retractor
+        if (!c->claim(gen))
+            return;   // claimed by another runner, or stale after a reset
 
         auto* self = reinterpret_cast<Executable*>(c.get());
         if (c->token.is_cancel_requested())   // not-yet-started: skip body, settle cancelled
@@ -470,11 +506,19 @@ inline void add_prerequisite(const std::shared_ptr<Task_control_block>& prereq,
 // A configured-but-not-launched task: attach prerequisites, then `launch()`. Built by
 // `ts::task(fn)`; owns the executable block until launched. `launch()` removes the
 // "not launched" lock, so the task runs once every prerequisite has settled.
+//
+// The builder is also the **reusable** handle: it retains the block after `launch()`
+// (which hands out a `Task<R>` aliasing the same block, but the builder keeps its own
+// reference), so a body + result storage allocated once can be re-run many times. The
+// pattern is `t.reset().after(...).launch(); r = t.get();` — `reset()` re-arms the block
+// and the "not launched" lock for another run, prerequisites are re-established each run.
+// One run in flight; `reset()` only after the prior run settled and its result was
+// consumed. This avoids reallocation (pooling doesn't help — reuse is the point).
 template<typename R>
 class Task_builder
 {
 public:
-    // Run after each prerequisite settles. Call before `launch()`.
+    // Run after each prerequisite settles. Call before `launch()` (each run).
     template<typename... Ps>
     Task_builder& after(const Task<Ps>&... prerequisites)
     {
@@ -488,6 +532,22 @@ public:
         detail::Task_control_block::release(core_);   // remove the launch lock
         return Task<R>(core_);
     }
+
+    // Re-arm for another run: re-arm the block and restore the "not launched" lock, so
+    // `after(...).launch()` runs it again. Precondition: the prior run settled and its
+    // result was consumed (one run in flight). Chain: `t.reset().after(x).launch()`.
+    Task_builder& reset()
+    {
+        core_->reset();
+        core_->num_locks.store(1, std::memory_order_relaxed);   // the "not launched" lock
+        return *this;
+    }
+
+    // Consume this run's result (see `Task<R>::get`) / query completion. The builder is
+    // the handle; equivalently `launch()`'s returned `Task<R>` can be used.
+    R get() { return Task<R>(core_).get(); }
+    bool is_done() const noexcept { return Task<R>(core_).is_done(); }
+    bool is_cancelled() const noexcept { return Task<R>(core_).is_cancelled(); }
 
 private:
     template<typename Fn> friend auto task(Fn&& fn);
@@ -660,6 +720,13 @@ public:
     void trigger()
     {
         control()->complete();
+    }
+
+    // Re-arm so it can be triggered again — a reusable barrier / phase gate. Precondition:
+    // previously triggered and all waiters released (one use in flight).
+    void reset()
+    {
+        control()->reset();
     }
 };
 

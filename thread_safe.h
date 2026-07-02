@@ -139,7 +139,7 @@ private:
         };
         auto core = detail::make_executable<R>(std::move(body), token);
         detail::pipe_enqueue(default_scheduler(), pipe_, mode,
-            [core] { core->execute(core); });
+            [core, gen = core->generation()] { core->execute(core, gen); });
         return Task<R>(core);
     }
 
@@ -166,7 +166,7 @@ auto launch(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t
     };
     auto core = detail::make_executable<R>(std::move(body), token);
     core->retractable = true;   // bare scheduler task (no pipe binding): safe to run inline from a waiter
-    detail::submit_closure(default_scheduler(), [core] { core->execute(core); });
+    detail::submit_closure(default_scheduler(), [core, gen = core->generation()] { core->execute(core, gen); });
     return Task<R>(core);
 }
 

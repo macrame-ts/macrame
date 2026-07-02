@@ -459,6 +459,73 @@ void test_task_after_cancelled_prereq()
     TS_CHECK(a.is_cancelled());
 }
 
+// --- J2: reusable tasks (reset) --------------------------------------------
+
+// The builder is the reusable handle: one block/body, re-run across runs via reset().
+void test_reuse_value()
+{
+    std::atomic<int> counter{ 0 };
+    auto t = ts::task([&counter] { return counter.fetch_add(1) + 1; });
+
+    t.launch();
+    TS_CHECK(t.get() == 1);
+    t.reset().launch();
+    TS_CHECK(t.get() == 2);
+    t.reset().launch();
+    TS_CHECK(t.get() == 3);   // fresh result each run, same block
+}
+
+void test_reuse_void()
+{
+    std::atomic<int> runs{ 0 };
+    auto t = ts::task([&runs] { runs.fetch_add(1); });
+
+    t.launch();
+    t.get();
+    for (int i = 0; i < 4; ++i)
+    {
+        t.reset().launch();
+        t.get();
+    }
+    TS_CHECK(runs.load() == 5);
+}
+
+// Prerequisites are re-established each run.
+void test_reuse_prereq()
+{
+    std::atomic<int> log{ 0 };
+    auto dependent = ts::task([&log] { return log.load(); });
+
+    for (int run = 1; run <= 3; ++run)
+    {
+        if (run > 1)
+            dependent.reset();
+        ts::Task<void> prereq = ts::launch([&log, run] { log.store(run * 10); });
+        dependent.after(prereq).launch();
+        TS_CHECK(dependent.get() == run * 10);   // ran after this run's fresh prerequisite
+    }
+}
+
+// A Signal re-armed via reset() acts as a reusable phase gate.
+void test_signal_reset()
+{
+    ts::Signal sig;
+    sig.trigger();
+    sig.get();
+    TS_CHECK(sig.is_done());
+
+    sig.reset();
+    TS_CHECK(!sig.is_done());   // re-armed
+    sig.trigger();
+    sig.get();
+    TS_CHECK(sig.is_done());
+}
+
+void test_death_reset_unsettled()
+{
+    TS_CHECK(ts::test::expect_death("reset_unsettled"));   // reset() before the task settled
+}
+
 // --- K: nested tasks -------------------------------------------------------
 
 // A nested task launched inside a parent's body gates the parent's completion.
@@ -558,6 +625,11 @@ void run_task_tests()
     run("task value after", test_task_value_after);
     run("task after already completed", test_task_after_already_completed);
     run("task after cancelled prereq", test_task_after_cancelled_prereq);
+    run("reuse value task", test_reuse_value);
+    run("reuse void task", test_reuse_void);
+    run("reuse task with prereq", test_reuse_prereq);
+    run("signal reset", test_signal_reset);
+    run("death: reset unsettled", test_death_reset_unsettled);
     run("nested gates parent", test_nested_gates_parent);
     run("nested multiple", test_nested_multiple);
     run("add nested existing", test_add_nested_existing);

@@ -243,6 +243,53 @@ void stress_nested()
     }
 }
 
+// Reusable task: one block/body re-run many times via reset(). Stresses reset()
+// (re-arm) racing the completing worker's settle tail -- get() wakes on notify_all
+// while the worker is still exiting settle, then the main thread re-arms and re-launches.
+void stress_reuse()
+{
+    std::atomic<int> total{ 0 };
+    auto t = ts::task([&total] { return total.fetch_add(1, std::memory_order_relaxed) + 1; });
+
+    int last = 0;
+    for (int i = 0; i < 5000; ++i)
+    {
+        if (i > 0)
+            t.reset();
+        t.launch();
+        last = t.get();
+    }
+    assert(last == 5000);
+
+    // Reuse + prerequisites + retraction: get() retracts (runs the prereq then the
+    // dependent inline), racing the worker dispatch; reset() re-arms for the next round.
+    // Stresses the generation stamp that voids the stale (retraction-duplicate) dispatch.
+    std::atomic<int> log{ 0 };
+    auto dep = ts::task([&log] { return log.load(std::memory_order_relaxed); });
+    for (int i = 1; i <= 3000; ++i)
+    {
+        if (i > 1)
+            dep.reset();
+        ts::Task<void> prereq = ts::launch([&log, i] { log.store(i, std::memory_order_relaxed); });
+        dep.after(prereq).launch();
+        assert(dep.get() == i);   // ran after THIS round's prerequisite, not a stale run
+    }
+
+    // A resettable Signal re-armed between rounds, with concurrent waiters/triggerers.
+    for (int r = 0; r < 2000; ++r)
+    {
+        ts::Signal sig;
+        {
+            std::vector<std::jthread> threads;
+            for (int w = 0; w < 3; ++w)
+                threads.emplace_back([&] { sig.get(); });
+            sig.trigger();
+        }   // join
+        sig.reset();
+        assert(!sig.is_done());
+    }
+}
+
 // Cancellation racing execution: request_cancel (a store) concurrent with the body's
 // token check (a load) and with then-propagation; the block must settle exactly once.
 void stress_cancel()
@@ -316,6 +363,7 @@ int main()
     std::puts("tsan: launch stress");        stress_launch();
     std::puts("tsan: prereq stress");        stress_prereq();
     std::puts("tsan: nested stress");        stress_nested();
+    std::puts("tsan: reuse stress");         stress_reuse();
     std::puts("tsan: retraction stress");    stress_retraction();
     std::puts("tsan: cancel stress");        stress_cancel();
     std::puts("tsan: graph stress");        stress_graph();

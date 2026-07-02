@@ -181,7 +181,7 @@ private:
     // completes once nested tasks settle) and `on_complete` (graph_node_completed ->
     // node_complete). node_trampoline is the raw scheduler entry -- a fn-ptr + Node*,
     // so dispatching a node costs no per-run allocation.
-    static void run_graph_node(const std::shared_ptr<detail::Task_control_block>& block);
+    static void run_graph_node(const std::shared_ptr<detail::Task_control_block>& block, std::uint64_t generation);
     static void graph_node_completed(detail::Task_control_block* block);
     static void node_trampoline(void* node);
 

@@ -496,6 +496,21 @@ also future work.
   post-logic a continuation firing at `Completed`; `ts::launch`/`nested` inherit the
   launcher's `Access_context` by value, so nested sub-work may touch the node's owned
   guarded data. Realizes the §8 invariant structurally.
+  **Reusable tasks** — `Task_control_block::reset()` re-arms a settled block in place
+  (monomorphic, scalars only: reuse is a *block* capability, so no new `<R>` type). The
+  existing `Task_builder<R>` (from `ts::task(fn)`) is the reusable handle — it already
+  retains the block after `launch()`, now also has `reset()`/`get()`/`is_done()`:
+  `t.reset().after(x).launch(); r = t.get();` re-runs one block/body/result-storage
+  (prereqs re-established each run; one run in flight; `reset()` guarded by the block's
+  `ready` flag). `Signal::reset()` gives a reusable phase gate. Subtlety: retraction
+  leaves a *duplicate* dispatch (it runs the body inline while `release` also queued
+  one), harmlessly deduped by the one-runner claim — but reuse re-arms the block, so a
+  leftover duplicate could re-run the body against the *next* run. Fixed by fusing the
+  claim and the reuse generation into **one atomic** (`run_state`: `[63:1]` generation,
+  bit 0 claimed): a dispatch captures the generation it was queued for and `claim(gen)`s;
+  a stale duplicate (generation bumped by `reset`) fails the CAS. Two separate atomics
+  would race — a stale dispatch could observe the old generation but the new unclaimed
+  bit and wrongly run (caught under TSan on the reuse+prerequisites+retraction stress).
 - **when_all cancellation:** make the internal join cancel-aware so a cancelled
   prerequisite cancels the join instead of stalling it (§11).
 - **Cancel callback:** notify (a continuation) when cancellation is requested.
