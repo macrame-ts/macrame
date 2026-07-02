@@ -468,7 +468,15 @@ TSan): the block settles exactly once, either way.
   so the last prerequisite to settle runs `finish`, which cancels the result. Downstream
   `.then` off the join propagates it.
 
-**Not covered:** a cancel *callback* (notify on request) is future work.
+- **Cancel callback (push).** `Cancel_callback(token, fn)` (RAII, `std::stop_callback`-
+  style) registers `fn`; `request_cancel()` fires all registered callbacks synchronously
+  on the requesting thread. For work that *blocks* rather than polls the token — wake a
+  condition variable, abort an I/O — it is the push complement to the pull check. If
+  cancellation was already requested at registration, `fn` runs in the constructor; the
+  destructor deregisters, and waits out a callback firing on another thread (so `fn`'s
+  captures stay valid) except for a re-entrant self-destroy (detaches, to avoid deadlock).
+  The source/token/callback share a `Cancel_state` (atomic flag for the lock-free
+  `is_cancel_requested`, mutex-guarded list for the callbacks).
 
 ---
 
@@ -515,7 +523,6 @@ TSan): the block settles exactly once, either way.
   a stale duplicate (generation bumped by `reset`) fails the CAS. Two separate atomics
   would race — a stale dispatch could observe the old generation but the new unclaimed
   bit and wrongly run (caught under TSan on the reuse+prerequisites+retraction stress).
-- **Cancel callback:** notify (a continuation) when cancellation is requested.
 - **Compile-time grouping:** schedule an object's accessors close together to shrink
   its reservation window (fewer interior gaps), where the DAG allows — trades against
   parallelism / critical path, so profiling-guided.

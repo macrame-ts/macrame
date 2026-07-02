@@ -371,6 +371,31 @@ void stress_cancel()
     }
 }
 
+// Cancel callbacks racing request_cancel: several threads register a Cancel_callback that
+// lives briefly then destroys, while another thread cancels. Stresses the callback-list
+// mutex, the fire-immediately-when-already-requested path, and -- the delicate one -- the
+// destructor waiting out a callback that is firing on another thread (no UAF, no hang).
+void stress_cancel_callback()
+{
+    for (int r = 0; r < 3000; ++r)
+    {
+        ts::Cancellation_source src;
+        std::atomic<int> fired{ 0 };
+        {
+            std::vector<std::jthread> threads;
+            for (int t = 0; t < 4; ++t)
+                threads.emplace_back([&]
+                {
+                    ts::Cancel_callback cb(src.token(),
+                        [&fired] { fired.fetch_add(1, std::memory_order_relaxed); });
+                    std::this_thread::yield();   // let its dtor race the cancel's firing
+                });
+            threads.emplace_back([&] { src.request_cancel(); });
+        }   // join: each callback either fired or was deregistered first; neither races
+        (void)fired;
+    }
+}
+
 // A graph node accessing an object directly while other threads fire async on the
 // SAME object: the per-run pipe reservation must keep them from overlapping.
 void stress_graph_async()
@@ -413,6 +438,7 @@ int main()
     std::puts("tsan: reuse stress");         stress_reuse();
     std::puts("tsan: retraction stress");    stress_retraction();
     std::puts("tsan: cancel stress");        stress_cancel();
+    std::puts("tsan: cancel callback stress"); stress_cancel_callback();
     std::puts("tsan: graph stress");        stress_graph();
     std::puts("tsan: graph+async stress");  stress_graph_async();
     std::puts("tsan: graph nested stress");  stress_graph_nested();

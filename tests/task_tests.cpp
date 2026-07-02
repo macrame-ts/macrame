@@ -431,6 +431,59 @@ void test_death_cancelled_value_get()
     TS_CHECK(ts::test::expect_death("cancelled_value_get"));   // get() on a cancelled value task
 }
 
+// --- H2: cancel callbacks (push notification) -----------------------------
+
+void test_cancel_callback_fires()
+{
+    ts::Cancellation_source src;
+    std::atomic<int> fired{ 0 };
+    ts::Cancel_callback cb(src.token(), [&fired] { fired.fetch_add(1); });
+    TS_CHECK(fired.load() == 0);        // not fired before the request
+    src.request_cancel();
+    TS_CHECK(fired.load() == 1);        // fired synchronously on request
+    src.request_cancel();
+    TS_CHECK(fired.load() == 1);        // idempotent -> not re-fired
+}
+
+void test_cancel_callback_already_requested()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();
+    std::atomic<int> fired{ 0 };
+    ts::Cancel_callback cb(src.token(), [&fired] { fired.fetch_add(1); });
+    TS_CHECK(fired.load() == 1);        // registered after cancel -> fires in the ctor
+}
+
+void test_cancel_callback_deregister()
+{
+    ts::Cancellation_source src;
+    std::atomic<int> fired{ 0 };
+    {
+        ts::Cancel_callback cb(src.token(), [&fired] { fired.fetch_add(1); });
+    }   // destroyed before any request
+    src.request_cancel();
+    TS_CHECK(fired.load() == 0);        // deregistered -> never fires
+}
+
+void test_cancel_callback_multiple()
+{
+    ts::Cancellation_source src;
+    std::atomic<int> fired{ 0 };
+    ts::Cancel_callback a(src.token(), [&fired] { fired.fetch_add(1); });
+    ts::Cancel_callback b(src.token(), [&fired] { fired.fetch_add(1); });
+    ts::Cancel_callback c(src.token(), [&fired] { fired.fetch_add(1); });
+    src.request_cancel();
+    TS_CHECK(fired.load() == 3);        // all fire
+}
+
+void test_cancel_callback_stateless_token()
+{
+    ts::Cancellation_token token;       // default: never cancels
+    std::atomic<int> fired{ 0 };
+    ts::Cancel_callback cb(token, [&fired] { fired.fetch_add(1); });
+    TS_CHECK(fired.load() == 0);        // no source -> no fire, ever
+}
+
 // --- I: standalone `launch` (bare scheduler task, body in the block) --------
 
 void test_launch_value()
@@ -670,6 +723,11 @@ void run_task_tests()
     run("cancel void get unblocks", test_cancel_void_get_unblocks);
     run("not cancelled normally", test_not_cancelled_normally);
     run("death: cancelled value get", test_death_cancelled_value_get);
+    run("cancel callback fires", test_cancel_callback_fires);
+    run("cancel callback already requested", test_cancel_callback_already_requested);
+    run("cancel callback deregister", test_cancel_callback_deregister);
+    run("cancel callback multiple", test_cancel_callback_multiple);
+    run("cancel callback stateless token", test_cancel_callback_stateless_token);
     run("launch value", test_launch_value);
     run("launch void", test_launch_void);
     run("launch then", test_launch_then);
