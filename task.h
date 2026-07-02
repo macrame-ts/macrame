@@ -89,6 +89,10 @@ struct Task_control_block
     bool cancelled = false;
     void* result_ptr = nullptr;        // -> the wrapper's stored R (set before complete), or null
     void (*execute)(const std::shared_ptr<Task_control_block>&) = nullptr;   // run the body (null => bodyless)
+    // Fired once at `settle` (completed OR cancelled), after continuations/successors.
+    // Unlike a continuation it is NOT consumed, so a reused block (e.g. a re-armed graph
+    // node) keeps it across runs -- an alloc-free completion hook. Null for most tasks.
+    void (*on_complete)(Task_control_block*) = nullptr;
     Cancellation_token token;          // checked by `execute` before running the body
     // `num_locks`: below `execution_flag` it counts unmet PREREQUISITES (gate
     // execution); once the body starts the flag is set and it counts pending NESTED
@@ -138,6 +142,8 @@ struct Task_control_block
             c(r, cancel_);
         for (auto& s : succs)
             release(s);
+        if (on_complete)
+            on_complete(this);
     }
 
     void attach(std::move_only_function<void(void*, bool)> cont)

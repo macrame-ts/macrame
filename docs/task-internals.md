@@ -47,7 +47,10 @@ Three types on the Task tier; two private, two public handles (one shared).
   successors, prerequisite/nested backlinks, the lock-counter — plus two type-erased
   hooks: `void* result_ptr` (nullptr ⇒ no result: `void` or bodyless) and
   `void (*execute)(Task_control_block*)` (nullptr ⇒ no body: bodyless). Continuations
-  are stored erased too (`move_only_function<void(void* result, bool cancelled)>`).
+  are stored erased too (`move_only_function<void(void* result, bool cancelled)>`). A
+  third fn-ptr, `on_complete` (nullptr for most tasks), fires once at `settle` and —
+  unlike a continuation — is **not consumed**, so a re-armed reusable block (a graph
+  node, §7.1) keeps it across runs: an alloc-free completion hook.
   All the heavy logic is compiled **once**, regardless of how many result/body types
   exist. The dependency machinery only ever traffics in `Task_control_block*`.
 
@@ -259,10 +262,30 @@ prerequisites via `remaining_deps` + the lazy reservation via `remaining_objects
 (§10), *not* folded into `num_locks`. So `num_locks` on a node block is used only
 in its `execution_flag` (post-execution) mode; the intricate part of a full rebase
 (folding prerequisite counting into `num_locks` against the lazy reservation) is
-avoided. The node block is per-run (allocated in `run_node`), not reused across
-runs — sequential re-runs only; concurrent runs of one graph are already
-unsupported (§10 scenario 2). Reusing node blocks across runs (arm-once at
-`compile`) is a perf follow-up if `graph_execute` regresses.
+avoided.
+
+**Allocation-free re-runs.** The node block is a `Graph_node_block` (the
+`Task_control_block` + a `graph`/`index` back-pointer), **allocated once at
+`compile()`** and re-armed each `execute()` (reset `started`/`completed`/`ready`/
+`num_locks`/`token` — all scalars, no alloc). It carries no body: `run_graph_node`
+reaches it via `graph->nodes_[index].run`, so there is no per-run body closure
+either, and nodes dispatch through the **raw scheduler API** (`submit(fn-ptr,
+Node*)`), not a heap-allocated closure. Completion runs via a **persistent
+`on_complete` fn-ptr** on the block (`graph_node_completed` → `node_complete`) —
+*not* a continuation, whose `move_only_function` in the block's `continuations`
+vector would allocate per run. Net: a run allocates only its completion handle
+(`done`, inherently per-run since the caller may outlive the run) plus, when a
+graph object is contended at reserve time, a small reservation closure. The reused
+`Run_state` (values reset, vector capacity kept) removes the per-run state alloc
+too. Correct because runs are **sequential** (a `get()` barrier between them makes
+the previous run quiescent before re-arm) and concurrent runs of one graph are
+unsupported (§10 scenario 2). One subtlety the reuse exposed: `done` must be kept
+alive by the completing worker across its `settle` (a local `shared_ptr` in
+`node_complete`), or the woken `get()` starting the next run — which overwrites
+`run.done` and drops its own handle — destroys the block mid-`notify_all` (found
+under TSan). The graph is movable (build-and-return, e.g. `build_frame_graph`);
+`execute()` refreshes the blocks' `graph` back-pointers, so a moved graph is valid
+on its next run.
 
 **Access inheritance.** For nested sub-work to touch the node's *owned* guarded
 data (the point of fanning out over it), it must run under the node's grant. A
@@ -492,10 +515,12 @@ also future work.
   lazy reservation needs a separate data-ready signal. Folding the scheduling half
   (and letting graph nodes be `after`/`then` prerequisites, and be retractable) is the
   remaining work.
-- **Reuse graph node blocks across runs** — §7.1 allocates a node's `Executable`
-  block per `execute()`. For a build-once/run-many graph, arm-once at `compile()` +
-  re-arm each run would drop the per-run allocation; gated on whether `graph_execute`
-  actually regresses (measure first) and on keeping the "one run at a time" contract.
+- **Reuse graph node blocks across runs:** **done** (§7.1) — node blocks and the
+  `Run_state` are built at `compile()` and re-armed each `execute()`, nodes dispatch
+  via the raw scheduler API, and completion uses the block's persistent `on_complete`
+  fn-ptr instead of a per-run continuation. A run now allocates only its `done` handle
+  (+ a reservation closure only when an object is contended). ~19% faster on the
+  8-node `graph` benchmark vs the per-run-block version.
 - **Retraction of pipe/async tasks** — today only bare-scheduler tasks (`launch`/
   `task`/`nested`) are `retractable`; retracting an `async` task would need to re-enter
   the pipe's access serialization inline. Also: `when_all` joins are driven by

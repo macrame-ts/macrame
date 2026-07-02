@@ -74,6 +74,15 @@ class Static_task_graph
     friend class Graph_node;
 
 public:
+    // Declared out-of-line (defaulted in the .cpp) because the reused `run_`
+    // (unique_ptr<Run_state>) has an incomplete pointee here. Movable so a graph can be
+    // built-and-returned (e.g. build_frame_graph); execute() refreshes the blocks' back
+    // pointers, so a moved graph is valid on its next run.
+    Static_task_graph();
+    ~Static_task_graph();
+    Static_task_graph(Static_task_graph&&) noexcept;
+    Static_task_graph& operator=(Static_task_graph&&) noexcept;
+
     // Add a node: functor + the `Thread_safe<>` instances it accesses. Per-object
     // access mode is deduced from the functor's parameter const-ness
     //   add_node([](Physics& p, const Nav& n){ ... }, physics, nav);   // p:write, n:read
@@ -114,6 +123,10 @@ private:
         std::vector<int> pipe_indices;      // those pipes as indices into distinct_pipes_ (deduped)
         std::vector<int> successors;
         int indegree = 0;
+        // The node's reusable task block (a `Graph_node_block`, allocated once in
+        // compile() and re-armed each run). Its `execute`/`on_complete` are wired so the
+        // body may spawn nested tasks and the graph post-logic fires at completion (§7.1).
+        std::shared_ptr<detail::Task_control_block> block;
     };
 
     struct Run_state;
@@ -154,20 +167,29 @@ private:
 
     // Lazy reservation: a node's objects are reserved when it becomes data-ready, and
     // the node runs once its data deps AND its object reservations are all satisfied.
-    static void on_data_ready(const std::shared_ptr<Run_state>& run, int index);
-    static void ensure_reserved(const std::shared_ptr<Run_state>& run, int pipe_index);
-    static void on_object_reserved(const std::shared_ptr<Run_state>& run, int pipe_index);
-    static void maybe_run(const std::shared_ptr<Run_state>& run, int index);
-    static void run_node(const std::shared_ptr<Run_state>& run, int index);
+    static void on_data_ready(Run_state& run, int index);
+    static void ensure_reserved(Run_state& run, int pipe_index);
+    static void on_object_reserved(Run_state& run, int pipe_index);
+    static void maybe_run(Run_state& run, int index);
+    static void run_node(Run_state& run, int index);
     // Graph post-logic for a node whose body AND all its nested tasks have settled:
     // early-release its objects, release its successors, and settle the run when the
-    // last node finishes. Runs as a continuation on the node's block (see run_node).
-    static void node_complete(const std::shared_ptr<Run_state>& run, int index);
+    // last node finishes. Runs via the node block's `on_complete` (see run_graph_node).
+    static void node_complete(Run_state& run, int index);
+    // A node runs as a real task block. These are wired into the block's `execute`
+    // (run_graph_node: sets current_task + the execution-flag lock, runs the body, then
+    // completes once nested tasks settle) and `on_complete` (graph_node_completed ->
+    // node_complete). node_trampoline is the raw scheduler entry -- a fn-ptr + Node*,
+    // so dispatching a node costs no per-run allocation.
+    static void run_graph_node(const std::shared_ptr<detail::Task_control_block>& block);
+    static void graph_node_completed(detail::Task_control_block* block);
+    static void node_trampoline(void* node);
 
     std::vector<Node> nodes_;
     std::vector<std::pair<int, int>> explicit_edges_;
     std::vector<detail::Pipe*> distinct_pipes_;        // every object the graph touches (for reservation)
     std::vector<std::vector<int>> pipe_accessors_;     // per distinct pipe: node indices that access it
+    std::unique_ptr<Run_state> run_;                   // reused across execute() runs (one run at a time)
     bool compiled_ = false;
 };
 

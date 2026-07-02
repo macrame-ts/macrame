@@ -31,6 +31,30 @@ struct Static_task_graph::Run_state
     std::shared_ptr<detail::Task_control_block> done;
 };
 
+namespace
+{
+
+// A graph node's reusable task block: the monomorphic control block (FIRST member, so a
+// `Task_control_block*` aliases / `reinterpret_cast`s back to it) plus the back-pointers
+// its execute/on_complete hooks need to reach the node body and the run. Allocated once
+// in compile(), re-armed each execute() -- so a run dispatches nodes with no per-node
+// allocation. The body is NOT stored here (reached via graph->nodes_[index].run), so
+// there is no per-run body closure either.
+struct Graph_node_block
+{
+    detail::Task_control_block core;   // MUST be first
+    Static_task_graph* graph = nullptr;
+    int index = -1;
+};
+
+} // namespace
+
+// Defaulted here, where Run_state is complete (the header's `run_` unique_ptr needs it).
+Static_task_graph::Static_task_graph() = default;
+Static_task_graph::~Static_task_graph() = default;
+Static_task_graph::Static_task_graph(Static_task_graph&&) noexcept = default;
+Static_task_graph& Static_task_graph::operator=(Static_task_graph&&) noexcept = default;
+
 void Static_task_graph::add_edge(int prerequisite, int successor)
 {
     explicit_edges_.emplace_back(prerequisite, successor);
@@ -115,6 +139,26 @@ void Static_task_graph::compile()
     }
 
     detect_cycles();
+
+    // Each node runs as a reusable task block, allocated once here and re-armed per run
+    // (§7.1) -- so a run dispatches every node without allocating. `execute`/`on_complete`
+    // are fixed fn-ptrs; graph+index let those hooks reach the node body and the run.
+    for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
+    {
+        auto wrapper = std::make_shared<Graph_node_block>();
+        wrapper->graph = this;
+        wrapper->index = i;
+        wrapper->core.execute = &run_graph_node;
+        wrapper->core.on_complete = &graph_node_completed;
+        nodes_[i].block = std::shared_ptr<detail::Task_control_block>(wrapper, &wrapper->core);
+    }
+
+    // Reused per-run state: values are reset each execute(), vector capacity persists, so
+    // a run allocates only its completion handle (`done`). Rebuilt here since node/pipe
+    // counts can change between compiles.
+    run_ = std::make_unique<Run_state>(nodes_.size(), distinct_pipes_.size());
+    run_->graph = this;
+
     compiled_ = true;
 }
 
@@ -147,22 +191,23 @@ void Static_task_graph::detect_cycles() const
 // A node has become data-ready (all data prerequisites met). Lazily reserve the
 // objects it touches (the first data-ready accessor of each object triggers its
 // reservation), then check whether the node can run.
-void Static_task_graph::on_data_ready(const std::shared_ptr<Run_state>& run, int index)
+void Static_task_graph::on_data_ready(Run_state& run, int index)
 {
-    for (int pi : run->graph->nodes_[index].pipe_indices)
+    for (int pi : run.graph->nodes_[index].pipe_indices)
         ensure_reserved(run, pi);
     maybe_run(run, index);
 }
 
 // Reserve a pipe once (whichever data-ready accessor gets here first). When acquired,
 // notify every accessor so their reservation counts drop.
-void Static_task_graph::ensure_reserved(const std::shared_ptr<Run_state>& run, int pipe_index)
+void Static_task_graph::ensure_reserved(Run_state& run, int pipe_index)
 {
-    if (run->object_initiated[pipe_index].exchange(1, std::memory_order_acq_rel) != 0)
+    if (run.object_initiated[pipe_index].exchange(1, std::memory_order_acq_rel) != 0)
         return;   // another accessor already initiated it
 
-    bool acquired = detail::pipe_reserve(*run->scheduler, *run->graph->distinct_pipes_[pipe_index],
-        [run, pipe_index] { on_object_reserved(run, pipe_index); });
+    Run_state* rp = &run;   // stable (run_ outlives the run); small capture -> no alloc
+    bool acquired = detail::pipe_reserve(*run.scheduler, *run.graph->distinct_pipes_[pipe_index],
+        [rp, pipe_index] { on_object_reserved(*rp, pipe_index); });
 
     if (acquired)
         on_object_reserved(run, pipe_index);
@@ -170,64 +215,110 @@ void Static_task_graph::ensure_reserved(const std::shared_ptr<Run_state>& run, i
 
 // A pipe's reservation is now held: every node that accesses it has one fewer
 // outstanding reservation, and may become runnable.
-void Static_task_graph::on_object_reserved(const std::shared_ptr<Run_state>& run, int pipe_index)
+void Static_task_graph::on_object_reserved(Run_state& run, int pipe_index)
 {
-    for (int node : run->graph->pipe_accessors_[pipe_index])
+    for (int node : run.graph->pipe_accessors_[pipe_index])
     {
-        run->remaining_objects[node].fetch_sub(1, std::memory_order_acq_rel);
+        run.remaining_objects[node].fetch_sub(1, std::memory_order_acq_rel);
         maybe_run(run, node);
     }
 }
 
 // Run the node iff both gates are open (data deps met and all its objects reserved),
 // exactly once.
-void Static_task_graph::maybe_run(const std::shared_ptr<Run_state>& run, int index)
+void Static_task_graph::maybe_run(Run_state& run, int index)
 {
-    if (run->remaining_deps[index].load(std::memory_order_acquire) != 0
-        || run->remaining_objects[index].load(std::memory_order_acquire) != 0)
+    if (run.remaining_deps[index].load(std::memory_order_acquire) != 0
+        || run.remaining_objects[index].load(std::memory_order_acquire) != 0)
         return;
-    if (run->launched[index].exchange(1, std::memory_order_acq_rel) == 0)
+    if (run.launched[index].exchange(1, std::memory_order_acq_rel) == 0)
         run_node(run, index);
 }
 
-void Static_task_graph::run_node(const std::shared_ptr<Run_state>& run, int index)
+// Dispatch a node: submit its (re-armed) block via the raw scheduler API -- a fn-ptr
+// plus the Node address, so no per-node closure is allocated.
+void Static_task_graph::run_node(Run_state& run, int index)
 {
-    // The node runs as a real task block: `Executable::run` installs `current_task` and
-    // the execution-flag lock, so the body may spawn NESTED tasks (`ts::nested`) whose
-    // completion gates the node's. The graph post-logic runs as a continuation on the
-    // block -- after the body AND all nested tasks settle -- so a node's objects stay
-    // reserved and its successors stay blocked until its dynamic sub-work is done. The
-    // block carries the run's `token`, so a cancelled node skips its body (settling
-    // cancelled) but its continuation still runs, keeping the drain going. Submitted on
-    // the run's scheduler (not the default), matching the prior direct submit.
-    Static_task_graph* graph = run->graph;
-    auto block = detail::make_executable<void>(
-        [graph, index] { graph->nodes_[index].run(); }, run->token);
-    block->attach([run, index](void*, bool) { node_complete(run, index); });
-    detail::submit_closure(*run->scheduler, [block] { block->execute(block); });
+    run.scheduler->submit(&node_trampoline, &run.graph->nodes_[index]);
 }
 
-void Static_task_graph::node_complete(const std::shared_ptr<Run_state>& run, int index)
+// Raw scheduler entry: run the node's block. Kept alive by the graph (Node owns the
+// block); the trampoline holds no ownership.
+void Static_task_graph::node_trampoline(void* node)
 {
-    Node& node = run->graph->nodes_[index];
+    auto* n = static_cast<Node*>(node);
+    n->block->execute(n->block);
+}
+
+// The node block's `execute`. Mirrors `Executable::run`, but reaches the body via
+// graph+index (no stored body) and completes via the block's `on_complete` hook: it
+// installs `current_task` + the execution-flag self-lock so the body may spawn NESTED
+// tasks (`ts::nested`) that gate the node's completion, then completes once the self-lock
+// and all nested tasks release. The block carries the run's `token`, so a cancelled node
+// skips its body (settling cancelled) -- `on_complete` still fires, keeping the drain
+// going.
+void Static_task_graph::run_graph_node(const std::shared_ptr<detail::Task_control_block>& block)
+{
+    using Block = detail::Task_control_block;
+
+    if (block->started.exchange(true, std::memory_order_acq_rel))
+        return;   // already claimed (belt-and-suspenders; graph nodes dispatch once)
+
+    auto* self = reinterpret_cast<Graph_node_block*>(block.get());
+    if (block->token.is_cancel_requested())
+    {
+        block->cancel();   // skip body; on_complete drains the run
+        return;
+    }
+
+    block->num_locks.store(Block::execution_flag + 1, std::memory_order_relaxed);
+    auto prev = std::move(detail::current_task);
+    detail::current_task = block;
+
+    self->graph->nodes_[self->index].run();   // node body: installs its own Access_scope
+
+    detail::current_task = std::move(prev);
+
+    // Drop the self-lock; if no nested tasks are pending, complete now (fires on_complete);
+    // otherwise the last nested task completes us.
+    if (block->num_locks.fetch_sub(1, std::memory_order_acq_rel) == Block::execution_flag + 1)
+        block->complete();
+}
+
+// The node block's `on_complete`: the node's body and all its nested tasks have settled.
+void Static_task_graph::graph_node_completed(detail::Task_control_block* block)
+{
+    auto* self = reinterpret_cast<Graph_node_block*>(block);
+    node_complete(*self->graph->run_, self->index);
+}
+
+void Static_task_graph::node_complete(Run_state& run, int index)
+{
+    Node& node = run.graph->nodes_[index];
 
     // Early release: free each object this node was the last to touch, so queued async
     // on it can run. Safe -- the count hits 0 only after every node accessing that
     // object has completed (this runs post-completion, so after any nested sub-work).
     for (int pi : node.pipe_indices)
-        if (run->remaining_accessors[pi].fetch_sub(1, std::memory_order_acq_rel) == 1)
-            detail::pipe_release(*run->scheduler, *run->graph->distinct_pipes_[pi]);
+        if (run.remaining_accessors[pi].fetch_sub(1, std::memory_order_acq_rel) == 1)
+            detail::pipe_release(*run.scheduler, *run.graph->distinct_pipes_[pi]);
 
     for (int successor : node.successors)
-        if (run->remaining_deps[successor].fetch_sub(1, std::memory_order_acq_rel) == 1)
+        if (run.remaining_deps[successor].fetch_sub(1, std::memory_order_acq_rel) == 1)
             on_data_ready(run, successor);
 
-    if (run->remaining_nodes.fetch_sub(1, std::memory_order_acq_rel) == 1)
+    if (run.remaining_nodes.fetch_sub(1, std::memory_order_acq_rel) == 1)
     {
-        if (run->token.is_cancel_requested())
-            run->done->cancel();
+        // Keep `done` alive across the settle: completing it notifies its cv, which can
+        // wake a waiter (`execute().get()`) that immediately starts the next run --
+        // overwriting `run.done` and dropping its own handle -- destroying this block
+        // mid-notify. The local ref holds it until settle returns. (The old per-run
+        // Run_state kept it alive via the worker closures; the reused slot does not.)
+        std::shared_ptr<detail::Task_control_block> done = run.done;
+        if (run.token.is_cancel_requested())
+            done->cancel();
         else
-            run->done->complete();
+            done->complete();
     }
 }
 
@@ -236,25 +327,47 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token t
     if (!compiled_)
         ts::fatal("Static_task_graph::execute called before compile()");
 
-    auto run = std::make_shared<Run_state>(nodes_.size(), distinct_pipes_.size());
-    run->graph = this;
-    run->scheduler = &scheduler;
-    run->token = token;
+    // Reuse the run state built at compile() (one run at a time; a full get() barrier
+    // between runs guarantees the previous run is quiescent -- see docs §7.1). Only the
+    // completion handle is freshly allocated, since a prior run's handle may still be
+    // held by the caller.
+    Run_state& run = *run_;
+    run.graph = this;   // refresh: a moved graph's back pointers point at the moved-from object
+    run.scheduler = &scheduler;
+    run.token = token;
+    run.done = std::make_shared<detail::Task_control_block>();
+
     for (size_t i = 0; i < nodes_.size(); ++i)
     {
-        run->remaining_deps[i].store(nodes_[i].indegree, std::memory_order_relaxed);
-        run->remaining_objects[i].store(static_cast<int>(nodes_[i].pipe_indices.size()), std::memory_order_relaxed);
+        run.remaining_deps[i].store(nodes_[i].indegree, std::memory_order_relaxed);
+        run.remaining_objects[i].store(static_cast<int>(nodes_[i].pipe_indices.size()), std::memory_order_relaxed);
+        run.launched[i].store(0, std::memory_order_relaxed);
+
+        // Re-arm the node's task block for this run (its successors/prerequisites/
+        // continuations are never populated -- graph edges use remaining_deps, completion
+        // uses on_complete -- so nothing there needs clearing).
+        auto* w = reinterpret_cast<Graph_node_block*>(nodes_[i].block.get());
+        w->graph = this;   // refresh back pointer too (see above)
+        detail::Task_control_block& b = w->core;
+        b.started.store(false, std::memory_order_relaxed);
+        b.completed = false;
+        b.cancelled = false;
+        b.ready.store(false, std::memory_order_relaxed);
+        b.num_locks.store(0, std::memory_order_relaxed);
+        b.token = token;
     }
     for (size_t i = 0; i < distinct_pipes_.size(); ++i)
-        run->remaining_accessors[i].store(static_cast<int>(pipe_accessors_[i].size()), std::memory_order_relaxed);
-    run->remaining_nodes.store(static_cast<int>(nodes_.size()), std::memory_order_relaxed);
-    run->done = std::make_shared<detail::Task_control_block>();
+    {
+        run.remaining_accessors[i].store(static_cast<int>(pipe_accessors_[i].size()), std::memory_order_relaxed);
+        run.object_initiated[i].store(0, std::memory_order_relaxed);
+    }
+    run.remaining_nodes.store(static_cast<int>(nodes_.size()), std::memory_order_relaxed);
 
-    Task<void> result(run->done);
+    Task<void> result(run.done);
 
     if (nodes_.empty())
     {
-        run->done->complete();
+        run.done->complete();
         return result;
     }
 
