@@ -244,6 +244,31 @@ void stress_retraction()
             t.get();
         assert(total.load() == outer * 3);
     }
+
+    // then / when_all retraction: the continuation's completion is callback-driven, but a
+    // retraction-hint backlink lets get() run the (retractable) producer inline. Stresses
+    // the hint racing the producer's worker dispatch, and the run_state claim (retractor
+    // vs worker) through the continuation.
+    for (int i = 0; i < 200; ++i)
+    {
+        std::atomic<int> total{ 0 };
+        std::vector<ts::Task<void>> tasks;
+        for (int o = 0; o < outer; ++o)
+            tasks.push_back(ts::launch([&]
+            {
+                int r = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); return 1; })
+                            .then([&](int x) { total.fetch_add(1, std::memory_order_relaxed); return x + 1; })
+                            .get();
+                (void)r;
+                ts::Task<int> a = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); return 1; });
+                ts::Task<int> b = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); return 2; });
+                int s = ts::when_all(a, b).then([](int x, int y) { return x + y; }).get();
+                (void)s;
+            }));
+        for (auto& t : tasks)
+            t.get();
+        assert(total.load() == outer * 4);
+    }
 }
 
 // Nested tasks: a parent spawns several nested tasks; the parent must not complete

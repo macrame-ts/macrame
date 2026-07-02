@@ -344,6 +344,74 @@ void test_deep_retraction_no_deadlock()
         runner.detach();
 }
 
+// Deep retraction through a `then` chain: each outer task get()s a CONTINUATION, whose
+// completion is continuation-driven (an attach callback), not lock-counter driven. The
+// retraction-hint backlink lets the blocked get() walk to the producer and run it inline,
+// so a then chain is deadlock-free under oversubscription like an after chain.
+void test_then_retraction_no_deadlock()
+{
+    std::atomic<int> total{ 0 };
+    std::atomic<bool> done{ false };
+    const int outer = 2 * static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+
+    std::thread runner([&]
+    {
+        naive_parallel_for(outer, [&](int)
+        {
+            int r = ts::launch([&] { total.fetch_add(1); return 20; })   // retractable producer
+                        .then([&](int x) { total.fetch_add(1); return x + 1; })
+                        .get();   // deep-retract: run the producer inline, its callback fires the continuation
+            (void)r;
+        });
+        done.store(true);
+    });
+
+    for (int i = 0; i < 300 && !done.load(); ++i)
+        std::this_thread::sleep_for(10ms);
+
+    TS_CHECK(done.load());   // false => `then` not deep-retractable
+    if (done.load())
+    {
+        runner.join();
+        TS_CHECK(total.load() == outer * 2);   // producer + continuation, once per outer
+    }
+    else
+        runner.detach();
+}
+
+// Same, through a when_all join: get() on the join walks its retraction hints, runs each
+// (retractable) prerequisite inline, they settle -> finish completes the join.
+void test_when_all_retraction_no_deadlock()
+{
+    std::atomic<int> total{ 0 };
+    std::atomic<bool> done{ false };
+    const int outer = 2 * static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+
+    std::thread runner([&]
+    {
+        naive_parallel_for(outer, [&](int)
+        {
+            ts::Task<int> a = ts::launch([&] { total.fetch_add(1); return 1; });
+            ts::Task<int> b = ts::launch([&] { total.fetch_add(1); return 2; });
+            int s = ts::when_all(a, b).then([](int x, int y) { return x + y; }).get();
+            (void)s;
+        });
+        done.store(true);
+    });
+
+    for (int i = 0; i < 300 && !done.load(); ++i)
+        std::this_thread::sleep_for(10ms);
+
+    TS_CHECK(done.load());   // false => when_all not deep-retractable
+    if (done.load())
+    {
+        runner.join();
+        TS_CHECK(total.load() == outer * 2);
+    }
+    else
+        runner.detach();
+}
+
 } // namespace
 
 void run_integration_tests()
@@ -362,4 +430,6 @@ void run_integration_tests()
     run("engine determinism", test_engine_determinism);
     run("oversubscription no deadlock", test_oversubscription_no_deadlock);
     run("deep retraction no deadlock", test_deep_retraction_no_deadlock);
+    run("then retraction no deadlock", test_then_retraction_no_deadlock);
+    run("when_all retraction no deadlock", test_when_all_retraction_no_deadlock);
 }

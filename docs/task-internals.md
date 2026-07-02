@@ -539,10 +539,22 @@ TSan): the block settles exactly once, either way.
   (+ a reservation closure only when an object is contended). ~19% faster on the
   8-node `graph` benchmark vs the per-run-block version.
 - **Retraction of pipe/async tasks** — today only bare-scheduler tasks (`launch`/
-  `task`/`nested`) are `retractable`; retracting an `async` task would need to re-enter
-  the pipe's access serialization inline. Also: `when_all` joins are driven by
-  continuations, not `num_locks`/`prerequisites`, so they're not deep-retractable until
-  `when_all` is rebased onto the lock-counter (below).
+  `task`/`nested`) are `retractable`. It is *not fundamental*: the pipe's completion
+  bookkeeping (`--active_readers`, `dispatch`, `notify`) rides the `submit_job` **wrapper**,
+  which runs independently of whether the body was claimed — so a body run inline by
+  retraction wouldn't corrupt pipe state (the wrapper still does the accounting; the
+  body just no-ops its claim). The real blocker is *admission ordering*: retraction can
+  reach a block whose pipe job is still **queued behind a conflicting writer** (not yet
+  admitted) and run it inline out of turn — racing that writer. Making async retractable
+  therefore means gating retractability on **pipe admission** (e.g. set `retractable`
+  in `submit_job`, when the pipe has granted the turn), so retraction only ever runs a
+  task the pipe already cleared. Bounded plumbing, and only helps *admitted* jobs (a job
+  still in the pipe deque isn't a scheduler task and is unreachable by retraction anyway).
+  Parked until async-retraction is a real need. **Done:** `then`/`when_all` are now
+  deep-retractable — the continuation/join gets a retraction-hint backlink (`prerequisites`
+  without `num_locks`; completion stays continuation-driven) and is marked retractable, so
+  `get()` walks to the (retractable) producer(s) and runs them inline. Only helps when the
+  producer itself is retractable (a bare `launch`/`task`, not an `async`).
 - Nested tasks + `current_task` TLS; re-base `parallel_for`'s rich mode on them.
 - Group latch tier for the default `parallel_for`.
 - Pooled block allocator + the one microbenchmark.

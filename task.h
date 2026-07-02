@@ -363,6 +363,22 @@ using Apply_result_t = decltype(std::apply(std::declval<Fn&>(), std::declval<Tup
 template<typename R>
 std::shared_ptr<Task_control_block> core_of(const Task<R>& t) noexcept;
 
+// Link `prereq` into `dependent`'s prerequisites as a RETRACTION HINT only — no lock
+// count, no successor, completion stays whatever drives `dependent` (a continuation
+// callback for `then`/`when_all`). It lets a blocking `get()` on `dependent` walk to
+// `prereq` and run it inline (deep retraction) when `prereq` is retractable and
+// un-started, instead of parking a worker. Skipped if `prereq` already settled (nothing
+// to retract; its callback has fired or will fire). Pushed under `prereq`'s mutex like
+// `add_prerequisite`, and only before `dependent` is exposed, so it doesn't race
+// `dependent`'s later settle/retract.
+inline void add_retraction_hint(const std::shared_ptr<Task_control_block>& prereq,
+                                const std::shared_ptr<Task_control_block>& dependent)
+{
+    std::scoped_lock lock(prereq->mutex);
+    if (!prereq->completed)
+        dependent->prerequisites.push_back(prereq);
+}
+
 } // namespace detail
 
 // Handle to an async result. `get()` blocks for the result (call once); `then()`
@@ -462,6 +478,8 @@ private:
                     next->cancel();
                 else { produce(r); next->complete(); }
             });
+            detail::add_retraction_hint(core_, next);   // deep-retractable: get() can run the producer inline
+            next->retractable = true;
             return Task<R2>(std::move(next));
         }
         else
@@ -473,6 +491,8 @@ private:
                     wrapper->core.cancel();
                 else { wrapper->store(produce(r)); wrapper->core.complete(); }
             });
+            detail::add_retraction_hint(core_, next);   // deep-retractable: get() can run the producer inline
+            next->retractable = true;
             return Task<R2>(std::move(next));
         }
     }
@@ -631,6 +651,7 @@ constexpr std::array<int, sizeof...(Rs)> when_all_slots()
 
 template<int Slot, typename R, typename Slots>
 void when_all_attach_one(Task<R> prereq,
+                         const std::shared_ptr<Task_control_block>& next_core,
                          std::shared_ptr<Slots> slots,
                          std::shared_ptr<std::atomic<int>> remaining,
                          std::shared_ptr<std::atomic<bool>> any_cancelled,
@@ -641,7 +662,8 @@ void when_all_attach_one(Task<R> prereq,
     // join would never settle). On completion, store the result; on cancellation, flag the
     // join cancelled; either way decrement, and the last prerequisite to settle runs
     // `finish` (which completes or cancels the join accordingly).
-    core_of(prereq)->attach(
+    std::shared_ptr<Task_control_block> prereq_core = core_of(prereq);
+    prereq_core->attach(
         [slots, remaining, any_cancelled, finish](void* r, bool cancelled)
         {
             if (cancelled)
@@ -651,6 +673,7 @@ void when_all_attach_one(Task<R> prereq,
             if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1)
                 (*finish)();
         });
+    add_retraction_hint(prereq_core, next_core);   // deep-retractable: get() can run each prereq inline
 }
 
 } // namespace detail
@@ -709,13 +732,15 @@ Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
         };
     }
 
+    next_core->retractable = true;   // a blocking get() can retract the (retractable) prerequisites
+
     constexpr auto slot = detail::when_all_slots<Rs...>();
     auto prereqs = std::make_tuple(std::move(prerequisites)...);
 
     [&]<std::size_t... I>(std::index_sequence<I...>)
     {
         (detail::when_all_attach_one<slot[I]>(
-             std::get<I>(std::move(prereqs)), slots, remaining, any_cancelled, finish), ...);
+             std::get<I>(std::move(prereqs)), next_core, slots, remaining, any_cancelled, finish), ...);
     }(std::index_sequence_for<Rs...>{});
 
     return Task<Result>(std::move(next_core));
