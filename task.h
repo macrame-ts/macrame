@@ -633,18 +633,21 @@ template<int Slot, typename R, typename Slots>
 void when_all_attach_one(Task<R> prereq,
                          std::shared_ptr<Slots> slots,
                          std::shared_ptr<std::atomic<int>> remaining,
+                         std::shared_ptr<std::atomic<bool>> any_cancelled,
                          std::shared_ptr<std::function<void()>> finish)
 {
-    if constexpr (std::is_void_v<R>)
-        prereq.then([remaining, finish]
+    // Attach directly to the prerequisite (NOT via `.then`, which skips its continuation
+    // on cancellation and would leave the join's `remaining` counter stuck above 0 -- the
+    // join would never settle). On completion, store the result; on cancellation, flag the
+    // join cancelled; either way decrement, and the last prerequisite to settle runs
+    // `finish` (which completes or cancels the join accordingly).
+    core_of(prereq)->attach(
+        [slots, remaining, any_cancelled, finish](void* r, bool cancelled)
         {
-            if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1)
-                (*finish)();
-        });
-    else
-        prereq.then([slots, remaining, finish](R& value)
-        {
-            std::get<Slot>(*slots).emplace(std::move(value));   // move out of the prerequisite
+            if (cancelled)
+                any_cancelled->store(true, std::memory_order_relaxed);
+            else if constexpr (!std::is_void_v<R>)
+                std::get<Slot>(*slots).emplace(std::move(*static_cast<R*>(r)));   // move out of the prerequisite
             if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1)
                 (*finish)();
         });
@@ -656,7 +659,9 @@ void when_all_attach_one(Task<R> prereq,
 // pure ordering (they drop out of the result); the results of the non-void ones are
 // carried as a tuple (as `void` if all prerequisites are void). Results may be
 // move-only. Consume with `.then` — either the tuple, or, apply-style, its elements
-// unpacked (`then([](A& a, B& b){ ... })`).
+// unpacked (`then([](A& a, B& b){ ... })`). If any prerequisite is cancelled the join
+// settles **cancelled** (it cannot form a complete tuple) rather than stalling; query
+// with `Task::is_cancelled()`, and a `.then` off it propagates the cancellation.
 template<typename... Rs>
 Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
 {
@@ -667,6 +672,9 @@ Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
 
     auto slots = std::make_shared<Slots>();
     auto remaining = std::make_shared<std::atomic<int>>(static_cast<int>(sizeof...(Rs)));
+    // Set if any prerequisite settles cancelled: the join then cancels (it cannot form a
+    // complete tuple), rather than stalling. `Task::is_cancelled()` reports it downstream.
+    auto any_cancelled = std::make_shared<std::atomic<bool>>(false);
 
     std::shared_ptr<detail::Task_control_block> next_core;
     auto finish = std::make_shared<std::function<void()>>();
@@ -674,14 +682,25 @@ Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
     if constexpr (std::is_void_v<Result>)
     {
         next_core = std::make_shared<detail::Task_control_block>();
-        *finish = [core = next_core] { core->complete(); };
+        *finish = [core = next_core, any_cancelled]
+        {
+            if (any_cancelled->load(std::memory_order_relaxed))
+                core->cancel();
+            else
+                core->complete();
+        };
     }
     else
     {
         auto [core, wrapper] = detail::make_block<Result>();
         next_core = core;
-        *finish = [wrapper, slots]
+        *finish = [wrapper, slots, any_cancelled]
         {
+            if (any_cancelled->load(std::memory_order_relaxed))
+            {
+                wrapper->core.cancel();   // some slots are empty (cancelled prereqs) -> no tuple
+                return;
+            }
             [&]<std::size_t... J>(std::index_sequence<J...>)
             {
                 wrapper->store(Result(std::move(*std::get<J>(*slots))...));   // move (move-only ok)
@@ -696,7 +715,7 @@ Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
     [&]<std::size_t... I>(std::index_sequence<I...>)
     {
         (detail::when_all_attach_one<slot[I]>(
-             std::get<I>(std::move(prereqs)), slots, remaining, finish), ...);
+             std::get<I>(std::move(prereqs)), slots, remaining, any_cancelled, finish), ...);
     }(std::index_sequence_for<Rs...>{});
 
     return Task<Result>(std::move(next_core));

@@ -461,10 +461,14 @@ The token flag is atomic and `settle` is idempotent under the block's mutex, so
 `request_cancel` racing a body's check or a completion is race-free (verified under
 TSan): the block settles exactly once, either way.
 
-**Not covered:** cancelling a `when_all` prerequisite — its internal join
-continuations aren't cancel-aware, so a cancelled prerequisite would stall the join
-(the remaining counter never reaches 0). A cancel *callback* (notify on request) is
-also future work.
+- **`when_all`:** if any prerequisite settles cancelled, the join settles **cancelled**
+  (it can't form a complete tuple) rather than stalling. The join attaches to each
+  prerequisite *directly* (not via `.then`, which skips its continuation on cancellation
+  and would leave the counter stuck): on cancel it flags the join and still decrements,
+  so the last prerequisite to settle runs `finish`, which cancels the result. Downstream
+  `.then` off the join propagates it.
+
+**Not covered:** a cancel *callback* (notify on request) is future work.
 
 ---
 
@@ -511,8 +515,6 @@ also future work.
   a stale duplicate (generation bumped by `reset`) fails the CAS. Two separate atomics
   would race — a stale dispatch could observe the old generation but the new unclaimed
   bit and wrongly run (caught under TSan on the reuse+prerequisites+retraction stress).
-- **when_all cancellation:** make the internal join cancel-aware so a cancelled
-  prerequisite cancels the join instead of stalling it (§11).
 - **Cancel callback:** notify (a continuation) when cancellation is requested.
 - **Compile-time grouping:** schedule an object's accessors close together to shrink
   its reservation window (fewer interior gaps), where the DAG allows — trades against

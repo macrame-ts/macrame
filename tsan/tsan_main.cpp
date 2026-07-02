@@ -158,6 +158,27 @@ void stress_when_all()
     assert(total.load() == 3000 * 9);
 }
 
+// when_all with a prerequisite cancelled concurrently with the join: request_cancel
+// races the prereq's body check and the join's decrement/finish. The join must settle
+// exactly once (completed or cancelled) and never stall (the counter must still reach 0).
+void stress_when_all_cancel()
+{
+    ts::Thread_safe<int> a{ 1 }, b{ 2 }, c{ 3 };
+    for (int i = 0; i < 3000; ++i)
+    {
+        ts::Cancellation_source src;
+        ts::Task<int> ta = a.async([](const int& x) { return x; });
+        ts::Task<int> tb = b.async([](const int& x) { return x; }, src.token());
+        ts::Task<int> tc = c.async([](const int& x) { return x; });
+
+        auto j = ts::when_all(ta, tb, tc);
+        std::jthread canceller([&] { src.request_cancel(); });   // race the join
+        canceller.join();
+        while (!j.is_done())                                     // must settle, not stall
+            std::this_thread::yield();
+    }
+}
+
 // Many external threads launching standalone tasks (body-in-block) concurrently,
 // each chained and awaited.
 void stress_launch()
@@ -360,6 +381,7 @@ int main()
     std::puts("tsan: thread_safe stress");  stress_thread_safe();
     std::puts("tsan: signal stress");       stress_signal();
     std::puts("tsan: when_all stress");      stress_when_all();
+    std::puts("tsan: when_all cancel stress"); stress_when_all_cancel();
     std::puts("tsan: launch stress");        stress_launch();
     std::puts("tsan: prereq stress");        stress_prereq();
     std::puts("tsan: nested stress");        stress_nested();

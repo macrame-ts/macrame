@@ -222,6 +222,57 @@ void test_when_all_apply_void()
     TS_CHECK(sink.load() == 3);
 }
 
+// --- F3: `when_all` cancellation ------------------------------------------
+
+// A cancelled prerequisite cancels the join (it can't form a complete tuple) instead
+// of stalling it.
+void test_when_all_cancelled_prereq()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();
+
+    ts::Thread_safe<int> a{ 1 }, b{ 2 };
+    ts::Task<int> ta = a.async([](const int& x) { return x; });                // completes
+    ts::Task<int> tb = b.async([](const int& x) { return x; }, src.token());   // cancelled
+
+    ts::Task<std::tuple<int, int>> j = ts::when_all(ta, tb);
+    wait_until([&] { return j.is_done(); });   // settles (does not hang)
+    TS_CHECK(j.is_cancelled());
+}
+
+// A cancelled void (ordering-only) prerequisite also cancels the join.
+void test_when_all_cancelled_void_prereq()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();
+
+    ts::Thread_safe<int> a{ 5 }, b{ 0 };
+    ts::Task<int> r = a.async([](const int& x) { return x; });        // completes
+    ts::Task<void> v = b.async([](int&) {}, src.token());            // cancelled void prereq
+
+    ts::Task<std::tuple<int>> j = ts::when_all(v, r);
+    wait_until([&] { return j.is_done(); });
+    TS_CHECK(j.is_cancelled());
+}
+
+// The cancellation propagates through a `.then` off the join (continuation skipped).
+void test_when_all_cancel_propagates_then()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();
+
+    ts::Thread_safe<int> a{ 1 }, b{ 2 };
+    ts::Task<int> ta = a.async([](const int& x) { return x; });
+    ts::Task<int> tb = b.async([](const int& x) { return x; }, src.token());   // cancelled
+
+    std::atomic<bool> then_ran{ false };
+    ts::Task<int> j = ts::when_all(ta, tb)
+        .then([&then_ran](int x, int y) { then_ran.store(true); return x + y; });   // apply-style
+    wait_until([&] { return j.is_done(); });
+    TS_CHECK(j.is_cancelled());
+    TS_CHECK(!then_ran.load());
+}
+
 // --- G: `Signal` ----------------------------------------------------------
 
 void test_signal_trigger_then_wait()
@@ -603,6 +654,9 @@ void run_task_tests()
     run("when_all move-only", test_when_all_move_only);
     run("when_all apply style", test_when_all_apply_style);
     run("when_all apply void", test_when_all_apply_void);
+    run("when_all cancelled prereq", test_when_all_cancelled_prereq);
+    run("when_all cancelled void prereq", test_when_all_cancelled_void_prereq);
+    run("when_all cancel propagates then", test_when_all_cancel_propagates_then);
     run("signal trigger then wait", test_signal_trigger_then_wait);
     run("signal wait then trigger", test_signal_wait_then_trigger);
     run("signal then", test_signal_then);
