@@ -415,8 +415,12 @@ also future work.
   self-lock and all nested tasks have released. **Retraction** (§6): a blocking
   `get()` on a *retractable* (bare-scheduler), ready, not-yet-started task runs it
   **inline** on the waiting thread — the `started` claim (`exchange`) ensures a worker
-  and a retractor never both run it. This breaks the oversubscription deadlock (nested
-  fork-join where parents block all workers while children queue).
+  and a retractor never both run it. **Deep**: `get()` on a *dependent* (a builder task
+  with prerequisites) walks its `prerequisites` (backward links) recursively, runs the
+  un-started subtree inline, then the dependent — so waiting on a join, not just a leaf,
+  is deadlock-free. This breaks the oversubscription deadlock (nested fork-join where
+  parents block all workers while children queue). Non-retractable prerequisites (pipe
+  tasks, externally-triggered `Signal`s) are left to complete on their own.
 - **when_all cancellation:** make the internal join cancel-aware so a cancelled
   prerequisite cancels the join instead of stalling it (§11).
 - **Cancel callback:** notify (a continuation) when cancellation is requested.
@@ -430,11 +434,11 @@ also future work.
   `remaining_deps`/`Node.successors` and `when_all`'s counter are now the *same*
   mechanism as `num_locks`/`successors`; fold them in so there's one implementation
   (the graph↔dynamic unification, realized).
-- **Deep retraction:** currently retraction only runs a *ready* task inline. Extend it
-  to walk a not-ready task's prerequisites and retract *them* first (so a `get()` on a
-  join retracts its inputs), and to retractable **pipe/async** tasks (needs re-entering
-  the pipe's access serialization inline — today only bare-scheduler tasks are marked
-  `retractable`).
+- **Retraction of pipe/async tasks** — today only bare-scheduler tasks (`launch`/
+  `task`/`nested`) are `retractable`; retracting an `async` task would need to re-enter
+  the pipe's access serialization inline. Also: `when_all` joins are driven by
+  continuations, not `num_locks`/`prerequisites`, so they're not deep-retractable until
+  `when_all` is rebased onto the lock-counter (below).
 - Nested tasks + `current_task` TLS; re-base `parallel_for`'s rich mode on them.
 - Group latch tier for the default `parallel_for`.
 - Pooled block allocator + the one microbenchmark.

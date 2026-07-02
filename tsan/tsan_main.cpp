@@ -178,15 +178,16 @@ void stress_retraction()
         for (int o = 0; o < outer; ++o)
             tasks.push_back(ts::launch([&]
             {
-                std::vector<ts::Task<void>> inner;
-                for (int k = 0; k < 4; ++k)
-                    inner.push_back(ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); }));
-                for (auto& t : inner)
-                    t.get();
+                // Inner chunks + a dependent join; get() the join -> DEEP retraction
+                // (retract the chunks, then the join).
+                auto a = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); });
+                auto b = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); });
+                auto c = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); });
+                ts::task([] {}).after(a, b, c).launch().get();
             }));
         for (auto& t : tasks)
             t.get();
-        assert(total.load() == outer * 4);
+        assert(total.load() == outer * 3);
     }
 }
 

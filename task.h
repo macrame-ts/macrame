@@ -97,7 +97,8 @@ struct Task_control_block
     std::atomic<std::uint32_t> num_locks{ 0 };
     std::atomic<bool> started{ false };   // claim: only one of {worker, retractor} runs the body
     bool retractable = false;             // safe to run inline from a waiter (no pipe/access binding)
-    std::vector<std::shared_ptr<Task_control_block>> successors;   // decremented on settle
+    std::vector<std::shared_ptr<Task_control_block>> successors;      // decremented on settle
+    std::vector<std::shared_ptr<Task_control_block>> prerequisites;   // backward links, for deep retraction
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
     void complete() { settle(false); }
@@ -119,6 +120,7 @@ struct Task_control_block
     {
         std::vector<std::move_only_function<void(void*, bool)>> conts;
         std::vector<std::shared_ptr<Task_control_block>> succs;
+        std::vector<std::shared_ptr<Task_control_block>> prereqs;   // drop (no longer needed)
         {
             std::scoped_lock lock(mutex);
             if (completed)
@@ -127,6 +129,7 @@ struct Task_control_block
             cancelled = cancel_;
             conts = std::move(continuations);
             succs = std::move(successors);
+            prereqs = std::move(prerequisites);
         }
         ready.store(true, std::memory_order_release);
         done_cv.notify_all();   // `completed` set under the lock above: no lost wakeup
@@ -156,20 +159,33 @@ struct Task_control_block
         done_cv.wait(lock, [this] { return completed; });
     }
 
-    // Retraction: if this task is retractable, ready (prerequisites met), and not yet
-    // started, run it inline on the *calling* thread instead of parking — so a waiter
-    // under worker exhaustion (nested fork-join) makes progress rather than deadlocking.
-    // `execute` claims via `started`, so a worker and a retractor never both run the
-    // body. Then block until settled (ours-inline, or a worker that beat us to it).
+    // Deep retraction: run the un-started part of `blk`'s dependency subtree inline on
+    // the *calling* thread instead of parking on it — so a waiter under worker
+    // exhaustion (nested fork-join) makes progress rather than deadlocking. Retract
+    // `blk`'s prerequisites first (recursively), then, once its prerequisites are met
+    // and it hasn't started, run its body inline. `execute` claims via `started`, so a
+    // worker and a retractor never both run a body; non-retractable prerequisites
+    // (pipe tasks, externally-triggered `Signal`s) are left to complete on their own.
+    static void retract(const std::shared_ptr<Task_control_block>& blk)
+    {
+        if (!blk->retractable || blk->ready.load(std::memory_order_acquire))
+            return;
+
+        std::vector<std::shared_ptr<Task_control_block>> prereqs;
+        {
+            std::scoped_lock lock(blk->mutex);
+            prereqs = blk->prerequisites;   // snapshot (they clear as they settle)
+        }
+        for (const auto& p : prereqs)
+            retract(p);
+
+        if (blk->execute && blk->num_locks.load(std::memory_order_acquire) == 0)
+            blk->execute(blk);   // ready & not started -> run inline (no-op if a worker beat us)
+    }
+
     static void retract_or_wait(const std::shared_ptr<Task_control_block>& blk)
     {
-        if (blk->retractable
-            && blk->execute
-            && !blk->ready.load(std::memory_order_acquire)
-            && blk->num_locks.load(std::memory_order_acquire) == 0)
-        {
-            blk->execute(blk);
-        }
+        retract(blk);
         blk->wait();
     }
 };
@@ -439,6 +455,7 @@ inline void add_prerequisite(const std::shared_ptr<Task_control_block>& prereq,
     {
         succ->num_locks.fetch_add(1, std::memory_order_relaxed);
         prereq->successors.push_back(succ);
+        succ->prerequisites.push_back(prereq);   // backward link, for deep retraction
     }
 }
 

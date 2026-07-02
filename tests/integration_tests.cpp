@@ -308,6 +308,43 @@ void test_oversubscription_no_deadlock()
         runner.detach();     // deadlocked; leak the stuck thread
 }
 
+// Deep retraction: each outer task get()s a DEPENDENT (a builder task with
+// prerequisites), not the leaf chunks. Simple retraction can't run it (its
+// prerequisites aren't met); deep retraction walks its prerequisites, runs the
+// un-started chunks inline, then runs the dependent — so it too avoids the
+// oversubscription deadlock.
+void test_deep_retraction_no_deadlock()
+{
+    std::atomic<int> total{ 0 };
+    std::atomic<bool> done{ false };
+    const int outer = 2 * static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+
+    std::thread runner([&]
+    {
+        naive_parallel_for(outer, [&](int)
+        {
+            ts::Task<void> a = ts::launch([&] { total.fetch_add(1); });
+            ts::Task<void> b = ts::launch([&] { total.fetch_add(1); });
+            ts::Task<void> c = ts::launch([&] { total.fetch_add(1); });
+            ts::Task<void> join = ts::task([] {}).after(a, b, c).launch();
+            join.get();   // deep-retract: run a/b/c inline, then the join
+        });
+        done.store(true);
+    });
+
+    for (int i = 0; i < 300 && !done.load(); ++i)
+        std::this_thread::sleep_for(10ms);
+
+    TS_CHECK(done.load());   // false => deep retraction not working
+    if (done.load())
+    {
+        runner.join();
+        TS_CHECK(total.load() == outer * 3);
+    }
+    else
+        runner.detach();
+}
+
 } // namespace
 
 void run_integration_tests()
@@ -325,4 +362,5 @@ void run_integration_tests()
     run("engine frame invariants", test_engine_frame);
     run("engine determinism", test_engine_determinism);
     run("oversubscription no deadlock", test_oversubscription_no_deadlock);
+    run("deep retraction no deadlock", test_deep_retraction_no_deadlock);
 }
