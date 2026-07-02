@@ -239,6 +239,44 @@ spawned.
   chunks are an opt-in richer mode (retraction + uniform access inheritance) at
   per-chunk cost.
 
+### 7.1 Nested tasks inside a graph node
+
+A `Static_task_graph` node can now spawn nested tasks (`ts::nested` /
+`ts::add_nested`) — needed for dynamic, data-dependent fan-out a static
+`parallel_for` can't express (e.g. a physics node discovering N runtime islands
+and solving them in parallel). This required making a graph node a **real task
+block**, not a bare closure: `run_node` builds the node body as an
+`Executable<Body,void>` and submits `execute` on the run's scheduler, so
+`Executable::run` installs `current_task` and the `execution_flag` self-lock (§4)
+around the body — exactly the state `add_nested` needs. The node's graph
+post-logic (early release, successor release, run completion) runs as a
+**continuation** on that block, so it fires only after the body *and* all nested
+tasks settle — the §8 invariant, structurally.
+
+This is a **scoped** version of "graph nodes are blocks": nodes get a block for
+their *execution / nesting / completion* only. Scheduling stays as it was — data
+prerequisites via `remaining_deps` + the lazy reservation via `remaining_objects`
+(§10), *not* folded into `num_locks`. So `num_locks` on a node block is used only
+in its `execution_flag` (post-execution) mode; the intricate part of a full rebase
+(folding prerequisite counting into `num_locks` against the lazy reservation) is
+avoided. The node block is per-run (allocated in `run_node`), not reused across
+runs — sequential re-runs only; concurrent runs of one graph are already
+unsupported (§10 scenario 2). Reusing node blocks across runs (arm-once at
+`compile`) is a perf follow-up if `graph_execute` regresses.
+
+**Access inheritance.** For nested sub-work to touch the node's *owned* guarded
+data (the point of fanning out over it), it must run under the node's grant. A
+worker running a nested task otherwise has no `Access_context` → the harness fires.
+So `ts::launch` (and thus `ts::nested`) now snapshots the launcher's
+`Access_context` **by value** (`detail::snapshot_access()`) and installs it around
+the body (`Inherited_access_scope`). By value, not by pointer: the node's context
+is a stack local in the body, and body-return ≠ completion — the nested task may
+run after the body unwinds, so a pointer would dangle. The copy is bounded to the
+node's declared instances, so a nested task touching an *undeclared* object still
+faults (completeness hazard preserved). Consistent with the reservation: the
+node's objects stay reserved until its block completes (post-nested), and the
+nested tasks run under the node's grant on those same objects.
+
 ---
 
 ## 8. The access invariant (ours, not UE's)
@@ -255,6 +293,15 @@ automatic **iff** successor edges key off `Completed` (body + all nested), which
 body-return, whenever nested tasks exist. Otherwise a downstream reader races a
 live nested writer — the completeness hazard in a new guise. Nested-completion
 gating is therefore a **safety invariant**, not a convenience.
+
+**Realized (§7.1).** A graph node runs as an `Executable` block whose graph
+post-logic (which releases successors and the object reservation) is a
+*continuation* — it fires only at `Completed`, after every nested task. So a
+downstream node's `remaining_deps` is not decremented, and the object is not
+released, until the node's nested writers are done. The nested writers inherit the
+node's grant by value, so they run under the same declared access the reservation
+holds. The invariant holds structurally, verified under TSan (`graph nested
+stress`).
 
 ---
 
@@ -421,6 +468,11 @@ also future work.
   is deadlock-free. This breaks the oversubscription deadlock (nested fork-join where
   parents block all workers while children queue). Non-retractable prerequisites (pipe
   tasks, externally-triggered `Signal`s) are left to complete on their own.
+  **Nested tasks inside graph nodes** (§7.1): a node runs as an `Executable` block
+  (so `current_task` is set and completion gates on nested tasks), its graph
+  post-logic a continuation firing at `Completed`; `ts::launch`/`nested` inherit the
+  launcher's `Access_context` by value, so nested sub-work may touch the node's owned
+  guarded data. Realizes the §8 invariant structurally.
 - **when_all cancellation:** make the internal join cancel-aware so a cancelled
   prerequisite cancels the join instead of stalling it (§11).
 - **Cancel callback:** notify (a continuation) when cancellation is requested.
@@ -433,7 +485,17 @@ also future work.
 - **Re-base the graph and `when_all` onto the block's lock-counter** — the graph's
   `remaining_deps`/`Node.successors` and `when_all`'s counter are now the *same*
   mechanism as `num_locks`/`successors`; fold them in so there's one implementation
-  (the graph↔dynamic unification, realized).
+  (the graph↔dynamic unification, realized). *Partial:* graph nodes now run as
+  `Executable` blocks for execution/nesting/completion (§7.1), but scheduling still
+  uses `remaining_deps` + the lazy reservation (`remaining_objects`) rather than
+  `num_locks` — the prerequisite half is deliberately *not* folded in, because the
+  lazy reservation needs a separate data-ready signal. Folding the scheduling half
+  (and letting graph nodes be `after`/`then` prerequisites, and be retractable) is the
+  remaining work.
+- **Reuse graph node blocks across runs** — §7.1 allocates a node's `Executable`
+  block per `execute()`. For a build-once/run-many graph, arm-once at `compile()` +
+  re-arm each run would drop the per-run allocation; gated on whether `graph_execute`
+  actually regresses (measure first) and on keeping the "one run at a time" contract.
 - **Retraction of pipe/async tasks** — today only bare-scheduler tasks (`launch`/
   `task`/`nested`) are `retractable`; retracting an `async` task would need to re-enter
   the pipe's access serialization inline. Also: `when_all` joins are driven by

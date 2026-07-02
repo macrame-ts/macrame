@@ -173,6 +173,69 @@ void test_cancel_skips_nodes()
     TS_CHECK(ran.load() == 0);          // every node skipped
 }
 
+// A node fans out nested tasks; the run must not complete until every one settles.
+void test_nested_gates_completion()
+{
+    constexpr int n = 8;
+    ts::Thread_safe<int> owned{ 0 };
+    std::atomic<int> done_count{ 0 };
+
+    ts::Static_task_graph g;
+    g.add_node([&done_count](int&)
+    {
+        for (int k = 0; k < n; ++k)
+            ts::nested([&done_count] { done_count.fetch_add(1, std::memory_order_relaxed); });
+    }, owned);
+    g.compile();
+
+    g.execute().get();
+    TS_CHECK(done_count.load() == n);   // get() returned only after every nested task
+}
+
+// A nested task touches the node's OWNED guarded object; it runs under the node's
+// inherited access grant, so the harness must accept it.
+void test_nested_inherits_access()
+{
+    ts::Thread_safe<tests::Counter> c;
+
+    ts::Static_task_graph g;
+    g.add_node([](tests::Counter& counter)
+    {
+        ts::nested([&counter] { counter.add(5); });   // guarded write, on a worker
+    }, c);
+    g.compile();
+
+    g.execute().get();
+    int v = c.async([](const tests::Counter& k) { return k.value(); }).get();
+    TS_CHECK(v == 5);
+}
+
+// Nested sub-work gates a conflicting successor: the reader node must see every write
+// the writer node's nested tasks made (they gate its completion, which orders the edge).
+void test_nested_before_successor()
+{
+    constexpr int n = 16;
+    ts::Thread_safe<std::array<int, n>> arr{};
+    std::atomic<int> sum_seen{ -1 };
+
+    ts::Static_task_graph g;
+    g.add_node([](std::array<int, n>& a)
+    {
+        for (int k = 0; k < n; ++k)
+            ts::nested([&a, k] { a[k] = k + 1; });   // disjoint elements: no race
+    }, arr);
+    g.add_node([&sum_seen](const std::array<int, n>& a)
+    {
+        int s = 0;
+        for (int v : a) s += v;
+        sum_seen.store(s);
+    }, arr);
+    g.compile();
+
+    g.execute().get();
+    TS_CHECK(sum_seen.load() == n * (n + 1) / 2);   // reader ran after every nested write
+}
+
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
@@ -192,6 +255,9 @@ void run_graph_tests()
     run("completion after all", test_completion_after_all);
     run("graph stress", test_graph_stress);
     run("cancel skips nodes", test_cancel_skips_nodes);
+    run("nested gates completion", test_nested_gates_completion);
+    run("nested inherits access", test_nested_inherits_access);
+    run("nested before successor", test_nested_before_successor);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);

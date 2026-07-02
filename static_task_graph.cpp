@@ -192,32 +192,43 @@ void Static_task_graph::maybe_run(const std::shared_ptr<Run_state>& run, int ind
 
 void Static_task_graph::run_node(const std::shared_ptr<Run_state>& run, int index)
 {
-    detail::submit_closure(*run->scheduler, [run, index]
+    // The node runs as a real task block: `Executable::run` installs `current_task` and
+    // the execution-flag lock, so the body may spawn NESTED tasks (`ts::nested`) whose
+    // completion gates the node's. The graph post-logic runs as a continuation on the
+    // block -- after the body AND all nested tasks settle -- so a node's objects stay
+    // reserved and its successors stay blocked until its dynamic sub-work is done. The
+    // block carries the run's `token`, so a cancelled node skips its body (settling
+    // cancelled) but its continuation still runs, keeping the drain going. Submitted on
+    // the run's scheduler (not the default), matching the prior direct submit.
+    Static_task_graph* graph = run->graph;
+    auto block = detail::make_executable<void>(
+        [graph, index] { graph->nodes_[index].run(); }, run->token);
+    block->attach([run, index](void*, bool) { node_complete(run, index); });
+    detail::submit_closure(*run->scheduler, [block] { block->execute(block); });
+}
+
+void Static_task_graph::node_complete(const std::shared_ptr<Run_state>& run, int index)
+{
+    Node& node = run->graph->nodes_[index];
+
+    // Early release: free each object this node was the last to touch, so queued async
+    // on it can run. Safe -- the count hits 0 only after every node accessing that
+    // object has completed (this runs post-completion, so after any nested sub-work).
+    for (int pi : node.pipe_indices)
+        if (run->remaining_accessors[pi].fetch_sub(1, std::memory_order_acq_rel) == 1)
+            detail::pipe_release(*run->scheduler, *run->graph->distinct_pipes_[pi]);
+
+    for (int successor : node.successors)
+        if (run->remaining_deps[successor].fetch_sub(1, std::memory_order_acq_rel) == 1)
+            on_data_ready(run, successor);
+
+    if (run->remaining_nodes.fetch_sub(1, std::memory_order_acq_rel) == 1)
     {
-        Node& node = run->graph->nodes_[index];
-
-        if (!run->token.is_cancel_requested())   // cancelled: skip the body, keep draining
-            node.run();
-
-        // Early release: free each object this node was the last to touch, so queued
-        // async on it can run. Safe -- the count hits 0 only after every node
-        // accessing that object has completed.
-        for (int pi : node.pipe_indices)
-            if (run->remaining_accessors[pi].fetch_sub(1, std::memory_order_acq_rel) == 1)
-                detail::pipe_release(*run->scheduler, *run->graph->distinct_pipes_[pi]);
-
-        for (int successor : node.successors)
-            if (run->remaining_deps[successor].fetch_sub(1, std::memory_order_acq_rel) == 1)
-                on_data_ready(run, successor);
-
-        if (run->remaining_nodes.fetch_sub(1, std::memory_order_acq_rel) == 1)
-        {
-            if (run->token.is_cancel_requested())
-                run->done->cancel();
-            else
-                run->done->complete();
-        }
-    });
+        if (run->token.is_cancel_requested())
+            run->done->cancel();
+        else
+            run->done->complete();
+    }
 }
 
 Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token token)

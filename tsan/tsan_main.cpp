@@ -12,6 +12,7 @@
 #include "thread_safe.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cstdio>
@@ -101,6 +102,39 @@ void stress_graph()
     g.compile();
     for (int i = 0; i < 200; ++i)
         g.execute().get();
+}
+
+// A graph node fans out NESTED tasks over disjoint elements of the object it owns,
+// re-executed in a loop with a conflicting reader successor. Stresses the node-as-block
+// path: current_task set/restore on a graph node, the execution_flag/num_locks switch,
+// add_nested racing nested completion, the node_complete continuation gating the run and
+// the successor, and inherited-access-scope reads on the shared array.
+void stress_graph_nested()
+{
+    constexpr int n = 32;
+    ts::Thread_safe<std::array<int, n>> arr{};
+    std::atomic<int> sum{ 0 };
+
+    ts::Static_task_graph g;
+    g.add_node([](std::array<int, n>& a)
+    {
+        for (int k = 0; k < n; ++k)
+            ts::nested([&a, k] { a[k] = k; });
+    }, arr);
+    g.add_node([&sum](const std::array<int, n>& a)
+    {
+        int s = 0;
+        for (int v : a) s += v;
+        sum.store(s, std::memory_order_relaxed);
+    }, arr);
+    g.compile();
+
+    for (int i = 0; i < 300; ++i)
+    {
+        sum.store(-1, std::memory_order_relaxed);
+        g.execute().get();
+        assert(sum.load(std::memory_order_relaxed) == n * (n - 1) / 2);
+    }
 }
 
 // when_all joining prerequisites that complete on different worker threads: mixed
@@ -286,6 +320,7 @@ int main()
     std::puts("tsan: cancel stress");        stress_cancel();
     std::puts("tsan: graph stress");        stress_graph();
     std::puts("tsan: graph+async stress");  stress_graph_async();
+    std::puts("tsan: graph nested stress");  stress_graph_nested();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);
     std::puts("tsan: done (no races)");
     return 0;

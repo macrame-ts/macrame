@@ -154,8 +154,18 @@ template<typename Fn>
 auto launch(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t<Fn>>
 {
     using R = std::invoke_result_t<Fn>;
-    auto core = detail::make_executable<R>(std::forward<Fn>(fn), token);
-    core->retractable = true;   // bare scheduler task (no pipe/access): safe to run inline from a waiter
+    // Inherit the launcher's access grant (if any), by value: sub-work launched from a
+    // task body (see `nested`) then runs under the launcher's permissions, so it may
+    // touch the guarded data the launcher owns -- e.g. a graph node fanning dynamic
+    // sub-work over the store it holds. The copy is independent of the launcher's stack,
+    // so it is valid after the launcher unwinds and on whatever worker runs the body.
+    auto body = [fn = std::forward<Fn>(fn), ctx = detail::snapshot_access()]() mutable -> R
+    {
+        detail::Inherited_access_scope scope(ctx);
+        return fn();
+    };
+    auto core = detail::make_executable<R>(std::move(body), token);
+    core->retractable = true;   // bare scheduler task (no pipe binding): safe to run inline from a waiter
     detail::submit_closure(default_scheduler(), [core] { core->execute(core); });
     return Task<R>(core);
 }

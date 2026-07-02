@@ -159,6 +159,10 @@ private:
     static void on_object_reserved(const std::shared_ptr<Run_state>& run, int pipe_index);
     static void maybe_run(const std::shared_ptr<Run_state>& run, int index);
     static void run_node(const std::shared_ptr<Run_state>& run, int index);
+    // Graph post-logic for a node whose body AND all its nested tasks have settled:
+    // early-release its objects, release its successors, and settle the run when the
+    // last node finishes. Runs as a continuation on the node's block (see run_node).
+    static void node_complete(const std::shared_ptr<Run_state>& run, int index);
 
     std::vector<Node> nodes_;
     std::vector<std::pair<int, int>> explicit_edges_;

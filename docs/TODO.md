@@ -30,6 +30,7 @@ are the incremental steps toward it.
 - Generic-lambda / `auto&` support for access-mode deduction (graph `add_node` currently needs non-generic lambdas so parameter const-ness is introspectable).
 
 ## Static_task_graph
+- Nested tasks inside a graph node: **done** — a node runs as a real `Executable` block (`current_task` set, `execution_flag` self-lock), so its body may `ts::nested(...)`; its completion (and thus successors + object release) gates on all nested tasks (§7.1/§8), and nested sub-work inherits the node's `Access_context` by value so it may touch the node's owned guarded data. Enables dynamic, runtime-sized fan-out over a node's store (what a static `parallel_for` can't express). Node blocks are per-run for now (reuse across runs is a perf follow-up); still one run at a time.
 - `compile()`: ambiguity detection (two nodes with conflicting access and no explicit order edge) — currently auto-ordered by declaration index.
 - Pipelined / concurrent execution (more than one execute() in flight) for frame overlap.
 - Profiler-guided graph optimization (reorder/rebucket from measured task durations).

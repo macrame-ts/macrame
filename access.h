@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <typeinfo>
 
 #ifndef TS_SAFETY_CHECKS
@@ -40,6 +41,18 @@ namespace detail
 extern thread_local const Access_context* current_access;
 
 [[noreturn]] void access_violation(const char* type_name, Access mode) noexcept;
+
+// Snapshot the calling thread's access grant by value (empty if no task is running).
+// Used to propagate a task's grants to sub-work launched from it (`ts::launch` /
+// `ts::nested`): the copy has independent lifetime, so the launched task may run --
+// possibly on another thread, possibly after the launcher's body unwinds -- still
+// holding the launcher's grant.
+inline std::optional<Access_context> snapshot_access()
+{
+    if (current_access)
+        return *current_access;
+    return std::nullopt;
+}
 
 } // namespace detail
 
@@ -91,5 +104,40 @@ public:
 private:
     const Access_context* prev_;
 };
+
+namespace detail
+{
+
+// Installs an inherited grant (a `snapshot_access()` copy) for the duration of a scope,
+// if one was captured; a no-op when empty. `ctx` must outlive the scope -- in practice
+// it is a by-value member of the launched task's body, alive for the whole call.
+class Inherited_access_scope
+{
+public:
+    explicit Inherited_access_scope(const std::optional<Access_context>& ctx) noexcept
+        : active_(ctx.has_value())
+    {
+        if (active_)
+        {
+            prev_ = current_access;
+            current_access = &*ctx;
+        }
+    }
+
+    ~Inherited_access_scope()
+    {
+        if (active_)
+            current_access = prev_;
+    }
+
+    Inherited_access_scope(const Inherited_access_scope&) = delete;
+    Inherited_access_scope& operator=(const Inherited_access_scope&) = delete;
+
+private:
+    bool active_;
+    const Access_context* prev_ = nullptr;
+};
+
+} // namespace detail
 
 } // namespace ts
