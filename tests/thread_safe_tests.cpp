@@ -14,7 +14,6 @@
 using namespace std::chrono_literals;
 using ts::test::run;
 using tests::Counter;
-using tests::record_max;
 using tests::wait_until;
 
 namespace
@@ -106,22 +105,23 @@ void test_serial_correctness()
 
 void test_concurrent_readers()
 {
-    std::atomic<int> active{ 0 }, peak{ 0 };
+    // Deterministic concurrency check: two readers each wait (bounded) for the other, so
+    // the gate is met iff the pipe genuinely ran readers concurrently -- rather than the
+    // old "peak > 1" that merely hoped the timing overlapped.
+    tests::Parallel_gate gate{ 2 };
     ts::Thread_safe<int> data{ 7 };
     std::vector<ts::Task<int>> tasks;
 
     for (int i = 0; i < 16; ++i)
-        tasks.push_back(data.async([&active, &peak](const int& v)
+        tasks.push_back(data.async([&gate](const int& v)
         {
-            record_max(peak, active.fetch_add(1) + 1);
-            std::this_thread::sleep_for(3ms);
-            active.fetch_sub(1);
+            gate.arrive();
             return v;
         }));
 
     for (auto& t : tasks)
         t.get();
-    TS_CHECK(peak.load() > 1);
+    TS_CHECK(gate.met());   // concurrent readers (not serialized by the reader/writer pipe)
 }
 
 void test_writer_exclusion()

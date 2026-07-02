@@ -161,84 +161,83 @@ void test_graph_async_stress()
     TS_CHECK(peak_of(x) == 1);
 }
 
-// Early release: an object touched only by a fast node is freed while a slow node
-// (on a different object) still runs, so async on it runs well before run completion.
+// Early release: an object touched only by a fast node is freed while a slow node (on a
+// different object) still runs, so async on it runs *during* the run. Deterministic: the
+// slow node, after its sleep, records whether the async already completed. Early release
+// => the async ran within the 60ms window (flag set); the coarse "hold for the whole
+// run" behavior would block the async until run end, so the flag would be unset.
 void test_early_release_frees_object_mid_run()
 {
-    using clock = std::chrono::steady_clock;
-    auto ms_since = [](clock::time_point t0)
-    {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count();
-    };
-
     ts::Thread_safe<int> x{ 0 }, y{ 0 };
+    std::atomic<bool> async_ran{ false };
+    std::atomic<bool> ran_during_run{ false };
+
     ts::Static_task_graph g;
-    g.add_node([](int& v) { v = 1; }, x);                                    // fast: sole accessor of x
-    g.add_node([](int& v) { std::this_thread::sleep_for(60ms); v = 1; }, y); // slow: sole accessor of y
+    g.add_node([](int& v) { v = 1; }, x);   // fast: sole accessor of x
+    g.add_node([&async_ran, &ran_during_run](int& v)
+    {
+        std::this_thread::sleep_for(60ms);
+        ran_during_run.store(async_ran.load());   // did x's async run while this node was still going?
+        v = 1;
+    }, y);   // slow: sole accessor of y
     g.compile();
 
-    auto t0 = clock::now();
     auto run = g.execute();
-    std::atomic<long long> x_async_ms{ -1 };
-    x.async([&](int&) { x_async_ms.store(ms_since(t0)); });
+    ts::Task<void> as = x.async([&async_ran](int&) { async_ran.store(true); });
     run.get();
-    long long run_ms = ms_since(t0);
+    as.get();
 
-    TS_CHECK(x_async_ms.load() >= 0);              // the async ran
-    TS_CHECK(x_async_ms.load() + 20 < run_ms);     // and well before the 60ms run finished
+    TS_CHECK(async_ran.load());        // the async ran
+    TS_CHECK(ran_during_run.load());   // and mid-run: x was freed early, not held to run end
 }
 
 // Lazy acquire: an object touched only by a LATE node (after a slow predecessor) is
-// reserved only when that node is dispatched, so async on it runs during the early
-// part of the frame instead of blocking on the whole run.
+// reserved only when that node is dispatched, so async on it runs during the early part
+// of the frame instead of blocking on the whole run. Deterministic the same way: the
+// slow predecessor (which does NOT touch x) records whether x's async already ran.
 void test_lazy_acquire_late_object_free_early()
 {
-    using clock = std::chrono::steady_clock;
-    auto ms_since = [](clock::time_point t0)
-    {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count();
-    };
-
     ts::Thread_safe<int> y{ 0 }, x{ 0 };
+    std::atomic<bool> async_ran{ false };
+    std::atomic<bool> ran_during_a{ false };
+
     ts::Static_task_graph g;
-    ts::Graph_node a = g.add_node([](int& v) { std::this_thread::sleep_for(60ms); v = 1; }, y);
+    ts::Graph_node a = g.add_node([&async_ran, &ran_during_a](int& v)
+    {
+        std::this_thread::sleep_for(60ms);
+        ran_during_a.store(async_ran.load());   // x's async ran while a (no x access) was active?
+        v = 1;
+    }, y);
     ts::Graph_node b = g.add_node([](int& v) { v = 1; }, x);   // x touched only after a
     b.after(a);
     g.compile();
 
-    auto t0 = clock::now();
     auto run = g.execute();
-    std::atomic<long long> x_async_ms{ -1 };
-    x.async([&](int&) { x_async_ms.store(ms_since(t0)); });
+    ts::Task<void> as = x.async([&async_ran](int&) { async_ran.store(true); });
     run.get();
-    long long run_ms = ms_since(t0);
+    as.get();
 
-    TS_CHECK(x_async_ms.load() >= 0);
-    TS_CHECK(x_async_ms.load() + 30 < run_ms);     // x was free while the 60ms node ran
+    TS_CHECK(async_ran.load());
+    TS_CHECK(ran_during_a.load());   // x was free while the 60ms node ran (reserved only when b dispatched)
 }
 
-// J: repeat a concurrency-sensitive workload to catch flakiness.
+// J: repeat a concurrency-sensitive workload to catch flakiness. Each iteration uses a
+// deterministic gate (two readers wait for each other) rather than a hoped "peak > 1".
 void test_repeat_stress()
 {
     bool all = true;
     for (int iter = 0; iter < 20; ++iter)
     {
-        std::atomic<int> active{ 0 }, peak{ 0 };
+        tests::Parallel_gate gate{ 2 };
         ts::Thread_safe<int> data{ 0 };
         std::vector<ts::Task<int>> tasks;
 
         for (int i = 0; i < 8; ++i)
-            tasks.push_back(data.async([&active, &peak](const int& v)
-            {
-                record_max(peak, active.fetch_add(1) + 1);
-                std::this_thread::sleep_for(1ms);
-                active.fetch_sub(1);
-                return v;
-            }));
+            tasks.push_back(data.async([&gate](const int& v) { gate.arrive(); return v; }));
         for (auto& t : tasks)
             t.get();
 
-        all = all && (peak.load() > 1);
+        all = all && gate.met();
     }
     TS_CHECK(all);
 }
