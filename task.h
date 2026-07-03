@@ -221,6 +221,11 @@ struct Task_control_block
     std::atomic<std::uint64_t> run_state{ 0 };
     bool retractable = false;             // safe to run inline from a waiter (no pipe/access binding)
 
+    // This block's current reuse generation — the high bits of `run_state`, above the
+    // claim bit (`run_state >> 1`). Bumped by `reset()` on each reuse. A dispatch captures
+    // this value and passes it to `claim(gen)`; if `reset` bumped it in the meantime, that
+    // dispatch is stale (a leftover from the prior run) and its claim CAS fails. See
+    // `run_state` / `claim`.
     std::uint64_t generation() const noexcept { return run_state.load(std::memory_order_relaxed) >> 1; }
 
     // Claim the body for `gen`; true if this caller should run it. Fails if already
