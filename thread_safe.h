@@ -143,7 +143,7 @@ private:
             return fn(*inst);
         };
         auto core = detail::make_executable<R>(std::move(body), token);
-        core->priority = priority;
+        core->flags.priority = priority;
         detail::pipe_enqueue(default_scheduler(), pipe_, mode,
             [core, gen = core->generation()] { core->execute(core, gen); }, priority);
         return Task<R>(core);

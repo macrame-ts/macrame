@@ -508,6 +508,16 @@ TSan): the block settles exactly once, either way.
   post-logic a continuation firing at `Completed`; `ts::launch`/`nested` inherit the
   launcher's `Access_context` by value, so nested sub-work may touch the node's owned
   guarded data. Realizes the §8 invariant structurally.
+  **Inline dispatch** — `ts::task(fn).set_inline().after(...)` runs a ready task on the
+  thread that settled its last prerequisite, not the queue (latency-sensitive dependents).
+  The dispatch forks in `release` at `num_locks == 0` (`dispatch_ready`): inline → run
+  here, else `submit_ready`. A **per-thread FIFO trampoline** (`inline_pending` vector +
+  head index; `clear()` retains capacity) makes a chain of inline tasks run iteratively —
+  O(1) stack instead of `settle → release → execute → settle …` recursion. Caveats
+  (documented, not enforced): runs on a nondeterministic / possibly external thread,
+  bypasses priority, must not block. `run_inline` is a packed bit in `Flags`
+  (with `priority`/`retractable`). Scope: the `after` path; `then`/graph/async inline come
+  with the continuation-unification arc.
   **Reusable tasks** — `Task_control_block::reset()` re-arms a settled block in place
   (monomorphic, scalars only: reuse is a *block* capability, so no new `<R>` type). The
   existing `Task_builder<R>` (from `ts::task(fn)`) is the reusable handle — it already

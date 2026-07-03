@@ -204,7 +204,16 @@ struct Task_control_block
     // node) keeps it across runs -- an alloc-free completion hook. Null for most tasks.
     void (*on_complete)(Task_control_block*) = nullptr;
     Cancellation_token token;          // checked by `execute` before running the body
-    Priority priority = Priority::normal;   // applied when the block is dispatched (submit_ready / pipe)
+    // Static dispatch properties, packed into one byte (all set at creation, never
+    // mutated once the block is shared, so non-atomic is race-free). `priority` and
+    // `run_inline` are read together at dispatch; `retractable` in the retraction guard.
+    struct Flags
+    {
+        Priority priority : 2 = Priority::normal;   // queue position when dispatched
+        bool retractable : 1 = false;               // safe to run inline from a waiter (no pipe/access binding)
+        bool run_inline : 1 = false;                // dispatch on the settling thread, not the queue
+    };
+    Flags flags;
     // `num_locks`: below `execution_flag` it counts unmet PREREQUISITES (gate
     // execution); once the body starts the flag is set and it counts pending NESTED
     // tasks (gate completion). See docs/task-internals.md §4/§7.
@@ -219,7 +228,6 @@ struct Task_control_block
     // `reset` (retraction queues a duplicate the reset would otherwise let re-run the
     // body) fails the CAS and skips.
     std::atomic<std::uint64_t> run_state{ 0 };
-    bool retractable = false;             // safe to run inline from a waiter (no pipe/access binding)
 
     // This block's current reuse generation — the high bits of `run_state`, above the
     // claim bit (`run_state >> 1`). Bumped by `reset()` on each reuse. A dispatch captures
@@ -245,14 +253,46 @@ struct Task_control_block
 
     // A prerequisite or nested task settled (`after`/nesting are ordering-only, so a
     // cancelled one still releases). Decrement `blk`'s lock count and, when the last
-    // lock drops, schedule it (prerequisites met) or complete it (nested done).
+    // lock drops, dispatch it (prerequisites met) or complete it (nested done).
     static void release(const std::shared_ptr<Task_control_block>& blk)
     {
         std::uint32_t now = blk->num_locks.fetch_sub(1, std::memory_order_acq_rel) - 1;
         if (now == 0)
-            submit_ready(blk);            // pre-execution: prerequisites met -> schedule
+            dispatch_ready(blk);          // pre-execution: prerequisites met -> queue, or run inline
         else if (now == execution_flag)
             blk->complete();              // post-execution: nested done -> complete
+    }
+
+    // Per-thread FIFO trampoline for inline tasks: a ready inline task runs on THIS thread
+    // (the one that settled its last prerequisite), driven iteratively so a chain of inline
+    // tasks doesn't recurse (settle -> release -> execute -> settle -> ...) and blow the
+    // stack. The first inline dispatch on a thread starts the drain; inline tasks made
+    // ready during the drain just push and are picked up in order (head advances as the
+    // vector grows). `clear()` at the end retains capacity -> no steady-state allocation.
+    inline static thread_local std::vector<std::shared_ptr<Task_control_block>> inline_pending;
+    inline static thread_local bool inline_draining = false;
+
+    static void dispatch_ready(const std::shared_ptr<Task_control_block>& blk)
+    {
+        if (!blk->flags.run_inline)
+        {
+            submit_ready(blk);   // queued: the scheduler runs it (at blk->flags.priority)
+            return;
+        }
+        inline_pending.push_back(blk);
+        if (inline_draining)
+            return;              // an active drain on this thread will run it
+        inline_draining = true;
+        for (std::size_t head = 0; head < inline_pending.size(); ++head)
+        {
+            std::shared_ptr<Task_control_block> b = std::move(inline_pending[head]);
+            if (b->execute)
+                b->execute(b, b->generation());   // claims + runs the body on this thread
+            else
+                b->complete();
+        }
+        inline_pending.clear();   // retains capacity
+        inline_draining = false;
     }
 
     void settle(bool cancel_)
@@ -326,7 +366,7 @@ struct Task_control_block
     // (pipe tasks, externally-triggered `Signal`s) are left to complete on their own.
     static void retract(const std::shared_ptr<Task_control_block>& blk)
     {
-        if (!blk->retractable || blk->ready.load(std::memory_order_acquire))
+        if (!blk->flags.retractable || blk->ready.load(std::memory_order_acquire))
             return;
 
         std::vector<std::shared_ptr<Task_control_block>> prereqs;
@@ -611,7 +651,7 @@ private:
                 else { produce(r); next->complete(); }
             });
             detail::add_retraction_hint(core_, next);   // deep-retractable: get() can run the producer inline
-            next->retractable = true;
+            next->flags.retractable = true;
             return Task<R2>(std::move(next));
         }
         else
@@ -624,7 +664,7 @@ private:
                 else { wrapper->store(produce(r)); wrapper->core.complete(); }
             });
             detail::add_retraction_hint(core_, next);   // deep-retractable: get() can run the producer inline
-            next->retractable = true;
+            next->flags.retractable = true;
             return Task<R2>(std::move(next));
         }
     }
@@ -682,7 +722,18 @@ public:
     // `launch()`.
     Task_builder& priority(Priority p)
     {
-        core_->priority = p;
+        core_->flags.priority = p;
+        return *this;
+    }
+
+    // Dispatch this task INLINE — run it on the thread that settles its last prerequisite,
+    // rather than queueing it. For latency-sensitive / very small dependents. Trade-offs:
+    // it runs on a nondeterministic thread (possibly external — see docs), bypasses
+    // priority, and must not block; a deep inline chain is bounded by a trampoline. Call
+    // before `launch()`.
+    Task_builder& set_inline()
+    {
+        core_->flags.run_inline = true;
         return *this;
     }
 
@@ -729,7 +780,7 @@ auto task(Fn&& fn)
     using R = std::invoke_result_t<Fn>;
     auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), {});
     core->num_locks.store(1, std::memory_order_relaxed);   // the "not launched" lock
-    core->retractable = true;   // bare scheduler task: safe to run inline from a waiter
+    core->flags.retractable = true;   // bare scheduler task: safe to run inline from a waiter
     return Task_builder<R>(std::move(core));
 }
 
@@ -745,8 +796,8 @@ auto launch(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority
 {
     using R = std::invoke_result_t<Fn>;
     auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), std::move(token));
-    core->retractable = true;   // bare scheduler task (no pipe binding): safe to run inline from a waiter
-    core->priority = priority;
+    core->flags.retractable = true;   // bare scheduler task (no pipe binding): safe to run inline from a waiter
+    core->flags.priority = priority;
     detail::submit_ready(core);
     return Task<R>(core);
 }
@@ -903,7 +954,7 @@ Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
         };
     }
 
-    next_core->retractable = true;   // a blocking get() can retract the (retractable) prerequisites
+    next_core->flags.retractable = true;   // a blocking get() can retract the (retractable) prerequisites
 
     constexpr auto slot = detail::when_all_slots<Rs...>();
     auto prereqs = std::make_tuple(std::move(prerequisites)...);

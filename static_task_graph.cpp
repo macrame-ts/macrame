@@ -247,7 +247,7 @@ void Static_task_graph::maybe_run(Run_state& run, int index)
 void Static_task_graph::run_node(Run_state& run, int index)
 {
     Node& node = run.graph->nodes_[index];
-    run.scheduler->submit(&node_trampoline, &node, node.block->priority);
+    run.scheduler->submit(&node_trampoline, &node, node.block->flags.priority);
 }
 
 // Raw scheduler entry: run the node's block. Kept alive by the graph (Node owns the
@@ -363,7 +363,7 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token t
         b.ready.store(false, std::memory_order_relaxed);
         b.num_locks.store(0, std::memory_order_relaxed);
         b.token = token;
-        b.priority = nodes_[i].priority;   // pick up any Graph_node::priority set since last run
+        b.flags.priority = nodes_[i].priority;   // pick up any Graph_node::priority set since last run
     }
     for (size_t i = 0; i < distinct_pipes_.size(); ++i)
     {

@@ -33,7 +33,7 @@ void submit_ready(std::shared_ptr<Task_control_block> block)
     // queue a duplicate) must not re-run the body against the new run. `claim(gen)`
     // (inside execute, or here for a bodyless block) is the atomic gate. See task.h.
     std::uint64_t gen = block->generation();
-    Priority priority = block->priority;
+    Priority priority = block->flags.priority;
     submit_closure(default_scheduler(),
         [block = std::move(block), gen]
         {

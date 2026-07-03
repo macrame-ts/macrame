@@ -271,6 +271,34 @@ void stress_retraction()
     }
 }
 
+// Inline dispatch: dependents marked set_inline() run on whatever thread settles their
+// prerequisite (a worker, or the get()-thread's retractor). Under oversubscription the
+// outer tasks saturate the workers and get() an inline chain, so it runs inline via
+// retraction. Stresses the dispatch fork (release -> dispatch_ready), the per-thread
+// trampoline, and inline execution racing worker completion + the run_state claim.
+void stress_inline()
+{
+    const int outer = 2 * static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+    for (int i = 0; i < 400; ++i)
+    {
+        std::atomic<int> count{ 0 };
+        std::vector<ts::Task<void>> tasks;
+        for (int o = 0; o < outer; ++o)
+            tasks.push_back(ts::launch([&count]
+            {
+                auto a = ts::launch([&count] { count.fetch_add(1, std::memory_order_relaxed); });
+                auto b = ts::task([&count] { count.fetch_add(1, std::memory_order_relaxed); })
+                             .set_inline().after(a).launch();
+                auto c = ts::task([&count] { count.fetch_add(1, std::memory_order_relaxed); })
+                             .set_inline().after(b).launch();
+                c.get();
+            }));
+        for (auto& t : tasks)
+            t.get();
+        assert(count.load() == outer * 3);
+    }
+}
+
 // Nested tasks: a parent spawns several nested tasks; the parent must not complete
 // until all settle. Stresses the execution_flag mode switch, add_nested's fetch_add
 // racing nested completion (release reaching execution_flag), and the body-end
@@ -437,6 +465,7 @@ int main()
     std::puts("tsan: nested stress");        stress_nested();
     std::puts("tsan: reuse stress");         stress_reuse();
     std::puts("tsan: retraction stress");    stress_retraction();
+    std::puts("tsan: inline stress");        stress_inline();
     std::puts("tsan: cancel stress");        stress_cancel();
     std::puts("tsan: cancel callback stress"); stress_cancel_callback();
     std::puts("tsan: graph stress");        stress_graph();

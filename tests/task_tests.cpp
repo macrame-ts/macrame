@@ -515,6 +515,57 @@ void test_launch_priority()
     TS_CHECK(d.async([](const int& v) { return v + 2; }, {}, Priority::high).get() == 42);
 }
 
+// An inline task runs on the thread that settled its last prerequisite. Pinned
+// deterministically: the prerequisite blocks on `gate` (so it can't complete until `dep`
+// is wired -- otherwise `after` would no-op and `dep` would run on this thread), and we
+// wait via a flag, not get() (a get() would retract `dep` onto this thread).
+void test_inline_runs_on_completer()
+{
+    std::atomic<bool> gate{ false };
+    std::atomic<std::thread::id> prereq_thread{};
+    std::atomic<std::thread::id> inline_thread{};
+    std::atomic<bool> inline_ran{ false };
+
+    ts::Task<void> prereq = ts::launch([&]
+    {
+        while (!gate.load()) std::this_thread::yield();   // held until `dep` is wired
+        prereq_thread.store(std::this_thread::get_id());
+    });
+    ts::Task<void> dep = ts::task([&] { inline_thread.store(std::this_thread::get_id()); inline_ran.store(true); })
+                             .set_inline().after(prereq).launch();
+    gate.store(true);   // prereq now finishes on its worker; dep dispatches inline there
+    wait_until([&] { return inline_ran.load(); });
+
+    TS_CHECK(inline_thread.load() == prereq_thread.load());          // ran on the prerequisite's completer (a worker)
+    TS_CHECK(inline_thread.load() != std::this_thread::get_id());    // not this thread
+}
+
+// An inline task with no pending prerequisite runs synchronously, on the launching thread.
+void test_inline_synchronous_when_ready()
+{
+    std::atomic<bool> ran{ false };
+    ts::task([&] { ran.store(true); }).set_inline().launch();
+    TS_CHECK(ran.load());   // already ran before this line
+}
+
+// A long chain of inline tasks runs iteratively (the trampoline), not recursively -- so it
+// does not overflow the stack. Held off a Signal so the whole chain is built before it fires.
+void test_inline_deep_chain_no_overflow()
+{
+    constexpr int n = 20000;
+    std::atomic<int> count{ 0 };
+
+    ts::Signal root;
+    ts::Task<void> prev = root;
+    for (int i = 0; i < n; ++i)
+        prev = ts::task([&count] { count.fetch_add(1, std::memory_order_relaxed); })
+                   .set_inline().after(prev).launch();
+
+    root.trigger();    // fires the chain -> all n run inline on this thread, trampolined
+    prev.get();
+    TS_CHECK(count.load() == n);
+}
+
 void test_launch_cancelled()
 {
     ts::Cancellation_source src;
@@ -743,6 +794,9 @@ void run_task_tests()
     run("launch void", test_launch_void);
     run("launch then", test_launch_then);
     run("launch priority", test_launch_priority);
+    run("inline runs on completer", test_inline_runs_on_completer);
+    run("inline synchronous when ready", test_inline_synchronous_when_ready);
+    run("inline deep chain no overflow", test_inline_deep_chain_no_overflow);
     run("launch cancelled", test_launch_cancelled);
     run("task after single", test_task_after_single);
     run("task after multiple", test_task_after_multiple);
