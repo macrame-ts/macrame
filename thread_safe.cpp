@@ -12,7 +12,7 @@ Scheduler& default_scheduler()
 namespace detail
 {
 
-void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closure)
+void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closure, Priority priority)
 {
     auto* held = new std::move_only_function<void()>(std::move(closure));
     scheduler.submit(
@@ -22,7 +22,7 @@ void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closur
             (*fn)();
             delete fn;
         },
-        held);
+        held, priority);
 }
 
 // A block whose prerequisites are all met: schedule it to run (its body, or, if
@@ -33,6 +33,7 @@ void submit_ready(std::shared_ptr<Task_control_block> block)
     // queue a duplicate) must not re-run the body against the new run. `claim(gen)`
     // (inside execute, or here for a bodyless block) is the atomic gate. See task.h.
     std::uint64_t gen = block->generation();
+    Priority priority = block->priority;
     submit_closure(default_scheduler(),
         [block = std::move(block), gen]
         {
@@ -40,7 +41,8 @@ void submit_ready(std::shared_ptr<Task_control_block> block)
                 block->execute(block, gen);      // claims `gen` internally (dedup + stale-skip)
             else if (block->claim(gen))          // bodyless: claim so a stale/duplicate no-ops
                 block->complete();
-        });
+        },
+        priority);
 }
 
 namespace
@@ -53,6 +55,7 @@ void dispatch(Scheduler& scheduler, Pipe& pipe);
 // in parallel; a writer runs alone.
 void submit_job(Scheduler& scheduler, Pipe& pipe, Job job)
 {
+    Priority priority = job.priority;
     submit_closure(scheduler,
         [&scheduler, &pipe, job = std::move(job)]() mutable
         {
@@ -68,7 +71,8 @@ void submit_job(Scheduler& scheduler, Pipe& pipe, Job job)
 
             if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
                 pipe.idle.notify_all();
-        });
+        },
+        priority);
 }
 
 // Admit as many front jobs as the reader/writer rules allow. Caller holds `pipe.mutex`.
@@ -101,7 +105,7 @@ void dispatch(Scheduler& scheduler, Pipe& pipe)
             // Signal the holder that it now owns the pipe; leave `writer_active` set
             // (the reservation is released explicitly via `pipe_release`, not on the
             // callback's completion).
-            submit_closure(scheduler, std::move(job.fn));
+            submit_closure(scheduler, std::move(job.fn), job.priority);
         else
             submit_job(scheduler, pipe, std::move(job));
     }
@@ -109,10 +113,11 @@ void dispatch(Scheduler& scheduler, Pipe& pipe)
 
 } // namespace
 
-void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> fn)
+void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> fn,
+                  Priority priority)
 {
     std::scoped_lock lock(pipe.mutex);
-    pipe.jobs.push_back(Job{ mode, std::move(fn) });
+    pipe.jobs.push_back(Job{ mode, std::move(fn), /*reservation*/ false, priority });
     dispatch(scheduler, pipe);
 }
 

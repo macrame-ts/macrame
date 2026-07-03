@@ -1,14 +1,13 @@
 #pragma once
 
+#include "priority.h"
+
 #include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <queue>
 #include <semaphore>
 #include <vector>
-
-// declaration order defines scheduling priority (high pops first); `Task_queue_cmp` depends on it
-enum class Priority { high, normal, low };
 
 enum class Idle_policy
 {

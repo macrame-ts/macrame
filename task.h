@@ -2,6 +2,7 @@
 
 #include "access.h"   // grant inheritance for launched/nested sub-work (snapshot_access)
 #include "fatal.h"
+#include "priority.h"
 
 #include <array>
 #include <atomic>
@@ -203,6 +204,7 @@ struct Task_control_block
     // node) keeps it across runs -- an alloc-free completion hook. Null for most tasks.
     void (*on_complete)(Task_control_block*) = nullptr;
     Cancellation_token token;          // checked by `execute` before running the body
+    Priority priority = Priority::normal;   // applied when the block is dispatched (submit_ready / pipe)
     // `num_locks`: below `execution_flag` it counts unmet PREREQUISITES (gate
     // execution); once the body starts the flag is set and it counts pending NESTED
     // tasks (gate completion). See docs/task-internals.md §4/§7.
@@ -671,6 +673,14 @@ public:
         return *this;
     }
 
+    // Set the queue priority for the run (applied when the task dispatches). Call before
+    // `launch()`.
+    Task_builder& priority(Priority p)
+    {
+        core_->priority = p;
+        return *this;
+    }
+
     Task<R> launch(Cancellation_token token = {})
     {
         core_->token = std::move(token);
@@ -720,15 +730,18 @@ auto task(Fn&& fn)
 
 // Launch a standalone task on the scheduler — a bare functor with no access target (the
 // primitive `async` for work that touches no guarded object). Returns a `Task<R>`; pass a
-// `Cancellation_token` to make it skippable before it runs. Dispatches through the
-// `submit_ready` bridge (so this stays scheduler-independent) and inherits the launcher's
-// access grant, so sub-work launched from a task body may touch the launcher's data.
+// `Cancellation_token` to make it skippable before it runs, and a `Priority` for its queue
+// position. Dispatches through the `submit_ready` bridge (so this stays scheduler-
+// independent) and inherits the launcher's access grant, so sub-work launched from a task
+// body may touch the launcher's data.
 template<typename Fn>
-auto launch(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t<Fn>>
+auto launch(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority::normal)
+    -> Task<std::invoke_result_t<Fn>>
 {
     using R = std::invoke_result_t<Fn>;
     auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), std::move(token));
     core->retractable = true;   // bare scheduler task (no pipe binding): safe to run inline from a waiter
+    core->priority = priority;
     detail::submit_ready(core);
     return Task<R>(core);
 }
@@ -762,9 +775,10 @@ void add_nested(const Task<R>& child)
 // completion gates the parent's). Sugar for `launch` + `add_nested`; call from within a
 // task body.
 template<typename Fn>
-auto nested(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t<Fn>>
+auto nested(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority::normal)
+    -> Task<std::invoke_result_t<Fn>>
 {
-    auto t = launch(std::forward<Fn>(fn), std::move(token));
+    auto t = launch(std::forward<Fn>(fn), std::move(token), priority);
     add_nested(t);
     return t;
 }

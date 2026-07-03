@@ -23,13 +23,15 @@ namespace detail
 {
 
 // Submit a closure to the scheduler (bridges to the raw func-ptr API).
-void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closure);
+void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closure,
+                    Priority priority = Priority::normal);
 
 struct Job
 {
     Access mode;
     std::move_only_function<void()> fn;
     bool reservation = false;   // if set, `fn` is an on-acquired callback; see `pipe_reserve`
+    Priority priority = Priority::normal;   // queue position when this job is admitted
 };
 
 // A per-object reader/writer pipe. Jobs are admitted in FIFO order; consecutive
@@ -55,7 +57,8 @@ struct Pipe
     }
 };
 
-void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> fn);
+void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> fn,
+                  Priority priority = Priority::normal);
 
 // Reserve a pipe for exclusive out-of-band use (a `Static_task_graph` run accesses
 // its objects directly, bypassing the pipe, so it must hold the pipe to keep async
@@ -110,24 +113,26 @@ public:
     // `read_write`: functor takes `T&` (and not `const T&`)
     template<typename Fn>
         requires std::invocable<Fn, T&> && (!std::invocable<Fn, const T&>)
-    auto async(Fn&& fn, Cancellation_token token = {}) -> Task<std::invoke_result_t<Fn, T&>>
+    auto async(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority::normal)
+        -> Task<std::invoke_result_t<Fn, T&>>
     {
         return launch<std::invoke_result_t<Fn, T&>, Access::read_write>(
-            &instance_, std::forward<Fn>(fn), token);
+            &instance_, std::forward<Fn>(fn), token, priority);
     }
 
     // `read_only`: functor takes `const T&`
     template<typename Fn>
         requires std::invocable<Fn, const T&>
-    auto async(Fn&& fn, Cancellation_token token = {}) const -> Task<std::invoke_result_t<Fn, const T&>>
+    auto async(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority::normal) const
+        -> Task<std::invoke_result_t<Fn, const T&>>
     {
         return launch<std::invoke_result_t<Fn, const T&>, Access::read_only>(
-            &instance_, std::forward<Fn>(fn), token);
+            &instance_, std::forward<Fn>(fn), token, priority);
     }
 
 private:
     template<typename R, Access mode, typename Inst, typename Fn>
-    Task<R> launch(Inst* inst, Fn&& fn, Cancellation_token token) const
+    Task<R> launch(Inst* inst, Fn&& fn, Cancellation_token token, Priority priority) const
     {
         // The body (stored in the block) runs `fn` under this object's access scope.
         auto body = [inst, fn = std::forward<Fn>(fn)]() mutable -> R
@@ -138,8 +143,9 @@ private:
             return fn(*inst);
         };
         auto core = detail::make_executable<R>(std::move(body), token);
+        core->priority = priority;
         detail::pipe_enqueue(default_scheduler(), pipe_, mode,
-            [core, gen = core->generation()] { core->execute(core, gen); });
+            [core, gen = core->generation()] { core->execute(core, gen); }, priority);
         return Task<R>(core);
     }
 

@@ -51,6 +51,9 @@ public:
     Graph_node& after(const Graph_node& prerequisite);
     Graph_node& before(const Graph_node& successor);
 
+    // Queue priority for this node when it is dispatched each run.
+    Graph_node& priority(Priority p);
+
     int index() const noexcept { return index_; }
 
 private:
@@ -123,6 +126,7 @@ private:
         std::vector<int> pipe_indices;      // those pipes as indices into distinct_pipes_ (deduped)
         std::vector<int> successors;
         int indegree = 0;
+        Priority priority = Priority::normal;   // applied to `block` at compile()
         // The node's reusable task block (a `Graph_node_block`, allocated once in
         // compile() and re-armed each run). Its `execute`/`on_complete` are wired so the
         // body may spawn nested tasks and the graph post-logic fires at completion (§7.1).

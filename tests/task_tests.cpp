@@ -504,6 +504,17 @@ void test_launch_then()
     TS_CHECK(r == 21);
 }
 
+void test_launch_priority()
+{
+    // Priority is accepted on every launch route (ordering is covered deterministically by
+    // the scheduler + graph tests; here just confirm the API threads through and runs).
+    TS_CHECK(ts::launch([] { return 1; }, {}, Priority::high).get() == 1);
+    TS_CHECK(ts::task([] { return 2; }).priority(Priority::low).launch().get() == 2);
+
+    ts::Thread_safe<int> d{ 40 };
+    TS_CHECK(d.async([](const int& v) { return v + 2; }, {}, Priority::high).get() == 42);
+}
+
 void test_launch_cancelled()
 {
     ts::Cancellation_source src;
@@ -731,6 +742,7 @@ void run_task_tests()
     run("launch value", test_launch_value);
     run("launch void", test_launch_void);
     run("launch then", test_launch_then);
+    run("launch priority", test_launch_priority);
     run("launch cancelled", test_launch_cancelled);
     run("task after single", test_task_after_single);
     run("task after multiple", test_task_after_multiple);

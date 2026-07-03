@@ -255,6 +255,28 @@ void test_nested_before_successor()
     TS_CHECK(sum_seen.load() == n * (n + 1) / 2);   // reader ran after every nested write
 }
 
+// Per-node priority: a writer root gates three reader successors, released together when
+// it completes; on a single worker they run in priority order. Deterministic because the
+// root queues all three (in its node_complete) before the worker picks the next task.
+void test_node_priority_order()
+{
+    Scheduler s{ { .num_threads = 1 } };
+    ts::Thread_safe<int> a{ 0 };
+    std::atomic<int> seq{ 0 };
+    std::atomic<int> high_ord{ 0 }, normal_ord{ 0 }, low_ord{ 0 };
+
+    ts::Static_task_graph g;
+    g.add_node([](int& v) { v = 1; }, a);   // writer root -> the three readers run after it
+    g.add_node([&seq, &low_ord](const int&) { low_ord.store(seq.fetch_add(1)); }, a).priority(Priority::low);
+    g.add_node([&seq, &normal_ord](const int&) { normal_ord.store(seq.fetch_add(1)); }, a).priority(Priority::normal);
+    g.add_node([&seq, &high_ord](const int&) { high_ord.store(seq.fetch_add(1)); }, a).priority(Priority::high);
+    g.compile();
+
+    g.execute(s).get();
+    TS_CHECK(high_ord.load() < normal_ord.load());    // high ran before normal
+    TS_CHECK(normal_ord.load() < low_ord.load());     // normal ran before low
+}
+
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
@@ -278,6 +300,7 @@ void run_graph_tests()
     run("nested inherits access", test_nested_inherits_access);
     run("builder nested inherits access", test_builder_nested_inherits_access);
     run("nested before successor", test_nested_before_successor);
+    run("node priority order", test_node_priority_order);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);

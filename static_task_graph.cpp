@@ -75,6 +75,13 @@ Graph_node& Graph_node::before(const Graph_node& successor)
     return *this;
 }
 
+Graph_node& Graph_node::priority(Priority p)
+{
+    if (graph_)
+        graph_->nodes_[index_].priority = p;   // applied to the block in execute() (see re-arm)
+    return *this;
+}
+
 // Two nodes conflict if they touch a common instance and at least one wants write.
 bool Static_task_graph::conflicts(const Node& a, const Node& b)
 {
@@ -239,7 +246,8 @@ void Static_task_graph::maybe_run(Run_state& run, int index)
 // plus the Node address, so no per-node closure is allocated.
 void Static_task_graph::run_node(Run_state& run, int index)
 {
-    run.scheduler->submit(&node_trampoline, &run.graph->nodes_[index]);
+    Node& node = run.graph->nodes_[index];
+    run.scheduler->submit(&node_trampoline, &node, node.block->priority);
 }
 
 // Raw scheduler entry: run the node's block. Kept alive by the graph (Node owns the
@@ -355,6 +363,7 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token t
         b.ready.store(false, std::memory_order_relaxed);
         b.num_locks.store(0, std::memory_order_relaxed);
         b.token = token;
+        b.priority = nodes_[i].priority;   // pick up any Graph_node::priority set since last run
     }
     for (size_t i = 0; i < distinct_pipes_.size(); ++i)
     {
