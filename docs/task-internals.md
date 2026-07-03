@@ -489,8 +489,9 @@ TSan): the block settles exactly once, either way.
   (§2) — body in an `Executable<Body,R>` reached via `core.execute`; **standalone
   `ts::launch(fn)`**; the **lock-counter (pre-execution half)** — `num_locks` +
   `successors` on the block, with dynamic prerequisites via
-  `ts::task(fn).after(x,y).launch()` (a settled prerequisite — completed *or*
-  cancelled — releases; `after` is ordering-only). `submit_ready` bridges the counter
+  `ts::task(fn).after(x,y).launch()` (a settled prerequisite releases the dependent; a
+  *cancelled* one propagates — marks `prereq_cancelled` so the dependent settles cancelled
+  rather than running, uniform with `then`). `submit_ready` bridges the counter
   to the scheduler. The **post-execution half** too (§7): the `execution_flag` mode
   bit — a running body sets flag + a self-lock; `ts::nested(fn)` / `ts::add_nested(t)`
   (via `current_task` TLS) add completion-locks; the parent completes only once its
@@ -572,10 +573,11 @@ TSan): the block settles exactly once, either way.
   inline callback in the producer's `settle`; it's a real `Executable` with the producer
   as a `num_locks` **prerequisite** — queued by default (so it carries a priority and the
   scheduler can interleave), inline opt-in. Its body reads `producer->result_ptr` (the
-  producer is kept alive as the prerequisite + the body's capture). A prerequisite is
-  ordering-only, so a *cancelled* producer still `release`s → dispatches the continuation;
-  `Executable::cancel_if` (the producer) makes `run` cancel instead of consuming a missing
-  result. Deep-retractable *natively* now (the producer is in `prerequisites`, so `retract`
+  producer is kept alive as the prerequisite + the body's capture). A cancelled prerequisite
+  still `release`s → dispatches the continuation, but sets the block's `prereq_cancelled`
+  flag, so `Executable::run` cancels instead of consuming a missing result — the *same*
+  cancel-propagation `after` now uses (no `then`-specific mechanism). Deep-retractable
+  *natively* now (the producer is in `prerequisites`, so `retract`
   walks to it and — after it settles, `num_locks == 0` — runs the continuation inline),
   which replaced the earlier retraction-hint hack for `then`. Subtlety found in the build:
   the continuation must have `num_locks == 1` until the producer settles — with `num_locks

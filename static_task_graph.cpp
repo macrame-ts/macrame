@@ -360,6 +360,7 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token t
         b.run_state.store(0, std::memory_order_relaxed);   // generation 0, unclaimed (nodes aren't reset())
         b.completed = false;
         b.cancelled = false;
+        b.prereq_cancelled.store(false, std::memory_order_relaxed);
         b.ready.store(false, std::memory_order_relaxed);
         b.num_locks.store(0, std::memory_order_relaxed);
         b.token = token;

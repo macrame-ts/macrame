@@ -228,6 +228,13 @@ struct Task_control_block
     // `reset` (retraction queues a duplicate the reset would otherwise let re-run the
     // body) fails the CAS and skips.
     std::atomic<std::uint64_t> run_state{ 0 };
+    // Set when a PREREQUISITE settled cancelled (`release` propagates the settle's cancel
+    // state). A result-consuming dependent (`then`) has no result to read, and an
+    // ordering dependent (`after`) inherits the cancellation for consistency, so
+    // `Executable::run` cancels instead of running the body. Harmless if set on a task
+    // already executing (a cancelled nested child): the flag is only read at execution
+    // start. Reset by `reset()` / graph re-arm.
+    std::atomic<bool> prereq_cancelled{ false };
 
     // This block's current reuse generation — the high bits of `run_state`, above the
     // claim bit (`run_state >> 1`). Bumped by `reset()` on each reuse. A dispatch captures
@@ -251,11 +258,17 @@ struct Task_control_block
     void complete() { settle(false); }
     void cancel()   { settle(true); }
 
-    // A prerequisite or nested task settled (`after`/nesting are ordering-only, so a
-    // cancelled one still releases). Decrement `blk`'s lock count and, when the last
-    // lock drops, dispatch it (prerequisites met) or complete it (nested done).
-    static void release(const std::shared_ptr<Task_control_block>& blk)
+    // A prerequisite or nested task settled. Decrement `blk`'s lock count and, when the
+    // last lock drops, dispatch it (prerequisites met) or complete it (nested done).
+    // `prereq_cancelled` carries whether the settling prerequisite was *cancelled*: a
+    // dependent (`then`/`after`) then cancels instead of running (checked at execution
+    // start). Non-prerequisite releases (the "not launched"/"not attached" lock) pass
+    // false. Nesting is ordering-only, so a cancelled nested child sets the flag harmlessly
+    // (the parent is already executing; the flag is only read before the body).
+    static void release(const std::shared_ptr<Task_control_block>& blk, bool prereq_cancelled = false)
     {
+        if (prereq_cancelled)
+            blk->prereq_cancelled.store(true, std::memory_order_relaxed);
         std::uint32_t now = blk->num_locks.fetch_sub(1, std::memory_order_acq_rel) - 1;
         if (now == 0)
             dispatch_ready(blk);          // pre-execution: prerequisites met -> queue, or run inline
@@ -316,7 +329,7 @@ struct Task_control_block
         for (auto& c : conts)
             c(r, cancel_);
         for (auto& s : succs)
-            release(s);
+            release(s, cancel_);   // propagate cancellation to dependents
         if (on_complete)
             on_complete(this);
     }
@@ -353,6 +366,7 @@ struct Task_control_block
         run_state.store((generation() + 1) << 1, std::memory_order_relaxed);   // next generation, unclaimed
         completed = false;
         cancelled = false;
+        prereq_cancelled.store(false, std::memory_order_relaxed);
         num_locks.store(0, std::memory_order_relaxed);
         ready.store(false, std::memory_order_release);
     }
@@ -442,12 +456,6 @@ struct Executable
     Task_control_block core;   // MUST be first
     Result_storage<R> storage;   // empty for void
     Body body;
-    // For a `then` continuation: the producer, whose result the body consumes. If it
-    // settled *cancelled* there is no result to read, so this task cancels instead of
-    // running (a prerequisite is ordering-only, so `release` dispatched us regardless).
-    // A raw pointer — the producer is kept alive as our prerequisite (and by the body's
-    // capture) until we settle. Null for ordinary tasks.
-    Task_control_block* cancel_if = nullptr;
 
     explicit Executable(Body b)
         : body(std::move(b))
@@ -459,9 +467,9 @@ struct Executable
             return;   // claimed by another runner, or stale after a reset
 
         auto* self = reinterpret_cast<Executable*>(c.get());
-        if (c->token.is_cancel_requested() || (self->cancel_if && self->cancel_if->cancelled))
+        if (c->token.is_cancel_requested() || c->prereq_cancelled.load(std::memory_order_acquire))
         {
-            c->cancel();   // own token, or the producer cancelled (no result to consume)
+            c->cancel();   // own token, or a prerequisite cancelled (no result to consume)
             return;
         }
 
@@ -491,14 +499,12 @@ struct Executable
 // Build an executable task; returns the handle core with `execute` wired up. Submit
 // `[core]{ core->execute(core.get()); }` (to the scheduler or a pipe) to run it.
 template<typename R, typename Body>
-std::shared_ptr<Task_control_block> make_executable(Body&& body, Cancellation_token token,
-                                                    Task_control_block* cancel_if = nullptr)
+std::shared_ptr<Task_control_block> make_executable(Body&& body, Cancellation_token token)
 {
     using Exec = Executable<std::decay_t<Body>, R>;
     auto exec = std::make_shared<Exec>(std::forward<Body>(body));
     exec->core.execute = &Exec::run;
     exec->core.token = std::move(token);
-    exec->cancel_if = cancel_if;
     return std::shared_ptr<Task_control_block>(exec, &exec->core);   // aliasing
 }
 
@@ -560,8 +566,9 @@ inline void add_retraction_hint(const std::shared_ptr<Task_control_block>& prere
 }
 
 // Register `succ` as a successor of `prereq` (bumping its lock count), unless `prereq`
-// has already settled. `after` is ordering-only — a cancelled prerequisite releases
-// its successors just like a completed one.
+// has already settled. `after` orders `succ` after `prereq` and propagates cancellation:
+// a cancelled `prereq` still releases `succ`, but marks `succ->prereq_cancelled` so it
+// settles cancelled rather than running (see `release` / `Executable::run`).
 inline void add_prerequisite(const std::shared_ptr<Task_control_block>& prereq,
                              const std::shared_ptr<Task_control_block>& succ)
 {
@@ -571,6 +578,13 @@ inline void add_prerequisite(const std::shared_ptr<Task_control_block>& prereq,
         succ->num_locks.fetch_add(1, std::memory_order_relaxed);
         prereq->successors.push_back(succ);
         succ->prerequisites.push_back(prereq);   // backward link, for deep retraction
+    }
+    else if (prereq->cancelled)
+    {
+        // Already settled cancelled -> `release` won't run, so propagate here: `succ`
+        // settles cancelled instead of running (a `then` would otherwise read a missing
+        // result). Under `prereq`'s mutex, so `cancelled` is consistent.
+        succ->prereq_cancelled.store(true, std::memory_order_relaxed);
     }
 }
 
@@ -665,17 +679,17 @@ private:
     // higher-priority work between a task and its continuation), inline opt-in. The producer
     // is a real `num_locks` prerequisite (so a blocking wait / retraction doesn't run this
     // task before the result exists, and `prerequisites` makes it deep-retractable). A
-    // prerequisite is ordering-only, so a *cancelled* producer still dispatches us -- but
-    // then there is no result to consume, so `cancel_if` makes `Executable::run` cancel this
-    // task instead of running the body. `produce` takes the producer's `result_ptr` (null
-    // for a void producer); the producer stays alive for the read as our prerequisite.
+    // *cancelled* producer still dispatches us (cancellation propagates via
+    // `prereq_cancelled`), and since there is then no result to consume, `Executable::run`
+    // cancels this task instead of running the body. `produce` takes the producer's
+    // `result_ptr` (null for a void producer); the producer stays alive as our prerequisite.
     template<typename R2, typename Produce>
     Task<R2> chain(Produce produce, Cancellation_token token)
     {
         auto producer = core_;
         auto next = detail::make_executable<R2>(
             [producer, produce = std::move(produce)]() mutable -> R2 { return produce(producer->result_ptr); },
-            token, producer.get());
+            token);
         next->flags.retractable = true;
         next->num_locks.store(1, std::memory_order_relaxed);   // "not attached" lock
         detail::add_prerequisite(producer, next);              // wait for the producer to settle

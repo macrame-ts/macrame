@@ -620,9 +620,26 @@ void test_task_after_cancelled_prereq()
     src.request_cancel();
     ts::Task<void> a = ts::launch([] {}, src.token());   // cancelled prerequisite
     std::atomic<bool> ran{ false };
-    ts::task([&] { ran.store(true); }).after(a).launch().get();
-    TS_CHECK(ran.load());            // `after` is ordering-only: a cancelled prereq releases
+    ts::Task<void> b = ts::task([&] { ran.store(true); }).after(a).launch();
+    b.get();   // void get on a cancelled task unblocks
     TS_CHECK(a.is_cancelled());
+    TS_CHECK(b.is_cancelled());       // cancellation propagates through `after` (like `then`)
+    TS_CHECK(!ran.load());            // the dependent's body did not run
+}
+
+// Multi-prerequisite: one cancelled prerequisite (of several) cancels the dependent.
+void test_task_after_cancel_propagates_multi()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();
+    ts::Task<void> a = ts::launch([] {});                    // completes
+    ts::Task<void> b = ts::launch([] {}, src.token());       // cancelled
+    ts::Task<void> c = ts::launch([] {});                    // completes
+    std::atomic<bool> ran{ false };
+    ts::Task<void> dep = ts::task([&] { ran.store(true); }).after(a, b, c).launch();
+    dep.get();
+    TS_CHECK(dep.is_cancelled());     // any cancelled prerequisite propagates
+    TS_CHECK(!ran.load());
 }
 
 // --- J2: reusable tasks (reset) --------------------------------------------
@@ -803,6 +820,7 @@ void run_task_tests()
     run("task value after", test_task_value_after);
     run("task after already completed", test_task_after_already_completed);
     run("task after cancelled prereq", test_task_after_cancelled_prereq);
+    run("task after cancel propagates multi", test_task_after_cancel_propagates_multi);
     run("reuse value task", test_reuse_value);
     run("reuse void task", test_reuse_void);
     run("reuse task with prereq", test_reuse_prereq);
