@@ -567,11 +567,21 @@ TSan): the block settles exactly once, either way.
   in `submit_job`, when the pipe has granted the turn), so retraction only ever runs a
   task the pipe already cleared. Bounded plumbing, and only helps *admitted* jobs (a job
   still in the pipe deque isn't a scheduler task and is unreachable by retraction anyway).
-  Parked until async-retraction is a real need. **Done:** `then`/`when_all` are now
-  deep-retractable — the continuation/join gets a retraction-hint backlink (`prerequisites`
-  without `num_locks`; completion stays continuation-driven) and is marked retractable, so
-  `get()` walks to the (retractable) producer(s) and runs them inline. Only helps when the
-  producer itself is retractable (a bare `launch`/`task`, not an `async`).
+  Parked until async-retraction is a real need.
+- **`then` rebased onto proper tasks. Done.** A `then` continuation is no longer an
+  inline callback in the producer's `settle`; it's a real `Executable` with the producer
+  as a `num_locks` **prerequisite** — queued by default (so it carries a priority and the
+  scheduler can interleave), inline opt-in. Its body reads `producer->result_ptr` (the
+  producer is kept alive as the prerequisite + the body's capture). A prerequisite is
+  ordering-only, so a *cancelled* producer still `release`s → dispatches the continuation;
+  `Executable::cancel_if` (the producer) makes `run` cancel instead of consuming a missing
+  result. Deep-retractable *natively* now (the producer is in `prerequisites`, so `retract`
+  walks to it and — after it settles, `num_locks == 0` — runs the continuation inline),
+  which replaced the earlier retraction-hint hack for `then`. Subtlety found in the build:
+  the continuation must have `num_locks == 1` until the producer settles — with `num_locks
+  == 0` (hint-only), `retract` ran it *before* the producer, reading a null `result_ptr`.
+  `when_all`'s **join** stays a bodyless aggregator + retraction hint; its **consumption**
+  (the `.then` off it) is this rebased path.
 - Nested tasks + `current_task` TLS; re-base `parallel_for`'s rich mode on them.
 - Group latch tier for the default `parallel_for`.
 - Pooled block allocator + the one microbenchmark.

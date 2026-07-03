@@ -442,6 +442,12 @@ struct Executable
     Task_control_block core;   // MUST be first
     Result_storage<R> storage;   // empty for void
     Body body;
+    // For a `then` continuation: the producer, whose result the body consumes. If it
+    // settled *cancelled* there is no result to read, so this task cancels instead of
+    // running (a prerequisite is ordering-only, so `release` dispatched us regardless).
+    // A raw pointer — the producer is kept alive as our prerequisite (and by the body's
+    // capture) until we settle. Null for ordinary tasks.
+    Task_control_block* cancel_if = nullptr;
 
     explicit Executable(Body b)
         : body(std::move(b))
@@ -453,9 +459,9 @@ struct Executable
             return;   // claimed by another runner, or stale after a reset
 
         auto* self = reinterpret_cast<Executable*>(c.get());
-        if (c->token.is_cancel_requested())   // not-yet-started: skip body, settle cancelled
+        if (c->token.is_cancel_requested() || (self->cancel_if && self->cancel_if->cancelled))
         {
-            c->cancel();
+            c->cancel();   // own token, or the producer cancelled (no result to consume)
             return;
         }
 
@@ -485,12 +491,14 @@ struct Executable
 // Build an executable task; returns the handle core with `execute` wired up. Submit
 // `[core]{ core->execute(core.get()); }` (to the scheduler or a pipe) to run it.
 template<typename R, typename Body>
-std::shared_ptr<Task_control_block> make_executable(Body&& body, Cancellation_token token)
+std::shared_ptr<Task_control_block> make_executable(Body&& body, Cancellation_token token,
+                                                    Task_control_block* cancel_if = nullptr)
 {
     using Exec = Executable<std::decay_t<Body>, R>;
     auto exec = std::make_shared<Exec>(std::forward<Body>(body));
     exec->core.execute = &Exec::run;
     exec->core.token = std::move(token);
+    exec->cancel_if = cancel_if;
     return std::shared_ptr<Task_control_block>(exec, &exec->core);   // aliasing
 }
 
@@ -549,6 +557,21 @@ inline void add_retraction_hint(const std::shared_ptr<Task_control_block>& prere
     std::scoped_lock lock(prereq->mutex);
     if (!prereq->completed)
         dependent->prerequisites.push_back(prereq);
+}
+
+// Register `succ` as a successor of `prereq` (bumping its lock count), unless `prereq`
+// has already settled. `after` is ordering-only — a cancelled prerequisite releases
+// its successors just like a completed one.
+inline void add_prerequisite(const std::shared_ptr<Task_control_block>& prereq,
+                             const std::shared_ptr<Task_control_block>& succ)
+{
+    std::scoped_lock lock(prereq->mutex);
+    if (!prereq->completed)
+    {
+        succ->num_locks.fetch_add(1, std::memory_order_relaxed);
+        prereq->successors.push_back(succ);
+        succ->prerequisites.push_back(prereq);   // backward link, for deep retraction
+    }
 }
 
 } // namespace detail
@@ -636,37 +659,28 @@ private:
     template<typename R2>
     friend std::shared_ptr<detail::Task_control_block> detail::core_of(const Task<R2>&) noexcept;
 
-    // Attach a continuation that produces R2 (via `produce(result_ptr)`) into a fresh
-    // block, propagating cancellation. Returns the `Task<R2>` handle.
+    // A continuation is a PROPER scheduled task (an `Executable`), not an inline callback:
+    // its body runs `produce(producer's result)`, dispatched through the normal prerequisite
+    // path when the producer settles -- queued by default (so the scheduler can slot
+    // higher-priority work between a task and its continuation), inline opt-in. The producer
+    // is a real `num_locks` prerequisite (so a blocking wait / retraction doesn't run this
+    // task before the result exists, and `prerequisites` makes it deep-retractable). A
+    // prerequisite is ordering-only, so a *cancelled* producer still dispatches us -- but
+    // then there is no result to consume, so `cancel_if` makes `Executable::run` cancel this
+    // task instead of running the body. `produce` takes the producer's `result_ptr` (null
+    // for a void producer); the producer stays alive for the read as our prerequisite.
     template<typename R2, typename Produce>
     Task<R2> chain(Produce produce, Cancellation_token token)
     {
-        if constexpr (std::is_void_v<R2>)
-        {
-            auto next = std::make_shared<detail::Task_control_block>();
-            core_->attach([next, produce = std::move(produce), token](void* r, bool cancelled) mutable
-            {
-                if (cancelled || token.is_cancel_requested())
-                    next->cancel();
-                else { produce(r); next->complete(); }
-            });
-            detail::add_retraction_hint(core_, next);   // deep-retractable: get() can run the producer inline
-            next->flags.retractable = true;
-            return Task<R2>(std::move(next));
-        }
-        else
-        {
-            auto [next, wrapper] = detail::make_block<R2>();
-            core_->attach([wrapper, produce = std::move(produce), token](void* r, bool cancelled) mutable
-            {
-                if (cancelled || token.is_cancel_requested())
-                    wrapper->core.cancel();
-                else { wrapper->store(produce(r)); wrapper->core.complete(); }
-            });
-            detail::add_retraction_hint(core_, next);   // deep-retractable: get() can run the producer inline
-            next->flags.retractable = true;
-            return Task<R2>(std::move(next));
-        }
+        auto producer = core_;
+        auto next = detail::make_executable<R2>(
+            [producer, produce = std::move(produce)]() mutable -> R2 { return produce(producer->result_ptr); },
+            token, producer.get());
+        next->flags.retractable = true;
+        next->num_locks.store(1, std::memory_order_relaxed);   // "not attached" lock
+        detail::add_prerequisite(producer, next);              // wait for the producer to settle
+        detail::Task_control_block::release(next);             // drop the lock -> dispatch when ready
+        return Task<R2>(std::move(next));
     }
 
     std::shared_ptr<detail::Task_control_block> core_;
@@ -677,21 +691,6 @@ namespace detail
 
 template<typename R>
 std::shared_ptr<Task_control_block> core_of(const Task<R>& t) noexcept { return t.core_; }
-
-// Register `succ` as a successor of `prereq` (bumping its lock count), unless `prereq`
-// has already settled. `after` is ordering-only — a cancelled prerequisite releases
-// its successors just like a completed one.
-inline void add_prerequisite(const std::shared_ptr<Task_control_block>& prereq,
-                             const std::shared_ptr<Task_control_block>& succ)
-{
-    std::scoped_lock lock(prereq->mutex);
-    if (!prereq->completed)
-    {
-        succ->num_locks.fetch_add(1, std::memory_order_relaxed);
-        prereq->successors.push_back(succ);
-        succ->prerequisites.push_back(prereq);   // backward link, for deep retraction
-    }
-}
 
 } // namespace detail
 

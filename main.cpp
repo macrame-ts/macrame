@@ -3,10 +3,13 @@
 #include "harness.h"
 #include "engine.h"
 
+#include <cstdio>
 #include <cstring>
 
 int main(int argc, char** argv)
 {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered: last line is visible if a test crashes
+
     // Death-test child: run one fatal scenario (it is expected to abort).
     if (argc >= 3 && std::strcmp(argv[1], "--death") == 0)
     {
