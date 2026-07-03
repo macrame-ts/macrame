@@ -79,7 +79,7 @@ void run_death_scenario(const char* name)
         ts::Cancellation_source src;
         src.request_cancel();
         ts::Thread_safe<int> d{ 0 };
-        ts::Task<int> t = d.async([](const int& v) { return v; }, src.token());
+        ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });
         while (!t.is_done()) std::this_thread::yield();
         t.get();   // cancelled value task has no result -> fatal
     }

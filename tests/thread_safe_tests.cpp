@@ -223,6 +223,71 @@ void test_pipe_stress()
     TS_CHECK(read_value(d) == 5000);
 }
 
+// --- inline dispatch (Async_options::run_inline) --------------------------
+
+// A write accessor with `run_inline` on a free pipe runs synchronously on the CALLING
+// thread; the returned task is already settled when the call returns.
+void test_inline_runs_synchronously()
+{
+    ts::Thread_safe<int> d{ 5 };
+    std::thread::id body_thread{};
+    ts::Task<int> t = d.async([&body_thread](int& v)
+    {
+        body_thread = std::this_thread::get_id();
+        return ++v;   // 6
+    }, { .run_inline = true });
+
+    TS_CHECK(t.is_done());                                  // ran before this line returned
+    TS_CHECK(body_thread == std::this_thread::get_id());    // on the calling thread
+    TS_CHECK(t.get() == 6);
+    TS_CHECK(read_value(d) == 6);
+}
+
+// A read accessor with `run_inline` on a free pipe joins as a reader and runs on the caller.
+void test_inline_read_on_caller()
+{
+    ts::Thread_safe<int> d{ 9 };
+    std::thread::id body_thread{};
+    int r = d.async([&body_thread](const int& v)
+    {
+        body_thread = std::this_thread::get_id();
+        return v;
+    }, { .run_inline = true }).get();
+    TS_CHECK(r == 9);
+    TS_CHECK(body_thread == std::this_thread::get_id());
+}
+
+// When the pipe is busy (a writer holds it), an inline-requested async cannot acquire it,
+// so it defers to the queue and runs correctly on a worker once the pipe drains.
+void test_inline_falls_back_when_busy()
+{
+    ts::Thread_safe<int> d{ 0 };
+    std::atomic<bool> gate{ false };
+    std::thread::id caller = std::this_thread::get_id();
+    std::atomic<std::thread::id> inline_thread{};
+
+    // Occupy the pipe with a writer that holds it until `gate` (writer_active is set
+    // synchronously by dispatch, so the pipe is busy by the time this call returns).
+    ts::Task<void> blocker = d.async([&gate](int&)
+    {
+        while (!gate.load()) std::this_thread::yield();
+    });
+
+    // Request inline while the writer holds the pipe -> must defer (not run on the caller).
+    ts::Task<int> t = d.async([&inline_thread](int& v)
+    {
+        inline_thread.store(std::this_thread::get_id());
+        return ++v;
+    }, { .run_inline = true });
+
+    TS_CHECK(!t.is_done());          // deferred behind the blocker, not run inline
+
+    gate.store(true);
+    TS_CHECK(t.get() == 1);          // ran correctly after the blocker drained
+    TS_CHECK(inline_thread.load() != caller);   // on a worker, not the calling thread
+    blocker.get();
+}
+
 } // namespace
 
 void run_thread_safe_tests()
@@ -241,4 +306,7 @@ void run_thread_safe_tests()
     run("reentrant same object", test_reentrant_same_object);
     run("reentrant other object", test_reentrant_other_object);
     run("pipe stress", test_pipe_stress);
+    run("inline runs synchronously", test_inline_runs_synchronously);
+    run("inline read on caller", test_inline_read_on_caller);
+    run("inline falls back when busy", test_inline_falls_back_when_busy);
 }

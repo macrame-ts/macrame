@@ -71,6 +71,15 @@ bool pipe_reserve(Scheduler& scheduler, Pipe& pipe, std::move_only_function<void
 // Release a reservation taken by `pipe_reserve`; admits queued jobs.
 void pipe_release(Scheduler& scheduler, Pipe& pipe);
 
+// Try to run an async job INLINE on the calling thread instead of enqueuing it (opt-in via
+// `Async_options::run_inline`). Admissible only when the pipe is immediately free for this
+// mode -- no queued jobs (FIFO preserved) and the reader/writer rules allow: `read_only`
+// joins as a concurrent reader, `read_write` as an exclusive writer. On success runs `fn()`
+// synchronously (the caller blocks for the body's duration), then releases, re-dispatches
+// the pipe, and returns true. On failure leaves `fn` untouched (so the caller can enqueue
+// it) and returns false. Caller-blocking + a nested access scope -- see `Thread_safe::async`.
+bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()>& fn);
+
 // An `async` accessor functor may, like the bare-task path, opt into cooperative
 // cancellation by taking a trailing `Cancellation_token` after the access argument `A`
 // (`[](T& v, Cancellation_token t){...}`). These accept either arity for a given `A`, so
@@ -89,6 +98,20 @@ struct Async_result<Fn, A, false> { using type = std::invoke_result_t<Fn, A>; };
 template<typename Fn, typename A> using Async_result_t = typename Async_result<Fn, A>::type;
 
 } // namespace detail
+
+// Dispatch options for `Thread_safe::async`. An aggregate, so it takes designated
+// initializers at the call site: `obj.async(fn, {.priority = Priority::high})`,
+// `obj.async(fn, {.run_inline = true})`. `token` makes the job skippable before it runs
+// (and, if the body declares a trailing `Cancellation_token`, is forwarded to it for a
+// mid-run early-out). `run_inline` runs the body synchronously on the calling thread when
+// the pipe is immediately free (else it enqueues as usual) -- see the note on `async`.
+// Deliberately a distinct struct from `Continuation_options` (async is not a continuation).
+struct Async_options
+{
+    Cancellation_token token = {};
+    Priority priority = Priority::normal;
+    bool run_inline = false;
+};
 
 // The only sanctioned way to touch a `T` across threads. You never receive a bare
 // `T&`; you hand a functor to `async()` and it runs once access has been granted.
@@ -127,29 +150,32 @@ public:
     Thread_safe(const Thread_safe&) = delete;
     Thread_safe& operator=(const Thread_safe&) = delete;
 
-    // `read_write`: functor takes `T&` (and not `const T&`), optionally + a trailing token
+    // `read_write`: functor takes `T&` (and not `const T&`), optionally + a trailing token.
+    // With `{.run_inline = true}` the body runs synchronously on the CALLING thread when the
+    // pipe is free (see below); it then blocks the caller and stacks its access scope, so do
+    // NOT opt in from a worker you can't afford to block (e.g. inside a graph node).
     template<typename Fn>
         requires detail::Async_accessor<Fn, T&> && (!detail::Async_accessor<Fn, const T&>)
-    auto async(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority::normal)
+    auto async(Fn&& fn, Async_options opts = {})
         -> Task<detail::Async_result_t<Fn, T&>>
     {
         return launch<detail::Async_result_t<Fn, T&>, Access::read_write>(
-            &instance_, std::forward<Fn>(fn), token, priority);
+            &instance_, std::forward<Fn>(fn), opts);
     }
 
     // `read_only`: functor takes `const T&`, optionally + a trailing token
     template<typename Fn>
         requires detail::Async_accessor<Fn, const T&>
-    auto async(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority::normal) const
+    auto async(Fn&& fn, Async_options opts = {}) const
         -> Task<detail::Async_result_t<Fn, const T&>>
     {
         return launch<detail::Async_result_t<Fn, const T&>, Access::read_only>(
-            &instance_, std::forward<Fn>(fn), token, priority);
+            &instance_, std::forward<Fn>(fn), opts);
     }
 
 private:
     template<typename R, Access mode, typename Inst, typename Fn>
-    Task<R> launch(Inst* inst, Fn&& fn, Cancellation_token token, Priority priority) const
+    Task<R> launch(Inst* inst, Fn&& fn, Async_options opts) const
     {
         // The body (stored in the block) runs `fn` under this object's access scope. If
         // `fn` takes a trailing token, the body does too and `Executable::run` forwards the
@@ -165,7 +191,7 @@ private:
                     Access_scope scope(ctx);
                     return fn(*inst, tok);
                 };
-                return detail::make_executable<R>(std::move(body), token);
+                return detail::make_executable<R>(std::move(body), opts.token);
             }
             else
             {
@@ -176,12 +202,17 @@ private:
                     Access_scope scope(ctx);
                     return fn(*inst);
                 };
-                return detail::make_executable<R>(std::move(body), token);
+                return detail::make_executable<R>(std::move(body), opts.token);
             }
         }();
-        core->flags.priority = priority;
-        detail::pipe_enqueue(default_scheduler(), pipe_, mode,
-            [core, gen = core->generation()] { core->execute(core, gen); }, priority);
+        core->flags.priority = opts.priority;
+
+        std::move_only_function<void()> job = [core, gen = core->generation()] { core->execute(core, gen); };
+        // Inline fast-path: if opted in and the pipe is free right now, run the body on this
+        // thread; otherwise enqueue as usual (`pipe_try_inline` leaves `job` untouched).
+        if (opts.run_inline && detail::pipe_try_inline(default_scheduler(), pipe_, mode, job))
+            return Task<R>(core);
+        detail::pipe_enqueue(default_scheduler(), pipe_, mode, std::move(job), opts.priority);
         return Task<R>(core);
     }
 

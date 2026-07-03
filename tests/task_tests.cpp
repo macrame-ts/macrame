@@ -233,7 +233,7 @@ void test_when_all_cancelled_prereq()
 
     ts::Thread_safe<int> a{ 1 }, b{ 2 };
     ts::Task<int> ta = a.async([](const int& x) { return x; });                // completes
-    ts::Task<int> tb = b.async([](const int& x) { return x; }, src.token());   // cancelled
+    ts::Task<int> tb = b.async([](const int& x) { return x; }, { .token = src.token() });   // cancelled
 
     ts::Task<std::tuple<int, int>> j = ts::when_all(ta, tb);
     wait_until([&] { return j.is_done(); });   // settles (does not hang)
@@ -248,7 +248,7 @@ void test_when_all_cancelled_void_prereq()
 
     ts::Thread_safe<int> a{ 5 }, b{ 0 };
     ts::Task<int> r = a.async([](const int& x) { return x; });        // completes
-    ts::Task<void> v = b.async([](int&) {}, src.token());            // cancelled void prereq
+    ts::Task<void> v = b.async([](int&) {}, { .token = src.token() });            // cancelled void prereq
 
     ts::Task<std::tuple<int>> j = ts::when_all(v, r);
     wait_until([&] { return j.is_done(); });
@@ -263,7 +263,7 @@ void test_when_all_cancel_propagates_then()
 
     ts::Thread_safe<int> a{ 1 }, b{ 2 };
     ts::Task<int> ta = a.async([](const int& x) { return x; });
-    ts::Task<int> tb = b.async([](const int& x) { return x; }, src.token());   // cancelled
+    ts::Task<int> tb = b.async([](const int& x) { return x; }, { .token = src.token() });   // cancelled
 
     std::atomic<bool> then_ran{ false };
     ts::Task<int> j = ts::when_all(ta, tb)
@@ -369,7 +369,7 @@ void test_cancel_before_run()
 
     ts::Thread_safe<int> d{ 0 };
     std::atomic<bool> ran{ false };
-    ts::Task<int> t = d.async([&ran](int& v) { ran.store(true); return v; }, src.token());
+    ts::Task<int> t = d.async([&ran](int& v) { ran.store(true); return v; }, { .token = src.token() });
 
     wait_until([&] { return t.is_done(); });
     TS_CHECK(t.is_cancelled());
@@ -382,7 +382,7 @@ void test_cancel_propagates_through_then()
     src.request_cancel();
 
     ts::Thread_safe<int> d{ 5 };
-    ts::Task<int> t = d.async([](const int& v) { return v; }, src.token());   // cancelled
+    ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });   // cancelled
     std::atomic<bool> then_ran{ false };
     ts::Task<int> u = t.then([&then_ran](int v) { then_ran.store(true); return v + 1; });
 
@@ -413,7 +413,7 @@ void test_cancel_void_get_unblocks()
     src.request_cancel();
 
     ts::Thread_safe<int> d{ 0 };
-    ts::Task<void> t = d.async([](int& v) { v = 1; }, src.token());
+    ts::Task<void> t = d.async([](int& v) { v = 1; }, { .token = src.token() });
     t.get();                            // void: unblocks, no fatal
     TS_CHECK(t.is_cancelled());
 }
@@ -512,7 +512,7 @@ void test_launch_priority()
     TS_CHECK(ts::task([] { return 2; }).priority(Priority::low).launch().get() == 2);
 
     ts::Thread_safe<int> d{ 40 };
-    TS_CHECK(d.async([](const int& v) { return v + 2; }, {}, Priority::high).get() == 42);
+    TS_CHECK(d.async([](const int& v) { return v + 2; }, { .priority = Priority::high }).get() == 42);
 }
 
 // An inline task runs on the thread that settled its last prerequisite. Pinned
@@ -628,7 +628,7 @@ void test_async_body_token_earlyout()
             std::this_thread::yield();
         stage.store(1);
         return v;
-    }, src.token());
+    }, { .token = src.token() });
 
     wait_until([&] { return started.load(); });
     src.request_cancel();

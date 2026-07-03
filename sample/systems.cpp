@@ -189,7 +189,7 @@ void tick_ai(ts::Thread_safe<Float_store>& nav,
             if (bailed)
                 nav_early.fetch_add(1, std::memory_order_relaxed);
             return v;
-        }, nav_cancel.token());
+        }, { .token = nav_cancel.token() });
 
     spin(1.5);   // AI's own logic, overlapping the async nav queries
     nav_cancel.request_cancel();   // AI has its paths -> stop stragglers (they early-out)

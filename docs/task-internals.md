@@ -367,6 +367,18 @@ exclusive writer that does **not** auto-complete — idle → acquired synchrono
 `X.async(...)` concurrent with a run touching `X` runs *after* the run's use of `X`,
 never alongside a node. One authority per object per frame.
 
+**Async inline (`pipe_try_inline`).** `Thread_safe::async(fn, {.run_inline = true})` opts
+the body into running *synchronously on the calling thread* instead of a worker hop.
+`pipe_try_inline(pipe, mode, fn)` is the sibling of `pipe_reserve`'s try-acquire, but
+mode-aware and run-then-release: under the pipe mutex it admits the job only if the pipe is
+immediately free for that mode — no queued jobs (FIFO preserved) and the reader/writer rules
+allow (`read_only` joins as a concurrent reader, `read_write` as an exclusive writer) — then
+runs `fn()` inline (the body installs its own access scope), re-locks, releases, `dispatch`es
+the remainder, and returns true. Not admissible → returns false and leaves `fn` untouched for
+the normal `pipe_enqueue`. Caveats (documented, not enforced): it **blocks the caller** for
+the body's duration and **stacks the access scope** on the caller's thread — so opting in from
+inside a graph node (or any worker you can't afford to block) is the anti-pattern above.
+
 Reservation is **lazy on acquire and early on release**, so an object is held only
 for `[first accessor's dispatch, last accessor's completion]` — not the whole run:
 

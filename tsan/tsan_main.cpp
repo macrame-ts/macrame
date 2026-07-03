@@ -69,6 +69,35 @@ void stress_thread_safe()
     assert(final == threads * per / 2);
 }
 
+// Concurrent async on one object mixing run_inline and normal jobs across threads.
+// An inline job runs on the calling thread when the pipe is momentarily free, else defers
+// to the queue; either way every increment must land exactly once and the pipe must drain.
+// Stresses pipe_try_inline's acquire/run/release racing pipe_enqueue + job completion.
+void stress_inline_async()
+{
+    constexpr int threads = 8, per = 2000;
+    ts::Thread_safe<int> obj{ 0 };
+    std::atomic<int> reads{ 0 };
+    {
+        std::vector<std::jthread> producers;
+        for (int t = 0; t < threads; ++t)
+            producers.emplace_back([&obj, &reads]
+            {
+                for (int k = 0; k < per; ++k)
+                {
+                    ts::Async_options opts{ .run_inline = (k % 3) == 0 };
+                    if (k & 1)
+                        obj.async([](int& v) { ++v; }, opts);
+                    else
+                        obj.async([&reads](const int& v)
+                            { reads.fetch_add(1, std::memory_order_relaxed); return v; }, opts);
+                }
+            });
+    }   // join producers
+    int final = obj.async([](const int& v) { return v; }).get();   // FIFO drain
+    assert(final == threads * per / 2);
+}
+
 // Many threads triggering one Signal concurrently while others wait / attach
 // continuations: idempotent `complete()` must fire exactly once with no race.
 void stress_signal()
@@ -168,7 +197,7 @@ void stress_when_all_cancel()
     {
         ts::Cancellation_source src;
         ts::Task<int> ta = a.async([](const int& x) { return x; });
-        ts::Task<int> tb = b.async([](const int& x) { return x; }, src.token());
+        ts::Task<int> tb = b.async([](const int& x) { return x; }, { .token = src.token() });
         ts::Task<int> tc = c.async([](const int& x) { return x; });
 
         auto j = ts::when_all(ta, tb, tc);
@@ -373,7 +402,7 @@ void stress_cancel()
     for (int i = 0; i < 2000; ++i)
     {
         ts::Cancellation_source src;
-        ts::Task<int> t = d.async([](const int& v) { return v; }, src.token());
+        ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });
         ts::Task<int> u = t.then([](int v) { return v + 1; });   // propagates settle either way
 
         std::jthread canceller([&] { src.request_cancel(); });   // race the body
@@ -442,7 +471,7 @@ void stress_token_body()
             while (!tok.is_cancel_requested())
                 std::this_thread::yield();
             return v;
-        }, src.token());
+        }, { .token = src.token() });
 
         while (!started.load(std::memory_order_relaxed))
             std::this_thread::yield();
@@ -530,6 +559,7 @@ int main()
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered: last stage is visible if it hangs
     std::puts("tsan: scheduler stress");   stress_scheduler();
     std::puts("tsan: thread_safe stress");  stress_thread_safe();
+    std::puts("tsan: inline async stress");  stress_inline_async();
     std::puts("tsan: signal stress");       stress_signal();
     std::puts("tsan: when_all stress");      stress_when_all();
     std::puts("tsan: when_all cancel stress"); stress_when_all_cancel();

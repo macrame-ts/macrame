@@ -144,5 +144,40 @@ void pipe_release(Scheduler& scheduler, Pipe& pipe)
         pipe.idle.notify_all();
 }
 
+bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()>& fn)
+{
+    {
+        std::scoped_lock lock(pipe.mutex);
+        if (!pipe.jobs.empty())
+            return false;   // queued work ahead -- preserve FIFO, defer to the queue
+        if (mode == Access::read_only)
+        {
+            if (pipe.writer_active)
+                return false;
+            ++pipe.active_readers;   // join as a concurrent reader
+        }
+        else
+        {
+            if (pipe.writer_active || pipe.active_readers > 0)
+                return false;
+            pipe.writer_active = true;   // exclusive writer
+        }
+    }
+
+    // Admitted: run the body inline on THIS thread (it installs its own access scope). The
+    // caller blocks for its duration. Then release + re-dispatch, mirroring `submit_job`.
+    fn();
+
+    std::scoped_lock lock(pipe.mutex);
+    if (mode == Access::read_only)
+        --pipe.active_readers;
+    else
+        pipe.writer_active = false;
+    dispatch(scheduler, pipe);
+    if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
+        pipe.idle.notify_all();
+    return true;
+}
+
 } // namespace detail
 } // namespace ts
