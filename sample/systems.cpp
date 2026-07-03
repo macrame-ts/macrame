@@ -17,6 +17,8 @@ namespace
 // `Thread_safe::async` demo instrumentation: concurrent `nav` queries in flight.
 std::atomic<int> nav_active{ 0 };
 std::atomic<int> nav_peak{ 0 };
+// Nav queries that early-outed on the cancel token mid-flight (body-level cancellation).
+std::atomic<int> nav_early{ 0 };
 
 // Streaming demo instrumentation: assets processed via `then`, batches via `when_all`.
 std::atomic<int> streamed{ 0 };
@@ -161,18 +163,36 @@ void tick_ai(ts::Thread_safe<Float_store>& nav,
     // blocking inside a graph node (the anti-pattern we avoid -- it ties up a
     // worker and risks deadlock); doing it cleanly needs continuations feeding a
     // downstream node (future work).
+    //
+    // The queries are speculative: each runs a longer budget than AI needs, and AI
+    // cancels the batch once it has done its own work. The query body opts into
+    // COOPERATIVE cancellation -- it takes a trailing `Cancellation_token` and polls
+    // it inside the budget loop, returning early when AI cancels. That is a body-level
+    // early-out (a cooperative return settles the task completed, not cancelled), the
+    // opt-in form for cancellation that arrives *while* the body runs.
+    ts::Cancellation_source nav_cancel;
     constexpr int queries = 6;
     for (int q = 0; q < queries; ++q)
-        nav.async([](const Float_store& n)
+        nav.async([](const Float_store& n, ts::Cancellation_token tok)
         {
             update_max(nav_peak, nav_active.fetch_add(1) + 1);
-            spin(0.25);
+            bool bailed = false;
+            auto start = std::chrono::steady_clock::now();
+            auto budget = std::chrono::duration<double, std::milli>(2.0 * time_scale);
+            while (std::chrono::steady_clock::now() - start < budget)
+            {
+                if (tok.is_cancel_requested()) { bailed = true; break; }   // early-out
+                std::this_thread::yield();
+            }
             float v = n.size() > 0 ? n.get(0) : 0.0f;
             nav_active.fetch_sub(1);
+            if (bailed)
+                nav_early.fetch_add(1, std::memory_order_relaxed);
             return v;
-        });
+        }, nav_cancel.token());
 
     spin(1.5);   // AI's own logic, overlapping the async nav queries
+    nav_cancel.request_cancel();   // AI has its paths -> stop stragglers (they early-out)
     fill(intents, 1.0f);
 }
 
@@ -263,6 +283,7 @@ void reset_stats()
 {
     nav_active.store(0);
     nav_peak.store(0);
+    nav_early.store(0);
     streamed.store(0);
     batches.store(0);
 }
@@ -270,6 +291,11 @@ void reset_stats()
 int observed_nav_concurrency()
 {
     return nav_peak.load();
+}
+
+int nav_early_outs()
+{
+    return nav_early.load();
 }
 
 int assets_streamed()

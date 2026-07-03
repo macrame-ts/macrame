@@ -52,6 +52,7 @@ double serial_budget_ms();
 // Reset per-run instrumentation.
 void reset_stats();
 int observed_nav_concurrency();   // peak concurrent `nav` queries (`Thread_safe::async`)
+int nav_early_outs();             // nav queries that early-outed on the cancel token mid-body
 int assets_streamed();            // asset loads finished via a `then` continuation
 int batches_streamed();           // load batches finished via a `when_all` continuation
 
