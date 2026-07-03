@@ -71,6 +71,23 @@ bool pipe_reserve(Scheduler& scheduler, Pipe& pipe, std::move_only_function<void
 // Release a reservation taken by `pipe_reserve`; admits queued jobs.
 void pipe_release(Scheduler& scheduler, Pipe& pipe);
 
+// An `async` accessor functor may, like the bare-task path, opt into cooperative
+// cancellation by taking a trailing `Cancellation_token` after the access argument `A`
+// (`[](T& v, Cancellation_token t){...}`). These accept either arity for a given `A`, so
+// the read/write disambiguation and result deduction work whether or not the token is
+// declared. `Executable::run` forwards the block's token to the token-taking body.
+template<typename Fn, typename A>
+concept Async_accessor = std::invocable<Fn, A> || std::invocable<Fn, A, const Cancellation_token&>;
+
+template<typename Fn, typename A>
+inline constexpr bool accessor_takes_token_v = std::invocable<Fn, A, const Cancellation_token&>;
+
+template<typename Fn, typename A, bool = accessor_takes_token_v<Fn, A>>
+struct Async_result { using type = std::invoke_result_t<Fn, A, const Cancellation_token&>; };
+template<typename Fn, typename A>
+struct Async_result<Fn, A, false> { using type = std::invoke_result_t<Fn, A>; };
+template<typename Fn, typename A> using Async_result_t = typename Async_result<Fn, A>::type;
+
 } // namespace detail
 
 // The only sanctioned way to touch a `T` across threads. You never receive a bare
@@ -110,23 +127,23 @@ public:
     Thread_safe(const Thread_safe&) = delete;
     Thread_safe& operator=(const Thread_safe&) = delete;
 
-    // `read_write`: functor takes `T&` (and not `const T&`)
+    // `read_write`: functor takes `T&` (and not `const T&`), optionally + a trailing token
     template<typename Fn>
-        requires std::invocable<Fn, T&> && (!std::invocable<Fn, const T&>)
+        requires detail::Async_accessor<Fn, T&> && (!detail::Async_accessor<Fn, const T&>)
     auto async(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority::normal)
-        -> Task<std::invoke_result_t<Fn, T&>>
+        -> Task<detail::Async_result_t<Fn, T&>>
     {
-        return launch<std::invoke_result_t<Fn, T&>, Access::read_write>(
+        return launch<detail::Async_result_t<Fn, T&>, Access::read_write>(
             &instance_, std::forward<Fn>(fn), token, priority);
     }
 
-    // `read_only`: functor takes `const T&`
+    // `read_only`: functor takes `const T&`, optionally + a trailing token
     template<typename Fn>
-        requires std::invocable<Fn, const T&>
+        requires detail::Async_accessor<Fn, const T&>
     auto async(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority::normal) const
-        -> Task<std::invoke_result_t<Fn, const T&>>
+        -> Task<detail::Async_result_t<Fn, const T&>>
     {
-        return launch<std::invoke_result_t<Fn, const T&>, Access::read_only>(
+        return launch<detail::Async_result_t<Fn, const T&>, Access::read_only>(
             &instance_, std::forward<Fn>(fn), token, priority);
     }
 
@@ -134,15 +151,34 @@ private:
     template<typename R, Access mode, typename Inst, typename Fn>
     Task<R> launch(Inst* inst, Fn&& fn, Cancellation_token token, Priority priority) const
     {
-        // The body (stored in the block) runs `fn` under this object's access scope.
-        auto body = [inst, fn = std::forward<Fn>(fn)]() mutable -> R
+        // The body (stored in the block) runs `fn` under this object's access scope. If
+        // `fn` takes a trailing token, the body does too and `Executable::run` forwards the
+        // block's token (uniform with the bare-task path's `with_inherited_access`).
+        auto core = [&]
         {
-            Access_context ctx;
-            ctx.add(inst, mode);
-            Access_scope scope(ctx);
-            return fn(*inst);
-        };
-        auto core = detail::make_executable<R>(std::move(body), token);
+            if constexpr (detail::accessor_takes_token_v<Fn, decltype(*inst)>)
+            {
+                auto body = [inst, fn = std::forward<Fn>(fn)](const Cancellation_token& tok) mutable -> R
+                {
+                    Access_context ctx;
+                    ctx.add(inst, mode);
+                    Access_scope scope(ctx);
+                    return fn(*inst, tok);
+                };
+                return detail::make_executable<R>(std::move(body), token);
+            }
+            else
+            {
+                auto body = [inst, fn = std::forward<Fn>(fn)]() mutable -> R
+                {
+                    Access_context ctx;
+                    ctx.add(inst, mode);
+                    Access_scope scope(ctx);
+                    return fn(*inst);
+                };
+                return detail::make_executable<R>(std::move(body), token);
+            }
+        }();
         core->flags.priority = priority;
         detail::pipe_enqueue(default_scheduler(), pipe_, mode,
             [core, gen = core->generation()] { core->execute(core, gen); }, priority);

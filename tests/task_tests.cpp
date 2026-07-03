@@ -613,6 +613,37 @@ void test_task_builder_token_earlyout()
     TS_CHECK(stage.load() == 1);
 }
 
+// An async read accessor may take a trailing token and early-out mid-run.
+void test_async_body_token_earlyout()
+{
+    ts::Cancellation_source src;
+    std::atomic<bool> started{ false };
+    std::atomic<int> stage{ 0 };
+
+    ts::Thread_safe<int> d{ 5 };
+    ts::Task<int> t = d.async([&started, &stage](const int& v, ts::Cancellation_token tok) -> int
+    {
+        started.store(true);
+        while (!tok.is_cancel_requested())
+            std::this_thread::yield();
+        stage.store(1);
+        return v;
+    }, src.token());
+
+    wait_until([&] { return started.load(); });
+    src.request_cancel();
+    TS_CHECK(t.get() == 5);          // early-outed, completed with the value
+    TS_CHECK(stage.load() == 1);
+}
+
+// A write accessor (T&) with a trailing token is still deduced read_write.
+void test_async_write_token()
+{
+    ts::Thread_safe<int> d{ 0 };
+    d.async([](int& v, ts::Cancellation_token) { v = 9; }).get();   // mutates -> write path
+    TS_CHECK(d.async([](const int& v) { return v; }).get() == 9);
+}
+
 // `then` accepts dispatch options (priority, inline, token); both flavors run and return.
 void test_then_options()
 {
@@ -902,6 +933,8 @@ void run_task_tests()
     run("inline deep chain no overflow", test_inline_deep_chain_no_overflow);
     run("task body token earlyout", test_task_body_token_earlyout);
     run("task builder token earlyout", test_task_builder_token_earlyout);
+    run("async body token earlyout", test_async_body_token_earlyout);
+    run("async write token", test_async_write_token);
     run("then options", test_then_options);
     run("then inline on completer", test_then_inline_on_completer);
     run("launch cancelled", test_launch_cancelled);

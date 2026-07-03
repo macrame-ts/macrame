@@ -428,6 +428,27 @@ void stress_token_body()
         assert(u.get() == 8);            // body early-outed, completed, continuation ran inline
         assert(stage.load() == 1);
     }
+
+    // Same, through an async accessor (body runs on the pipe): request_cancel races the
+    // accessor's polling read.
+    ts::Thread_safe<int> d{ 5 };
+    for (int i = 0; i < 2000; ++i)
+    {
+        ts::Cancellation_source src;
+        std::atomic<bool> started{ false };
+        ts::Task<int> t = d.async([&started](const int& v, ts::Cancellation_token tok) -> int
+        {
+            started.store(true, std::memory_order_relaxed);
+            while (!tok.is_cancel_requested())
+                std::this_thread::yield();
+            return v;
+        }, src.token());
+
+        while (!started.load(std::memory_order_relaxed))
+            std::this_thread::yield();
+        src.request_cancel();
+        assert(t.get() == 5);
+    }
 }
 
 // Cancel callbacks racing request_cancel: several threads register a Cancel_callback that
