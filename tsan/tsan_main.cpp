@@ -449,6 +449,27 @@ void stress_token_body()
         src.request_cancel();
         assert(t.get() == 5);
     }
+
+    // A then continuation whose own body takes a token, cancelled while it runs: cancel
+    // races the continuation's polling read after it dispatches off the producer.
+    for (int i = 0; i < 2000; ++i)
+    {
+        ts::Cancellation_source src;
+        std::atomic<bool> started{ false };
+        ts::Task<int> p = ts::launch([] { return 1; });
+        ts::Task<int> u = p.then([&started](int v, ts::Cancellation_token tok)
+        {
+            started.store(true, std::memory_order_relaxed);
+            while (!tok.is_cancel_requested())
+                std::this_thread::yield();
+            return v + 1;
+        }, { .token = src.token() });
+
+        while (!started.load(std::memory_order_relaxed))
+            std::this_thread::yield();
+        src.request_cancel();
+        assert(u.get() == 2);
+    }
 }
 
 // Cancel callbacks racing request_cancel: several threads register a Cancel_callback that

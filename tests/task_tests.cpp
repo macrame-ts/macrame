@@ -683,6 +683,61 @@ void test_then_inline_on_completer()
     (void)cont;
 }
 
+// A then continuation body (value shape) may take a trailing token and early-out mid-run;
+// it forwards the continuation's OWN token (`opts.token`). A cooperative return completes.
+void test_then_body_token_earlyout()
+{
+    ts::Cancellation_source src;
+    std::atomic<bool> started{ false };
+    std::atomic<int> stage{ 0 };
+
+    ts::Task<int> p = ts::launch([] { return 3; });
+    ts::Task<int> u = p.then([&started, &stage](int v, ts::Cancellation_token tok) -> int
+    {
+        started.store(true);
+        while (!tok.is_cancel_requested())
+            std::this_thread::yield();
+        stage.store(1);
+        return v + 1;
+    }, { .token = src.token() });
+
+    wait_until([&] { return started.load(); });
+    src.request_cancel();
+    TS_CHECK(u.get() == 4);
+    TS_CHECK(stage.load() == 1);
+    TS_CHECK(!u.is_cancelled());
+}
+
+// Void-producer and apply-style continuations also accept a trailing token.
+void test_then_body_token_shapes()
+{
+    // void producer
+    ts::Cancellation_source src;
+    std::atomic<bool> started{ false };
+    std::atomic<int> stage{ 0 };
+    ts::Task<void> p = ts::launch([] {});
+    ts::Task<void> u = p.then([&started, &stage](ts::Cancellation_token tok)
+    {
+        started.store(true);
+        while (!tok.is_cancel_requested())
+            std::this_thread::yield();
+        stage.store(1);
+    }, { .token = src.token() });
+    wait_until([&] { return started.load(); });
+    src.request_cancel();
+    u.get();
+    TS_CHECK(stage.load() == 1);
+
+    // apply-style + token (not cancelled: just exercises the branch's type deduction + run)
+    ts::Thread_safe<int> a{ 2 }, b{ 3 };
+    ts::Task<int> ra = a.async([](const int& v) { return v; });
+    ts::Task<int> rb = b.async([](const int& v) { return v; });
+    int s = ts::when_all(ra, rb)
+                .then([](int x, int y, ts::Cancellation_token tok) { (void)tok; return x + y; })
+                .get();
+    TS_CHECK(s == 5);
+}
+
 void test_launch_cancelled()
 {
     ts::Cancellation_source src;
@@ -937,6 +992,8 @@ void run_task_tests()
     run("async write token", test_async_write_token);
     run("then options", test_then_options);
     run("then inline on completer", test_then_inline_on_completer);
+    run("then body token earlyout", test_then_body_token_earlyout);
+    run("then body token shapes", test_then_body_token_shapes);
     run("launch cancelled", test_launch_cancelled);
     run("task after single", test_task_after_single);
     run("task after multiple", test_task_after_multiple);

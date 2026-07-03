@@ -446,13 +446,17 @@ state**, not a separate channel: a settled task is either completed or cancelled
 - **Body-level early-out (opt-in).** A task body may take the token so it can poll and
   early-out for cancellation that arrives *while it runs* (the pre-run skip only covers
   work that hasn't started). Declare a trailing `Cancellation_token` parameter —
-  `ts::launch([](Cancellation_token t){ ... if (t.is_cancel_requested()) return; ... })`
-  (or `[](T& v, Cancellation_token t)` for `async`). `Executable::run` forwards the
-  block's token when the wrapped body accepts it (`with_inherited_access` /
-  `Task_result_t` detect the trailing param; a token-taking body isn't nullary-invocable,
-  so `Task_result_t` picks the result type off the token-arity overload). A cooperative
-  early-out *returns normally*, so the task settles **completed** (with whatever partial
-  result), not cancelled — the token being set doesn't auto-cancel a running task.
+  `ts::launch([](Cancellation_token t){ ... if (t.is_cancel_requested()) return; ... })`,
+  `[](T& v, Cancellation_token t)` for `async`, or on a `then` continuation in any shape
+  (void / whole-result / apply-style). `Executable::run` forwards the block's token when
+  the wrapped body accepts it; a token-taking body isn't invocable at the shorter arity, so
+  the result-type traits (`Task_result_t` for bare tasks, `Async_result_t`/`Async_accessor`
+  for `async`, `Apply_invocable_tok`/`Invoke_result_tok` for `then`) pick the result off the
+  token-arity overload. A `then` body gets the continuation's own token (`opts.token`); the
+  `chain` body always takes a token and forwards it to `produce`, which passes it to `fn`
+  only when `fn` declared it. A cooperative early-out *returns normally*, so the task settles
+  **completed** (with whatever partial result), not cancelled — the token being set doesn't
+  auto-cancel a running task.
 - **Propagates automatically.** Continuations carry the outcome — `void(bool
   cancelled)` for `void`, `void(R*)` (nullptr = cancelled) for a value. `complete`
   fires them with the result; `cancel` fires them with the cancel signal, and each

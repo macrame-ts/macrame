@@ -564,23 +564,50 @@ auto with_inherited_access(Fn&& fn)
 // --- apply-style continuation detection -----------------------------------
 //
 // A `then` off a tuple-valued task may take the tuple by reference (`then([](tuple&
-// t){...})`) or, apply-style, its elements unpacked (`then([](A& a, B& b){...})`).
+// t){...})`) or, apply-style, its elements unpacked (`then([](A& a, B& b){...})`). Any
+// continuation shape may also opt into a trailing `Cancellation_token` (body-level
+// early-out, like every other task body), so each detection comes in a plain and a
+// token-taking flavor.
 
 template<typename> inline constexpr bool is_tuple_v = false;
 template<typename... Ts> inline constexpr bool is_tuple_v<std::tuple<Ts...>> = true;
 
+// Invocable with the tuple's elements unpacked (`fn(Ts&...)`), plain or + a trailing token.
 template<typename Fn, typename Tuple> struct Apply_invocable : std::false_type {};
 template<typename Fn, typename... Ts>
 struct Apply_invocable<Fn, std::tuple<Ts...>> : std::bool_constant<std::is_invocable_v<Fn, Ts&...>> {};
 
+template<typename Fn, typename Tuple> struct Apply_invocable_tok : std::false_type {};
+template<typename Fn, typename... Ts>
+struct Apply_invocable_tok<Fn, std::tuple<Ts...>>
+    : std::bool_constant<std::is_invocable_v<Fn, Ts&..., const Cancellation_token&>> {};
+
+// The producer's result taken as a whole (`fn(R&)`), plain or + a trailing token.
+template<typename Fn, typename R>
+inline constexpr bool takes_whole_v =
+    std::is_invocable_v<Fn, R&> || std::is_invocable_v<Fn, R&, const Cancellation_token&>;
+
 // `then(fn)` unpacks when the producer is a tuple, `fn` does NOT take the tuple by
-// reference, but it IS invocable with the tuple's elements.
+// reference (either arity), but it IS invocable with the tuple's elements (either arity).
 template<typename Fn, typename R>
 inline constexpr bool use_apply_v =
-    is_tuple_v<R> && !std::is_invocable_v<Fn, R&> && Apply_invocable<Fn, R>::value;
+    is_tuple_v<R> && !takes_whole_v<Fn, R>
+    && (Apply_invocable<Fn, R>::value || Apply_invocable_tok<Fn, R>::value);
 
-template<typename Fn, typename Tuple>
-using Apply_result_t = decltype(std::apply(std::declval<Fn&>(), std::declval<Tuple&>()));
+template<typename Fn, typename Tuple, bool WithToken> struct Apply_result;
+template<typename Fn, typename... Ts>
+struct Apply_result<Fn, std::tuple<Ts...>, false> { using type = std::invoke_result_t<Fn, Ts&...>; };
+template<typename Fn, typename... Ts>
+struct Apply_result<Fn, std::tuple<Ts...>, true>
+{ using type = std::invoke_result_t<Fn, Ts&..., const Cancellation_token&>; };
+
+// `invoke_result_t<Fn, Args...>`, optionally with a trailing token appended. A struct (not
+// `conditional_t`) so only the selected arity is instantiated — the other would be
+// ill-formed when `fn` accepts just one of them.
+template<typename Fn, bool WithToken, typename... Args> struct Invoke_result_tok
+{ using type = std::invoke_result_t<Fn, Args...>; };
+template<typename Fn, typename... Args> struct Invoke_result_tok<Fn, true, Args...>
+{ using type = std::invoke_result_t<Fn, Args..., const Cancellation_token&>; };
 
 // The control block behind a `Task` handle (used to wire prerequisites).
 template<typename R>
@@ -686,32 +713,45 @@ public:
     // and the cancellation propagates to the returned task. For a non-void producer
     // `fn` receives the result by reference (or, for a tuple, apply-style); for void
     // it takes no argument.
+    // The continuation `fn` may declare a trailing `Cancellation_token` in any of its
+    // shapes (void / whole-result / apply-style) to poll for cancellation mid-run; the
+    // token forwarded is the continuation's own (`opts.token`, checked at dispatch too).
     template<typename Fn>
     auto then(Fn&& fn, Continuation_options opts = {})
     {
         if constexpr (std::is_void_v<R>)
         {
-            using R2 = std::invoke_result_t<Fn>;
-            return chain<R2>([fn = std::forward<Fn>(fn)](void*) mutable -> R2
+            constexpr bool tok = detail::takes_token_v<std::decay_t<Fn>>;
+            using R2 = detail::Task_result_t<Fn>;
+            return chain<R2>([fn = std::forward<Fn>(fn)](void*, const Cancellation_token& t) mutable -> R2
             {
-                return fn();
-            }, opts);
+                if constexpr (tok) return fn(t);
+                else return fn();
+            }, std::move(opts));
         }
         else if constexpr (detail::use_apply_v<Fn, R>)
         {
-            using R2 = detail::Apply_result_t<Fn, R>;
-            return chain<R2>([fn = std::forward<Fn>(fn)](void* r) mutable -> R2
+            constexpr bool tok = detail::Apply_invocable_tok<std::decay_t<Fn>, R>::value
+                                 && !detail::Apply_invocable<std::decay_t<Fn>, R>::value;
+            using R2 = typename detail::Apply_result<std::decay_t<Fn>, R, tok>::type;
+            return chain<R2>([fn = std::forward<Fn>(fn)](void* r, const Cancellation_token& t) mutable -> R2
             {
-                return std::apply(fn, *static_cast<R*>(r));
-            }, opts);
+                if constexpr (tok)
+                    return std::apply([&fn, &t](auto&... xs) -> R2 { return fn(xs..., t); }, *static_cast<R*>(r));
+                else
+                    return std::apply(fn, *static_cast<R*>(r));
+            }, std::move(opts));
         }
         else
         {
-            using R2 = std::invoke_result_t<Fn, R&>;
-            return chain<R2>([fn = std::forward<Fn>(fn)](void* r) mutable -> R2
+            constexpr bool tok = std::is_invocable_v<std::decay_t<Fn>&, R&, const Cancellation_token&>
+                                 && !std::is_invocable_v<std::decay_t<Fn>&, R&>;
+            using R2 = typename detail::Invoke_result_tok<std::decay_t<Fn>&, tok, R&>::type;
+            return chain<R2>([fn = std::forward<Fn>(fn)](void* r, const Cancellation_token& t) mutable -> R2
             {
-                return fn(*static_cast<R*>(r));
-            }, opts);
+                if constexpr (tok) return fn(*static_cast<R*>(r), t);
+                else return fn(*static_cast<R*>(r));
+            }, std::move(opts));
         }
     }
 
@@ -737,7 +777,8 @@ private:
     {
         auto producer = core_;
         auto next = detail::make_executable<R2>(
-            [producer, produce = std::move(produce)]() mutable -> R2 { return produce(producer->result_ptr); },
+            [producer, produce = std::move(produce)](const Cancellation_token& tok) mutable -> R2
+            { return produce(producer->result_ptr, tok); },
             std::move(opts.token));
         next->flags.retractable = true;
         next->flags.priority = opts.priority;
