@@ -400,7 +400,7 @@ void test_cancel_at_then_via_token()
     ts::Cancellation_source src;
     src.request_cancel();
     std::atomic<bool> then_ran{ false };
-    ts::Task<int> u = t.then([&then_ran](int v) { then_ran.store(true); return v; }, src.token());
+    ts::Task<int> u = t.then([&then_ran](int v) { then_ran.store(true); return v; }, { .token = src.token() });
 
     wait_until([&] { return u.is_done(); });
     TS_CHECK(u.is_cancelled());         // token cancelled the continuation even though t succeeded
@@ -564,6 +564,92 @@ void test_inline_deep_chain_no_overflow()
     root.trigger();    // fires the chain -> all n run inline on this thread, trampolined
     prev.get();
     TS_CHECK(count.load() == n);
+}
+
+// A task body that declares a trailing `Cancellation_token` receives the task's token and
+// can poll it to early-out. Cancellation arrives WHILE the body runs (the pre-run skip
+// does not apply -- the task already started), so this exercises the body parameter, not
+// the dispatch-time skip. A cooperative early-out returns normally, so the task COMPLETES.
+void test_task_body_token_earlyout()
+{
+    ts::Cancellation_source src;
+    std::atomic<bool> started{ false };
+    std::atomic<int> stage{ 0 };
+
+    ts::Task<void> t = ts::launch([&](ts::Cancellation_token tok)
+    {
+        started.store(true);
+        while (!tok.is_cancel_requested())
+            std::this_thread::yield();   // running -- poll the token
+        stage.store(1);                  // observed cancellation mid-body -> early out
+    }, src.token());
+
+    wait_until([&] { return started.load(); });   // body started before we cancel
+    src.request_cancel();
+    t.get();
+    TS_CHECK(stage.load() == 1);          // the body received and reacted to the token
+    TS_CHECK(!t.is_cancelled());          // cooperative return -> COMPLETED, not cancelled
+}
+
+// The builder path also forwards the token to a token-taking body.
+void test_task_builder_token_earlyout()
+{
+    ts::Cancellation_source src;
+    std::atomic<bool> started{ false };
+    std::atomic<int> stage{ 0 };
+
+    ts::Task<int> t = ts::task([&](ts::Cancellation_token tok) -> int
+    {
+        started.store(true);
+        while (!tok.is_cancel_requested())
+            std::this_thread::yield();
+        stage.store(1);
+        return 42;
+    }).launch(src.token());
+
+    wait_until([&] { return started.load(); });
+    src.request_cancel();
+    TS_CHECK(t.get() == 42);
+    TS_CHECK(stage.load() == 1);
+}
+
+// `then` accepts dispatch options (priority, inline, token); both flavors run and return.
+void test_then_options()
+{
+    ts::Task<int> a = ts::launch([] { return 10; });
+    TS_CHECK(a.then([](int v) { return v + 1; }, { .priority = Priority::high }).get() == 11);
+
+    ts::Task<int> c = ts::launch([] { return 20; });
+    TS_CHECK(c.then([](int v) { return v + 2; }, { .run_inline = true }).get() == 22);
+}
+
+// An inline `then` runs on the thread that completes the producer (same mechanism as
+// Task_builder::set_inline). Pinned deterministically like test_inline_runs_on_completer.
+void test_then_inline_on_completer()
+{
+    std::atomic<bool> gate{ false };
+    std::atomic<std::thread::id> producer_thread{};
+    std::atomic<std::thread::id> then_thread{};
+    std::atomic<bool> then_ran{ false };
+
+    ts::Task<int> producer = ts::launch([&]
+    {
+        while (!gate.load()) std::this_thread::yield();   // held until the continuation is wired
+        producer_thread.store(std::this_thread::get_id());
+        return 5;
+    });
+    ts::Task<int> cont = producer.then([&](int v)
+    {
+        then_thread.store(std::this_thread::get_id());
+        then_ran.store(true);
+        return v;
+    }, { .run_inline = true });
+    gate.store(true);
+    wait_until([&] { return then_ran.load(); });
+
+    TS_CHECK(then_thread.load() == producer_thread.load());       // ran on the producer's completer
+    TS_CHECK(then_thread.load() != std::this_thread::get_id());   // not this thread
+    (void)cont;
 }
 
 void test_launch_cancelled()
@@ -814,6 +900,10 @@ void run_task_tests()
     run("inline runs on completer", test_inline_runs_on_completer);
     run("inline synchronous when ready", test_inline_synchronous_when_ready);
     run("inline deep chain no overflow", test_inline_deep_chain_no_overflow);
+    run("task body token earlyout", test_task_body_token_earlyout);
+    run("task builder token earlyout", test_task_builder_token_earlyout);
+    run("then options", test_then_options);
+    run("then inline on completer", test_then_inline_on_completer);
     run("launch cancelled", test_launch_cancelled);
     run("task after single", test_task_after_single);
     run("task after multiple", test_task_after_multiple);

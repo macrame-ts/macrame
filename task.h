@@ -479,11 +479,21 @@ struct Executable
         auto prev = std::move(current_task);
         current_task = c;
 
+        // The body may take the task's token (opt-in cooperative cancellation, see
+        // `with_inherited_access`); pass it if so, otherwise invoke nullary.
         if constexpr (std::is_void_v<R>)
-            self->body();
+        {
+            if constexpr (std::is_invocable_v<Body&, const Cancellation_token&>)
+                self->body(c->token);
+            else
+                self->body();
+        }
         else
         {
-            self->storage.result.emplace(self->body());
+            if constexpr (std::is_invocable_v<Body&, const Cancellation_token&>)
+                self->storage.result.emplace(self->body(c->token));
+            else
+                self->storage.result.emplace(self->body());
             c->result_ptr = &*self->storage.result;
         }
 
@@ -508,20 +518,47 @@ std::shared_ptr<Task_control_block> make_executable(Body&& body, Cancellation_to
     return std::shared_ptr<Task_control_block>(exec, &exec->core);   // aliasing
 }
 
+// A task body may opt into COOPERATIVE cancellation by declaring a trailing
+// `Cancellation_token` parameter (`[](Cancellation_token t){...}` or, for `async`,
+// `[](T& v, Cancellation_token t){...}`): `Executable::run` then passes the task's token
+// so the body can poll `is_cancel_requested()` and early-out mid-execution. This is
+// distinct from the pre-run skip (a token cancelled BEFORE the body starts skips it
+// entirely); the parameter matters for cancellation that arrives WHILE the body runs.
+template<typename Fn>
+inline constexpr bool takes_token_v = std::is_invocable_v<Fn&, const Cancellation_token&>;
+
+// The body's result type, accounting for the optional trailing token parameter (a
+// token-taking `fn` is not invocable with no args, so `invoke_result_t<Fn>` would be
+// ill-formed). Specialized rather than `conditional_t` so only the valid branch is typed.
+template<typename Fn, bool = takes_token_v<Fn>>
+struct Task_result { using type = std::invoke_result_t<Fn&, const Cancellation_token&>; };
+template<typename Fn>
+struct Task_result<Fn, false> { using type = std::invoke_result_t<Fn&>; };
+template<typename Fn> using Task_result_t = typename Task_result<std::decay_t<Fn>>::type;
+
 // Wrap `fn` so the task runs under the access grant active where it was BUILT (see
 // access.h): sub-work launched from a task body inherits the launcher's permissions and
 // may touch the launcher's guarded data. The snapshot is by value, so it is valid after
 // the launcher unwinds and on whatever worker (or retractor) runs the body; a top-level
 // build (no active grant) captures nothing, so the scope is a no-op. Shared by
-// `ts::launch` and `ts::task` so both the eager and the builder path inherit alike.
+// `ts::launch` and `ts::task` so both the eager and the builder path inherit alike. If
+// `fn` takes a trailing `Cancellation_token`, the wrapper does too (forwarded by
+// `Executable::run` from the block's token), so the body can poll for cancellation.
 template<typename R, typename Fn>
 auto with_inherited_access(Fn&& fn)
 {
-    return [fn = std::forward<Fn>(fn), ctx = snapshot_access()]() mutable -> R
-    {
-        Inherited_access_scope scope(ctx);
-        return fn();
-    };
+    if constexpr (takes_token_v<std::decay_t<Fn>>)
+        return [fn = std::forward<Fn>(fn), ctx = snapshot_access()](const Cancellation_token& tok) mutable -> R
+        {
+            Inherited_access_scope scope(ctx);
+            return fn(tok);
+        };
+    else
+        return [fn = std::forward<Fn>(fn), ctx = snapshot_access()]() mutable -> R
+        {
+            Inherited_access_scope scope(ctx);
+            return fn();
+        };
 }
 
 // --- apply-style continuation detection -----------------------------------
@@ -590,6 +627,18 @@ inline void add_prerequisite(const std::shared_ptr<Task_control_block>& prereq,
 
 } // namespace detail
 
+// Dispatch options for a `then` continuation. An aggregate, so it takes designated
+// initializers at the call site: `t.then(fn, {.priority = Priority::high})`,
+// `t.then(fn, {.run_inline = true})`. `token` cancels the continuation independently of
+// the producer (checked when it fires). `run_inline` runs it on the thread that settles
+// the producer instead of queueing it (same trade-offs as `Task_builder::set_inline`).
+struct Continuation_options
+{
+    Cancellation_token token = {};
+    Priority priority = Priority::normal;
+    bool run_inline = false;
+};
+
 // Handle to an async result. `get()` blocks for the result (call once); `then()`
 // chains a continuation that runs when this task completes.
 template<typename R>
@@ -638,7 +687,7 @@ public:
     // `fn` receives the result by reference (or, for a tuple, apply-style); for void
     // it takes no argument.
     template<typename Fn>
-    auto then(Fn&& fn, Cancellation_token token = {})
+    auto then(Fn&& fn, Continuation_options opts = {})
     {
         if constexpr (std::is_void_v<R>)
         {
@@ -646,7 +695,7 @@ public:
             return chain<R2>([fn = std::forward<Fn>(fn)](void*) mutable -> R2
             {
                 return fn();
-            }, token);
+            }, opts);
         }
         else if constexpr (detail::use_apply_v<Fn, R>)
         {
@@ -654,7 +703,7 @@ public:
             return chain<R2>([fn = std::forward<Fn>(fn)](void* r) mutable -> R2
             {
                 return std::apply(fn, *static_cast<R*>(r));
-            }, token);
+            }, opts);
         }
         else
         {
@@ -662,7 +711,7 @@ public:
             return chain<R2>([fn = std::forward<Fn>(fn)](void* r) mutable -> R2
             {
                 return fn(*static_cast<R*>(r));
-            }, token);
+            }, opts);
         }
     }
 
@@ -684,13 +733,15 @@ private:
     // cancels this task instead of running the body. `produce` takes the producer's
     // `result_ptr` (null for a void producer); the producer stays alive as our prerequisite.
     template<typename R2, typename Produce>
-    Task<R2> chain(Produce produce, Cancellation_token token)
+    Task<R2> chain(Produce produce, Continuation_options opts)
     {
         auto producer = core_;
         auto next = detail::make_executable<R2>(
             [producer, produce = std::move(produce)]() mutable -> R2 { return produce(producer->result_ptr); },
-            token);
+            std::move(opts.token));
         next->flags.retractable = true;
+        next->flags.priority = opts.priority;
+        next->flags.run_inline = opts.run_inline;
         next->num_locks.store(1, std::memory_order_relaxed);   // "not attached" lock
         detail::add_prerequisite(producer, next);              // wait for the producer to settle
         detail::Task_control_block::release(next);             // drop the lock -> dispatch when ready
@@ -790,7 +841,7 @@ private:
 template<typename Fn>
 auto task(Fn&& fn)
 {
-    using R = std::invoke_result_t<Fn>;
+    using R = detail::Task_result_t<Fn>;
     auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), {});
     core->num_locks.store(1, std::memory_order_relaxed);   // the "not launched" lock
     core->flags.retractable = true;   // bare scheduler task: safe to run inline from a waiter
@@ -805,9 +856,9 @@ auto task(Fn&& fn)
 // body may touch the launcher's data.
 template<typename Fn>
 auto launch(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority::normal)
-    -> Task<std::invoke_result_t<Fn>>
+    -> Task<detail::Task_result_t<Fn>>
 {
-    using R = std::invoke_result_t<Fn>;
+    using R = detail::Task_result_t<Fn>;
     auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), std::move(token));
     core->flags.retractable = true;   // bare scheduler task (no pipe binding): safe to run inline from a waiter
     core->flags.priority = priority;
@@ -845,7 +896,7 @@ void add_nested(const Task<R>& child)
 // task body.
 template<typename Fn>
 auto nested(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority::normal)
-    -> Task<std::invoke_result_t<Fn>>
+    -> Task<detail::Task_result_t<Fn>>
 {
     auto t = launch(std::forward<Fn>(fn), std::move(token), priority);
     add_nested(t);

@@ -399,6 +399,37 @@ void stress_cancel()
     }
 }
 
+// A token-taking body polling the token while another thread cancels: request_cancel racing
+// the body's polling read of the shared cancel flag, and the block settling completed after a
+// cooperative early-out. Also races a then-inline continuation dispatched off the completer.
+void stress_token_body()
+{
+    for (int i = 0; i < 2000; ++i)
+    {
+        ts::Cancellation_source src;
+        std::atomic<bool> started{ false };
+        std::atomic<int> stage{ 0 };
+
+        ts::Task<int> t = ts::launch([&started, &stage](ts::Cancellation_token tok) -> int
+        {
+            started.store(true, std::memory_order_relaxed);
+            while (!tok.is_cancel_requested())
+                std::this_thread::yield();
+            stage.store(1, std::memory_order_relaxed);
+            return 7;
+        }, src.token());
+
+        ts::Task<int> u = t.then([](int v) { return v + 1; }, { .run_inline = true });
+
+        while (!started.load(std::memory_order_relaxed))
+            std::this_thread::yield();
+        src.request_cancel();
+
+        assert(u.get() == 8);            // body early-outed, completed, continuation ran inline
+        assert(stage.load() == 1);
+    }
+}
+
 // Cancel callbacks racing request_cancel: several threads register a Cancel_callback that
 // lives briefly then destroys, while another thread cancels. Stresses the callback-list
 // mutex, the fire-immediately-when-already-requested path, and -- the delicate one -- the
@@ -467,6 +498,7 @@ int main()
     std::puts("tsan: retraction stress");    stress_retraction();
     std::puts("tsan: inline stress");        stress_inline();
     std::puts("tsan: cancel stress");        stress_cancel();
+    std::puts("tsan: token body stress");    stress_token_body();
     std::puts("tsan: cancel callback stress"); stress_cancel_callback();
     std::puts("tsan: graph stress");        stress_graph();
     std::puts("tsan: graph+async stress");  stress_graph_async();

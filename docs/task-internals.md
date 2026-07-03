@@ -441,15 +441,25 @@ state**, not a separate channel: a settled task is either completed or cancelled
 
 - **Checked when work is about to run.** `async`'s body and each graph `run_node`
   check the token first; if cancelled, the body is **skipped** and the block settles
-  as cancelled. Already-running work is *not* interrupted (a long body can poll the
-  token cooperatively). So cancellation skips *not-yet-started* work.
+  as cancelled. Already-running work is *not* interrupted. So cancellation skips
+  *not-yet-started* work.
+- **Body-level early-out (opt-in).** A task body may take the token so it can poll and
+  early-out for cancellation that arrives *while it runs* (the pre-run skip only covers
+  work that hasn't started). Declare a trailing `Cancellation_token` parameter —
+  `ts::launch([](Cancellation_token t){ ... if (t.is_cancel_requested()) return; ... })`
+  (or `[](T& v, Cancellation_token t)` for `async`). `Executable::run` forwards the
+  block's token when the wrapped body accepts it (`with_inherited_access` /
+  `Task_result_t` detect the trailing param; a token-taking body isn't nullary-invocable,
+  so `Task_result_t` picks the result type off the token-arity overload). A cooperative
+  early-out *returns normally*, so the task settles **completed** (with whatever partial
+  result), not cancelled — the token being set doesn't auto-cancel a running task.
 - **Propagates automatically.** Continuations carry the outcome — `void(bool
   cancelled)` for `void`, `void(R*)` (nullptr = cancelled) for a value. `complete`
   fires them with the result; `cancel` fires them with the cancel signal, and each
   continuation's closure then cancels *its* subsequent. So cancelling one task
   cancels the whole downstream chain, and a cancelled prerequisite cancels its
-  continuations even if they weren't given the token. `then(fn, token)` also lets the
-  token cancel *at that link* even when the producer succeeded.
+  continuations even if they weren't given the token. `then(fn, {.token = ...})` also
+  lets the token cancel *at that link* even when the producer succeeded.
 - **Graph:** `execute(scheduler, token)` — pending nodes skip (the DAG still drains so
   the run settles), and the completion `Task<void>` is cancelled. In-flight nodes
   finish.
@@ -517,8 +527,11 @@ TSan): the block settles exactly once, either way.
   O(1) stack instead of `settle → release → execute → settle …` recursion. Caveats
   (documented, not enforced): runs on a nondeterministic / possibly external thread,
   bypasses priority, must not block. `run_inline` is a packed bit in `Flags`
-  (with `priority`/`retractable`). Scope: the `after` path; `then`/graph/async inline come
-  with the continuation-unification arc.
+  (with `priority`/`retractable`). `then` takes the same knobs via a `Continuation_options`
+  aggregate (`t.then(fn, {.priority = high})`, `{.run_inline = true}`, `{.token = ...}`) —
+  `chain` sets the continuation's `flags.priority`/`flags.run_inline` before `release`, so
+  a `then` dispatches inline / at a priority exactly as a builder task does. Graph/async
+  inline still pending.
   **Reusable tasks** — `Task_control_block::reset()` re-arms a settled block in place
   (monomorphic, scalars only: reuse is a *block* capability, so no new `<R>` type). The
   existing `Task_builder<R>` (from `ts::task(fn)`) is the reusable handle — it already
