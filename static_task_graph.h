@@ -54,6 +54,13 @@ public:
     // Queue priority for this node when it is dispatched each run.
     Graph_node& priority(Priority p);
 
+    // Dispatch this node INLINE: when it becomes ready, run it on the thread that settled
+    // its last prerequisite (and acquired its objects) instead of queueing -- but only if
+    // that thread can acquire ALL its objects synchronously; if any is contended (held by
+    // async), it defers to the queue. Bounded by the shared inline trampoline. Same
+    // trade-offs as `Task_builder::set_inline` (nondeterministic thread, must not block).
+    Graph_node& set_inline();
+
     int index() const noexcept { return index_; }
 
 private:
@@ -128,6 +135,7 @@ private:
         std::vector<int> successors;
         int indegree = 0;
         Priority priority = Priority::normal;   // applied to `block` at compile()
+        bool inline_dispatch = false;           // run on the settling thread if its acquires all succeed synchronously
         // The node's reusable task block (a `Graph_node_block`, allocated once in
         // compile() and re-armed each run). Its `execute`/`on_complete` are wired so the
         // body may spawn nested tasks and the graph post-logic fires at completion (§7.1).
@@ -177,7 +185,9 @@ private:
     // [acquire, complete] window -- free in the gaps for async / other objects (no whole-run
     // reservation). See docs §10.
     static void on_data_ready(Run_state& run, int index);
-    static void acquire_next(Run_state& run, int index, int pos);
+    // `synchronous` tracks whether the whole acquire chain so far ran on the settling thread
+    // (no deferral) -- an inline node dispatches inline only if it stays true to the end.
+    static void acquire_next(Run_state& run, int index, int pos, bool synchronous);
     static void run_node(Run_state& run, int index);
     // Graph post-logic for a node whose body AND all its nested tasks have settled:
     // release the objects it held, release its successors, and settle the run when the

@@ -411,6 +411,22 @@ one object and waits for none — no wait-cycle can form regardless. Canonical o
 load-bearing only once multi-object `async` (a second class of multi-object acquirer) lands;
 it's baked in now (pipe index = canonical id) for that.
 
+**Inline node dispatch (opt-in, `Graph_node::set_inline`).** The per-node acquire makes the
+inline hand-off natural: when a node's last prerequisite completes on some thread, that thread
+runs `acquire_next` for the successor. `acquire_next` threads a `synchronous` flag — true while
+the chain stays on that thread, flipped false the moment any acquire *defers* to a
+`pipe_acquire` callback (a contended object). At the end, an inline node that stayed
+`synchronous` dispatches through the shared `dispatch_ready` trampoline (its block's
+`run_inline` bit is set, so the inline path runs it on this thread, bounded/iterative like the
+task inline path); otherwise it goes through the queue (`run_node` on the run's scheduler). So
+an inline node runs on the settling thread **only if it can acquire all its objects there and
+then** — a contended object (async grabbed it in a gap) defers it to the queue, exactly the
+"revoke the predecessor's access, acquire the successor's, else defer" hand-off. A chain of
+inline nodes on one object trampolines: each releases the object at completion, the next
+acquires it synchronously and dispatches inline. Caveats mirror `Task_builder::set_inline`
+(runs on a nondeterministic thread — the caller for a root — must not block); an all-inline
+graph runs synchronously on the `execute()` caller.
+
 Note there is **no** class of objects that async can't reach: `async()` is public on
 every `Thread_safe`, so any graph object is potentially async-reachable — you can't
 statically skip reservation for "async-free" objects. A per-object user assertion

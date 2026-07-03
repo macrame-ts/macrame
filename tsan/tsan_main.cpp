@@ -566,6 +566,40 @@ void stress_graph_async()
     }   // join firers
 }
 
+// Inline graph nodes (set_inline) under async contention: an inline node whose object is
+// free at settle runs inline on the settling thread (trampolined for chains); if an async
+// grabbed the object in the gap, the acquire defers and the node runs queued. Stresses the
+// synchronous-vs-deferred fork in acquire_next, dispatch_ready reused for graph nodes, and
+// node_complete releasing while async races to acquire. A chain of three inline nodes on the
+// same object exercises the trampoline + the release/re-acquire hand-off.
+void stress_graph_inline()
+{
+    ts::Thread_safe<int> x{ 0 };
+    ts::Static_task_graph g;
+    ts::Graph_node a = g.add_node([](int& v) { ++v; }, x).set_inline();
+    ts::Graph_node b = g.add_node([](int& v) { ++v; }, x).set_inline();
+    ts::Graph_node c = g.add_node([](int& v) { ++v; }, x).set_inline();
+    b.after(a);
+    c.after(b);
+    g.compile();
+
+    std::atomic<bool> stop{ false };
+    {
+        std::vector<std::jthread> firers;
+        for (int t = 0; t < 3; ++t)
+            firers.emplace_back([&]
+            {
+                while (!stop.load(std::memory_order_relaxed))
+                    x.async([](int& v) { ++v; }).get();   // contends the inline nodes' object
+            });
+
+        for (int i = 0; i < 300; ++i)
+            g.execute().get();
+
+        stop.store(true, std::memory_order_relaxed);
+    }   // join firers
+}
+
 } // namespace
 
 int main()
@@ -588,6 +622,7 @@ int main()
     std::puts("tsan: cancel callback stress"); stress_cancel_callback();
     std::puts("tsan: graph stress");        stress_graph();
     std::puts("tsan: graph+async stress");  stress_graph_async();
+    std::puts("tsan: graph inline stress");  stress_graph_inline();
     std::puts("tsan: graph nested stress");  stress_graph_nested();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);
     std::puts("tsan: done (no races)");

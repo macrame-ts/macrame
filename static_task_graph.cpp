@@ -74,6 +74,13 @@ Graph_node& Graph_node::priority(Priority p)
     return *this;
 }
 
+Graph_node& Graph_node::set_inline()
+{
+    if (graph_)
+        graph_->nodes_[index_].inline_dispatch = true;   // applied to the block in execute() (see re-arm)
+    return *this;
+}
+
 // Two nodes conflict if they touch a common instance and at least one wants write.
 bool Static_task_graph::conflicts(const Node& a, const Node& b)
 {
@@ -202,7 +209,7 @@ void Static_task_graph::detect_cycles() const
 // single remaining_deps 0-transition, or a root at kickoff), so acquisition starts once.
 void Static_task_graph::on_data_ready(Run_state& run, int index)
 {
-    acquire_next(run, index, 0);
+    acquire_next(run, index, 0, /*synchronous*/ true);
 }
 
 // Acquire the node's `pos`-th object (in ascending pipe-index / canonical order), mode-aware
@@ -212,12 +219,19 @@ void Static_task_graph::on_data_ready(Run_state& run, int index)
 // synchronously (bounded by the node's object count); a contended one defers to `pipe_acquire`'s
 // callback (fires on a worker when the object frees). Edges guarantee no other NODE contends
 // the same object concurrently, so the only wait is on out-of-band async.
-void Static_task_graph::acquire_next(Run_state& run, int index, int pos)
+void Static_task_graph::acquire_next(Run_state& run, int index, int pos, bool synchronous)
 {
     const Node& node = run.graph->nodes_[index];
     if (pos >= static_cast<int>(node.pipe_indices.size()))
     {
-        run_node(run, index);   // all objects held -> dispatch the node
+        // All objects held. An inline node whose acquires ALL succeeded synchronously (still
+        // on the settling thread) runs here via the shared trampoline (its block has
+        // `run_inline` set, so `dispatch_ready` takes the inline path -- bounded, iterative);
+        // otherwise (queued node, or an acquire deferred to a worker) go through the queue.
+        if (synchronous && node.inline_dispatch)
+            detail::Task_control_block::dispatch_ready(node.block);
+        else
+            run_node(run, index);
         return;
     }
 
@@ -225,10 +239,10 @@ void Static_task_graph::acquire_next(Run_state& run, int index, int pos)
     Access mode = node.pipe_modes[pos];
     Run_state* rp = &run;   // stable (run_ outlives the run)
     bool acquired = detail::pipe_acquire(*run.scheduler, *run.graph->distinct_pipes_[pi], mode,
-        [rp, index, pos] { acquire_next(*rp, index, pos + 1); });
+        [rp, index, pos] { acquire_next(*rp, index, pos + 1, /*synchronous*/ false); });
 
     if (acquired)
-        acquire_next(run, index, pos + 1);
+        acquire_next(run, index, pos + 1, synchronous);   // still on the settling thread
 }
 
 // Dispatch a node: submit its (re-armed) block via the raw scheduler API -- a fn-ptr
@@ -350,7 +364,8 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token t
         b.ready.store(false, std::memory_order_relaxed);
         b.num_locks.store(0, std::memory_order_relaxed);
         b.token = token;
-        b.flags.priority = nodes_[i].priority;   // pick up any Graph_node::priority set since last run
+        b.flags.priority = nodes_[i].priority;          // pick up any Graph_node::priority set since last run
+        b.flags.run_inline = nodes_[i].inline_dispatch; // so dispatch_ready takes the inline path for an inline node
     }
     run.remaining_nodes.store(static_cast<int>(nodes_.size()), std::memory_order_relaxed);
 

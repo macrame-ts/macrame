@@ -277,6 +277,58 @@ void test_node_priority_order()
     TS_CHECK(normal_ord.load() < low_ord.load());     // normal ran before low
 }
 
+// An inline root node runs on the execute() caller thread (it settled + acquired its own
+// object synchronously). Deterministic: the object is free at kickoff, so the acquire
+// succeeds synchronously and the node dispatches inline on this thread.
+void test_graph_node_inline_on_caller()
+{
+    ts::Thread_safe<int> x{ 0 };
+    std::atomic<std::thread::id> node_thread{};
+
+    ts::Static_task_graph g;
+    g.add_node([&node_thread](int& v) { node_thread.store(std::this_thread::get_id()); v = 1; }, x).set_inline();
+    g.compile();
+    g.execute().get();
+
+    TS_CHECK(node_thread.load() == std::this_thread::get_id());   // inline root ran on the caller
+    TS_CHECK(read_value(x) == 1);
+}
+
+// A chain of inline nodes runs entirely on the settling thread (here the caller): the root
+// runs inline, releases its object, its inline successor acquires it synchronously and runs
+// inline too (trampolined). Order preserved by the edge.
+void test_graph_inline_chain_on_caller()
+{
+    ts::Thread_safe<int> x{ 0 };
+    std::atomic<int> seq{ 0 };
+    std::atomic<int> a_ord{ 0 }, b_ord{ 0 };
+    std::atomic<std::thread::id> a_thr{}, b_thr{};
+
+    ts::Static_task_graph g;
+    ts::Graph_node a = g.add_node([&](int& v) { a_ord.store(++seq); a_thr.store(std::this_thread::get_id()); v = 1; }, x).set_inline();
+    ts::Graph_node b = g.add_node([&](int& v) { b_ord.store(++seq); b_thr.store(std::this_thread::get_id()); v = 2; }, x).set_inline();
+    b.after(a);
+    g.compile();
+    g.execute().get();
+
+    TS_CHECK(a_ord.load() == 1 && b_ord.load() == 2);            // order preserved
+    TS_CHECK(a_thr.load() == std::this_thread::get_id());
+    TS_CHECK(b_thr.load() == std::this_thread::get_id());        // whole inline chain on the caller
+    TS_CHECK(read_value(x) == 2);
+}
+
+// Inline nodes are re-runnable like any node (the block re-arms; run_inline sticks).
+void test_graph_inline_rerun()
+{
+    ts::Thread_safe<int> x{ 0 };
+    ts::Static_task_graph g;
+    g.add_node([](int& v) { ++v; }, x).set_inline();
+    g.compile();
+    for (int i = 0; i < 5; ++i)
+        g.execute().get();
+    TS_CHECK(read_value(x) == 5);
+}
+
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
@@ -301,6 +353,9 @@ void run_graph_tests()
     run("builder nested inherits access", test_builder_nested_inherits_access);
     run("nested before successor", test_nested_before_successor);
     run("node priority order", test_node_priority_order);
+    run("graph node inline on caller", test_graph_node_inline_on_caller);
+    run("graph inline chain on caller", test_graph_inline_chain_on_caller);
+    run("graph inline rerun", test_graph_inline_rerun);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);
