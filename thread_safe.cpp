@@ -121,24 +121,41 @@ void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_
     dispatch(scheduler, pipe);
 }
 
-bool pipe_reserve(Scheduler& scheduler, Pipe& pipe, std::move_only_function<void()> on_acquired)
+bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired)
 {
     std::scoped_lock lock(pipe.mutex);
-    if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
+    // Admit at the front only if nothing is queued (FIFO) and the mode rule holds: a reader
+    // joins concurrent readers (no writer), a writer needs the pipe idle.
+    if (pipe.jobs.empty())
     {
-        pipe.writer_active = true;   // acquired now; hold as an exclusive writer
-        return true;
+        if (mode == Access::read_only)
+        {
+            if (!pipe.writer_active)
+            {
+                ++pipe.active_readers;   // acquired now; hold as a concurrent reader
+                return true;
+            }
+        }
+        else if (!pipe.writer_active && pipe.active_readers == 0)
+        {
+            pipe.writer_active = true;   // acquired now; hold as an exclusive writer
+            return true;
+        }
     }
-    // Deferred: sit behind the queued/active work; admitted (FIFO) when it drains.
-    // No dispatch here -- something is active, so a writer can't be admitted yet.
-    pipe.jobs.push_back(Job{ Access::read_write, std::move(on_acquired), /*reservation*/ true });
+    // Deferred: sit behind the queued/active work; admitted (FIFO) when it drains. No
+    // dispatch here -- the blocking condition still holds, so nothing can be admitted yet;
+    // whatever releases it (a completing job or `pipe_release`) re-dispatches.
+    pipe.jobs.push_back(Job{ mode, std::move(on_acquired), /*reservation*/ true });
     return false;
 }
 
-void pipe_release(Scheduler& scheduler, Pipe& pipe)
+void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode)
 {
     std::scoped_lock lock(pipe.mutex);
-    pipe.writer_active = false;
+    if (mode == Access::read_only)
+        --pipe.active_readers;
+    else
+        pipe.writer_active = false;
     dispatch(scheduler, pipe);
     if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
         pipe.idle.notify_all();

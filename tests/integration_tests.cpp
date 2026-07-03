@@ -221,6 +221,68 @@ void test_lazy_acquire_late_object_free_early()
     TS_CHECK(ran_during_a.load());   // x was free while the 60ms node ran (reserved only when b dispatched)
 }
 
+// Gap freeing (per-node acquire, not whole-run): an object touched by an EARLY node and a
+// LATE node, with a gap node (on another object) between them, is RELEASED after the early
+// node and re-acquired only at the late node -- so it is FREE during the gap. The old
+// whole-run [first accessor, last accessor] reservation held it continuously across the gap,
+// which would leave `ran_during_gap` false. Deterministic: the gap node (touches only y)
+// sleeps and records whether x's async already ran.
+void test_gap_frees_object_between_accessors()
+{
+    ts::Thread_safe<int> x{ 0 }, y{ 0 };
+    std::atomic<bool> async_ran{ false };
+    std::atomic<bool> ran_during_gap{ false };
+
+    ts::Static_task_graph g;
+    ts::Graph_node n1 = g.add_node([](int& v) { v = 1; }, x);   // early accessor of x
+    ts::Graph_node n2 = g.add_node([&async_ran, &ran_during_gap](int& v)
+    {
+        std::this_thread::sleep_for(60ms);
+        ran_during_gap.store(async_ran.load());   // x's async ran while the gap node was active?
+        v = 1;
+    }, y);                                                      // gap: touches only y
+    ts::Graph_node n3 = g.add_node([](int& v) { v = 2; }, x);   // late accessor of x
+    n2.after(n1);
+    n3.after(n2);   // order n1 -> n2 -> n3 (n1 -> n3 is also an auto x-conflict edge)
+    g.compile();
+
+    auto run = g.execute();
+    ts::Task<void> as = x.async([&async_ran](int&) { async_ran.store(true); });
+    run.get();
+    as.get();
+
+    TS_CHECK(async_ran.load());
+    TS_CHECK(ran_during_gap.load());   // x released after n1, re-acquired at n3 -> free during n2
+}
+
+// Mode-aware acquire: a READ node holds its object as a reader, so a concurrent async READ
+// on the same object overlaps it. The old whole-run reservation was writer-exclusive and
+// blocked any async (even a read) for the run; per-node mode-aware acquire lets concurrent
+// reads run. Deterministic: the read node sleeps, then records whether the async read ran.
+void test_reader_node_overlaps_async_read()
+{
+    ts::Thread_safe<int> x{ 7 };
+    std::atomic<bool> async_ran{ false };
+    std::atomic<bool> ran_during_node{ false };
+
+    ts::Static_task_graph g;
+    g.add_node([&async_ran, &ran_during_node](const int& v)
+    {
+        std::this_thread::sleep_for(60ms);
+        ran_during_node.store(async_ran.load());
+        (void)v;
+    }, x);   // READ node (const ref -> read_only, held as a reader)
+    g.compile();
+
+    auto run = g.execute();
+    ts::Task<int> as = x.async([&async_ran](const int& v) { async_ran.store(true); return v; });   // READ async
+    run.get();
+    TS_CHECK(as.get() == 7);
+
+    TS_CHECK(async_ran.load());
+    TS_CHECK(ran_during_node.load());   // read async overlapped the read node (both readers)
+}
+
 // J: repeat a concurrency-sensitive workload to catch flakiness. Each iteration uses a
 // deterministic gate (two readers wait for each other) rather than a hoped "peak > 1".
 void test_repeat_stress()
@@ -425,6 +487,8 @@ void run_integration_tests()
     run("graph/async contention", test_graph_async_stress);
     run("early release frees object mid-run", test_early_release_frees_object_mid_run);
     run("lazy acquire keeps late object free", test_lazy_acquire_late_object_free_early);
+    run("gap frees object between accessors", test_gap_frees_object_between_accessors);
+    run("reader node overlaps async read", test_reader_node_overlaps_async_read);
     run("repeat stress x20", test_repeat_stress);
     run("engine frame invariants", test_engine_frame);
     run("engine determinism", test_engine_determinism);

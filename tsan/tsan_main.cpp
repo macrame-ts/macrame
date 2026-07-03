@@ -528,21 +528,35 @@ void stress_cancel_callback()
 
 // A graph node accessing an object directly while other threads fire async on the
 // SAME object: the per-run pipe reservation must keep them from overlapping.
+// Per-node mode-aware acquire/release coexisting with out-of-band async. Multi-object
+// nodes (incremental canonical-order acquire), a gap node (x free between its accessors),
+// and mixed read/write nodes, while async readers AND writers hammer the same objects --
+// stresses pipe_acquire/pipe_release (both modes), the acquire callback chain racing async
+// completion, and the gap windows. A writer node must never overlap any async on its object;
+// concurrent reads may overlap (allowed).
 void stress_graph_async()
 {
-    ts::Thread_safe<int> x{ 0 };
+    ts::Thread_safe<int> x{ 0 }, y{ 0 };
     ts::Static_task_graph g;
-    g.add_node([](int& v) { ++v; }, x);
+    ts::Graph_node n1 = g.add_node([](int& a) { ++a; }, x);                       // write x
+    ts::Graph_node n2 = g.add_node([](const int&, int& b) { ++b; }, x, y);        // read x, write y (multi-object)
+    ts::Graph_node n3 = g.add_node([](int& a) { ++a; }, x);                       // write x again (x gap: none, but re-acquire)
+    n2.after(n1);
+    n3.after(n2);
     g.compile();
 
     std::atomic<bool> stop{ false };
     {
         std::vector<std::jthread> firers;
-        for (int t = 0; t < 4; ++t)
+        for (int t = 0; t < 3; ++t)
             firers.emplace_back([&]
             {
                 while (!stop.load(std::memory_order_relaxed))
-                    x.async([](int& v) { ++v; }).get();
+                {
+                    x.async([](int& v) { ++v; }).get();                 // write x
+                    x.async([](const int& v) { return v; }).get();      // read x
+                    y.async([](const int& v) { return v; }).get();      // read y
+                }
             });
 
         for (int i = 0; i < 300; ++i)

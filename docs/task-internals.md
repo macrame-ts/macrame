@@ -360,12 +360,16 @@ both sides hold a valid declared `Access_context`, and the harness only catches
 *undeclared* access, never two-declared-concurrent. So the race is silent
 (TSan/ASan only) — which is exactly why it needs a structural fix.
 
-**Mechanism (implemented):** `pipe_reserve(pipe, on_acquired)` holds a pipe as an
-exclusive writer that does **not** auto-complete — idle → acquired synchronously
-(returns true); else the reservation queues behind pending work (FIFO) and
-`on_acquired` fires when admitted. Async jobs queue behind a held reservation, so
-`X.async(...)` concurrent with a run touching `X` runs *after* the run's use of `X`,
-never alongside a node. One authority per object per frame.
+**Mechanism (implemented):** per-node **mode-aware acquire/release**. `pipe_acquire(pipe,
+mode, on_acquired)` holds a pipe in `mode` without auto-completing — a `read_only` holder
+joins concurrent readers, a `read_write` holder is exclusive; admissible at the front (FIFO
++ reader/writer rules) → acquired synchronously (returns true), else it queues and
+`on_acquired` fires when admitted. `pipe_release(pipe, mode)` drops the hold (mode-aware) and
+re-dispatches. A node acquires each object it touches before running and releases it at
+completion, so an object is held only over each accessor's `[acquire, complete]` window —
+free in between. Async on a graph object thus coexists **per node**: it can't overlap a node
+holding the object incompatibly (a writer node is exclusive), a read async overlaps a read
+node, and any async runs in the gaps. Generalises the old writer-only whole-run `pipe_reserve`.
 
 **Async inline (`pipe_try_inline`).** `Thread_safe::async(fn, {.run_inline = true})` opts
 the body into running *synchronously on the calling thread* instead of a worker hop.
@@ -379,38 +383,33 @@ the normal `pipe_enqueue`. Caveats (documented, not enforced): it **blocks the c
 the body's duration and **stacks the access scope** on the caller's thread — so opting in from
 inside a graph node (or any worker you can't afford to block) is the anti-pattern above.
 
-Reservation is **lazy on acquire and early on release**, so an object is held only
-for `[first accessor's dispatch, last accessor's completion]` — not the whole run:
+Acquire is **per node, mode-aware, canonical-order incremental**, so an object is held
+only over each accessor's `[acquire, complete]` window — not the whole run:
 
-- **Lazy acquire.** An object is reserved when its *first data-ready accessor* is
-  dispatched — not up front. A node runs only once **two** gates are open: its data
-  prerequisites (`remaining_deps`) *and* its object reservations
-  (`remaining_objects`). When a node becomes data-ready (`on_data_ready`) it
-  `ensure_reserved`s each of its objects (a per-pipe `object_initiated` CAS makes the
-  first accessor the sole initiator); when a pipe is acquired (`on_object_reserved`)
-  every accessor's `remaining_objects` drops and `maybe_run` re-checks both gates
-  (a run-once `launched` guard). So a late-touched object (e.g. `audio`, written at
-  end of tick) stays free for async through the early frame.
-- **Early release.** Each object is freed by its *last accessor*, not at run
-  completion: `run_node` decrements `remaining_accessors[pipe]` (initialized to the
-  accessor count from `pipe_accessors_`) and calls `pipe_release` at 0. Safe — 0 is
-  reached only after every accessor has completed.
+- **Per object, not up front.** A node runs once **two** gates are open: its data
+  prerequisites (`remaining_deps`) *and* all its objects acquired. When it becomes data-ready
+  (`on_data_ready`) it walks its objects in ascending pipe-index (canonical) order —
+  `acquire_next` holds each: an immediate acquire recurses on synchronously, a contended one
+  defers to `pipe_acquire`'s callback (fires when the object frees). Once the last is held it
+  runs (`run_node`); at completion (`node_complete`, after any nested sub-work) it releases
+  them all (`pipe_release`, mode-aware). No per-pipe run-level bookkeeping — each node owns
+  its own acquire/release.
+- **Gaps are free.** An object touched by an early node and a late node with a gap node
+  between is released after the early node and re-acquired only at the late node — free
+  during the gap. (The old `[first accessor, last accessor]` reservation held it continuously
+  across the gap; a late-touched object like `audio` was likewise held from the first
+  accessor. Now both are free until an accessor actually runs.)
+- **Mode-aware.** A reader node holds its object as a reader, so two reader nodes — or a
+  reader node and an async reader — overlap; a writer node is exclusive. (The old reservation
+  was writer-only, blocking even a read async for the whole run.)
 
-**Deadlock-freedom** no longer needs "reserve all up front / sole multi-object
-acquirer": reservation is **run-level and shared** (a pipe is reserved once per run;
-a node needing an already-reserved object just proceeds — it never waits for a holder
-to release), and acquiring a reservation only ever waits on *that pipe's own* queued
-async, which is single-object and independent. No cross-object hold-and-wait, so no
-cycle — even without a canonical order. (The one real deadlock remains blocking on a
-same-object async *inside* a node; see below.)
-
-**Gaps:** the window is `[first accessor, last accessor]` *including* any interior
-gap where no node touches the object — a mid-run gap still holds the reservation
-(async blocked through it), because "last accessor" is the release trigger and
-releasing/re-acquiring mid-run could then delay the object's later node (and gaps
-aren't statically precise under parallelism). The way to *shrink* gaps is
-**compile-time grouping** — scheduling an object's accessors close together — which
-trades against parallelism and is a follow-up.
+**Deadlock-freedom** comes from **canonical order** — a node acquires objects in ascending
+pipe-index order, holding as it goes (the classic ordered-acquisition result), not from
+atomicity. In the graph it's belt-and-suspenders: conflict edges serialise every conflicting
+node pair, so no two *concurrent* nodes ever contend an object, and single-object async holds
+one object and waits for none — no wait-cycle can form regardless. Canonical order becomes
+load-bearing only once multi-object `async` (a second class of multi-object acquirer) lands;
+it's baked in now (pipe index = canonical id) for that.
 
 Note there is **no** class of objects that async can't reach: `async()` is public on
 every `Thread_safe`, so any graph object is potentially async-reachable — you can't
@@ -424,24 +423,25 @@ ever matters, make the idle-pipe reserve lock-free rather than skipping it.
 
 Reservation + single-resource async closes the common race, but these remain sharp:
 
-1. **Blocking on a same-object async inside a node** → deadlock: the async sits
-   behind the run's reservation (released only at run end) while the node `.get()`s
-   it. (Reinforces "never block inside a node.")
-2. **Two runs over overlapping objects, concurrently** → reservation deadlock (two
-   multi-object acquirers, opposite orders). One run per object-set at a time.
-3. **Nested `execute()` on a reserved object** → the inner run's reservation waits
-   for the outer's release, which waits for the triggering node → deadlock.
+1. **Blocking on a same-object async inside a node** → deadlock: the node holds the
+   object and `.get()`s an async on it, which is queued behind that very hold. (Reinforces
+   "never block inside a node.")
+2. **Two runs over overlapping objects, concurrently** → not supported: the reused
+   `Run_state` is single-run (one `execute()` at a time), so a second concurrent run would
+   corrupt it. (Per-node acquire is canonical-order, so it would *not* deadlock — the block
+   is the shared run state, not the acquire order.)
+3. **Nested `execute()` on an object a node holds** → the inner run's node waits for the
+   object, held by the outer node that triggered the inner run → deadlock.
 4. **Incomplete access declaration** → a node touching `Y` but declaring only `X`
-   doesn't reserve `Y`; async to `Y` races the node's undeclared `Y` access. The
-   reservation is only as complete as the declaration.
+   doesn't acquire `Y`; async to `Y` races the node's undeclared `Y` access. The
+   protection is only as complete as the declaration.
 5. **Escaped reference** → a raw pointer into `X` used with no `Access_context`
-   bypasses both reservation and harness. The classic completeness hazard.
+   bypasses both the acquire and the harness. The classic completeness hazard.
 6. **Ordering / latency (not races):** whether the graph observes a pre-run async's
-   write depends on enqueue timing (nondeterministic); coarse release backs up async
-   to a graph object for the whole frame.
+   write depends on enqueue timing (nondeterministic).
 
-Contract, therefore: **one run per object-set at a time, no blocking on same-object
-async inside a node, and complete access declarations.**
+Contract, therefore: **one `execute()` at a time, no blocking on same-object async inside a
+node, and complete access declarations.**
 
 ---
 

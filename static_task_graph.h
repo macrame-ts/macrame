@@ -123,7 +123,8 @@ private:
         std::move_only_function<void()> run;
         std::vector<std::pair<const void*, Access>> access;
         std::vector<detail::Pipe*> pipes;   // the pipes of the objects this node accesses
-        std::vector<int> pipe_indices;      // those pipes as indices into distinct_pipes_ (deduped)
+        std::vector<int> pipe_indices;      // those pipes as indices into distinct_pipes_ (deduped, ASCENDING = canonical acquire order)
+        std::vector<Access> pipe_modes;     // this node's mode per pipe_indices entry (write wins on a dup)
         std::vector<int> successors;
         int indegree = 0;
         Priority priority = Priority::normal;   // applied to `block` at compile()
@@ -169,15 +170,17 @@ private:
     static bool conflicts(const Node& a, const Node& b);
     void detect_cycles() const;
 
-    // Lazy reservation: a node's objects are reserved when it becomes data-ready, and
-    // the node runs once its data deps AND its object reservations are all satisfied.
+    // Per-node acquire: when a node becomes data-ready it acquires the objects it touches,
+    // one at a time in canonical (ascending pipe-index) order, holding each -- mode-aware
+    // (a reader joins concurrent readers, a writer is exclusive). Once all are held the node
+    // runs; on completion it releases them. So an object is held only over each accessor's
+    // [acquire, complete] window -- free in the gaps for async / other objects (no whole-run
+    // reservation). See docs §10.
     static void on_data_ready(Run_state& run, int index);
-    static void ensure_reserved(Run_state& run, int pipe_index);
-    static void on_object_reserved(Run_state& run, int pipe_index);
-    static void maybe_run(Run_state& run, int index);
+    static void acquire_next(Run_state& run, int index, int pos);
     static void run_node(Run_state& run, int index);
     // Graph post-logic for a node whose body AND all its nested tasks have settled:
-    // early-release its objects, release its successors, and settle the run when the
+    // release the objects it held, release its successors, and settle the run when the
     // last node finishes. Runs via the node block's `on_complete` (see run_graph_node).
     static void node_complete(Run_state& run, int index);
     // A node runs as a real task block. These are wired into the block's `execute`
@@ -191,8 +194,7 @@ private:
 
     std::vector<Node> nodes_;
     std::vector<std::pair<int, int>> explicit_edges_;
-    std::vector<detail::Pipe*> distinct_pipes_;        // every object the graph touches (for reservation)
-    std::vector<std::vector<int>> pipe_accessors_;     // per distinct pipe: node indices that access it
+    std::vector<detail::Pipe*> distinct_pipes_;        // every object the graph touches (indexes pipe acquire)
     std::unique_ptr<Run_state> run_;                   // reused across execute() runs (one run at a time)
     bool compiled_ = false;
 };

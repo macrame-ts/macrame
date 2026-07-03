@@ -60,16 +60,18 @@ struct Pipe
 void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> fn,
                   Priority priority = Priority::normal);
 
-// Reserve a pipe for exclusive out-of-band use (a `Static_task_graph` run accesses
-// its objects directly, bypassing the pipe, so it must hold the pipe to keep async
-// jobs from racing that direct access). Behaves as an exclusive (writer) holder that
-// does not auto-complete: async jobs queue behind it until `pipe_release`.
-// Returns true if acquired synchronously (pipe was idle); false if deferred, in which
-// case `on_acquired` runs once the pipe drains to the reservation.
-bool pipe_reserve(Scheduler& scheduler, Pipe& pipe, std::move_only_function<void()> on_acquired);
+// Acquire a pipe for out-of-band direct access in `mode`, holding it (not auto-completing)
+// until `pipe_release`. A `Static_task_graph` node accesses its objects directly, bypassing
+// the pipe, so it holds the pipe to keep async from racing that access -- but MODE-AWARE:
+// a read_only holder joins concurrent readers (so two reader nodes, or a reader node and an
+// async reader, overlap), a read_write holder is exclusive. Returns true if acquired now
+// (admissible at the front, per the reader/writer rules); false if deferred, in which case
+// `on_acquired` runs once the pipe drains to it (FIFO). Generalizes the old writer-only
+// `pipe_reserve`; async coexistence is now per-node, not whole-run (see docs §10).
+bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired);
 
-// Release a reservation taken by `pipe_reserve`; admits queued jobs.
-void pipe_release(Scheduler& scheduler, Pipe& pipe);
+// Release a hold taken by `pipe_acquire` in `mode`; admits queued jobs.
+void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode);
 
 // Try to run an async job INLINE on the calling thread instead of enqueuing it (opt-in via
 // `Async_options::run_inline`). Admissible only when the pipe is immediately free for this
