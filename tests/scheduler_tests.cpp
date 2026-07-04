@@ -90,8 +90,38 @@ void run_mode(Idle_policy policy, int count)
     TS_CHECK(n.load() == count);
 }
 
-void test_block_mode() { run_mode(Idle_policy::block, 2000); }
-void test_spin_mode()  { run_mode(Idle_policy::spin, 2000); }
+void test_block_mode()           { run_mode(Idle_policy::block, 2000); }
+void test_spin_mode()            { run_mode(Idle_policy::spin, 2000); }
+void test_spin_then_block_mode() { run_mode(Idle_policy::spin_then_block, 2000); }
+void test_handoff_mode()         { run_mode(Idle_policy::handoff, 2000); }
+
+// handoff with a single worker: the lone spinner must promote itself across parks correctly
+// (a submit while it is parked must wake it via the 0->1 producer wake).
+void test_handoff_single_worker()
+{
+    std::atomic<int> n{ 0 };
+    Scheduler s{ { .num_threads = 1, .idle_policy = Idle_policy::handoff } };
+    for (int i = 0; i < 2000; ++i)
+        s.submit(inc, &n);
+    wait_until([&] { return n.load() == 2000; });
+    TS_CHECK(n.load() == 2000);
+}
+
+// handoff: submit in bursts with idle gaps between, so the pool fully parks and the producer's
+// 0->1 wake (not a spinner) is what restarts it each burst.
+void test_handoff_bursts()
+{
+    std::atomic<int> n{ 0 };
+    Scheduler s{ { .idle_policy = Idle_policy::handoff } };
+    constexpr int bursts = 20, per = 200;
+    for (int b = 0; b < bursts; ++b)
+    {
+        for (int i = 0; i < per; ++i)
+            s.submit(inc, &n);
+        wait_until([&] { return n.load() == (b + 1) * per; });   // let it fully drain + park
+    }
+    TS_CHECK(n.load() == bursts * per);
+}
 
 void test_shutdown_drains()
 {
@@ -109,7 +139,9 @@ void test_empty_exit()
 {
     { Scheduler s{ { .idle_policy = Idle_policy::block } }; }
     { Scheduler s{ { .idle_policy = Idle_policy::spin } }; }
-    TS_CHECK(true);   // reaching here means neither hung on shutdown
+    { Scheduler s{ { .idle_policy = Idle_policy::spin_then_block } }; }
+    { Scheduler s{ { .idle_policy = Idle_policy::handoff } }; }
+    TS_CHECK(true);   // reaching here means none hung on shutdown
 }
 
 struct Nested { Scheduler* s; std::atomic<int>* n; };
@@ -189,6 +221,10 @@ void run_scheduler_tests()
     run("priority order (1 worker)", test_priority_order);
     run("block mode", test_block_mode);
     run("spin mode", test_spin_mode);
+    run("spin_then_block mode", test_spin_then_block_mode);
+    run("handoff mode", test_handoff_mode);
+    run("handoff single worker", test_handoff_single_worker);
+    run("handoff bursts", test_handoff_bursts);
     run("shutdown drains", test_shutdown_drains);
     run("empty queue exits", test_empty_exit);
     run("submit from task", test_submit_from_task);

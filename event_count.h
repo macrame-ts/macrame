@@ -39,9 +39,27 @@ public:
     // Abandon a prepared wait (the predicate became true) -- nothing to undo.
     void cancel_wait() const noexcept {}
 
-    void notify_one() noexcept
+    // Move the epoch forward WITHOUT issuing the (expensive) wake syscall. A parked worker is
+    // not woken by this alone -- but once the epoch has moved, its `commit_wait(key)` sees
+    // `epoch_ != key` and returns without parking (or, if already parked, a later `wake_one`
+    // releases it). The `handoff` idle policy calls `advance()` on every submit (cheap) and
+    // `wake_one()` only when there is no spinner to discover the work.
+    void advance() noexcept
     {
         epoch_.fetch_add(1, std::memory_order_release);
+    }
+
+    // Wake one parked worker (the futex/WaitOnAddress syscall -- the costly part). Pair with a
+    // preceding `advance()` (or `notify_one`): a bare wake is a no-op if the epoch is unchanged,
+    // because `std::atomic::wait` re-checks the value and re-parks.
+    void wake_one() noexcept
+    {
+        epoch_.notify_one();
+    }
+
+    void notify_one() noexcept
+    {
+        advance();
         epoch_.notify_one();
     }
 

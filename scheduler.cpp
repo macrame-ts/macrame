@@ -5,6 +5,10 @@
 #include <cstdint>
 #include <thread>
 
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    #include <immintrin.h>   // _mm_pause
+#endif
+
 thread_local Scheduler* current_scheduler = nullptr;
 thread_local int current_worker_index = -1;
 
@@ -20,10 +24,22 @@ std::uint32_t next_rand()
     s ^= s << 5;
     return s;
 }
+
+// A spin-loop pause: hints the CPU to back off (frees the pipeline / lets a hyperthread run)
+// without yielding to the OS. Much lighter than `std::this_thread::yield` for a short spin.
+inline void cpu_relax() noexcept
+{
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    _mm_pause();
+#else
+    std::this_thread::yield();
+#endif
+}
 }
 
 Scheduler::Scheduler(Scheduler_config config)
     : idle_policy_(config.idle_policy)
+    , spin_cycles_(config.spin_cycles)
 {
     uint32_t num_threads = config.num_threads;
     if (num_threads == 0)
@@ -44,8 +60,9 @@ Scheduler::~Scheduler()
     quit_.store(true, std::memory_order_release);
 
     // wake every parked worker so it observes `quit_` and drains/exits (a not-yet-parked
-    // worker sees the bumped epoch in its re-check / commit_wait, so none is missed)
-    if (idle_policy_ == Idle_policy::block)
+    // worker sees the bumped epoch in its re-check / commit_wait, so none is missed). Every
+    // parking policy needs this; only `spin` never parks.
+    if (idle_policy_ != Idle_policy::spin)
         events_.notify_all();
 }
 
@@ -57,15 +74,34 @@ void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
     if (priority == Priority::normal && current_scheduler == this && current_worker_index >= 0
         && local_normal_[static_cast<std::size_t>(current_worker_index)]->push({ func, data }))
     {
-        if (idle_policy_ == Idle_policy::block)
-            events_.notify_one();   // wake a thief to help (no-op if none parked)
+        signal_submit();   // wake a thief to help (no-op if none parked)
         return;
     }
 
     queues_[static_cast<std::size_t>(priority)].push({ func, data });
 
-    if (idle_policy_ == Idle_policy::block)
+    signal_submit();
+}
+
+// Producer-side wake, per policy. `block`/`spin_then_block` wake one parked worker every submit;
+// `handoff` always advances the epoch (cheap -- releases any worker about to park) but issues the
+// wake syscall only when no spinner exists to discover the work; `spin` never signals.
+void Scheduler::signal_submit()
+{
+    switch (idle_policy_)
+    {
+    case Idle_policy::spin:
+        break;
+    case Idle_policy::block:
+    case Idle_policy::spin_then_block:
         events_.notify_one();
+        break;
+    case Idle_policy::handoff:
+        events_.advance();   // move the epoch so a parking worker's commit_wait returns
+        if (num_spinning_.load(std::memory_order_relaxed) == 0)
+            events_.wake_one();   // no spinner -> pay the wake syscall (0->1 transition)
+        break;
+    }
 }
 
 // Serve a `low` task after this many consecutive high/normal tasks, so a steady stream of
@@ -132,6 +168,93 @@ bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
 int Scheduler::worker_count() const noexcept
 {
     return static_cast<int>(workers_.size());
+}
+
+// Dispatch the idle wait for the configured policy. Returns true with a task in `out` to run;
+// false means the worker parked-and-woke (or spin-yielded) and should re-scan / re-check quit.
+bool Scheduler::wait_for_work(int worker_index, detail::Task_entry& out)
+{
+    switch (idle_policy_)
+    {
+    case Idle_policy::spin:
+        std::this_thread::yield();   // never park; loop back and re-scan
+        return false;
+    case Idle_policy::block:
+        return park(worker_index, out);
+    case Idle_policy::spin_then_block:
+        if (spin_scan(worker_index, out, spin_cycles_))
+            return true;
+        return park(worker_index, out);
+    case Idle_policy::handoff:
+        return handoff_wait(worker_index, out);
+    }
+    return false;
+}
+
+bool Scheduler::park(int worker_index, detail::Task_entry& out)
+{
+    // Snapshot the epoch, RE-CHECK for work/shutdown, then park only if the epoch is unchanged.
+    // A submit that raced the failed scan bumped the epoch, so commit_wait returns at once. See
+    // `Event_count`.
+    std::uint32_t key = events_.prepare_wait();
+    if (find_work(worker_index, out))
+    {
+        events_.cancel_wait();
+        return true;
+    }
+    if (quit_.load(std::memory_order_acquire))
+    {
+        events_.cancel_wait();
+        return false;
+    }
+    events_.commit_wait(key);
+    return false;
+}
+
+bool Scheduler::spin_scan(int worker_index, detail::Task_entry& out, std::uint32_t cycles)
+{
+    for (std::uint32_t c = 0; c < cycles; ++c)
+    {
+        if (find_work(worker_index, out))
+            return true;
+        if (quit_.load(std::memory_order_acquire))
+            return false;
+        cpu_relax();
+    }
+    return false;
+}
+
+// Go-style spinner handoff. Become a spinner and scan for `spin_cycles_`; on finding work,
+// relinquish the spinner role and -- if we were the last spinner -- wake a successor to keep the
+// pool discovering work while we run. On an empty spin-out, drop the spinner role and park.
+//
+// `num_spinning_` is advisory: correctness rides the always-advanced epoch (`signal_submit`
+// bumps it on every submit), so a park that races a submit is released by `commit_wait`
+// regardless of what `num_spinning_` read. Thus relaxed ordering throughout, and an occasional
+// stale count only costs a spurious wake or a bounded latency (the running worker re-scans when
+// its task returns) -- never a lost task.
+bool Scheduler::handoff_wait(int worker_index, detail::Task_entry& out)
+{
+    num_spinning_.fetch_add(1, std::memory_order_relaxed);
+
+    for (std::uint32_t c = 0; c < spin_cycles_; ++c)
+    {
+        if (find_work(worker_index, out))
+        {
+            if (num_spinning_.fetch_sub(1, std::memory_order_relaxed) == 1)
+                events_.notify_one();   // we were the last spinner -> promote a successor
+            return true;
+        }
+        if (quit_.load(std::memory_order_acquire))
+        {
+            num_spinning_.fetch_sub(1, std::memory_order_relaxed);
+            return false;
+        }
+        cpu_relax();
+    }
+
+    num_spinning_.fetch_sub(1, std::memory_order_relaxed);   // no longer spinning; park below
+    return park(worker_index, out);
 }
 
 bool Scheduler::all_empty() const

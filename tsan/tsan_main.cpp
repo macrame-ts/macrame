@@ -624,6 +624,41 @@ void stress_multi_async()
     }   // join firers
 }
 
+// Idle policies: the handoff spinner protocol (num_spinning + successor promotion + the
+// last-spinner-parks-vs-producer-wake race) and spin_then_block, driven by many concurrent
+// producers plus burst/drain cycles that fully park the pool between bursts (exercising the
+// 0->1 producer wake). A dedicated scheduler per policy; a counter increment per task.
+void stress_idle_policy(Idle_policy policy)
+{
+    // Sustained multi-producer submit.
+    {
+        Scheduler s{ { .idle_policy = policy } };
+        std::atomic<int> n{ 0 };
+        constexpr int per_producer = 20000, producers = 4;
+        {
+            std::vector<std::jthread> ps;
+            for (int p = 0; p < producers; ++p)
+                ps.emplace_back([&] { for (int i = 0; i < per_producer; ++i) s.submit(inc, &n); });
+        }   // join producers
+        while (n.load(std::memory_order_acquire) != per_producer * producers)
+            std::this_thread::yield();
+        assert(n.load() == per_producer * producers);
+    }
+    // Burst/drain: fully park the pool between bursts so the producer 0->1 wake restarts it.
+    {
+        Scheduler s{ { .idle_policy = policy } };
+        std::atomic<int> n{ 0 };
+        constexpr int bursts = 200, per = 300;
+        for (int b = 0; b < bursts; ++b)
+        {
+            for (int i = 0; i < per; ++i) s.submit(inc, &n);
+            while (n.load(std::memory_order_acquire) != (b + 1) * per)
+                std::this_thread::yield();
+        }
+        assert(n.load() == bursts * per);
+    }
+}
+
 // parallel_for: raw helpers racing on `next`/`done`, the refcounted state lifetime (late
 // queued helpers touch it after the caller returns), and nested parallel_for (caller
 // participation must drain without the queued helpers running). Covers guided/unbalanced
@@ -681,6 +716,8 @@ int main()
     std::puts("tsan: graph+async stress");  stress_graph_async();
     std::puts("tsan: graph inline stress");  stress_graph_inline();
     std::puts("tsan: multi async stress");   stress_multi_async();
+    std::puts("tsan: spin_then_block stress"); stress_idle_policy(Idle_policy::spin_then_block);
+    std::puts("tsan: handoff stress");        stress_idle_policy(Idle_policy::handoff);
     std::puts("tsan: parallel_for stress");  stress_parallel_for();
     std::puts("tsan: graph nested stress");  stress_graph_nested();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);
