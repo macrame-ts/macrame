@@ -174,10 +174,57 @@ namespace detail
 
 struct Task_control_block;
 
+// Intrusive strong-refcount ownership of a `Task_control_block`. The count + a `destroy`
+// thunk live IN the block (no separate control block), so a handle is ONE pointer (half a
+// `shared_ptr`) -- lighter in the successor/prerequisite/inline vectors and on every copy.
+// The block's refcount starts at 0; the first `Task_ptr(&block)` brings it to 1. `inc`/`dec`
+// are defined below the block (they touch its members).
+void intrusive_inc(Task_control_block* p) noexcept;
+void intrusive_dec(Task_control_block* p) noexcept;
+
+class Task_ptr
+{
+public:
+    Task_ptr() noexcept = default;
+    Task_ptr(std::nullptr_t) noexcept {}
+    explicit Task_ptr(Task_control_block* p) noexcept : p_(p) { if (p_) intrusive_inc(p_); }
+    Task_ptr(const Task_ptr& o) noexcept : p_(o.p_) { if (p_) intrusive_inc(p_); }
+    Task_ptr(Task_ptr&& o) noexcept : p_(o.p_) { o.p_ = nullptr; }
+    Task_ptr& operator=(const Task_ptr& o) noexcept
+    {
+        if (o.p_) intrusive_inc(o.p_);
+        if (p_) intrusive_dec(p_);
+        p_ = o.p_;
+        return *this;
+    }
+    Task_ptr& operator=(Task_ptr&& o) noexcept
+    {
+        if (this != &o)
+        {
+            if (p_) intrusive_dec(p_);
+            p_ = o.p_;
+            o.p_ = nullptr;
+        }
+        return *this;
+    }
+    ~Task_ptr() { if (p_) intrusive_dec(p_); }
+
+    Task_control_block* get() const noexcept { return p_; }
+    Task_control_block* operator->() const noexcept { return p_; }
+    Task_control_block& operator*() const noexcept { return *p_; }
+    explicit operator bool() const noexcept { return p_ != nullptr; }
+    void reset() noexcept { if (p_) intrusive_dec(p_); p_ = nullptr; }
+
+    friend bool operator==(const Task_ptr&, const Task_ptr&) noexcept = default;
+
+private:
+    Task_control_block* p_ = nullptr;
+};
+
 // Submit a block whose prerequisites are all met to run (defined in the scheduler
 // layer; task.h stays scheduler-independent). Runs `execute` if it has a body, else
 // `complete`s it.
-void submit_ready(std::shared_ptr<Task_control_block> block);
+void submit_ready(Task_ptr block);
 
 // --- Task control block ----------------------------------------------------
 //
@@ -192,13 +239,19 @@ void submit_ready(std::shared_ptr<Task_control_block> block);
 // `then()` on one task, or `get()` twice, is unsupported (`get()` moves the result).
 struct Task_control_block
 {
+    // Intrusive strong refcount (see `Task_ptr`) + a type-erased destroy thunk that deletes
+    // the enclosing wrapper (`Result_block<R>` / `Executable<Body,R>` / `Graph_node_block` /
+    // a bare block). Starts at 0; the first `Task_ptr` brings it to 1.
+    std::atomic<std::uint32_t> refcount{ 0 };
+    void (*destroy)(Task_control_block*) = nullptr;
+
     std::mutex mutex;
     std::condition_variable done_cv;   // wakes N waiters (a `Signal` is a barrier)
     std::atomic<bool> ready{ false };
     bool completed = false;
     bool cancelled = false;
     void* result_ptr = nullptr;        // -> the wrapper's stored R (set before complete), or null
-    void (*execute)(const std::shared_ptr<Task_control_block>&, std::uint64_t generation) = nullptr;   // run the body (null => bodyless)
+    void (*execute)(const Task_ptr&, std::uint64_t generation) = nullptr;   // run the body (null => bodyless)
     // Fired once at `settle` (completed OR cancelled), after continuations/successors.
     // Unlike a continuation it is NOT consumed, so a reused block (e.g. a re-armed graph
     // node) keeps it across runs -- an alloc-free completion hook. Null for most tasks.
@@ -251,8 +304,8 @@ struct Task_control_block
         return run_state.compare_exchange_strong(
             expected, (gen << 1) | 1u, std::memory_order_acq_rel, std::memory_order_relaxed);
     }
-    std::vector<std::shared_ptr<Task_control_block>> successors;      // decremented on settle
-    std::vector<std::shared_ptr<Task_control_block>> prerequisites;   // backward links, for deep retraction
+    std::vector<Task_ptr> successors;      // decremented on settle
+    std::vector<Task_ptr> prerequisites;   // backward links, for deep retraction
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
     void complete() { settle(false); }
@@ -265,7 +318,7 @@ struct Task_control_block
     // start). Non-prerequisite releases (the "not launched"/"not attached" lock) pass
     // false. Nesting is ordering-only, so a cancelled nested child sets the flag harmlessly
     // (the parent is already executing; the flag is only read before the body).
-    static void release(const std::shared_ptr<Task_control_block>& blk, bool prereq_cancelled = false)
+    static void release(const Task_ptr& blk, bool prereq_cancelled = false)
     {
         if (prereq_cancelled)
             blk->prereq_cancelled.store(true, std::memory_order_relaxed);
@@ -282,10 +335,10 @@ struct Task_control_block
     // stack. The first inline dispatch on a thread starts the drain; inline tasks made
     // ready during the drain just push and are picked up in order (head advances as the
     // vector grows). `clear()` at the end retains capacity -> no steady-state allocation.
-    inline static thread_local std::vector<std::shared_ptr<Task_control_block>> inline_pending;
+    inline static thread_local std::vector<Task_ptr> inline_pending;
     inline static thread_local bool inline_draining = false;
 
-    static void dispatch_ready(const std::shared_ptr<Task_control_block>& blk)
+    static void dispatch_ready(const Task_ptr& blk)
     {
         if (!blk->flags.run_inline)
         {
@@ -298,7 +351,7 @@ struct Task_control_block
         inline_draining = true;
         for (std::size_t head = 0; head < inline_pending.size(); ++head)
         {
-            std::shared_ptr<Task_control_block> b = std::move(inline_pending[head]);
+            Task_ptr b = std::move(inline_pending[head]);
             if (b->execute)
                 b->execute(b, b->generation());   // claims + runs the body on this thread
             else
@@ -311,8 +364,8 @@ struct Task_control_block
     void settle(bool cancel_)
     {
         std::vector<std::move_only_function<void(void*, bool)>> conts;
-        std::vector<std::shared_ptr<Task_control_block>> succs;
-        std::vector<std::shared_ptr<Task_control_block>> prereqs;   // drop (no longer needed)
+        std::vector<Task_ptr> succs;
+        std::vector<Task_ptr> prereqs;   // drop (no longer needed)
         {
             std::scoped_lock lock(mutex);
             if (completed)
@@ -378,12 +431,12 @@ struct Task_control_block
     // and it hasn't started, run its body inline. `execute` claims via `run_state`, so a
     // worker and a retractor never both run a body; non-retractable prerequisites
     // (pipe tasks, externally-triggered `Signal`s) are left to complete on their own.
-    static void retract(const std::shared_ptr<Task_control_block>& blk)
+    static void retract(const Task_ptr& blk)
     {
         if (!blk->flags.retractable || blk->ready.load(std::memory_order_acquire))
             return;
 
-        std::vector<std::shared_ptr<Task_control_block>> prereqs;
+        std::vector<Task_ptr> prereqs;
         {
             std::scoped_lock lock(blk->mutex);
             prereqs = blk->prerequisites;   // snapshot (they clear as they settle)
@@ -395,12 +448,23 @@ struct Task_control_block
             blk->execute(blk, blk->generation());   // ready & not started -> run inline (no-op if a worker beat us)
     }
 
-    static void retract_or_wait(const std::shared_ptr<Task_control_block>& blk)
+    static void retract_or_wait(const Task_ptr& blk)
     {
         retract(blk);
         blk->wait();
     }
 };
+
+// `Task_ptr` refcount ops (block is complete here). `dec` at 0 runs the wrapper's `destroy`.
+inline void intrusive_inc(Task_control_block* p) noexcept
+{
+    p->refcount.fetch_add(1, std::memory_order_relaxed);
+}
+inline void intrusive_dec(Task_control_block* p) noexcept
+{
+    if (p->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        p->destroy(p);
+}
 
 // Result storage composed around the monomorphic block. `core` is the FIRST member so
 // a `Task_control_block*` aliases the wrapper. `store()` moves the value in and points
@@ -418,27 +482,38 @@ struct Result_block
     }
 };
 
-// Make a fresh block for a `Task<R>`; returns the handle core plus (for a non-void R)
-// the typed wrapper the producer stores into.
+// A bare block (no result, no body -- `Signal`, a `when_all` void join): one allocation,
+// destroyed as a plain `Task_control_block` when its refcount hits 0.
+inline Task_ptr make_bare_block()
+{
+    auto* b = new Task_control_block();
+    b->destroy = [](Task_control_block* c) { delete c; };
+    return Task_ptr(b);   // refcount 0 -> 1
+}
+
+// Make a fresh block for a `Task<R>`; returns the handle core plus (for a non-void R) a RAW
+// pointer to the typed wrapper the producer stores into. The wrapper is owned by the block's
+// intrusive refcount (`core`), so the raw pointer stays valid as long as any `Task_ptr` to
+// the block does -- capture `core` (owning) alongside it, never the raw pointer alone.
 template<typename R>
 auto make_block()
 {
     if constexpr (std::is_void_v<R>)
     {
-        return std::make_shared<Task_control_block>();
+        return make_bare_block();
     }
     else
     {
-        auto wrapper = std::make_shared<Result_block<R>>();
-        std::shared_ptr<Task_control_block> core(wrapper, &wrapper->core);   // aliasing
-        return std::pair{ std::move(core), std::move(wrapper) };
+        auto* wrapper = new Result_block<R>();
+        wrapper->core.destroy = [](Task_control_block* c) { delete reinterpret_cast<Result_block<R>*>(c); };
+        return std::pair{ Task_ptr(&wrapper->core), wrapper };
     }
 }
 
 // The task currently executing on this thread (for nested-task attachment). A
 // shared_ptr so a nested child can register the parent as its successor and keep it
 // alive until the child completes.
-inline thread_local std::shared_ptr<Task_control_block> current_task;
+inline thread_local Task_ptr current_task;
 
 // Empty for `void`, so an executable `void` task pays nothing for a result.
 template<typename R> struct Result_storage { std::optional<R> result; };
@@ -461,7 +536,7 @@ struct Executable
         : body(std::move(b))
     {}
 
-    static void run(const std::shared_ptr<Task_control_block>& c, std::uint64_t gen)
+    static void run(const Task_ptr& c, std::uint64_t gen)
     {
         if (!c->claim(gen))
             return;   // claimed by another runner, or stale after a reset
@@ -509,13 +584,14 @@ struct Executable
 // Build an executable task; returns the handle core with `execute` wired up. Submit
 // `[core]{ core->execute(core.get()); }` (to the scheduler or a pipe) to run it.
 template<typename R, typename Body>
-std::shared_ptr<Task_control_block> make_executable(Body&& body, Cancellation_token token)
+Task_ptr make_executable(Body&& body, Cancellation_token token)
 {
     using Exec = Executable<std::decay_t<Body>, R>;
-    auto exec = std::make_shared<Exec>(std::forward<Body>(body));
+    auto* exec = new Exec(std::forward<Body>(body));
+    exec->core.destroy = [](Task_control_block* c) { delete reinterpret_cast<Exec*>(c); };
     exec->core.execute = &Exec::run;
     exec->core.token = std::move(token);
-    return std::shared_ptr<Task_control_block>(exec, &exec->core);   // aliasing
+    return Task_ptr(&exec->core);   // refcount 0 -> 1, owns the wrapper
 }
 
 // A task body may opt into COOPERATIVE cancellation by declaring a trailing
@@ -611,7 +687,7 @@ template<typename Fn, typename... Args> struct Invoke_result_tok<Fn, true, Args.
 
 // The control block behind a `Task` handle (used to wire prerequisites).
 template<typename R>
-std::shared_ptr<Task_control_block> core_of(const Task<R>& t) noexcept;
+Task_ptr core_of(const Task<R>& t) noexcept;
 
 // Link `prereq` into `dependent`'s prerequisites as a RETRACTION HINT only — no lock
 // count, no successor, completion stays whatever drives `dependent` (a continuation
@@ -621,8 +697,8 @@ std::shared_ptr<Task_control_block> core_of(const Task<R>& t) noexcept;
 // to retract; its callback has fired or will fire). Pushed under `prereq`'s mutex like
 // `add_prerequisite`, and only before `dependent` is exposed, so it doesn't race
 // `dependent`'s later settle/retract.
-inline void add_retraction_hint(const std::shared_ptr<Task_control_block>& prereq,
-                                const std::shared_ptr<Task_control_block>& dependent)
+inline void add_retraction_hint(const Task_ptr& prereq,
+                                const Task_ptr& dependent)
 {
     std::scoped_lock lock(prereq->mutex);
     if (!prereq->completed)
@@ -633,8 +709,8 @@ inline void add_retraction_hint(const std::shared_ptr<Task_control_block>& prere
 // has already settled. `after` orders `succ` after `prereq` and propagates cancellation:
 // a cancelled `prereq` still releases `succ`, but marks `succ->prereq_cancelled` so it
 // settles cancelled rather than running (see `release` / `Executable::run`).
-inline void add_prerequisite(const std::shared_ptr<Task_control_block>& prereq,
-                             const std::shared_ptr<Task_control_block>& succ)
+inline void add_prerequisite(const Task_ptr& prereq,
+                             const Task_ptr& succ)
 {
     std::scoped_lock lock(prereq->mutex);
     if (!prereq->completed)
@@ -674,7 +750,7 @@ class Task
 public:
     Task() = default;
 
-    explicit Task(std::shared_ptr<detail::Task_control_block> core) noexcept
+    explicit Task(detail::Task_ptr core) noexcept
         : core_(std::move(core))
     {}
 
@@ -760,7 +836,7 @@ protected:
 
 private:
     template<typename R2>
-    friend std::shared_ptr<detail::Task_control_block> detail::core_of(const Task<R2>&) noexcept;
+    friend detail::Task_ptr detail::core_of(const Task<R2>&) noexcept;
 
     // A continuation is a PROPER scheduled task (an `Executable`), not an inline callback:
     // its body runs `produce(producer's result)`, dispatched through the normal prerequisite
@@ -789,14 +865,14 @@ private:
         return Task<R2>(std::move(next));
     }
 
-    std::shared_ptr<detail::Task_control_block> core_;
+    detail::Task_ptr core_;
 };
 
 namespace detail
 {
 
 template<typename R>
-std::shared_ptr<Task_control_block> core_of(const Task<R>& t) noexcept { return t.core_; }
+Task_ptr core_of(const Task<R>& t) noexcept { return t.core_; }
 
 } // namespace detail
 
@@ -868,11 +944,11 @@ public:
 private:
     template<typename Fn> friend auto task(Fn&& fn);
 
-    explicit Task_builder(std::shared_ptr<detail::Task_control_block> core) noexcept
+    explicit Task_builder(detail::Task_ptr core) noexcept
         : core_(std::move(core))
     {}
 
-    std::shared_ptr<detail::Task_control_block> core_;
+    detail::Task_ptr core_;
 };
 
 // Configure a standalone task (body + prerequisites) to launch later. `fn` takes no
@@ -914,13 +990,13 @@ auto launch(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority
 template<typename R>
 void add_nested(const Task<R>& child)
 {
-    std::shared_ptr<detail::Task_control_block> parent = detail::current_task;
+    detail::Task_ptr parent = detail::current_task;
     if (!parent)
         ts::fatal("add_nested called outside a running task");
 
     parent->num_locks.fetch_add(1, std::memory_order_relaxed);   // a completion lock on the parent
 
-    std::shared_ptr<detail::Task_control_block> child_core = detail::core_of(child);
+    detail::Task_ptr child_core = detail::core_of(child);
     {
         std::scoped_lock lock(child_core->mutex);
         if (!child_core->completed)
@@ -978,7 +1054,7 @@ constexpr std::array<int, sizeof...(Rs)> when_all_slots()
 
 template<int Slot, typename R, typename Slots>
 void when_all_attach_one(Task<R> prereq,
-                         const std::shared_ptr<Task_control_block>& next_core,
+                         const Task_ptr& next_core,
                          std::shared_ptr<Slots> slots,
                          std::shared_ptr<std::atomic<int>> remaining,
                          std::shared_ptr<std::atomic<bool>> any_cancelled,
@@ -989,7 +1065,7 @@ void when_all_attach_one(Task<R> prereq,
     // join would never settle). On completion, store the result; on cancellation, flag the
     // join cancelled; either way decrement, and the last prerequisite to settle runs
     // `finish` (which completes or cancels the join accordingly).
-    std::shared_ptr<Task_control_block> prereq_core = core_of(prereq);
+    Task_ptr prereq_core = core_of(prereq);
     prereq_core->attach(
         [slots, remaining, any_cancelled, finish](void* r, bool cancelled)
         {
@@ -1026,12 +1102,12 @@ Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
     // complete tuple), rather than stalling. `Task::is_cancelled()` reports it downstream.
     auto any_cancelled = std::make_shared<std::atomic<bool>>(false);
 
-    std::shared_ptr<detail::Task_control_block> next_core;
+    detail::Task_ptr next_core;
     auto finish = std::make_shared<std::function<void()>>();
 
     if constexpr (std::is_void_v<Result>)
     {
-        next_core = std::make_shared<detail::Task_control_block>();
+        next_core = detail::make_bare_block();
         *finish = [core = next_core, any_cancelled]
         {
             if (any_cancelled->load(std::memory_order_relaxed))
@@ -1044,18 +1120,19 @@ Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
     {
         auto [core, wrapper] = detail::make_block<Result>();
         next_core = core;
-        *finish = [wrapper, slots, any_cancelled]
+        // Capture `core` (owning) to keep the block alive; the raw `wrapper` aliases it.
+        *finish = [core, wrapper, slots, any_cancelled]
         {
             if (any_cancelled->load(std::memory_order_relaxed))
             {
-                wrapper->core.cancel();   // some slots are empty (cancelled prereqs) -> no tuple
+                core->cancel();   // some slots are empty (cancelled prereqs) -> no tuple
                 return;
             }
             [&]<std::size_t... J>(std::index_sequence<J...>)
             {
                 wrapper->store(Result(std::move(*std::get<J>(*slots))...));   // move (move-only ok)
             }(std::make_index_sequence<std::tuple_size_v<Slots>>{});
-            wrapper->core.complete();
+            core->complete();
         };
     }
 
@@ -1085,7 +1162,7 @@ class Signal : public Task<void>
 {
 public:
     Signal()
-        : Task<void>(std::make_shared<detail::Task_control_block>())
+        : Task<void>(detail::make_bare_block())
     {}
 
     void trigger()

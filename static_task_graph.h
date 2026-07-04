@@ -122,7 +122,7 @@ private:
         // The node's reusable task block (a `Graph_node_block`, allocated once in
         // compile() and re-armed each run). Its `execute`/`on_complete` are wired so the
         // body may spawn nested tasks and the graph post-logic fires at completion (§7.1).
-        std::shared_ptr<detail::Task_control_block> block;
+        detail::Task_ptr block;
     };
 
     struct Run_state;
@@ -190,7 +190,7 @@ private:
     // completes once nested tasks settle) and `on_complete` (graph_node_completed ->
     // node_complete). node_trampoline is the raw scheduler entry -- a fn-ptr + Node*,
     // so dispatching a node costs no per-run allocation.
-    static void run_graph_node(const std::shared_ptr<detail::Task_control_block>& block, std::uint64_t generation);
+    static void run_graph_node(const detail::Task_ptr& block, std::uint64_t generation);
     static void graph_node_completed(detail::Task_control_block* block);
     static void node_trampoline(void* node);
 

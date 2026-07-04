@@ -110,7 +110,7 @@ struct Multi_async_state
 // the same order the graph uses (`distinct_pipes_` is address-sorted), so nodes and
 // multi-object asyncs can't deadlock against each other.
 void multi_acquire(std::shared_ptr<Multi_async_state> state,
-                   std::shared_ptr<Task_control_block> block, std::size_t pos);
+                   Task_ptr block, std::size_t pos);
 
 // Try to run an async job INLINE on the calling thread instead of enqueuing it (opt-in via
 // `Async_options::run_inline`). Admissible only when the pipe is immediately free for this

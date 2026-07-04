@@ -27,7 +27,7 @@ void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closur
 
 // A block whose prerequisites are all met: schedule it to run (its body, or, if
 // bodyless, just complete). Bridges task.h's lock-counter to the scheduler.
-void submit_ready(std::shared_ptr<Task_control_block> block)
+void submit_ready(Task_ptr block)
 {
     // Capture the reuse generation: a dispatch left stale by a `reset` (retraction can
     // queue a duplicate) must not re-run the body against the new run. `claim(gen)`
@@ -162,7 +162,7 @@ void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode)
 }
 
 void multi_acquire(std::shared_ptr<Multi_async_state> state,
-                   std::shared_ptr<Task_control_block> block, std::size_t pos)
+                   Task_ptr block, std::size_t pos)
 {
     if (pos == state->holds.size())
     {

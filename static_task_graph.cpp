@@ -22,7 +22,7 @@ struct Static_task_graph::Run_state
     std::vector<std::atomic<int>> remaining_deps;        // per node: unmet data prerequisites
     std::vector<std::atomic<std::uint64_t>> preheld;     // per node: bitmask of pipe_indices positions handed from a predecessor (skip acquire)
     std::atomic<int> remaining_nodes{ 0 };
-    std::shared_ptr<detail::Task_control_block> done;
+    detail::Task_ptr done;
 };
 
 namespace
@@ -163,12 +163,13 @@ void Static_task_graph::compile()
     // are fixed fn-ptrs; graph+index let those hooks reach the node body and the run.
     for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
     {
-        auto wrapper = std::make_shared<Graph_node_block>();
+        auto* wrapper = new Graph_node_block();
+        wrapper->core.destroy = [](detail::Task_control_block* c) { delete reinterpret_cast<Graph_node_block*>(c); };
         wrapper->graph = this;
         wrapper->index = i;
         wrapper->core.execute = &run_graph_node;
         wrapper->core.on_complete = &graph_node_completed;
-        nodes_[i].block = std::shared_ptr<detail::Task_control_block>(wrapper, &wrapper->core);
+        nodes_[i].block = detail::Task_ptr(&wrapper->core);
     }
 
     // Reused per-run state: values are reset each execute(), vector capacity persists, so
@@ -278,7 +279,7 @@ void Static_task_graph::node_trampoline(void* node)
 // and all nested tasks release. The block carries the run's `token`, so a cancelled node
 // skips its body (settling cancelled) -- `on_complete` still fires, keeping the drain
 // going.
-void Static_task_graph::run_graph_node(const std::shared_ptr<detail::Task_control_block>& block, std::uint64_t gen)
+void Static_task_graph::run_graph_node(const detail::Task_ptr& block, std::uint64_t gen)
 {
     using Block = detail::Task_control_block;
 
@@ -391,7 +392,7 @@ void Static_task_graph::node_complete(Run_state& run, int index)
         // overwriting `run.done` and dropping its own handle -- destroying this block
         // mid-notify. The local ref holds it until settle returns. (The old per-run
         // Run_state kept it alive via the worker closures; the reused slot does not.)
-        std::shared_ptr<detail::Task_control_block> done = run.done;
+        detail::Task_ptr done = run.done;
         if (run.token.is_cancel_requested())
             done->cancel();
         else
@@ -412,7 +413,7 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token t
     run.graph = this;   // refresh: a moved graph's back pointers point at the moved-from object
     run.scheduler = &scheduler;
     run.token = token;
-    run.done = std::make_shared<detail::Task_control_block>();
+    run.done = detail::make_bare_block();
 
     for (size_t i = 0; i < nodes_.size(); ++i)
     {
