@@ -16,6 +16,7 @@
 using namespace std::chrono_literals;
 using ts::test::run;
 using tests::record_max;
+using tests::wait_until;
 
 namespace
 {
@@ -283,6 +284,66 @@ void test_reader_node_overlaps_async_read()
     TS_CHECK(ran_during_node.load());   // read async overlapped the read node (both readers)
 }
 
+// Multi-object async: run over several objects at once (per-arg mode from const-ness),
+// holding all their pipes for the body. Basic correctness (write one, read another).
+void test_multi_async_basic()
+{
+    ts::Thread_safe<int> a{ 10 }, b{ 20 };
+    int result = ts::async([](int& x, const int& y) { x += y; return x; }, a, b).get();   // a += b
+    TS_CHECK(result == 30);
+    TS_CHECK(read_value(a) == 30);
+    TS_CHECK(read_value(b) == 20);
+}
+
+// A multi-object writer holds both objects exclusively, so single-object asyncs on either
+// queue behind it -- never concurrent on either object.
+void test_multi_async_exclusion()
+{
+    ts::Thread_safe<Guarded> x, y;
+    std::vector<ts::Task<void>> tasks;
+    for (int i = 0; i < 4; ++i)
+    {
+        tasks.push_back(ts::async([](Guarded& a, Guarded& b) { a.touch(); b.touch(); }, x, y));
+        tasks.push_back(x.async([](Guarded& g) { g.touch(); }));
+        tasks.push_back(y.async([](Guarded& g) { g.touch(); }));
+    }
+    for (auto& t : tasks)
+        t.get();
+    TS_CHECK(peak_of(x) == 1);   // never concurrent on x
+    TS_CHECK(peak_of(y) == 1);   // never concurrent on y
+}
+
+// Deadlock-freedom: two multi-object asyncs declaring the SAME pair in OPPOSITE order both
+// acquire in canonical (pipe-address) order, so no hold-and-wait cycle forms. All complete.
+void test_multi_async_no_deadlock()
+{
+    ts::Thread_safe<int> a{ 0 }, b{ 0 };
+    std::vector<ts::Task<void>> tasks;
+    for (int i = 0; i < 50; ++i)
+    {
+        tasks.push_back(ts::async([](int& x, int& y) { ++x; ++y; }, a, b));   // declared order a, b
+        tasks.push_back(ts::async([](int& x, int& y) { ++x; ++y; }, b, a));   // declared order b, a
+    }
+    for (auto& t : tasks)
+        t.get();
+    TS_CHECK(read_value(a) == 100);   // 100 tasks each incremented both
+    TS_CHECK(read_value(b) == 100);
+}
+
+// Options (first arg): priority + token skip.
+void test_multi_async_options()
+{
+    ts::Thread_safe<int> a{ 1 }, b{ 2 };
+    int r = ts::async({ .priority = Priority::high }, [](const int& x, const int& y) { return x + y; }, a, b).get();
+    TS_CHECK(r == 3);
+
+    ts::Cancellation_source src;
+    src.request_cancel();
+    ts::Task<int> t = ts::async({ .token = src.token() }, [](const int& x, const int& y) { return x + y; }, a, b);
+    wait_until([&] { return t.is_done(); });
+    TS_CHECK(t.is_cancelled());   // skipped before running; don't get() a cancelled value
+}
+
 // J: repeat a concurrency-sensitive workload to catch flakiness. Each iteration uses a
 // deterministic gate (two readers wait for each other) rather than a hoped "peak > 1".
 void test_repeat_stress()
@@ -489,6 +550,10 @@ void run_integration_tests()
     run("lazy acquire keeps late object free", test_lazy_acquire_late_object_free_early);
     run("gap frees object between accessors", test_gap_frees_object_between_accessors);
     run("reader node overlaps async read", test_reader_node_overlaps_async_read);
+    run("multi async basic", test_multi_async_basic);
+    run("multi async exclusion", test_multi_async_exclusion);
+    run("multi async no deadlock", test_multi_async_no_deadlock);
+    run("multi async options", test_multi_async_options);
     run("repeat stress x20", test_repeat_stress);
     run("engine frame invariants", test_engine_frame);
     run("engine determinism", test_engine_determinism);

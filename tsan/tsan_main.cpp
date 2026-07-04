@@ -600,6 +600,29 @@ void stress_graph_inline()
     }   // join firers
 }
 
+// Multi-object async under contention: concurrent multi-object asyncs over the SAME pair in
+// opposite declared orders (canonical-order acquire must keep them deadlock-free), mixed with
+// single-object asyncs on each. Stresses multi_acquire's chain (immediate + deferred), the
+// release-on-completion continuation, and cross-object hold-and-wait (no cycle).
+void stress_multi_async()
+{
+    ts::Thread_safe<int> a{ 0 }, b{ 0 };
+    {
+        std::vector<std::jthread> firers;
+        for (int t = 0; t < 4; ++t)
+            firers.emplace_back([&]
+            {
+                for (int i = 0; i < 1500; ++i)
+                {
+                    ts::async([](int& x, int& y) { ++x; ++y; }, a, b).get();   // declared order a, b
+                    ts::async([](int& x, int& y) { ++x; ++y; }, b, a).get();   // declared order b, a
+                    a.async([](const int& v) { return v; }).get();
+                    b.async([](const int& v) { return v; }).get();
+                }
+            });
+    }   // join firers
+}
+
 } // namespace
 
 int main()
@@ -623,6 +646,7 @@ int main()
     std::puts("tsan: graph stress");        stress_graph();
     std::puts("tsan: graph+async stress");  stress_graph_async();
     std::puts("tsan: graph inline stress");  stress_graph_inline();
+    std::puts("tsan: multi async stress");   stress_multi_async();
     std::puts("tsan: graph nested stress");  stress_graph_nested();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);
     std::puts("tsan: done (no races)");

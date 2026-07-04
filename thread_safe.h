@@ -8,10 +8,13 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <tuple>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace ts
 {
@@ -73,6 +76,42 @@ bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_
 // Release a hold taken by `pipe_acquire` in `mode`; admits queued jobs.
 void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode);
 
+// Extracts the parameter type list of a callable's `operator()` (or a function pointer).
+// Non-generic lambdas / functors / function pointers only; generic `auto&` params aren't
+// introspectable. Shared by `Static_task_graph::add_node` and multi-object `ts::async` for
+// per-argument access-mode deduction.
+template<typename T>
+struct Function_traits : Function_traits<decltype(&T::operator())> {};
+template<typename C, typename R, typename... A>
+struct Function_traits<R(C::*)(A...)> { using args = std::tuple<A...>; };
+template<typename C, typename R, typename... A>
+struct Function_traits<R(C::*)(A...) const> { using args = std::tuple<A...>; };
+template<typename R, typename... A>
+struct Function_traits<R(*)(A...)> { using args = std::tuple<A...>; };
+
+// `read_only` for a `const T&` parameter, `read_write` otherwise.
+template<typename Arg>
+constexpr Access async_mode_of()
+{
+    return std::is_const_v<std::remove_reference_t<Arg>> ? Access::read_only : Access::read_write;
+}
+
+// The pipes a multi-object async acquired (canonical / pipe-address order, deduped
+// write-wins), released at the task's completion.
+struct Multi_async_state
+{
+    Scheduler* scheduler = nullptr;
+    std::vector<std::pair<Pipe*, Access>> holds;
+};
+
+// Acquire `state->holds[pos..]` in order (each held via `pipe_acquire`, mode-aware); once all
+// are held, dispatch `block`. Immediate acquisitions recurse; a contended one defers to the
+// callback. Canonical (pipe-address) order makes the multi-object acquire deadlock-free --
+// the same order the graph uses (`distinct_pipes_` is address-sorted), so nodes and
+// multi-object asyncs can't deadlock against each other.
+void multi_acquire(std::shared_ptr<Multi_async_state> state,
+                   std::shared_ptr<Task_control_block> block, std::size_t pos);
+
 // Try to run an async job INLINE on the calling thread instead of enqueuing it (opt-in via
 // `Async_options::run_inline`). Admissible only when the pipe is immediately free for this
 // mode -- no queued jobs (FIFO preserved) and the reader/writer rules allow: `read_only`
@@ -122,10 +161,18 @@ struct Async_options
 //   `functor(const T&)` -> `read_only`
 class Static_task_graph;
 
+namespace detail
+{
+// Grants the multi-object `ts::async` builder access to a `Thread_safe`'s instance + pipe
+// (the same internals `Static_task_graph` reaches as a friend). Defined below `Thread_safe`.
+struct Thread_safe_access;
+}
+
 template<typename T>
 class Thread_safe
 {
     friend class Static_task_graph;
+    friend struct detail::Thread_safe_access;
 
 public:
     // Non-explicit default ctor (value-initializes `T`) so arrays of `Thread_safe`
@@ -221,6 +268,92 @@ private:
     T instance_;
     mutable detail::Pipe pipe_;
 };
+
+namespace detail
+{
+
+struct Thread_safe_access
+{
+    template<typename T> static T* instance(Thread_safe<T>& t) { return &t.instance_; }
+    template<typename T> static Pipe& pipe(Thread_safe<T>& t) { return t.pipe_; }
+};
+
+// Build a multi-object async task: `fn(*objs...)` under an `Access_context` declaring every
+// object (per-arg mode from `Args`), gated on holding all their pipes. Acquires the pipes in
+// canonical order (deduped write-wins), releases them at completion via an attached
+// continuation. Returns the `Task<R>`.
+template<typename Args, std::size_t... I, typename Fn, typename... Ts>
+auto async_build(Async_options opts, std::index_sequence<I...>, Fn&& fn, Thread_safe<Ts>&... objs)
+{
+    using R = std::invoke_result_t<Fn, Ts&...>;
+    auto instances = std::make_tuple(Thread_safe_access::instance(objs)...);
+
+    auto body = [instances, fn = std::forward<Fn>(fn)]() mutable -> R
+    {
+        Access_context ctx;
+        (ctx.add(static_cast<const void*>(std::get<I>(instances)),
+                 async_mode_of<std::tuple_element_t<I, Args>>()), ...);
+        Access_scope scope(ctx);
+        return fn(*std::get<I>(instances)...);
+    };
+    auto block = make_executable<R>(std::move(body), std::move(opts.token));
+    block->flags.priority = opts.priority;
+
+    // Collect (pipe, mode) per object, dedup write-wins; a `std::map` keyed by pipe address
+    // gives the canonical (ascending-address) acquire order for free.
+    Pipe* pipes[] = { &Thread_safe_access::pipe(objs)... };
+    Access modes[] = { async_mode_of<std::tuple_element_t<I, Args>>()... };
+    std::map<Pipe*, Access> by_pipe;
+    for (std::size_t k = 0; k < sizeof...(Ts); ++k)
+    {
+        auto [it, inserted] = by_pipe.try_emplace(pipes[k], modes[k]);
+        if (!inserted && modes[k] == Access::read_write)
+            it->second = Access::read_write;
+    }
+
+    auto state = std::make_shared<Multi_async_state>();
+    state->scheduler = &default_scheduler();
+    for (const auto& [p, m] : by_pipe)
+        state->holds.push_back({ p, m });
+
+    // Release every held pipe once the body (and any nested sub-work) completes.
+    block->attach([state](void*, bool)
+    {
+        for (const auto& [p, m] : state->holds)
+            pipe_release(*state->scheduler, *p, m);
+    });
+
+    Task<R> result(block);
+    multi_acquire(std::move(state), std::move(block), 0);
+    return result;
+}
+
+} // namespace detail
+
+// Multi-object async: run `fn(*obj1, *obj2, ...)` once it holds all the objects, with per-arg
+// access deduced from the functor's parameter const-ness (`Function_traits`; non-generic
+// lambdas / function pointers only). Deadlock-free (objects acquired in canonical order).
+// Options come FIRST (a function parameter pack can't be followed by a defaulted arg); the
+// no-options overload defaults them. `run_inline` on the options is ignored here (multi-object
+// inline is a follow-up); `token`/`priority` apply as usual. Fire-and-forget or consume the
+// `Task<R>` -- but do NOT block a graph node on it (same rule as single-object async).
+template<typename Fn, typename... Ts>
+    requires (sizeof...(Ts) >= 1)
+auto async(Async_options opts, Fn&& fn, Thread_safe<Ts>&... objs)
+{
+    using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
+    static_assert(std::tuple_size_v<Args> == sizeof...(Ts),
+        "multi-object async: functor arity must match the number of Thread_safe objects");
+    return detail::async_build<Args>(std::move(opts), std::index_sequence_for<Ts...>{},
+        std::forward<Fn>(fn), objs...);
+}
+
+template<typename Fn, typename... Ts>
+    requires (sizeof...(Ts) >= 1)
+auto async(Fn&& fn, Thread_safe<Ts>&... objs)
+{
+    return async(Async_options{}, std::forward<Fn>(fn), objs...);
+}
 
 // `ts::launch` / `ts::nested` (bare scheduler tasks) live in task.h now — they dispatch
 // through the `submit_ready` bridge and need no pipe, so they belong with the task core.

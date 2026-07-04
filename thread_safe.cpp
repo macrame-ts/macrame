@@ -161,6 +161,23 @@ void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode)
         pipe.idle.notify_all();
 }
 
+void multi_acquire(std::shared_ptr<Multi_async_state> state,
+                   std::shared_ptr<Task_control_block> block, std::size_t pos)
+{
+    if (pos == state->holds.size())
+    {
+        submit_ready(std::move(block));   // all objects held -> run the body
+        return;
+    }
+
+    auto [pipe, mode] = state->holds[pos];
+    bool acquired = pipe_acquire(*state->scheduler, *pipe, mode,
+        [state, block, pos]() mutable { multi_acquire(std::move(state), std::move(block), pos + 1); });
+
+    if (acquired)
+        multi_acquire(std::move(state), std::move(block), pos + 1);
+}
+
 bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()>& fn)
 {
     {

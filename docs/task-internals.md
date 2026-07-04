@@ -427,6 +427,18 @@ acquires it synchronously and dispatches inline. Caveats mirror `Task_builder::s
 (runs on a nondeterministic thread — the caller for a root — must not block); an all-inline
 graph runs synchronously on the `execute()` caller.
 
+**Multi-object `ts::async`** reuses the *same* acquire primitive outside the graph: the free
+function `ts::async(fn, objs...)` runs `fn(*objs...)` over several `Thread_safe`s at once. It
+acquires each object's pipe mode-aware, in canonical (pipe-address) order, holding all
+(`multi_acquire`, the acquire chain), runs the body under an `Access_context` declaring every
+object, then releases at completion (a continuation `attach`ed to the block). Because the
+graph's `distinct_pipes_` is address-sorted, graph nodes and multi-object asyncs acquire in
+the **same** canonical order — so the two classes of multi-object acquirer can't deadlock
+against each other (this is where canonical order stops being belt-and-suspenders and becomes
+load-bearing). A repeated object is deduped write-wins. Options are passed first
+(`ts::async({.priority=p}, fn, objs...)`) since a parameter pack can't precede a defaulted
+argument; `run_inline` is ignored (multi-object inline is a follow-up).
+
 Note there is **no** class of objects that async can't reach: `async()` is public on
 every `Thread_safe`, so any graph object is potentially async-reachable — you can't
 statically skip reservation for "async-free" objects. A per-object user assertion

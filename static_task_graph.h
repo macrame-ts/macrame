@@ -14,26 +14,8 @@
 namespace ts
 {
 
-namespace detail
-{
-
-// Extracts the parameter type list of a callable's `operator()`. Works for
-// non-generic lambdas, functors, and function pointers; generic lambdas (`auto&`)
-// are not introspectable and are unsupported here (see docs/TODO.md).
-template<typename T>
-struct Function_traits : Function_traits<decltype(&T::operator())> {};
-
-template<typename C, typename R, typename... A>
-struct Function_traits<R(C::*)(A...)> { using args = std::tuple<A...>; };
-
-template<typename C, typename R, typename... A>
-struct Function_traits<R(C::*)(A...) const> { using args = std::tuple<A...>; };
-
-// free functions / function pointers
-template<typename R, typename... A>
-struct Function_traits<R(*)(A...)> { using args = std::tuple<A...>; };
-
-} // namespace detail
+// `detail::Function_traits` (per-argument type extraction for access-mode deduction) now
+// lives in `thread_safe.h` -- shared with multi-object `ts::async`.
 
 class Static_task_graph;
 
