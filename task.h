@@ -366,19 +366,31 @@ struct Task_control_block
         std::vector<std::move_only_function<void(void*, bool)>> conts;
         std::vector<Task_ptr> succs;
         std::vector<Task_ptr> prereqs;   // drop (no longer needed)
+        void* r = nullptr;               // the result for continuations, captured under the lock
         {
             std::scoped_lock lock(mutex);
             if (completed)
                 return;
             completed = true;
             cancelled = cancel_;
+            // `ready` MUST be set under the same lock as `completed`: a `get()` waits on
+            // `completed` (acquiring this lock), then `reset()` checks `ready` lock-free. If
+            // `ready` were stored after the lock, a get() could observe `completed` and return
+            // in the gap before `ready` was set, and the following `reset()` would wrongly
+            // fatal ("reset() on a task that has not settled"). Under the lock, any observer of
+            // `completed` also observes `ready`.
+            ready.store(true, std::memory_order_release);
             conts = std::move(continuations);
             succs = std::move(successors);
             prereqs = std::move(prerequisites);
+            // Read `result_ptr` for the continuations HERE, under the lock -- not after the
+            // notify below. Otherwise a reusable task's `get()` (woken by the notify) can
+            // `reset()` + relaunch and the new run overwrites `result_ptr` while this settle
+            // tail still reads it (a data race the reuse stress hits under TSan). The moved-out
+            // `conts`/`succs` are local, so firing them after the notify is fine.
+            r = cancel_ ? nullptr : result_ptr;
         }
-        ready.store(true, std::memory_order_release);
         done_cv.notify_all();   // `completed` set under the lock above: no lost wakeup
-        void* r = cancel_ ? nullptr : result_ptr;
         for (auto& c : conts)
             c(r, cancel_);
         for (auto& s : succs)
