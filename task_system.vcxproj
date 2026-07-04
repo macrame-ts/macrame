@@ -42,6 +42,7 @@
   <ItemGroup>
     <ClInclude Include="access.h" />
     <ClInclude Include="fatal.h" />
+    <ClInclude Include="mpmc_queue.h" />
     <ClInclude Include="priority.h" />
     <ClInclude Include="scheduler.h" />
     <ClInclude Include="static_task_graph.h" />

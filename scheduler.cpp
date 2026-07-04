@@ -29,11 +29,25 @@ Scheduler::~Scheduler()
 
 void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
 {
-    {
-        std::lock_guard lock(queue_mutex_);
-        task_queue_.emplace(func, data, priority);
-    }
+    queues_[static_cast<std::size_t>(priority)].push({ func, data });
 
     if (idle_policy_ == Idle_policy::block)
         work_available_.release();
+}
+
+// Scan the per-priority queues high (index 0) -> low; take the first available task.
+bool Scheduler::try_pop(detail::Task_entry& out)
+{
+    for (std::size_t p = 0; p < detail::priority_count; ++p)
+        if (queues_[p].pop(out))
+            return true;
+    return false;
+}
+
+bool Scheduler::all_empty() const
+{
+    for (const auto& q : queues_)
+        if (!q.empty())
+            return false;
+    return true;
 }

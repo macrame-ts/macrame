@@ -1,11 +1,11 @@
 #pragma once
 
+#include "mpmc_queue.h"
 #include "priority.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
-#include <mutex>
-#include <queue>
 #include <semaphore>
 #include <vector>
 
@@ -26,24 +26,18 @@ using Task_func_ptr = void(*)(void* data);
 namespace detail
 {
 
-struct Task_skeleton
+// A queued task: the func + its data. Priority is no longer a field -- it is the queue the
+// task lives in (one lock-free MPMC queue per priority, scanned high->low).
+struct Task_entry
 {
-    Task_func_ptr func_;
-    void* data_;
-    Priority priority_;
+    Task_func_ptr func_ = nullptr;
+    void* data_ = nullptr;
 };
-
-struct Task_queue_cmp
-{
-    bool operator()(const Task_skeleton& l, const Task_skeleton& r) const
-    {
-        return l.priority_ > r.priority_;
-    }
-};
-
-using Task_queue = std::priority_queue<Task_skeleton, std::vector<Task_skeleton>, Task_queue_cmp>;
 
 class Worker_thread;
+
+// One queue per `Priority` value (high/normal/low), indexed by the enum.
+inline constexpr std::size_t priority_count = 3;
 
 } // namespace detail
 
@@ -64,8 +58,13 @@ public:
     void submit(Task_func_ptr func, void* data, Priority priority = Priority::normal);
 
 private:
-    detail::Task_queue task_queue_;
-    std::mutex queue_mutex_;
+    // Scan the per-priority queues high->low; true if a task was popped.
+    bool try_pop(detail::Task_entry& out);
+    // Approximate: all queues empty (racy; for the shutdown-drain check with `quit_`).
+    bool all_empty() const;
+
+    // One lock-free MPMC queue per priority (index = the `Priority` enum value).
+    std::array<detail::Mpmc_queue<detail::Task_entry>, detail::priority_count> queues_;
     std::atomic<bool> quit_ = false;
     std::counting_semaphore<> work_available_{ 0 };
     const Idle_policy idle_policy_;
