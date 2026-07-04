@@ -3,10 +3,12 @@
 #include "event_count.h"
 #include "mpmc_queue.h"
 #include "priority.h"
+#include "work_stealing_deque.h"
 
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 enum class Idle_policy
@@ -43,6 +45,9 @@ inline constexpr std::size_t priority_count = 3;
 
 class Scheduler;
 extern thread_local Scheduler* current_scheduler;
+// This thread's worker index within `current_scheduler` (>= 0 for a worker of it, else -1).
+// Routes a worker's own `normal` submits to its local deque, and identifies it in stealing.
+extern thread_local int current_worker_index;
 
 class Scheduler
 {
@@ -58,13 +63,20 @@ public:
     void submit(Task_func_ptr func, void* data, Priority priority = Priority::normal);
 
 private:
-    // Scan the per-priority queues high->low; true if a task was popped.
-    bool try_pop(detail::Task_entry& out);
-    // Approximate: all queues empty (racy; for the shutdown-drain check with `quit_`).
+    // Find one task for worker `worker_index`, scanning: global high -> its own local deque
+    // (LIFO, cache-hot) -> global normal -> global low -> steal `normal` from a random victim.
+    // High stays strict (checked first). True if a task was found.
+    bool find_work(int worker_index, detail::Task_entry& out);
+    // Approximate: all global queues AND all local deques empty (racy; shutdown-drain check).
     bool all_empty() const;
 
-    // One lock-free MPMC queue per priority (index = the `Priority` enum value).
+    // One lock-free MPMC queue per priority (index = the `Priority` enum value). `high`/`low`
+    // are global-only; `normal` also has per-worker deques (below), with this as overflow +
+    // the injector for external (non-worker) submits.
     std::array<detail::Mpmc_queue<detail::Task_entry>, detail::priority_count> queues_;
+    // Per-worker Chase-Lev deque for `normal`: a worker's own `normal` submits go here (LIFO,
+    // no shared cache line -- the producer fast path); thieves steal FIFO. One per worker.
+    std::vector<std::unique_ptr<detail::Work_stealing_deque<detail::Task_entry>>> local_normal_;
     std::atomic<bool> quit_ = false;
     detail::Event_count events_;   // wakes idle (block-mode) workers; replaces the semaphore
     const Idle_policy idle_policy_;

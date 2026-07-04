@@ -10,12 +10,12 @@ namespace detail
 class Worker_thread
 {
 public:
-    explicit Worker_thread(Scheduler& scheduler);
+    Worker_thread(Scheduler& scheduler, int index);
 
 private:
     std::jthread thread_;
 
-    static void main(Scheduler& scheduler);
+    static void main(Scheduler& scheduler, int index);
 };
 
 } // namespace detail

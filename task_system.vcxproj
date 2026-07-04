@@ -49,6 +49,7 @@
     <ClInclude Include="static_task_graph.h" />
     <ClInclude Include="task.h" />
     <ClInclude Include="thread_safe.h" />
+    <ClInclude Include="work_stealing_deque.h" />
     <ClInclude Include="worker_thread.h" />
     <ClInclude Include="benchmarks\benchmarks.h" />
     <ClInclude Include="sample\engine.h" />
