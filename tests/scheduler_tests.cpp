@@ -90,7 +90,6 @@ void run_mode(Idle_policy policy, int count)
     TS_CHECK(n.load() == count);
 }
 
-void test_block_mode()           { run_mode(Idle_policy::block, 2000); }
 void test_spin_mode()            { run_mode(Idle_policy::spin, 2000); }
 void test_spin_then_block_mode() { run_mode(Idle_policy::spin_then_block, 2000); }
 void test_handoff_mode()         { run_mode(Idle_policy::handoff, 2000); }
@@ -137,7 +136,6 @@ void test_shutdown_drains()
 
 void test_empty_exit()
 {
-    { Scheduler s{ { .idle_policy = Idle_policy::block } }; }
     { Scheduler s{ { .idle_policy = Idle_policy::spin } }; }
     { Scheduler s{ { .idle_policy = Idle_policy::spin_then_block } }; }
     { Scheduler s{ { .idle_policy = Idle_policy::handoff } }; }
@@ -219,7 +217,6 @@ void run_scheduler_tests()
     run("single task", test_single_task);
     run("many tasks", test_many_tasks);
     run("priority order (1 worker)", test_priority_order);
-    run("block mode", test_block_mode);
     run("spin mode", test_spin_mode);
     run("spin_then_block mode", test_spin_then_block_mode);
     run("handoff mode", test_handoff_mode);

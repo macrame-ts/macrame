@@ -298,25 +298,21 @@ void run_benchmarks()
         reps, static_cast<long long>(target.count()), hw);
 
     std::printf("\nthroughput (1 producer, empty tasks):\n");
-    report("block",   bench_throughput(Idle_policy::block));
     report("spin",    bench_throughput(Idle_policy::spin));
     report("s+block", bench_throughput(Idle_policy::spin_then_block));
     report("handoff", bench_throughput(Idle_policy::handoff));
 
     std::printf("\nwake latency (1 task in flight):\n");
-    report("block",   bench_wake_latency(Idle_policy::block));
     report("spin",    bench_wake_latency(Idle_policy::spin));
     report("s+block", bench_wake_latency(Idle_policy::spin_then_block));
     report("handoff", bench_wake_latency(Idle_policy::handoff));
 
     std::printf("\ncontention (%u producers):\n", hw);
-    report("block",   bench_contention(Idle_policy::block, hw));
     report("spin",    bench_contention(Idle_policy::spin, hw));
     report("s+block", bench_contention(Idle_policy::spin_then_block, hw));
     report("handoff", bench_contention(Idle_policy::handoff, hw));
 
     std::printf("\nfork-join (worker->worker submits, fanout %d):\n", fj_fanout);
-    report("block",   bench_fork_join(Idle_policy::block));
     report("spin",    bench_fork_join(Idle_policy::spin));
     report("s+block", bench_fork_join(Idle_policy::spin_then_block));
     report("handoff", bench_fork_join(Idle_policy::handoff));

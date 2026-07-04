@@ -92,7 +92,6 @@ void Scheduler::signal_submit()
     {
     case Idle_policy::spin:
         break;
-    case Idle_policy::block:
     case Idle_policy::spin_then_block:
         events_.notify_one();
         break;
@@ -179,8 +178,6 @@ bool Scheduler::wait_for_work(int worker_index, detail::Task_entry& out)
     case Idle_policy::spin:
         std::this_thread::yield();   // never park; loop back and re-scan
         return false;
-    case Idle_policy::block:
-        return park(worker_index, out);
     case Idle_policy::spin_then_block:
         if (spin_scan(worker_index, out, spin_cycles_))
             return true;

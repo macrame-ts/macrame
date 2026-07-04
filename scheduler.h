@@ -21,12 +21,10 @@ enum class Idle_policy
     // Never park: every idle worker yields in a loop forever. Lowest wake latency, but burns a
     // core per idle worker. Producers never signal.
     spin,
-    // Park immediately on the eventcount when no work is found. Producers wake one parked worker
-    // on every submit. The simple baseline (== `spin_then_block` with zero spin cycles).
-    block,
-    // UE-style: an idle worker spins `spin_cycles` scans before parking, so a task arriving
-    // during the spin window is grabbed with no wake latency. Producers still wake one parked
-    // worker on every submit (spinning workers grab work without needing the wake).
+    // UE-style (the default): an idle worker spins `spin_cycles` scans before parking on the
+    // eventcount, so a task arriving during the spin window is grabbed with no wake latency.
+    // Producers wake one parked worker on every submit (spinning workers grab work without the
+    // wake). `spin_cycles == 0` degenerates to park-immediately.
     spin_then_block,
     // Go-style spinner handoff: at most a few workers spin; a spinner that finds work relinquishes
     // the spinner role and, if it was the last spinner, wakes a successor to spin BEFORE it runs
@@ -39,9 +37,9 @@ enum class Idle_policy
 struct Scheduler_config
 {
     uint32_t num_threads = 0;                    // 0 -> `std::thread::hardware_concurrency()`
-    Idle_policy idle_policy = Idle_policy::block;
+    Idle_policy idle_policy = Idle_policy::spin_then_block;
     // `spin_then_block`/`handoff`: number of `find_work` scans an idle worker spins before it
-    // parks (UE's `WorkerSpinCycles` is ~53). Ignored by `spin`/`block`.
+    // parks (UE's `WorkerSpinCycles` is ~53). Ignored by `spin`.
     uint32_t spin_cycles = 64;
 };
 
