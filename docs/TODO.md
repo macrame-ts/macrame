@@ -8,7 +8,7 @@ in `docs/task-internals.md` — the items below under "Task types" / "Task chain
 are the incremental steps toward it.
 
 ## Task chaining / results
-- **Rename `sync()` → `sync()`: done.** `get` under-sold the cost (it *blocks*, and may retract + run a whole subtree inline); `sync()` signals a synchronization point. `Task<R>::sync` / `Task_builder<R>::sync` (`Signal` too, as a void `Task`). Considered `join`/`await`/`block_get`/`wait_get`; `sync` chosen. Smart-pointer `.sync()` (`Task_ptr`, `shared_ptr`) and `std::get<>` are untouched.
+- **Rename `get()` → `sync()`: done.** `get` under-sold the cost (it *blocks*, and may retract + run a whole subtree inline); `sync()` signals a synchronization point. `Task<R>::sync` / `Task_builder<R>::sync` (`Signal` too, as a void `Task`). Considered `join`/`await`/`block_get`/`wait_get`; `sync` chosen. Smart-pointer `.sync()` (`Task_ptr`, `shared_ptr`) and `std::get<>` are untouched.
 - Typed prerequisite -> subsequent chaining (dynamic path): **done** — `Task::then` (single) and `when_all` (multi, results as a tuple).
 - Apply-style `when_all`: **done** — `then` unpacks a tuple result into separate continuation args (`then([](A& a, B& b){...})`) when the functor doesn't take the tuple by reference; falls back to the tuple form otherwise.
 - `when_all` with void prerequisites and move-only results: **done** — void prerequisites act as pure ordering and drop out of the result (all-void → `Task<void>`); non-void results are carried in a tuple and **moved** (move-only supported). The consumer of a prerequisite's result is `when_all` (results move out), consistent with the single-consumer model.
