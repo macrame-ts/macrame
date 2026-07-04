@@ -142,6 +142,43 @@ void test_stress()
     TS_CHECK(n.load() == count);
 }
 
+struct Order_rec { std::atomic<int>* seq; std::atomic<int>* out; };
+void order_fn(void* p)
+{
+    auto* r = static_cast<Order_rec*>(p);
+    int o = r->seq->fetch_add(1);
+    if (r->out)
+        r->out->store(o);
+}
+
+// The starvation valve: under a steady stream of `normal` work, a `low` task still makes
+// progress (served every N high/normal) instead of waiting for normal to drain. One worker,
+// held while we queue 1 low + many normal, so the ordering is deterministic. Without the
+// valve `low` runs LAST (order == normals); with it, it runs mid-stream (well before the end).
+void test_low_starvation_valve()
+{
+    Scheduler s{ { .num_threads = 1 } };
+    std::atomic<bool> started{ false }, go{ false };
+    std::atomic<int> seq{ 0 }, low_order{ -1 };
+
+    Blocker b{ &started, &go };
+    s.submit(block_fn, &b);
+    wait_until([&] { return started.load(); });   // worker is held inside the blocker
+
+    Order_rec normal_rec{ &seq, nullptr };
+    Order_rec low_rec{ &seq, &low_order };
+    s.submit(order_fn, &low_rec, Priority::low);
+    constexpr int normals = 200;
+    for (int i = 0; i < normals; ++i)
+        s.submit(order_fn, &normal_rec, Priority::normal);
+
+    go.store(true);
+    wait_until([&] { return seq.load() == normals + 1; });
+
+    TS_CHECK(low_order.load() >= 0);          // low ran
+    TS_CHECK(low_order.load() < normals);     // and NOT last -- the valve served it mid-stream
+}
+
 } // namespace
 
 void run_scheduler_tests()
@@ -155,5 +192,6 @@ void run_scheduler_tests()
     run("shutdown drains", test_shutdown_drains);
     run("empty queue exits", test_empty_exit);
     run("submit from task", test_submit_from_task);
+    run("low starvation valve", test_low_starvation_valve);
     run("stress 100k", test_stress);
 }

@@ -68,18 +68,44 @@ void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
         events_.notify_one();
 }
 
+// Serve a `low` task after this many consecutive high/normal tasks, so a steady stream of
+// normal work cannot starve low indefinitely (aging valve, à la Go/Tokio's "check global
+// every ~61/31"). Low priority still means low: it just gets guaranteed occasional progress.
+constexpr int low_valve_threshold = 64;
+
 // Find one task for `worker_index`: global high (strict) -> own local deque (LIFO) -> global
-// normal -> global low -> steal `normal` from a random victim.
+// normal -> global low -> steal `normal` from a random victim. A per-worker aging counter
+// forces `low` ahead of normal once in a while (the starvation valve).
 bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
 {
-    if (queues_[0].pop(out))                                   // global high
+    static thread_local int since_low = 0;   // consecutive high/normal tasks taken by this worker
+
+    if (queues_[0].pop(out))                                   // global high (strict)
+    {
+        ++since_low;
         return true;
+    }
+    // Valve: if we've taken many high/normal in a row, serve one low BEFORE normal/local.
+    if (since_low >= low_valve_threshold && queues_[2].pop(out))
+    {
+        since_low = 0;
+        return true;
+    }
     if (local_normal_[static_cast<std::size_t>(worker_index)]->take(out))   // own deque, LIFO
+    {
+        ++since_low;
         return true;
+    }
     if (queues_[1].pop(out))                                   // global normal (overflow + external)
+    {
+        ++since_low;
         return true;
-    if (queues_[2].pop(out))                                   // global low
+    }
+    if (queues_[2].pop(out))                                   // global low (normal was empty anyway)
+    {
+        since_low = 0;
         return true;
+    }
 
     // Steal a `normal` task from another worker's deque (start at a random victim, scan around).
     int n = static_cast<int>(local_normal_.size());
@@ -94,7 +120,10 @@ bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
             if (v == worker_index)
                 continue;
             if (local_normal_[static_cast<std::size_t>(v)]->steal(out))
+            {
+                ++since_low;
                 return true;
+            }
         }
     }
     return false;
