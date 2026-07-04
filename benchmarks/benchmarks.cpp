@@ -146,6 +146,49 @@ std::vector<double> bench_contention(Idle_policy policy, unsigned producers)
     return ops_per_sec;
 }
 
+// Fork-join / worker-submit throughput: tasks that spawn tasks. Unlike `contention` (which
+// is EXTERNAL producers, all hitting the global queue), here the child submits come from
+// WORKER bodies -- so with per-worker deques (M2 stage 3) they push to the worker's own local
+// deque (no shared cache line) and idle workers steal. Raw scheduler API (no task-block alloc)
+// to isolate scheduler throughput.
+struct Fj_ctx
+{
+    Scheduler* sched;
+    std::atomic<int64_t> budget;   // remaining child tasks to spawn (across the whole tree)
+    std::atomic<int64_t> done;
+};
+constexpr int fj_fanout = 4;
+
+void fj_task(void* p)
+{
+    auto* c = static_cast<Fj_ctx*>(p);
+    for (int k = 0; k < fj_fanout; ++k)
+    {
+        if (c->budget.fetch_sub(1, std::memory_order_relaxed) > 0)
+            c->sched->submit(&fj_task, c);   // worker -> worker submit (this runs on a worker)
+        else
+            break;
+    }
+    c->done.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::vector<double> bench_fork_join(Idle_policy policy)
+{
+    Scheduler sched{ { .idle_policy = policy } };
+    return measure([&]() -> uint64_t
+    {
+        constexpr int64_t n = 100000;
+        Fj_ctx c{ &sched, {}, {} };
+        c.budget.store(n, std::memory_order_relaxed);
+        c.done.store(0, std::memory_order_relaxed);
+        sched.submit(&fj_task, &c);          // root (external submit)
+        const int64_t total = n + 1;         // root + n spawned
+        while (c.done.load(std::memory_order_acquire) < total)   // keeps `c` alive past all tasks
+            std::this_thread::yield();
+        return static_cast<uint64_t>(total);
+    });
+}
+
 // --- public feature benchmarks --------------------------------------------
 
 // Thread_safe write: serialized async writes through one object's pipe.
@@ -265,6 +308,10 @@ void run_benchmarks()
     std::printf("\ncontention (%u producers):\n", hw);
     report("block", bench_contention(Idle_policy::block, hw));
     report("spin",  bench_contention(Idle_policy::spin, hw));
+
+    std::printf("\nfork-join (worker->worker submits, fanout %d):\n", fj_fanout);
+    report("block", bench_fork_join(Idle_policy::block));
+    report("spin",  bench_fork_join(Idle_policy::spin));
 
     std::printf("\nfeatures:\n");
     report("ts_write", bench_ts_write());
