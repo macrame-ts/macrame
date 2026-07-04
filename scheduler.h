@@ -62,6 +62,10 @@ public:
 
     void submit(Task_func_ptr func, void* data, Priority priority = Priority::normal);
 
+    // Number of worker threads (the natural default concurrency for `parallel_for`).
+    // Defined in the .cpp -- `Worker_thread` is incomplete here.
+    int worker_count() const noexcept;
+
 private:
     // Find one task for worker `worker_index`, scanning: global high -> its own local deque
     // (LIFO, cache-hot) -> global normal -> global low -> steal `normal` from a random victim.

@@ -129,6 +129,11 @@ bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
     return false;
 }
 
+int Scheduler::worker_count() const noexcept
+{
+    return static_cast<int>(workers_.size());
+}
+
 bool Scheduler::all_empty() const
 {
     for (const auto& q : queues_)

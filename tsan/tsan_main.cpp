@@ -7,6 +7,7 @@
 // these workloads; a race prints a report and (with halt_on_error) exits nonzero.
 
 #include "engine.h"          // sample::run_frames
+#include "parallel_for.h"
 #include "scheduler.h"
 #include "static_task_graph.h"
 #include "thread_safe.h"
@@ -623,6 +624,39 @@ void stress_multi_async()
     }   // join firers
 }
 
+// parallel_for: raw helpers racing on `next`/`done`, the refcounted state lifetime (late
+// queued helpers touch it after the caller returns), and nested parallel_for (caller
+// participation must drain without the queued helpers running). Covers guided/unbalanced
+// balance and the async variant.
+void stress_parallel_for()
+{
+    for (int i = 0; i < 400; ++i)
+    {
+        constexpr int n = 2000;
+        std::atomic<long long> total{ 0 };
+        ts::parallel_for(n, [&total](int k) { total.fetch_add(k, std::memory_order_relaxed); },
+            { .balance = ts::Balance::guided });
+        assert(total.load() == static_cast<long long>(n) * (n - 1) / 2);
+
+        total.store(0);
+        ts::async_parallel_for(n, [&total](int k) { total.fetch_add(k, std::memory_order_relaxed); },
+            { .balance = ts::Balance::unbalanced }).sync();
+        assert(total.load() == static_cast<long long>(n) * (n - 1) / 2);
+    }
+
+    // Nested: outer occupies workers, each body runs an inner parallel_for.
+    for (int i = 0; i < 200; ++i)
+    {
+        constexpr int outer = 32, inner = 32;
+        std::atomic<long long> total{ 0 };
+        ts::parallel_for(outer, [&total](int)
+        {
+            ts::parallel_for(inner, [&total](int) { total.fetch_add(1, std::memory_order_relaxed); });
+        });
+        assert(total.load() == static_cast<long long>(outer) * inner);
+    }
+}
+
 } // namespace
 
 int main()
@@ -647,6 +681,7 @@ int main()
     std::puts("tsan: graph+async stress");  stress_graph_async();
     std::puts("tsan: graph inline stress");  stress_graph_inline();
     std::puts("tsan: multi async stress");   stress_multi_async();
+    std::puts("tsan: parallel_for stress");  stress_parallel_for();
     std::puts("tsan: graph nested stress");  stress_graph_nested();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);
     std::puts("tsan: done (no races)");
