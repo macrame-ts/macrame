@@ -1,12 +1,12 @@
 #pragma once
 
+#include "event_count.h"
 #include "mpmc_queue.h"
 #include "priority.h"
 
 #include <array>
 #include <atomic>
 #include <cstdint>
-#include <semaphore>
 #include <vector>
 
 enum class Idle_policy
@@ -66,7 +66,7 @@ private:
     // One lock-free MPMC queue per priority (index = the `Priority` enum value).
     std::array<detail::Mpmc_queue<detail::Task_entry>, detail::priority_count> queues_;
     std::atomic<bool> quit_ = false;
-    std::counting_semaphore<> work_available_{ 0 };
+    detail::Event_count events_;   // wakes idle (block-mode) workers; replaces the semaphore
     const Idle_policy idle_policy_;
     std::vector<detail::Worker_thread> workers_;
 };

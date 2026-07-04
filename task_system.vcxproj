@@ -41,6 +41,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="access.h" />
+    <ClInclude Include="event_count.h" />
     <ClInclude Include="fatal.h" />
     <ClInclude Include="mpmc_queue.h" />
     <ClInclude Include="priority.h" />

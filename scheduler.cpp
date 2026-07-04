@@ -22,9 +22,10 @@ Scheduler::~Scheduler()
 {
     quit_.store(true, std::memory_order_release);
 
-    // wake every blocked worker so it observes `quit_` and drains/exits
+    // wake every parked worker so it observes `quit_` and drains/exits (a not-yet-parked
+    // worker sees the bumped epoch in its re-check / commit_wait, so none is missed)
     if (idle_policy_ == Idle_policy::block)
-        work_available_.release(static_cast<std::ptrdiff_t>(workers_.size()));
+        events_.notify_all();
 }
 
 void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
@@ -32,7 +33,7 @@ void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
     queues_[static_cast<std::size_t>(priority)].push({ func, data });
 
     if (idle_policy_ == Idle_policy::block)
-        work_available_.release();
+        events_.notify_one();   // wake one parked worker (no-op if none parked)
 }
 
 // Scan the per-priority queues high (index 0) -> low; take the first available task.

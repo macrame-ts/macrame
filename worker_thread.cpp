@@ -14,39 +14,41 @@ void Worker_thread::main(Scheduler& scheduler)
 
     while (true)
     {
-        // `block` mode: sleep until a permit is available. The permit count tracks queued
-        // tasks (+ N shutdown wakes), so a successful acquire entitles this worker to exactly
-        // one task -- popped below without re-acquiring on a transient scan miss.
-        if (scheduler.idle_policy_ == Idle_policy::block)
-            scheduler.work_available_.acquire();
+        detail::Task_entry task;
+        if (scheduler.try_pop(task))   // high->low scan
+        {
+            task.func_(task.data_);
+            continue;
+        }
 
+        // No work found.
         if (scheduler.quit_.load(std::memory_order_acquire) && scheduler.all_empty())
             break;
 
-        // Take exactly one task. Retry the high->low scan on a transient miss (another worker
-        // grabbed the task this permit is for; the count guarantees one still remains) rather
-        // than re-acquiring. Bail if the scheduler is shutting down and the queues have drained.
-        detail::Task_entry task;
-        bool got = false;
-        for (;;)
+        if (scheduler.idle_policy_ == Idle_policy::block)
         {
+            // Park until notified -- but snapshot the epoch and RE-CHECK first, so work (or a
+            // shutdown) that raced the failed scan isn't missed: if it enqueued+notified
+            // before the snapshot, the re-check finds it; if after, `commit_wait` returns at
+            // once (epoch moved). See `Event_count`.
+            std::uint32_t key = scheduler.events_.prepare_wait();
             if (scheduler.try_pop(task))
             {
-                got = true;
-                break;
+                scheduler.events_.cancel_wait();
+                task.func_(task.data_);
+                continue;
             }
-            if (scheduler.quit_.load(std::memory_order_acquire) && scheduler.all_empty())
-                break;   // shutting down and drained
-            std::this_thread::yield();
+            if (scheduler.quit_.load(std::memory_order_acquire))
+            {
+                scheduler.events_.cancel_wait();
+                continue;   // -> the quit/all_empty break at the top of the loop
+            }
+            scheduler.events_.commit_wait(key);
         }
-
-        // Inner loop bailed without a task -> shutdown: exit. Falling back to `acquire()`
-        // here would burn a second permit for no work (a leak -> another worker blocks on
-        // acquire forever). This transition is where a block-mode shutdown deadlocked.
-        if (!got)
-            break;
-
-        task.func_(task.data_);
+        else
+        {
+            std::this_thread::yield();   // spin mode: never park
+        }
     }
 
     current_scheduler = nullptr;
