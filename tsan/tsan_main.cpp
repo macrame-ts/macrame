@@ -539,8 +539,8 @@ void stress_graph_async()
     ts::Thread_safe<int> x{ 0 }, y{ 0 };
     ts::Static_task_graph g;
     ts::Graph_node n1 = g.add_node([](int& a) { ++a; }, x);                       // write x
-    ts::Graph_node n2 = g.add_node([](const int&, int& b) { ++b; }, x, y);        // read x, write y (multi-object)
-    ts::Graph_node n3 = g.add_node([](int& a) { ++a; }, x);                       // write x again (x gap: none, but re-acquire)
+    ts::Graph_node n2 = g.add_node([](int& a, int& b) { ++a; ++b; }, x, y);       // write x (handoff from n1) + write y
+    ts::Graph_node n3 = g.add_node([](int& a) { ++a; }, x);                       // write x (handoff from n2)
     n2.after(n1);
     n3.after(n2);
     g.compile();

@@ -115,6 +115,7 @@ private:
         std::vector<int> pipe_indices;      // those pipes as indices into distinct_pipes_ (deduped, ASCENDING = canonical acquire order)
         std::vector<Access> pipe_modes;     // this node's mode per pipe_indices entry (write wins on a dup)
         std::vector<int> successors;
+        std::vector<int> ready_buf;             // scratch: successors made ready by this node's completion (reused; single completion/run)
         int indegree = 0;
         Priority priority = Priority::normal;   // applied to `block` at compile()
         bool inline_dispatch = false;           // run on the settling thread if its acquires all succeed synchronously
@@ -168,9 +169,18 @@ private:
     // reservation). See docs §10.
     static void on_data_ready(Run_state& run, int index);
     // `synchronous` tracks whether the whole acquire chain so far ran on the settling thread
-    // (no deferral) -- an inline node dispatches inline only if it stays true to the end.
+    // (no deferral) -- an inline node dispatches inline only if it stays true to the end. A
+    // pre-held object (handed from a predecessor, see `node_complete`) is skipped without a
+    // pipe op and keeps `synchronous`.
     static void acquire_next(Run_state& run, int index, int pos, bool synchronous);
     static void run_node(Run_state& run, int index);
+    // Object handoff (elide a release + re-acquire round-trip): the ready successor to hand
+    // object `pi` (held in mode `m`) to, or -1. Handoff iff exactly one ready successor
+    // accesses `pi`, in the same mode `m` -- then the pipe state (writer/reader) is already
+    // right for it, so releasing and re-acquiring is pure waste. `mark_preheld` sets the bit
+    // that makes that successor's `acquire_next` skip the object.
+    static int handoff_target(Run_state& run, const std::vector<int>& ready, int pi, Access m);
+    static void mark_preheld(Run_state& run, int node_index, int pi);
     // Graph post-logic for a node whose body AND all its nested tasks have settled:
     // release the objects it held, release its successors, and settle the run when the
     // last node finishes. Runs via the node block's `on_complete` (see run_graph_node).

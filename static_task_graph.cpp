@@ -13,12 +13,14 @@ struct Static_task_graph::Run_state
 {
     explicit Run_state(size_t node_count)
         : remaining_deps(node_count)
+        , preheld(node_count)
     {}
 
     Static_task_graph* graph = nullptr;
     Scheduler* scheduler = nullptr;
     Cancellation_token token;
-    std::vector<std::atomic<int>> remaining_deps;   // per node: unmet data prerequisites
+    std::vector<std::atomic<int>> remaining_deps;        // per node: unmet data prerequisites
+    std::vector<std::atomic<std::uint64_t>> preheld;     // per node: bitmask of pipe_indices positions handed from a predecessor (skip acquire)
     std::atomic<int> remaining_nodes{ 0 };
     std::shared_ptr<detail::Task_control_block> done;
 };
@@ -235,6 +237,14 @@ void Static_task_graph::acquire_next(Run_state& run, int index, int pos, bool sy
         return;
     }
 
+    // Pre-held: a predecessor handed us this object (skipped its release; the pipe is already
+    // held in the right mode). No pipe op -- treat as acquired, stay on the settling thread.
+    if (pos < 64 && (run.preheld[index].load(std::memory_order_relaxed) >> pos) & 1u)
+    {
+        acquire_next(run, index, pos + 1, synchronous);
+        return;
+    }
+
     int pi = node.pipe_indices[pos];
     Access mode = node.pipe_modes[pos];
     Run_state* rp = &run;   // stable (run_ outlives the run)
@@ -303,19 +313,76 @@ void Static_task_graph::graph_node_completed(detail::Task_control_block* block)
     node_complete(*self->graph->run_, self->index);
 }
 
+// The ready successor to hand object `pi` to (see the header): exactly one ready successor
+// accesses `pi`, and in mode `m`.
+int Static_task_graph::handoff_target(Run_state& run, const std::vector<int>& ready, int pi, Access m)
+{
+    int found = -1;
+    Access found_mode = Access::read_only;
+    for (int s : ready)
+    {
+        const Node& sn = run.graph->nodes_[s];
+        for (size_t k = 0; k < sn.pipe_indices.size(); ++k)
+            if (sn.pipe_indices[k] == pi)
+            {
+                if (found != -1)
+                    return -1;   // a second ready accessor -> not a clean single handoff
+                found = s;
+                found_mode = sn.pipe_modes[k];
+                break;
+            }
+    }
+    return (found != -1 && found_mode == m) ? found : -1;
+}
+
+// Mark object `pi` as pre-held for `node_index` (its `acquire_next` will skip it).
+void Static_task_graph::mark_preheld(Run_state& run, int node_index, int pi)
+{
+    const Node& n = run.graph->nodes_[node_index];
+    for (size_t pos = 0; pos < n.pipe_indices.size(); ++pos)
+        if (n.pipe_indices[pos] == pi)
+        {
+            if (pos < 64)
+                run.preheld[node_index].fetch_or(std::uint64_t{ 1 } << pos, std::memory_order_relaxed);
+            return;
+        }
+}
+
 void Static_task_graph::node_complete(Run_state& run, int index)
 {
     Node& node = run.graph->nodes_[index];
 
-    // Release every object this node held (mode-aware), freeing it for async and later
-    // nodes -- so the object is held only over this node's [acquire, complete] window and
-    // is free in the gaps. Runs post-completion (after any nested sub-work).
-    for (size_t k = 0; k < node.pipe_indices.size(); ++k)
-        detail::pipe_release(*run.scheduler, *run.graph->distinct_pipes_[node.pipe_indices[k]], node.pipe_modes[k]);
-
+    // Phase 1: settle successor data-deps; collect those this node's completion makes ready
+    // (it is exclusively their trigger, so this node's thread owns them until we hand off /
+    // dispatch them below -- no race with another prerequisite).
+    std::vector<int>& ready = node.ready_buf;
+    ready.clear();
     for (int successor : node.successors)
         if (run.remaining_deps[successor].fetch_sub(1, std::memory_order_acq_rel) == 1)
-            on_data_ready(run, successor);
+            ready.push_back(successor);
+
+    // Phase 2: hand off or release each object this node held. HANDOFF (skip release + skip
+    // the successor's re-acquire) when exactly one ready successor takes the object in the
+    // SAME mode -- the pipe state is then already correct for it, so a release + re-acquire
+    // round-trip is pure waste. The handed object stays held across the edge (no gap), which
+    // is fine: the successor runs immediately (it just went ready). Otherwise RELEASE (freeing
+    // the object for async / a later node -- the gap-freeing of M1.1a). Runs post-completion
+    // (after any nested sub-work).
+    for (size_t k = 0; k < node.pipe_indices.size(); ++k)
+    {
+        int pi = node.pipe_indices[k];
+        Access m = node.pipe_modes[k];
+        int target = handoff_target(run, ready, pi, m);
+        if (target >= 0)
+            mark_preheld(run, target, pi);   // hand it directly -> no pipe op
+        else
+            detail::pipe_release(*run.scheduler, *run.graph->distinct_pipes_[pi], m);
+    }
+
+    // Phase 3: trigger the ready successors (they acquire their objects, skipping any handed
+    // to them).
+    for (int successor : ready)
+        on_data_ready(run, successor);
 
     if (run.remaining_nodes.fetch_sub(1, std::memory_order_acq_rel) == 1)
     {
@@ -350,6 +417,7 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token t
     for (size_t i = 0; i < nodes_.size(); ++i)
     {
         run.remaining_deps[i].store(nodes_[i].indegree, std::memory_order_relaxed);
+        run.preheld[i].store(0, std::memory_order_relaxed);   // no handoffs yet this run
 
         // Re-arm the node's task block for this run (its successors/prerequisites/
         // continuations are never populated -- graph edges use remaining_deps, completion

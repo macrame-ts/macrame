@@ -344,6 +344,43 @@ void test_multi_async_options()
     TS_CHECK(t.is_cancelled());   // skipped before running; don't get() a cancelled value
 }
 
+// Object handoff: a write chain (each node writes the same object) hands the exclusive hold
+// node-to-node instead of releasing + re-acquiring it. Correctness -- the value threads
+// through the chain -- and re-runnability confirm the hold is preserved across the handoffs.
+void test_handoff_write_chain()
+{
+    ts::Thread_safe<int> x{ 0 };
+    ts::Static_task_graph g;
+    ts::Graph_node a = g.add_node([](int& v) { v += 1; }, x);
+    ts::Graph_node b = g.add_node([](int& v) { v *= 10; }, x);
+    ts::Graph_node c = g.add_node([](int& v) { v += 5; }, x);
+    b.after(a);
+    c.after(b);
+    g.compile();
+
+    g.execute().get();
+    TS_CHECK(read_value(x) == 15);         // ((0 + 1) * 10) + 5 -- each handed the hold in order
+
+    g.execute().get();
+    TS_CHECK(read_value(x) == 165);        // re-run: ((15 + 1) * 10) + 5
+}
+
+// Mixed mode across an edge does NOT hand off: a writer node then a reader node on the same
+// object -- different modes, so the writer releases and the reader acquires its own hold.
+// Correctness (the read sees the write) confirms the release/re-acquire path still works.
+void test_handoff_skips_mode_change()
+{
+    ts::Thread_safe<int> x{ 3 };
+    std::atomic<int> seen{ -1 };
+    ts::Static_task_graph g;
+    ts::Graph_node w = g.add_node([](int& v) { v = 42; }, x);            // write
+    ts::Graph_node r = g.add_node([&seen](const int& v) { seen.store(v); }, x);   // read (mode change -> no handoff)
+    r.after(w);
+    g.compile();
+    g.execute().get();
+    TS_CHECK(seen.load() == 42);
+}
+
 // J: repeat a concurrency-sensitive workload to catch flakiness. Each iteration uses a
 // deterministic gate (two readers wait for each other) rather than a hoped "peak > 1".
 void test_repeat_stress()
@@ -554,6 +591,8 @@ void run_integration_tests()
     run("multi async exclusion", test_multi_async_exclusion);
     run("multi async no deadlock", test_multi_async_no_deadlock);
     run("multi async options", test_multi_async_options);
+    run("handoff write chain", test_handoff_write_chain);
+    run("handoff skips mode change", test_handoff_skips_mode_change);
     run("repeat stress x20", test_repeat_stress);
     run("engine frame invariants", test_engine_frame);
     run("engine determinism", test_engine_determinism);

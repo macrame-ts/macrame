@@ -394,6 +394,16 @@ only over each accessor's `[acquire, complete]` window — not the whole run:
   runs (`run_node`); at completion (`node_complete`, after any nested sub-work) it releases
   them all (`pipe_release`, mode-aware). No per-pipe run-level bookkeeping — each node owns
   its own acquire/release.
+- **Handoff (elide the round-trip).** A serial chain on one object — node writes X, successor
+  writes X — would otherwise release X and immediately re-acquire it. `node_complete` instead
+  **hands X directly** to the sole ready successor that takes it in the *same* mode: it skips
+  the release, and a per-node `preheld` bitmask (position in the successor's `pipe_indices`)
+  makes that successor's `acquire_next` skip the object (no pipe op — the pipe state, a held
+  writer or a reader-count slot, is already right for it). Unique for a writer by the conflict
+  edges (two writers of one object are ordered, never both ready). The handed object stays held
+  across the edge (no gap), which is fine: the successor just went ready and runs immediately.
+  Any object *not* handed off is released — the gap-freeing above. The mask is set (before the
+  successor is triggered, so single-writer + happens-before via the trigger) and cleared per run.
 - **Gaps are free.** An object touched by an early node and a late node with a gap node
   between is released after the early node and re-acquired only at the late node — free
   during the gap. (The old `[first accessor, last accessor]` reservation held it continuously
