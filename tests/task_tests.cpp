@@ -504,6 +504,33 @@ void test_launch_then()
     TS_CHECK(r == 21);
 }
 
+// `sync()` returns `const R&` and does not consume: the same task can be sync'd repeatedly,
+// and `sync()` can coexist with a `then` -- both see the same result.
+void test_sync_const_ref_multi()
+{
+    ts::Task<int> t = ts::launch([] { return 42; });
+    const int& a = t.sync();
+    const int& b = t.sync();          // second sync -- still valid (non-consuming)
+    TS_CHECK(a == 42 && b == 42);
+    TS_CHECK(&a == &b);               // same storage: sync() aliased the block's result
+    int viathen = t.then([](int v) { return v + 1; }).sync();
+    TS_CHECK(viathen == 43);          // then reads the un-consumed result
+    TS_CHECK(t.sync() == 42);         // and it is still there after the then
+}
+
+// `take()` moves the result out -- works for a move-only `R`, and steals the payload.
+void test_take_moves_move_only()
+{
+    ts::Task<std::unique_ptr<int>> t = ts::launch([] { return std::make_unique<int>(7); });
+    std::unique_ptr<int> p = t.take();
+    TS_CHECK(p && *p == 7);
+
+    // A moved-out large value: verify ownership actually transferred (source emptied).
+    ts::Task<std::vector<int>> v = ts::launch([] { return std::vector<int>{ 1, 2, 3, 4 }; });
+    std::vector<int> got = v.take();
+    TS_CHECK(got.size() == 4 && got[3] == 4);
+}
+
 void test_launch_priority()
 {
     // Priority is accepted on every launch route (ordering is covered deterministically by
@@ -982,6 +1009,8 @@ void run_task_tests()
     run("launch value", test_launch_value);
     run("launch void", test_launch_void);
     run("launch then", test_launch_then);
+    run("sync const-ref multi-consumer", test_sync_const_ref_multi);
+    run("take moves move-only", test_take_moves_move_only);
     run("launch priority", test_launch_priority);
     run("inline runs on completer", test_inline_runs_on_completer);
     run("inline synchronous when ready", test_inline_synchronous_when_ready);

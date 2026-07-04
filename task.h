@@ -235,8 +235,10 @@ void submit_ready(Task_ptr block);
 // member so a `Task_control_block*` aliases it (see docs/task-internals.md §2).
 // Continuations receive `(result_ptr-or-nullptr, cancelled)` so they propagate a
 // cancellation to their own subsequent. `settle()` is idempotent — the first settle
-// wins (so a bodyless block can be triggered; see `Signal`). Note: mixing `sync()` and
-// `then()` on one task, or `sync()` twice, is unsupported (`sync()` moves the result).
+// wins (so a bodyless block can be triggered; see `Signal`). Result-consumption contract:
+// `sync()` returns `const R&` (non-consuming), so any number of readers (`sync()` twice,
+// `sync()` + `then`, N waiters) share one immutable-after-settle result; `take()` is the
+// single destructive move (ownership handoff / move-only R). At most one mover, and last.
 struct Task_control_block
 {
     // Intrusive strong refcount (see `Task_ptr`) + a type-erased destroy thunk that deletes
@@ -778,10 +780,14 @@ public:
         return core_ && core_->ready.load(std::memory_order_acquire) && core_->cancelled;
     }
 
-    // Blocks until the task settles and returns its result. Call once. For a value
-    // task, fatal if it was cancelled (no result) — check `is_cancelled()` first;
-    // a cancelled `void` sync() simply returns.
-    R sync()
+    // Blocks until the task settles and returns its result **by `const&`** (non-consuming):
+    // any number of readers may `sync()` the same task (returns `const R&` for a value task,
+    // `void` for a void one). The reference is valid while a handle (this `Task`, or the
+    // `Task_builder` / another copy) keeps the block alive; `T r = t.sync()` copies within the
+    // full-expression and is always safe. To *move* the result out (ownership handoff, or a
+    // move-only `R`) use `take()`. For a value task, fatal if it was cancelled (no result) —
+    // check `is_cancelled()` first; a cancelled `void` sync() simply returns.
+    decltype(auto) sync()
     {
         detail::Task_control_block::retract_or_wait(core_);
         if constexpr (std::is_void_v<R>)
@@ -792,8 +798,19 @@ public:
         {
             if (core_->cancelled)
                 ts::fatal("Task::sync() on a cancelled task; check is_cancelled() first");
-            return std::move(*static_cast<R*>(core_->result_ptr));
+            return *static_cast<const R*>(core_->result_ptr);
         }
+    }
+
+    // Blocks, then **moves** the result out — the single destructive consume (for ownership
+    // handoff or a move-only `R`). Leaves the stored result moved-from, so it must be the last
+    // consume (see the block's result-consumption contract). Fatal if the task was cancelled.
+    R take() requires (!std::is_void_v<R>)
+    {
+        detail::Task_control_block::retract_or_wait(core_);
+        if (core_->cancelled)
+            ts::fatal("Task::take() on a cancelled task; check is_cancelled() first");
+        return std::move(*static_cast<R*>(core_->result_ptr));
     }
 
     // Chains a continuation. Runs `fn` when this task completes; if this task is
@@ -947,9 +964,11 @@ public:
         return *this;
     }
 
-    // Consume this run's result (see `Task<R>::sync`) / query completion. The builder is
-    // the handle; equivalently `launch()`'s returned `Task<R>` can be used.
-    R sync() { return Task<R>(core_).sync(); }
+    // Read this run's result by `const&` (see `Task<R>::sync`) / move it out (`take`) / query
+    // completion. The builder is the handle; equivalently `launch()`'s returned `Task<R>` can
+    // be used. The block outlives the temporary `Task` here (the builder's `core_` keeps it).
+    decltype(auto) sync() { return Task<R>(core_).sync(); }
+    R take() requires (!std::is_void_v<R>) { return Task<R>(core_).take(); }
     bool is_done() const noexcept { return Task<R>(core_).is_done(); }
     bool is_cancelled() const noexcept { return Task<R>(core_).is_cancelled(); }
 
