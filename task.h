@@ -241,24 +241,57 @@ void submit_ready(Task_ptr block);
 // single destructive move (ownership handoff / move-only R). At most one mover, and last.
 struct Task_control_block
 {
-    // Intrusive strong refcount (see `Task_ptr`) + a type-erased destroy thunk that deletes
-    // the enclosing wrapper (`Result_block<R>` / `Executable<Body,R>` / `Graph_node_block` /
-    // a bare block). Starts at 0; the first `Task_ptr` brings it to 1.
-    std::atomic<std::uint32_t> refcount{ 0 };
-    void (*destroy)(Task_control_block*) = nullptr;
+    // NOTE: members are ordered for size, not logic -- the sub-8-byte fields are clustered
+    // (below the 8-byte block) so they share padding instead of each punching a hole between
+    // pointers/atomics, and the two 32-bit atomics sit together to fill one 8-byte slot.
+    // sizeof shrank 336 -> 320 by this reorder alone (clang-cl x64). See docs/task-internals.md §2.
 
-    std::mutex mutex;
-    std::condition_variable done_cv;   // wakes N waiters (a `Signal` is a barrier)
-    std::atomic<bool> ready{ false };
-    bool completed = false;
-    bool cancelled = false;
+    // Intrusive strong refcount (see `Task_ptr`) + `num_locks`. Two 32-bit atomics packed
+    // adjacent = one 8-byte slot, no padding. `refcount` starts at 0 (first `Task_ptr` -> 1).
+    // `num_locks`: below `execution_flag` it counts unmet PREREQUISITES (gate execution);
+    // once the body starts the flag is set and it counts pending NESTED tasks (gate
+    // completion). See docs/task-internals.md §4/§7.
+    static constexpr std::uint32_t execution_flag = 0x8000'0000u;
+    std::atomic<std::uint32_t> refcount{ 0 };
+    std::atomic<std::uint32_t> num_locks{ 0 };
+
+    // Type-erased destroy thunk that deletes the enclosing wrapper (`Result_block<R>` /
+    // `Executable<Body,R>` / `Graph_node_block` / a bare block).
+    void (*destroy)(Task_control_block*) = nullptr;
     void* result_ptr = nullptr;        // -> the wrapper's stored R (set before complete), or null
     void (*execute)(const Task_ptr&, std::uint64_t generation) = nullptr;   // run the body (null => bodyless)
     // Fired once at `settle` (completed OR cancelled), after continuations/successors.
     // Unlike a continuation it is NOT consumed, so a reused block (e.g. a re-armed graph
     // node) keeps it across runs -- an alloc-free completion hook. Null for most tasks.
     void (*on_complete)(Task_control_block*) = nullptr;
+    // One-runner claim + reuse generation fused into ONE atomic, so a stale dispatch and
+    // a concurrent `reset()` can't be observed out of order (two separate atomics could,
+    // letting a stale dispatch see the old generation but the new unclaimed state and
+    // wrongly run). Bits [63:1] = generation (bumped by `reset`), bit [0] = body claimed.
+    // A dispatch captures the generation it was queued for and calls `claim(gen)`: exactly
+    // one caller (worker or retractor) wins per generation; a dispatch left stale by a
+    // `reset` (retraction queues a duplicate the reset would otherwise let re-run the
+    // body) fails the CAS and skips.
+    std::atomic<std::uint64_t> run_state{ 0 };
     Cancellation_token token;          // checked by `execute` before running the body
+
+    // --- one-byte cluster --------------------------------------------------------------
+    // Each field is its own byte (distinct objects), so the lock-free atomics (`ready`,
+    // `prereq_cancelled`) and the mutex-only bools (`completed`, `cancelled`) never share a
+    // word -- no read-modify-write straddles the lock/lock-free boundary. Clustered here so
+    // they share trailing padding rather than each punching a hole between 8-byte members.
+    // (Fusing `completed`+`cancelled` into a bitfield was measured to save 0 bytes -- the
+    // cluster's padding absorbs it -- so they stay plain bools; simpler, no under-lock RMW.)
+    std::atomic<bool> ready{ false };
+    // Set when a PREREQUISITE settled cancelled (`release` propagates the settle's cancel
+    // state). A result-consuming dependent (`then`) has no result to read, and an
+    // ordering dependent (`after`) inherits the cancellation for consistency, so
+    // `Executable::run` cancels instead of running the body. Harmless if set on a task
+    // already executing (a cancelled nested child): the flag is only read at execution
+    // start. Reset by `reset()` / graph re-arm.
+    std::atomic<bool> prereq_cancelled{ false };
+    bool completed = false;            // mutex-only
+    bool cancelled = false;            // mutex-only
     // Static dispatch properties, packed into one byte (all set at creation, never
     // mutated once the block is shared, so non-atomic is race-free). `priority` and
     // `run_inline` are read together at dispatch; `retractable` in the retraction guard.
@@ -269,27 +302,14 @@ struct Task_control_block
         bool run_inline : 1 = false;                // dispatch on the settling thread, not the queue
     };
     Flags flags;
-    // `num_locks`: below `execution_flag` it counts unmet PREREQUISITES (gate
-    // execution); once the body starts the flag is set and it counts pending NESTED
-    // tasks (gate completion). See docs/task-internals.md §4/§7.
-    static constexpr std::uint32_t execution_flag = 0x8000'0000u;
-    std::atomic<std::uint32_t> num_locks{ 0 };
-    // One-runner claim + reuse generation fused into ONE atomic, so a stale dispatch and
-    // a concurrent `reset()` can't be observed out of order (two separate atomics could,
-    // letting a stale dispatch see the old generation but the new unclaimed state and
-    // wrongly run). Bits [63:1] = generation (bumped by `reset`), bit [0] = body claimed.
-    // A dispatch captures the generation it was queued for and calls `claim(gen)`: exactly
-    // one caller (worker or retractor) wins per generation; a dispatch left stale by a
-    // `reset` (retraction queues a duplicate the reset would otherwise let re-run the
-    // body) fails the CAS and skips.
-    std::atomic<std::uint64_t> run_state{ 0 };
-    // Set when a PREREQUISITE settled cancelled (`release` propagates the settle's cancel
-    // state). A result-consuming dependent (`then`) has no result to read, and an
-    // ordering dependent (`after`) inherits the cancellation for consistency, so
-    // `Executable::run` cancels instead of running the body. Harmless if set on a task
-    // already executing (a cancelled nested child): the flag is only read at execution
-    // start. Reset by `reset()` / graph re-arm.
-    std::atomic<bool> prereq_cancelled{ false };
+    // -----------------------------------------------------------------------------------
+
+    std::mutex mutex;
+    std::condition_variable done_cv;   // wakes N waiters (a `Signal` is a barrier)
+
+    std::vector<Task_ptr> successors;      // decremented on settle
+    std::vector<Task_ptr> prerequisites;   // backward links, for deep retraction
+    std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
     // This block's current reuse generation — the high bits of `run_state`, above the
     // claim bit (`run_state >> 1`). Bumped by `reset()` on each reuse. A dispatch captures
@@ -306,9 +326,6 @@ struct Task_control_block
         return run_state.compare_exchange_strong(
             expected, (gen << 1) | 1u, std::memory_order_acq_rel, std::memory_order_relaxed);
     }
-    std::vector<Task_ptr> successors;      // decremented on settle
-    std::vector<Task_ptr> prerequisites;   // backward links, for deep retraction
-    std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
     void complete() { settle(false); }
     void cancel()   { settle(true); }
