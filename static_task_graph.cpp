@@ -388,7 +388,7 @@ void Static_task_graph::node_complete(Run_state& run, int index)
     if (run.remaining_nodes.fetch_sub(1, std::memory_order_acq_rel) == 1)
     {
         // Keep `done` alive across the settle: completing it notifies its cv, which can
-        // wake a waiter (`execute().get()`) that immediately starts the next run --
+        // wake a waiter (`execute().sync()`) that immediately starts the next run --
         // overwriting `run.done` and dropping its own handle -- destroying this block
         // mid-notify. The local ref holds it until settle returns. (The old per-run
         // Run_state kept it alive via the worker closures; the reused slot does not.)

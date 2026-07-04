@@ -21,7 +21,7 @@ namespace
 
 int read_value(ts::Thread_safe<int>& data)
 {
-    return data.async([](const int& v) { return v; }).get();
+    return data.async([](const int& v) { return v; }).sync();
 }
 
 // --- C: compile-time constraints ------------------------------------------
@@ -69,7 +69,7 @@ void test_write_then_read()
 {
     ts::Thread_safe<Counter> c;
     c.async([](Counter& x) { x.add(7); });
-    int v = c.async([](const Counter& x) { return x.value(); }).get();
+    int v = c.async([](const Counter& x) { return x.value(); }).sync();
     TS_CHECK(v == 7);
 }
 
@@ -77,7 +77,7 @@ void test_async_returns_value()
 {
     ts::Thread_safe<int> d{ 41 };
     ts::Task<int> t = d.async([](const int& v) { return v + 1; });
-    TS_CHECK(t.get() == 42);
+    TS_CHECK(t.sync() == 42);
 }
 
 void test_destructor_waits()
@@ -99,7 +99,7 @@ void test_serial_correctness()
     ts::Thread_safe<Counter> counter;
     for (int i = 0; i < 1000; ++i)
         counter.async([](Counter& c) { c.increment(); });
-    int v = counter.async([](const Counter& c) { return c.value(); }).get();
+    int v = counter.async([](const Counter& c) { return c.value(); }).sync();
     TS_CHECK(v == 1000);
 }
 
@@ -120,7 +120,7 @@ void test_concurrent_readers()
         }));
 
     for (auto& t : tasks)
-        t.get();
+        t.sync();
     TS_CHECK(gate.met());   // concurrent readers (not serialized by the reader/writer pipe)
 }
 
@@ -158,7 +158,7 @@ void test_writer_exclusion()
     }
 
     for (auto& t : tasks)
-        t.get();
+        t.sync();
     TS_CHECK(!violated.load());
     TS_CHECK(read_value(data) == writes);
 }
@@ -178,8 +178,8 @@ void test_independent_objects_parallel()
     auto job = [&gate](int&) { gate.arrive(); };
     ts::Task<void> ta = a.async(job);
     ts::Task<void> tb = b.async(job);
-    ta.get();
-    tb.get();
+    ta.sync();
+    tb.sync();
     TS_CHECK(gate.met());   // separate pipes ran concurrently
 }
 
@@ -239,7 +239,7 @@ void test_inline_runs_synchronously()
 
     TS_CHECK(t.is_done());                                  // ran before this line returned
     TS_CHECK(body_thread == std::this_thread::get_id());    // on the calling thread
-    TS_CHECK(t.get() == 6);
+    TS_CHECK(t.sync() == 6);
     TS_CHECK(read_value(d) == 6);
 }
 
@@ -252,7 +252,7 @@ void test_inline_read_on_caller()
     {
         body_thread = std::this_thread::get_id();
         return v;
-    }, { .run_inline = true }).get();
+    }, { .run_inline = true }).sync();
     TS_CHECK(r == 9);
     TS_CHECK(body_thread == std::this_thread::get_id());
 }
@@ -283,9 +283,9 @@ void test_inline_falls_back_when_busy()
     TS_CHECK(!t.is_done());          // deferred behind the blocker, not run inline
 
     gate.store(true);
-    TS_CHECK(t.get() == 1);          // ran correctly after the blocker drained
+    TS_CHECK(t.sync() == 1);          // ran correctly after the blocker drained
     TS_CHECK(inline_thread.load() != caller);   // on a worker, not the calling thread
-    blocker.get();
+    blocker.sync();
 }
 
 } // namespace

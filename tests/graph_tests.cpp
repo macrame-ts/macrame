@@ -18,7 +18,7 @@ namespace
 
 int read_value(ts::Thread_safe<int>& d)
 {
-    return d.async([](const int& v) { return v; }).get();
+    return d.async([](const int& v) { return v; }).sync();
 }
 
 // --- G: construction / compile + H: execution -----------------------------
@@ -33,12 +33,12 @@ void test_access_ordering()
     g.add_node([](const int& x, const int& y, int& z) { z = x + y; }, a, b, c);
     g.compile();
 
-    g.execute().get();
+    g.execute().sync();
     TS_CHECK(read_value(a) == 1);
     TS_CHECK(read_value(b) == 10);
     TS_CHECK(read_value(c) == 11);
 
-    g.execute().get();   // re-run is deterministic
+    g.execute().sync();   // re-run is deterministic
     TS_CHECK(read_value(c) == 11);
 }
 
@@ -54,7 +54,7 @@ void test_explicit_ordering()
     nq.after(np);
     g.compile();
 
-    g.execute().get();
+    g.execute().sync();
     TS_CHECK(p_order.load() == 1);
     TS_CHECK(q_order.load() == 2);
 }
@@ -70,7 +70,7 @@ void test_independent_parallel()
     g.add_node(job, b);
     g.compile();
 
-    g.execute().get();
+    g.execute().sync();
     TS_CHECK(gate.met());   // no conflict -> nodes run concurrently
 }
 
@@ -82,7 +82,7 @@ void test_re_run_counts()
     g.compile();
 
     for (int i = 0; i < 5; ++i)
-        g.execute().get();
+        g.execute().sync();
     TS_CHECK(read_value(a) == 5);
 }
 
@@ -90,7 +90,7 @@ void test_empty_graph()
 {
     ts::Static_task_graph g;
     g.compile();
-    g.execute().get();
+    g.execute().sync();
     TS_CHECK(true);   // completes immediately
 }
 
@@ -100,7 +100,7 @@ void test_single_node()
     ts::Static_task_graph g;
     g.add_node([](int& v) { v = 1; }, a);
     g.compile();
-    g.execute().get();
+    g.execute().sync();
     TS_CHECK(read_value(a) == 1);
 }
 
@@ -116,7 +116,7 @@ void test_diamond()
     g.add_node([](const int& yv, const int& zv, int& wv) { wv = yv + zv; }, y, z, w);
     g.compile();
 
-    g.execute().get();
+    g.execute().sync();
     TS_CHECK(read_value(w) == 5);    // (1+1) + (1+2)
     TS_CHECK(gate.met());            // the two middle nodes ran concurrently
 }
@@ -133,7 +133,7 @@ void test_completion_after_all()
         g.add_node([&ran](int&) { std::this_thread::sleep_for(1ms); ran.fetch_add(1); }, d);
     g.compile();
 
-    g.execute().get();
+    g.execute().sync();
     TS_CHECK(ran.load() == wide);   // get() returned only after every node
 }
 
@@ -146,7 +146,7 @@ void test_graph_stress()
     g.compile();
 
     for (int run_i = 0; run_i < 10; ++run_i)
-        g.execute().get();
+        g.execute().sync();
 
     bool all = true;
     for (auto& d : data)
@@ -167,7 +167,7 @@ void test_cancel_skips_nodes()
     ts::Cancellation_source src;
     src.request_cancel();               // cancel before running
     ts::Task<void> run = g.execute(ts::default_scheduler(), src.token());
-    run.get();
+    run.sync();
 
     TS_CHECK(run.is_cancelled());
     TS_CHECK(ran.load() == 0);          // every node skipped
@@ -188,7 +188,7 @@ void test_nested_gates_completion()
     }, owned);
     g.compile();
 
-    g.execute().get();
+    g.execute().sync();
     TS_CHECK(done_count.load() == n);   // get() returned only after every nested task
 }
 
@@ -205,8 +205,8 @@ void test_nested_inherits_access()
     }, c);
     g.compile();
 
-    g.execute().get();
-    int v = c.async([](const tests::Counter& k) { return k.value(); }).get();
+    g.execute().sync();
+    int v = c.async([](const tests::Counter& k) { return k.value(); }).sync();
     TS_CHECK(v == 5);
 }
 
@@ -224,8 +224,8 @@ void test_builder_nested_inherits_access()
     }, c);
     g.compile();
 
-    g.execute().get();
-    int v = c.async([](const tests::Counter& k) { return k.value(); }).get();
+    g.execute().sync();
+    int v = c.async([](const tests::Counter& k) { return k.value(); }).sync();
     TS_CHECK(v == 7);
 }
 
@@ -251,7 +251,7 @@ void test_nested_before_successor()
     }, arr);
     g.compile();
 
-    g.execute().get();
+    g.execute().sync();
     TS_CHECK(sum_seen.load() == n * (n + 1) / 2);   // reader ran after every nested write
 }
 
@@ -272,7 +272,7 @@ void test_node_priority_order()
     g.add_node([&seq, &high_ord](const int&) { high_ord.store(seq.fetch_add(1)); }, a).priority(Priority::high);
     g.compile();
 
-    g.execute(s).get();
+    g.execute(s).sync();
     TS_CHECK(high_ord.load() < normal_ord.load());    // high ran before normal
     TS_CHECK(normal_ord.load() < low_ord.load());     // normal ran before low
 }
@@ -288,7 +288,7 @@ void test_graph_node_inline_on_caller()
     ts::Static_task_graph g;
     g.add_node([&node_thread](int& v) { node_thread.store(std::this_thread::get_id()); v = 1; }, x).set_inline();
     g.compile();
-    g.execute().get();
+    g.execute().sync();
 
     TS_CHECK(node_thread.load() == std::this_thread::get_id());   // inline root ran on the caller
     TS_CHECK(read_value(x) == 1);
@@ -309,7 +309,7 @@ void test_graph_inline_chain_on_caller()
     ts::Graph_node b = g.add_node([&](int& v) { b_ord.store(++seq); b_thr.store(std::this_thread::get_id()); v = 2; }, x).set_inline();
     b.after(a);
     g.compile();
-    g.execute().get();
+    g.execute().sync();
 
     TS_CHECK(a_ord.load() == 1 && b_ord.load() == 2);            // order preserved
     TS_CHECK(a_thr.load() == std::this_thread::get_id());
@@ -325,7 +325,7 @@ void test_graph_inline_rerun()
     g.add_node([](int& v) { ++v; }, x).set_inline();
     g.compile();
     for (int i = 0; i < 5; ++i)
-        g.execute().get();
+        g.execute().sync();
     TS_CHECK(read_value(x) == 5);
 }
 

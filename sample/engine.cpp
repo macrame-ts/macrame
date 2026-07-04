@@ -21,14 +21,14 @@ Frame_stats run_frames(int frames, float scale)
     using clock = std::chrono::steady_clock;
     auto t0 = clock::now();
     for (int f = 0; f < frames; ++f)
-        graph.execute().get();
+        graph.execute().sync();
     double total_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
 
     // A deterministic frame output: propagation wrote world_xf = local_xf + bodies.
     float xf = world.world_xf.async([](const Float_store& s)
     {
         return s.size() > 0 ? s.get(0) : 0.0f;
-    }).get();
+    }).sync();
 
     return { frames, total_ms / frames, serial_budget_ms() * scale, xf };
 }

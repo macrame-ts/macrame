@@ -63,7 +63,7 @@ void run_death_scenario(const char* name)
     else if (std::strcmp(name, "execute_before_compile") == 0)
     {
         ts::Static_task_graph g;
-        g.execute().get();   // -> fatal
+        g.execute().sync();   // -> fatal
     }
     else if (std::strcmp(name, "graph_undeclared") == 0)
     {
@@ -72,7 +72,7 @@ void run_death_scenario(const char* name)
         ts::Static_task_graph g;
         g.add_node([&outside](int&) { outside.increment(); }, a);   // touches undeclared `outside`
         g.compile();
-        g.execute().get();   // node runs -> violation
+        g.execute().sync();   // node runs -> violation
     }
     else if (std::strcmp(name, "cancelled_value_get") == 0)
     {
@@ -81,12 +81,12 @@ void run_death_scenario(const char* name)
         ts::Thread_safe<int> d{ 0 };
         ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });
         while (!t.is_done()) std::this_thread::yield();
-        t.get();   // cancelled value task has no result -> fatal
+        t.sync();   // cancelled value task has no result -> fatal
     }
     else if (std::strcmp(name, "add_nested_outside") == 0)
     {
         ts::Task<int> t = ts::launch([] { return 1; });
-        t.get();
+        t.sync();
         ts::add_nested(t);   // no currently-executing task -> fatal
     }
     else if (std::strcmp(name, "reset_unsettled") == 0)

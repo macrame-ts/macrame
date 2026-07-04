@@ -23,7 +23,7 @@ namespace
 
 int read_value(ts::Thread_safe<int>& d)
 {
-    return d.async([](const int& v) { return v; }).get();
+    return d.async([](const int& v) { return v; }).sync();
 }
 
 // `then()` chained off the graph's `execute()` completion handle.
@@ -35,7 +35,7 @@ void test_then_off_graph_completion()
     g.compile();
 
     std::atomic<bool> after{ false };
-    g.execute().then([&after] { after.store(true); }).get();
+    g.execute().then([&after] { after.store(true); }).sync();
 
     TS_CHECK(after.load());
     TS_CHECK(read_value(a) == 5);
@@ -49,13 +49,13 @@ void test_when_all_into_graph()
             a.async([](const int& v) { return v; }),
             b.async([](const int& v) { return v; }))
         .then([](std::tuple<int, int>& r) { return std::get<0>(r) + std::get<1>(r); })
-        .get();
+        .sync();
 
     ts::Thread_safe<int> c{ 0 };
     ts::Static_task_graph g;
     g.add_node([sum](int& v) { v = sum; }, c);
     g.compile();
-    g.execute().get();
+    g.execute().sync();
 
     TS_CHECK(read_value(c) == 5);
 }
@@ -67,7 +67,7 @@ void test_graph_then_dynamic()
     ts::Static_task_graph g;
     g.add_node([](int& v) { v = 7; }, a);
     g.compile();
-    g.execute().get();
+    g.execute().sync();
 
     TS_CHECK(read_value(a) == 7);
 }
@@ -91,8 +91,8 @@ struct Guarded
     }
 };
 
-int peak_of(ts::Thread_safe<Guarded>& x) { return x.async([](const Guarded& g) { return g.peak.load(); }).get(); }
-int total_of(ts::Thread_safe<Guarded>& x) { return x.async([](const Guarded& g) { return g.total.load(); }).get(); }
+int peak_of(ts::Thread_safe<Guarded>& x) { return x.async([](const Guarded& g) { return g.peak.load(); }).sync(); }
+int total_of(ts::Thread_safe<Guarded>& x) { return x.async([](const Guarded& g) { return g.total.load(); }).sync(); }
 
 // Static node access + dynamic async on the SAME object must not overlap: the run
 // reserves the object, so the asyncs queue behind the node. (`execute()` reserves
@@ -109,9 +109,9 @@ void test_graph_async_no_overlap_during()
     std::vector<ts::Task<void>> asyncs;
     for (int i = 0; i < 4; ++i)
         asyncs.push_back(x.async([](Guarded& gg) { gg.touch(); }));
-    run.get();
+    run.sync();
     for (auto& a : asyncs)
-        a.get();
+        a.sync();
 
     TS_CHECK(peak_of(x) == 1);        // never concurrent
     TS_CHECK(total_of(x) == 5);       // node + 4 asyncs all ran
@@ -127,8 +127,8 @@ void test_async_before_graph_no_overlap()
     ts::Static_task_graph g;
     g.add_node([](Guarded& gg) { gg.touch(); }, x);
     g.compile();
-    g.execute().get();
-    pending.get();
+    g.execute().sync();
+    pending.sync();
 
     TS_CHECK(peak_of(x) == 1);
     TS_CHECK(total_of(x) == 2);
@@ -150,11 +150,11 @@ void test_graph_async_stress()
             firers.emplace_back([&]
             {
                 while (!stop.load(std::memory_order_relaxed))
-                    x.async([](Guarded& gg) { gg.touch(); }).get();
+                    x.async([](Guarded& gg) { gg.touch(); }).sync();
             });
 
         for (int i = 0; i < 20; ++i)
-            g.execute().get();
+            g.execute().sync();
 
         stop.store(true, std::memory_order_relaxed);
     }   // join firers
@@ -185,8 +185,8 @@ void test_early_release_frees_object_mid_run()
 
     auto run = g.execute();
     ts::Task<void> as = x.async([&async_ran](int&) { async_ran.store(true); });
-    run.get();
-    as.get();
+    run.sync();
+    as.sync();
 
     TS_CHECK(async_ran.load());        // the async ran
     TS_CHECK(ran_during_run.load());   // and mid-run: x was freed early, not held to run end
@@ -215,8 +215,8 @@ void test_lazy_acquire_late_object_free_early()
 
     auto run = g.execute();
     ts::Task<void> as = x.async([&async_ran](int&) { async_ran.store(true); });
-    run.get();
-    as.get();
+    run.sync();
+    as.sync();
 
     TS_CHECK(async_ran.load());
     TS_CHECK(ran_during_a.load());   // x was free while the 60ms node ran (reserved only when b dispatched)
@@ -249,8 +249,8 @@ void test_gap_frees_object_between_accessors()
 
     auto run = g.execute();
     ts::Task<void> as = x.async([&async_ran](int&) { async_ran.store(true); });
-    run.get();
-    as.get();
+    run.sync();
+    as.sync();
 
     TS_CHECK(async_ran.load());
     TS_CHECK(ran_during_gap.load());   // x released after n1, re-acquired at n3 -> free during n2
@@ -277,8 +277,8 @@ void test_reader_node_overlaps_async_read()
 
     auto run = g.execute();
     ts::Task<int> as = x.async([&async_ran](const int& v) { async_ran.store(true); return v; });   // READ async
-    run.get();
-    TS_CHECK(as.get() == 7);
+    run.sync();
+    TS_CHECK(as.sync() == 7);
 
     TS_CHECK(async_ran.load());
     TS_CHECK(ran_during_node.load());   // read async overlapped the read node (both readers)
@@ -289,7 +289,7 @@ void test_reader_node_overlaps_async_read()
 void test_multi_async_basic()
 {
     ts::Thread_safe<int> a{ 10 }, b{ 20 };
-    int result = ts::async([](int& x, const int& y) { x += y; return x; }, a, b).get();   // a += b
+    int result = ts::async([](int& x, const int& y) { x += y; return x; }, a, b).sync();   // a += b
     TS_CHECK(result == 30);
     TS_CHECK(read_value(a) == 30);
     TS_CHECK(read_value(b) == 20);
@@ -308,7 +308,7 @@ void test_multi_async_exclusion()
         tasks.push_back(y.async([](Guarded& g) { g.touch(); }));
     }
     for (auto& t : tasks)
-        t.get();
+        t.sync();
     TS_CHECK(peak_of(x) == 1);   // never concurrent on x
     TS_CHECK(peak_of(y) == 1);   // never concurrent on y
 }
@@ -325,7 +325,7 @@ void test_multi_async_no_deadlock()
         tasks.push_back(ts::async([](int& x, int& y) { ++x; ++y; }, b, a));   // declared order b, a
     }
     for (auto& t : tasks)
-        t.get();
+        t.sync();
     TS_CHECK(read_value(a) == 100);   // 100 tasks each incremented both
     TS_CHECK(read_value(b) == 100);
 }
@@ -334,7 +334,7 @@ void test_multi_async_no_deadlock()
 void test_multi_async_options()
 {
     ts::Thread_safe<int> a{ 1 }, b{ 2 };
-    int r = ts::async({ .priority = Priority::high }, [](const int& x, const int& y) { return x + y; }, a, b).get();
+    int r = ts::async({ .priority = Priority::high }, [](const int& x, const int& y) { return x + y; }, a, b).sync();
     TS_CHECK(r == 3);
 
     ts::Cancellation_source src;
@@ -358,10 +358,10 @@ void test_handoff_write_chain()
     c.after(b);
     g.compile();
 
-    g.execute().get();
+    g.execute().sync();
     TS_CHECK(read_value(x) == 15);         // ((0 + 1) * 10) + 5 -- each handed the hold in order
 
-    g.execute().get();
+    g.execute().sync();
     TS_CHECK(read_value(x) == 165);        // re-run: ((15 + 1) * 10) + 5
 }
 
@@ -377,7 +377,7 @@ void test_handoff_skips_mode_change()
     ts::Graph_node r = g.add_node([&seen](const int& v) { seen.store(v); }, x);   // read (mode change -> no handoff)
     r.after(w);
     g.compile();
-    g.execute().get();
+    g.execute().sync();
     TS_CHECK(seen.load() == 42);
 }
 
@@ -395,7 +395,7 @@ void test_repeat_stress()
         for (int i = 0; i < 8; ++i)
             tasks.push_back(data.async([&gate](const int& v) { gate.arrive(); return v; }));
         for (auto& t : tasks)
-            t.get();
+            t.sync();
 
         all = all && gate.met();
     }
@@ -430,7 +430,7 @@ void naive_parallel_for(int n, Fn fn)
     for (int i = 0; i < n; ++i)
         tasks.push_back(ts::launch([fn, i] { fn(i); }));
     for (auto& t : tasks)
-        t.get();
+        t.sync();
 }
 
 // Nested parallel-for → oversubscription deadlock. The outer tasks saturate every
@@ -486,7 +486,7 @@ void test_deep_retraction_no_deadlock()
             ts::Task<void> b = ts::launch([&] { total.fetch_add(1); });
             ts::Task<void> c = ts::launch([&] { total.fetch_add(1); });
             ts::Task<void> join = ts::task([] {}).after(a, b, c).launch();
-            join.get();   // deep-retract: run a/b/c inline, then the join
+            join.sync();   // deep-retract: run a/b/c inline, then the join
         });
         done.store(true);
     });
@@ -520,7 +520,7 @@ void test_then_retraction_no_deadlock()
         {
             int r = ts::launch([&] { total.fetch_add(1); return 20; })   // retractable producer
                         .then([&](int x) { total.fetch_add(1); return x + 1; })
-                        .get();   // deep-retract: run the producer inline, its callback fires the continuation
+                        .sync();   // deep-retract: run the producer inline, its callback fires the continuation
             (void)r;
         });
         done.store(true);
@@ -553,7 +553,7 @@ void test_when_all_retraction_no_deadlock()
         {
             ts::Task<int> a = ts::launch([&] { total.fetch_add(1); return 1; });
             ts::Task<int> b = ts::launch([&] { total.fetch_add(1); return 2; });
-            int s = ts::when_all(a, b).then([](int x, int y) { return x + y; }).get();
+            int s = ts::when_all(a, b).then([](int x, int y) { return x + y; }).sync();
             (void)s;
         });
         done.store(true);

@@ -200,7 +200,7 @@ std::vector<double> bench_ts_write()
     {
         for (uint64_t i = 0; i < batch; ++i)
             obj.async([](uint64_t& v) { ++v; });
-        obj.async([](const uint64_t& v) { return v; }).get();   // FIFO drain
+        obj.async([](const uint64_t& v) { return v; }).sync();   // FIFO drain
         return batch;
     });
 }
@@ -232,7 +232,7 @@ std::vector<double> bench_then()
         ts::Task<int> t = obj.async([](const int& v) { return v; });
         for (int k = 0; k < chain; ++k)
             t = t.then([](int v) { return v + 1; });
-        t.get();
+        t.sync();
         return chain;
     });
 }
@@ -246,7 +246,7 @@ std::vector<double> bench_when_all()
     {
         ts::when_all(a.async(read), b.async(read), c.async(read), d.async(read))
             .then([](std::tuple<int, int, int, int>& r) { return std::get<0>(r); })
-            .get();
+            .sync();
         return 1;
     });
 }
@@ -262,7 +262,7 @@ std::vector<double> bench_graph_execute()
     g.compile();
     return measure([&]() -> uint64_t
     {
-        g.execute().get();
+        g.execute().sync();
         return 1;
     });
 }

@@ -69,8 +69,8 @@ Three types on the Task tier; two private, two public handles (one shared).
   points at a per-`Body` thunk that `static_cast`s the block back to `Executable`
   (block is the first member) and runs the body.
 
-- **`Task<R>`** (public) — the consumer handle (a future): `get()`, `is_done()`,
-  `then()`, use as a prerequisite. `get()` does `static_cast<R*>(core->result_ptr)`
+- **`Task<R>`** (public) — the consumer handle (a future): `sync()`, `is_done()`,
+  `then()`, use as a prerequisite. `sync()` does `static_cast<R*>(core->result_ptr)`
   and moves out — the cast is always to the right `R` (storage + handle are created
   together at one site, both on the same `R`; confined to `detail`).
 
@@ -277,11 +277,11 @@ vector would allocate per run. Net: a run allocates only its completion handle
 (`done`, inherently per-run since the caller may outlive the run) plus, when a
 graph object is contended at reserve time, a small reservation closure. The reused
 `Run_state` (values reset, vector capacity kept) removes the per-run state alloc
-too. Correct because runs are **sequential** (a `get()` barrier between them makes
+too. Correct because runs are **sequential** (a `sync()` barrier between them makes
 the previous run quiescent before re-arm) and concurrent runs of one graph are
 unsupported (§10 scenario 2). One subtlety the reuse exposed: `done` must be kept
 alive by the completing worker across its `settle` (a local `shared_ptr` in
-`node_complete`), or the woken `get()` starting the next run — which overwrites
+`node_complete`), or the woken `sync()` starting the next run — which overwrites
 `run.done` and drops its own handle — destroys the block mid-`notify_all` (found
 under TSan). The graph is movable (build-and-return, e.g. `build_frame_graph`);
 `execute()` refreshes the blocks' `graph` back-pointers, so a moved graph is valid
@@ -462,7 +462,7 @@ ever matters, make the idle-pipe reserve lock-free rather than skipping it.
 Reservation + single-resource async closes the common race, but these remain sharp:
 
 1. **Blocking on a same-object async inside a node** → deadlock: the node holds the
-   object and `.get()`s an async on it, which is queued behind that very hold. (Reinforces
+   object and `.sync()`s an async on it, which is queued behind that very hold. (Reinforces
    "never block inside a node.")
 2. **Two runs over overlapping objects, concurrently** → not supported: the reused
    `Run_state` is single-run (one `execute()` at a time), so a second concurrent run would
@@ -517,8 +517,8 @@ state**, not a separate channel: a settled task is either completed or cancelled
 - **Graph:** `execute(scheduler, token)` — pending nodes skip (the DAG still drains so
   the run settles), and the completion `Task<void>` is cancelled. In-flight nodes
   finish.
-- **`get()`:** a cancelled `void` `get()` unblocks (query `is_cancelled()`); a
-  cancelled *value* `get()` is **fatal** — there is no result, so check
+- **`sync()`:** a cancelled `void` `sync()` unblocks (query `is_cancelled()`); a
+  cancelled *value* `sync()` is **fatal** — there is no result, so check
   `is_cancelled()` first. (No exceptions, so this is a precondition, not a throw.)
 
 The token flag is atomic and `settle` is idempotent under the block's mutex, so
@@ -560,9 +560,9 @@ TSan): the block settles exactly once, either way.
   bit — a running body sets flag + a self-lock; `ts::nested(fn)` / `ts::add_nested(t)`
   (via `current_task` TLS) add completion-locks; the parent completes only once its
   self-lock and all nested tasks have released. **Retraction** (§6): a blocking
-  `get()` on a *retractable* (bare-scheduler), ready, not-yet-started task runs it
+  `sync()` on a *retractable* (bare-scheduler), ready, not-yet-started task runs it
   **inline** on the waiting thread — the `started` claim (`exchange`) ensures a worker
-  and a retractor never both run it. **Deep**: `get()` on a *dependent* (a builder task
+  and a retractor never both run it. **Deep**: `sync()` on a *dependent* (a builder task
   with prerequisites) walks its `prerequisites` (backward links) recursively, runs the
   un-started subtree inline, then the dependent — so waiting on a join, not just a leaf,
   is deadlock-free. This breaks the oversubscription deadlock (nested fork-join where
@@ -589,8 +589,8 @@ TSan): the block settles exactly once, either way.
   **Reusable tasks** — `Task_control_block::reset()` re-arms a settled block in place
   (monomorphic, scalars only: reuse is a *block* capability, so no new `<R>` type). The
   existing `Task_builder<R>` (from `ts::task(fn)`) is the reusable handle — it already
-  retains the block after `launch()`, now also has `reset()`/`get()`/`is_done()`:
-  `t.reset().after(x).launch(); r = t.get();` re-runs one block/body/result-storage
+  retains the block after `launch()`, now also has `reset()`/`sync()`/`is_done()`:
+  `t.reset().after(x).launch(); r = t.sync();` re-runs one block/body/result-storage
   (prereqs re-established each run; one run in flight; `reset()` guarded by the block's
   `ready` flag). `Signal::reset()` gives a reusable phase gate. Subtlety: retraction
   leaves a *duplicate* dispatch (it runs the body inline while `release` also queued

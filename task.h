@@ -235,8 +235,8 @@ void submit_ready(Task_ptr block);
 // member so a `Task_control_block*` aliases it (see docs/task-internals.md §2).
 // Continuations receive `(result_ptr-or-nullptr, cancelled)` so they propagate a
 // cancellation to their own subsequent. `settle()` is idempotent — the first settle
-// wins (so a bodyless block can be triggered; see `Signal`). Note: mixing `get()` and
-// `then()` on one task, or `get()` twice, is unsupported (`get()` moves the result).
+// wins (so a bodyless block can be triggered; see `Signal`). Note: mixing `sync()` and
+// `then()` on one task, or `sync()` twice, is unsupported (`sync()` moves the result).
 struct Task_control_block
 {
     // Intrusive strong refcount (see `Task_ptr`) + a type-erased destroy thunk that deletes
@@ -373,9 +373,9 @@ struct Task_control_block
                 return;
             completed = true;
             cancelled = cancel_;
-            // `ready` MUST be set under the same lock as `completed`: a `get()` waits on
+            // `ready` MUST be set under the same lock as `completed`: a `sync()` waits on
             // `completed` (acquiring this lock), then `reset()` checks `ready` lock-free. If
-            // `ready` were stored after the lock, a get() could observe `completed` and return
+            // `ready` were stored after the lock, a sync() could observe `completed` and return
             // in the gap before `ready` was set, and the following `reset()` would wrongly
             // fatal ("reset() on a task that has not settled"). Under the lock, any observer of
             // `completed` also observes `ready`.
@@ -384,7 +384,7 @@ struct Task_control_block
             succs = std::move(successors);
             prereqs = std::move(prerequisites);
             // Read `result_ptr` for the continuations HERE, under the lock -- not after the
-            // notify below. Otherwise a reusable task's `get()` (woken by the notify) can
+            // notify below. Otherwise a reusable task's `sync()` (woken by the notify) can
             // `reset()` + relaunch and the new run overwrites `result_ptr` while this settle
             // tail still reads it (a data race the reuse stress hits under TSan). The moved-out
             // `conts`/`succs` are local, so firing them after the notify is fine.
@@ -703,7 +703,7 @@ Task_ptr core_of(const Task<R>& t) noexcept;
 
 // Link `prereq` into `dependent`'s prerequisites as a RETRACTION HINT only — no lock
 // count, no successor, completion stays whatever drives `dependent` (a continuation
-// callback for `then`/`when_all`). It lets a blocking `get()` on `dependent` walk to
+// callback for `then`/`when_all`). It lets a blocking `sync()` on `dependent` walk to
 // `prereq` and run it inline (deep retraction) when `prereq` is retractable and
 // un-started, instead of parking a worker. Skipped if `prereq` already settled (nothing
 // to retract; its callback has fired or will fire). Pushed under `prereq`'s mutex like
@@ -754,8 +754,8 @@ struct Continuation_options
     bool run_inline = false;
 };
 
-// Handle to an async result. `get()` blocks for the result (call once); `then()`
-// chains a continuation that runs when this task completes.
+// Handle to an async result. `sync()` blocks for the result (call once; may retract + run
+// the task inline); `then()` chains a continuation that runs when this task completes.
 template<typename R>
 class Task
 {
@@ -780,8 +780,8 @@ public:
 
     // Blocks until the task settles and returns its result. Call once. For a value
     // task, fatal if it was cancelled (no result) — check `is_cancelled()` first;
-    // a cancelled `void` get() simply returns.
-    R get()
+    // a cancelled `void` sync() simply returns.
+    R sync()
     {
         detail::Task_control_block::retract_or_wait(core_);
         if constexpr (std::is_void_v<R>)
@@ -791,7 +791,7 @@ public:
         else
         {
             if (core_->cancelled)
-                ts::fatal("Task::get() on a cancelled task; check is_cancelled() first");
+                ts::fatal("Task::sync() on a cancelled task; check is_cancelled() first");
             return std::move(*static_cast<R*>(core_->result_ptr));
         }
     }
@@ -895,7 +895,7 @@ Task_ptr core_of(const Task<R>& t) noexcept { return t.core_; }
 // The builder is also the **reusable** handle: it retains the block after `launch()`
 // (which hands out a `Task<R>` aliasing the same block, but the builder keeps its own
 // reference), so a body + result storage allocated once can be re-run many times. The
-// pattern is `t.reset().after(...).launch(); r = t.get();` — `reset()` re-arms the block
+// pattern is `t.reset().after(...).launch(); r = t.sync();` — `reset()` re-arms the block
 // and the "not launched" lock for another run, prerequisites are re-established each run.
 // One run in flight; `reset()` only after the prior run settled and its result was
 // consumed. This avoids reallocation (pooling doesn't help — reuse is the point).
@@ -947,9 +947,9 @@ public:
         return *this;
     }
 
-    // Consume this run's result (see `Task<R>::get`) / query completion. The builder is
+    // Consume this run's result (see `Task<R>::sync`) / query completion. The builder is
     // the handle; equivalently `launch()`'s returned `Task<R>` can be used.
-    R get() { return Task<R>(core_).get(); }
+    R sync() { return Task<R>(core_).sync(); }
     bool is_done() const noexcept { return Task<R>(core_).is_done(); }
     bool is_cancelled() const noexcept { return Task<R>(core_).is_cancelled(); }
 
@@ -1088,7 +1088,7 @@ void when_all_attach_one(Task<R> prereq,
             if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1)
                 (*finish)();
         });
-    add_retraction_hint(prereq_core, next_core);   // deep-retractable: get() can run each prereq inline
+    add_retraction_hint(prereq_core, next_core);   // deep-retractable: sync() can run each prereq inline
 }
 
 } // namespace detail
@@ -1148,7 +1148,7 @@ Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
         };
     }
 
-    next_core->flags.retractable = true;   // a blocking get() can retract the (retractable) prerequisites
+    next_core->flags.retractable = true;   // a blocking sync() can retract the (retractable) prerequisites
 
     constexpr auto slot = detail::when_all_slots<Rs...>();
     auto prereqs = std::make_tuple(std::move(prerequisites)...);
