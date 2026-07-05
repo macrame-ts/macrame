@@ -761,16 +761,30 @@ inline void add_prerequisite(const Task_ptr& prereq,
 
 } // namespace detail
 
-// Dispatch options for a `then` continuation. An aggregate, so it takes designated
-// initializers at the call site: `t.then(fn, {.priority = Priority::high})`,
-// `t.then(fn, {.run_inline = true})`. `token` cancels the continuation independently of
-// the producer (checked when it fires). `run_inline` runs it on the thread that settles
-// the producer instead of queueing it (same trade-offs as `Task_builder::set_inline`).
-struct Continuation_options
+// Dispatch options for a queued task body — a `then` continuation or a `Thread_safe`
+// read/write (`async`). An aggregate, so it takes designated initializers at the call site:
+// `t.then(fn, {.priority = Priority::high})`, `obj.async(fn, {.run_inline = true})`. `token`
+// makes the body skippable before it runs (and, if the body declares a trailing
+// `Cancellation_token`, is forwarded to it for a mid-run early-out). `run_inline` runs it on
+// the thread that makes it ready instead of queueing it — for `then`, the thread that settles
+// the producer; for `async`, the calling thread when the pipe is free (`pipe_try_inline`) —
+// same trade-offs as `Task_builder::set_inline`.
+struct Task_options
 {
     Cancellation_token token = {};
     Priority priority = Priority::normal;
     bool run_inline = false;
+};
+
+// Dispatch options for launching a standalone task (`ts::launch`) or a nested one
+// (`ts::nested`). Deliberately WITHOUT `run_inline`: `launch`/`nested` have no prerequisites,
+// so there is no settling thread to inline onto — inline dispatch is a builder capability
+// (`ts::task(fn).set_inline()`). `token` makes it skippable before it runs; `priority` sets
+// its queue position.
+struct Launch_options
+{
+    Cancellation_token token = {};
+    Priority priority = Priority::normal;
 };
 
 // Handle to an async result. `sync()` blocks for the result (call once; may retract + run
@@ -843,7 +857,7 @@ public:
     // shapes (void / whole-result / apply-style) to poll for cancellation mid-run; the
     // token forwarded is the continuation's own (`opts.token`, checked at dispatch too).
     template<typename Fn>
-    auto then(Fn&& fn, Continuation_options opts = {})
+    auto then(Fn&& fn, Task_options opts = {})
     {
         if constexpr (std::is_void_v<R>)
         {
@@ -899,7 +913,7 @@ private:
     // cancels this task instead of running the body. `produce` takes the producer's
     // `result_ptr` (null for a void producer); the producer stays alive as our prerequisite.
     template<typename R2, typename Produce>
-    Task<R2> chain(Produce produce, Continuation_options opts)
+    Task<R2> chain(Produce produce, Task_options opts)
     {
         auto producer = core_;
         auto next = detail::make_executable<R2>(
@@ -1018,19 +1032,19 @@ auto task(Fn&& fn)
 }
 
 // Launch a standalone task on the scheduler — a bare functor with no access target (the
-// primitive `async` for work that touches no guarded object). Returns a `Task<R>`; pass a
-// `Cancellation_token` to make it skippable before it runs, and a `Priority` for its queue
+// primitive `async` for work that touches no guarded object). Returns a `Task<R>`; a
+// `Launch_options{token, priority}` makes it skippable before it runs and sets its queue
 // position. Dispatches through the `submit_ready` bridge (so this stays scheduler-
 // independent) and inherits the launcher's access grant, so sub-work launched from a task
 // body may touch the launcher's data.
 template<typename Fn>
-auto launch(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority::normal)
+auto launch(Fn&& fn, Launch_options opts = {})
     -> Task<detail::Task_result_t<Fn>>
 {
     using R = detail::Task_result_t<Fn>;
-    auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), std::move(token));
+    auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), std::move(opts.token));
     core->flags.retractable = true;   // bare scheduler task (no pipe binding): safe to run inline from a waiter
-    core->flags.priority = priority;
+    core->flags.priority = opts.priority;
     detail::submit_ready(core);
     return Task<R>(core);
 }
@@ -1064,10 +1078,10 @@ void add_nested(const Task<R>& child)
 // completion gates the parent's). Sugar for `launch` + `add_nested`; call from within a
 // task body.
 template<typename Fn>
-auto nested(Fn&& fn, Cancellation_token token = {}, Priority priority = Priority::normal)
+auto nested(Fn&& fn, Launch_options opts = {})
     -> Task<detail::Task_result_t<Fn>>
 {
-    auto t = launch(std::forward<Fn>(fn), std::move(token), priority);
+    auto t = launch(std::forward<Fn>(fn), std::move(opts));
     add_nested(t);
     return t;
 }

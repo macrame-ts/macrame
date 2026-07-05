@@ -113,7 +113,7 @@ void multi_acquire(std::shared_ptr<Multi_async_state> state,
                    Task_ptr block, std::size_t pos);
 
 // Try to run an async job INLINE on the calling thread instead of enqueuing it (opt-in via
-// `Async_options::run_inline`). Admissible only when the pipe is immediately free for this
+// `Task_options::run_inline`). Admissible only when the pipe is immediately free for this
 // mode -- no queued jobs (FIFO preserved) and the reader/writer rules allow: `read_only`
 // joins as a concurrent reader, `read_write` as an exclusive writer. On success runs `fn()`
 // synchronously (the caller blocks for the body's duration), then releases, re-dispatches
@@ -140,19 +140,10 @@ template<typename Fn, typename A> using Async_result_t = typename Async_result<F
 
 } // namespace detail
 
-// Dispatch options for `Thread_safe::async`. An aggregate, so it takes designated
-// initializers at the call site: `obj.async(fn, {.priority = Priority::high})`,
-// `obj.async(fn, {.run_inline = true})`. `token` makes the job skippable before it runs
-// (and, if the body declares a trailing `Cancellation_token`, is forwarded to it for a
-// mid-run early-out). `run_inline` runs the body synchronously on the calling thread when
-// the pipe is immediately free (else it enqueues as usual) -- see the note on `async`.
-// Deliberately a distinct struct from `Continuation_options` (async is not a continuation).
-struct Async_options
-{
-    Cancellation_token token = {};
-    Priority priority = Priority::normal;
-    bool run_inline = false;
-};
+// `Thread_safe::async` and the multi-object `ts::async` take `Task_options` (defined in
+// task.h) — the same aggregate as `then`: `{token, priority, run_inline}`. `run_inline` runs
+// the body synchronously on the calling thread when the pipe is immediately free (else it
+// enqueues as usual) -- see the note on `async`.
 
 // The only sanctioned way to touch a `T` across threads. You never receive a bare
 // `T&`; you hand a functor to `async()` and it runs once access has been granted.
@@ -205,7 +196,7 @@ public:
     // NOT opt in from a worker you can't afford to block (e.g. inside a graph node).
     template<typename Fn>
         requires detail::Async_accessor<Fn, T&> && (!detail::Async_accessor<Fn, const T&>)
-    auto async(Fn&& fn, Async_options opts = {})
+    auto async(Fn&& fn, Task_options opts = {})
         -> Task<detail::Async_result_t<Fn, T&>>
     {
         return launch<detail::Async_result_t<Fn, T&>, Access::read_write>(
@@ -215,7 +206,7 @@ public:
     // `read_only`: functor takes `const T&`, optionally + a trailing token
     template<typename Fn>
         requires detail::Async_accessor<Fn, const T&>
-    auto async(Fn&& fn, Async_options opts = {}) const
+    auto async(Fn&& fn, Task_options opts = {}) const
         -> Task<detail::Async_result_t<Fn, const T&>>
     {
         return launch<detail::Async_result_t<Fn, const T&>, Access::read_only>(
@@ -224,7 +215,7 @@ public:
 
 private:
     template<typename R, Access mode, typename Inst, typename Fn>
-    Task<R> launch(Inst* inst, Fn&& fn, Async_options opts) const
+    Task<R> launch(Inst* inst, Fn&& fn, Task_options opts) const
     {
         // The body (stored in the block) runs `fn` under this object's access scope. If
         // `fn` takes a trailing token, the body does too and `Executable::run` forwards the
@@ -283,7 +274,7 @@ struct Thread_safe_access
 // canonical order (deduped write-wins), releases them at completion via an attached
 // continuation. Returns the `Task<R>`.
 template<typename Args, std::size_t... I, typename Fn, typename... Ts>
-auto async_build(Async_options opts, std::index_sequence<I...>, Fn&& fn, Thread_safe<Ts>&... objs)
+auto async_build(Task_options opts, std::index_sequence<I...>, Fn&& fn, Thread_safe<Ts>&... objs)
 {
     using R = std::invoke_result_t<Fn, Ts&...>;
     auto instances = std::make_tuple(Thread_safe_access::instance(objs)...);
@@ -339,7 +330,7 @@ auto async_build(Async_options opts, std::index_sequence<I...>, Fn&& fn, Thread_
 // `Task<R>` -- but do NOT block a graph node on it (same rule as single-object async).
 template<typename Fn, typename... Ts>
     requires (sizeof...(Ts) >= 1)
-auto async(Async_options opts, Fn&& fn, Thread_safe<Ts>&... objs)
+auto async(Task_options opts, Fn&& fn, Thread_safe<Ts>&... objs)
 {
     using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
     static_assert(std::tuple_size_v<Args> == sizeof...(Ts),
@@ -352,7 +343,7 @@ template<typename Fn, typename... Ts>
     requires (sizeof...(Ts) >= 1)
 auto async(Fn&& fn, Thread_safe<Ts>&... objs)
 {
-    return async(Async_options{}, std::forward<Fn>(fn), objs...);
+    return async(Task_options{}, std::forward<Fn>(fn), objs...);
 }
 
 // `ts::launch` / `ts::nested` (bare scheduler tasks) live in task.h now — they dispatch

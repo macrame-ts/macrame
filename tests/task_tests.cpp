@@ -539,7 +539,7 @@ void test_launch_priority()
 {
     // Priority is accepted on every launch route (ordering is covered deterministically by
     // the scheduler + graph tests; here just confirm the API threads through and runs).
-    TS_CHECK(ts::launch([] { return 1; }, {}, Priority::high).sync() == 1);
+    TS_CHECK(ts::launch([] { return 1; }, { .priority = Priority::high }).sync() == 1);
     TS_CHECK(ts::task([] { return 2; }).priority(Priority::low).launch().sync() == 2);
 
     ts::Thread_safe<int> d{ 40 };
@@ -613,7 +613,7 @@ void test_task_body_token_earlyout()
         while (!tok.is_cancel_requested())
             std::this_thread::yield();   // running -- poll the token
         stage.store(1);                  // observed cancellation mid-body -> early out
-    }, src.token());
+    }, { .token = src.token() });
 
     wait_until([&] { return started.load(); });   // body started before we cancel
     src.request_cancel();
@@ -774,7 +774,7 @@ void test_launch_cancelled()
     ts::Cancellation_source src;
     src.request_cancel();
     std::atomic<bool> ran{ false };
-    ts::Task<int> t = ts::launch([&ran] { ran.store(true); return 1; }, src.token());
+    ts::Task<int> t = ts::launch([&ran] { ran.store(true); return 1; }, { .token = src.token() });
     wait_until([&] { return t.is_done(); });
     TS_CHECK(t.is_cancelled());
     TS_CHECK(!ran.load());
@@ -821,7 +821,7 @@ void test_task_after_cancelled_prereq()
 {
     ts::Cancellation_source src;
     src.request_cancel();
-    ts::Task<void> a = ts::launch([] {}, src.token());   // cancelled prerequisite
+    ts::Task<void> a = ts::launch([] {}, { .token = src.token() });   // cancelled prerequisite
     std::atomic<bool> ran{ false };
     ts::Task<void> b = ts::task([&] { ran.store(true); }).after(a).launch();
     b.sync();   // void get on a cancelled task unblocks
@@ -836,7 +836,7 @@ void test_task_after_cancel_propagates_multi()
     ts::Cancellation_source src;
     src.request_cancel();
     ts::Task<void> a = ts::launch([] {});                    // completes
-    ts::Task<void> b = ts::launch([] {}, src.token());       // cancelled
+    ts::Task<void> b = ts::launch([] {}, { .token = src.token() });       // cancelled
     ts::Task<void> c = ts::launch([] {});                    // completes
     std::atomic<bool> ran{ false };
     ts::Task<void> dep = ts::task([&] { ran.store(true); }).after(a, b, c).launch();

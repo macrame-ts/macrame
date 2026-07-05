@@ -223,7 +223,7 @@ void test_pipe_stress()
     TS_CHECK(read_value(d) == 5000);
 }
 
-// --- inline dispatch (Async_options::run_inline) --------------------------
+// --- inline dispatch (Task_options::run_inline) --------------------------
 
 // A write accessor with `run_inline` on a free pipe runs synchronously on the CALLING
 // thread; the returned task is already settled when the call returns.

@@ -90,7 +90,7 @@ void stress_inline_async()
             {
                 for (int k = 0; k < per; ++k)
                 {
-                    ts::Async_options opts{ .run_inline = (k % 3) == 0 };
+                    ts::Task_options opts{ .run_inline = (k % 3) == 0 };
                     if (k & 1)
                         obj.async([](int& v) { ++v; }, opts);
                     else
@@ -455,7 +455,7 @@ void stress_token_body()
                 std::this_thread::yield();
             stage.store(1, std::memory_order_relaxed);
             return 7;
-        }, src.token());
+        }, { .token = src.token() });
 
         ts::Task<int> u = t.then([](int v) { return v + 1; }, { .run_inline = true });
 

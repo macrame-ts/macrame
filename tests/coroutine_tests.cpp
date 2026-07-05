@@ -98,7 +98,7 @@ void test_loop()
 // via `is_cancelled()` and early-out with a value.
 Task<int> co_cancel(Cancellation_token tok)
 {
-    Task<int> t = ts::launch([] { return 7; }, tok);
+    Task<int> t = ts::launch([] { return 7; }, { .token = tok });
     while (!t.is_done())
         std::this_thread::yield();
     if (t.is_cancelled())
