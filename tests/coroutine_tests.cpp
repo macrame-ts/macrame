@@ -12,6 +12,7 @@
 #include <thread>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 using ts::test::run;
 using ts::Task;
@@ -141,6 +142,87 @@ void test_access_context()
     TS_CHECK(t.sync() == 1);
 }
 
+// 8. The async-lock guard: `co_await ts::write(w)` acquires the pipe and resumes with an RAII
+// guard giving direct `Counter&`; mutate it, release at scope end, then read it back via a read
+// guard. Straight-line RAII in place of a callback `async`.
+Task<int> co_write_guard(ts::Thread_safe<tests::Counter>& w)
+{
+    {
+        auto g = co_await ts::write(w);   // exclusive; guard grants `Counter&`
+        g->increment();
+        g->add(5);
+    }   // guard released -- pipe free again
+    auto r = co_await ts::read(w);        // shared reader; `const Counter&`
+    co_return r->value();
+}
+
+void test_write_guard()
+{
+    ts::Thread_safe<tests::Counter> w;
+    TS_CHECK(co_write_guard(w).sync() == 6);   // 1 + 5
+}
+
+// 9. Read guard: shared access, `const` view -- the harness passes for a const method inside it.
+Task<int> co_read_guard(ts::Thread_safe<tests::Counter>& w)
+{
+    auto g = co_await ts::read(w);
+    co_return g->value();
+}
+
+void test_read_guard()
+{
+    ts::Thread_safe<tests::Counter> w;
+    w.async([](tests::Counter& c) { c.add(9); }).sync();
+    TS_CHECK(co_read_guard(w).sync() == 9);
+}
+
+// 10. Guard + control flow: a loop inside ONE write-guard scope -- the ergonomic win over an
+// `async` lambda (no `co_await` in the loop, so the pipe is held for the whole critical section).
+Task<int> co_guard_loop(ts::Thread_safe<tests::Counter>& w, int n)
+{
+    auto g = co_await ts::write(w);
+    for (int i = 0; i < n; ++i)
+        g->increment();
+    co_return g->value();
+}
+
+void test_guard_loop()
+{
+    ts::Thread_safe<tests::Counter> w;
+    TS_CHECK(co_guard_loop(w, 10).sync() == 10);
+}
+
+// 11. Contention: many threads each drive a coroutine that repeatedly acquires the write guard
+// on the SAME object. The pipe serializes the writers (deferred acquire -> suspend -> resume on
+// the releasing thread), so the total is exact. The concurrency test.
+Task<void> co_bump(ts::Thread_safe<tests::Counter>& w, int times)
+{
+    for (int i = 0; i < times; ++i)
+    {
+        auto g = co_await ts::write(w);   // may defer + resume cross-thread under contention
+        g->increment();
+    }   // released each iteration -- no guard held across the next co_await
+}
+
+void test_guard_contention()
+{
+    ts::Thread_safe<tests::Counter> w;
+    constexpr int threads = 8, each = 200;
+    {
+        std::vector<std::jthread> drivers;
+        for (int i = 0; i < threads; ++i)
+            drivers.emplace_back([&w] { co_bump(w, each).sync(); });
+    }   // join
+    TS_CHECK(co_read_guard(w).sync() == threads * each);
+}
+
+// 12. The suspension detector: `co_await` other work while holding a guard faults. Subprocess
+// death test (the fatal aborts) -- the scenario lives in `run_death_scenario` (tests.cpp).
+void test_death_await_under_guard()
+{
+    TS_CHECK(ts::test::expect_death("coro_await_under_guard"));
+}
+
 } // namespace
 
 void run_coroutine_tests()
@@ -153,6 +235,11 @@ void run_coroutine_tests()
     run("co loop", test_loop);
     run("co cancel", test_cancel);
     run("co access context", test_access_context);
+    run("co write guard", test_write_guard);
+    run("co read guard", test_read_guard);
+    run("co guard loop", test_guard_loop);
+    run("co guard contention", test_guard_contention);
+    run("co await-under-guard fatal", test_death_await_under_guard);
 }
 
 #else   // no coroutine support in this toolchain

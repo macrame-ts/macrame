@@ -729,6 +729,33 @@ void stress_coroutine()
     }   // join drivers
     assert(bad.load() == 0);
 }
+
+// Coroutine async-lock guard under contention: many threads each drive a coroutine that
+// repeatedly `co_await ts::write(w)` the SAME object. A contended acquire defers -> the coroutine
+// suspends -> resumes on the releasing thread, so this races `pipe_acquire`'s `on_acquired`
+// handshake + the cross-thread resume against `pipe_release`. The pipe serializes writers, so
+// the total must be exact.
+ts::Task<void> co_guard_bump(ts::Thread_safe<int>& w, int times)
+{
+    for (int i = 0; i < times; ++i)
+    {
+        auto g = co_await ts::write(w);
+        ++*g;
+    }   // guard released each iteration
+}
+
+void stress_coroutine_guard()
+{
+    constexpr int threads = 8, each = 300;
+    ts::Thread_safe<int> w{ 0 };
+    {
+        std::vector<std::jthread> drivers;
+        for (int t = 0; t < threads; ++t)
+            drivers.emplace_back([&] { co_guard_bump(w, each).sync(); });
+    }   // join
+    int final = w.async([](const int& v) { return v; }).sync();
+    assert(final == threads * each);
+}
 #endif
 
 } // namespace
@@ -760,6 +787,7 @@ int main()
     std::puts("tsan: parallel_for stress");  stress_parallel_for();
 #if defined(__cpp_impl_coroutine)
     std::puts("tsan: coroutine stress");     stress_coroutine();
+    std::puts("tsan: coroutine guard stress"); stress_coroutine_guard();
 #endif
     std::puts("tsan: graph nested stress");  stress_graph_nested();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);
