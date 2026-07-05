@@ -5,6 +5,7 @@
 
 #include "coroutine_support.h"
 #include "thread_safe.h"
+#include "test_util.h"
 
 #include <atomic>
 #include <cstdio>
@@ -111,6 +112,35 @@ void test_cancel()
     TS_CHECK(co_cancel(src.token()).sync() == -1);
 }
 
+// 7. Access-context threading: a coroutine created under a grant re-installs it on every
+// resumed segment, so a body touching guarded data AFTER a suspension does not fault the
+// harness. The `Signal` gate makes the suspension + resume deterministic and, crucially,
+// resumes OUTSIDE the original `Access_scope` (below) -- so `current_access` is null at resume
+// and only the promise's re-installed snapshot lets `increment()`/`value()` pass.
+Task<int> co_touch_after_await(tests::Counter& c, ts::Signal& gate)
+{
+    co_await gate;        // suspends until triggered
+    c.increment();        // guarded -- faults the harness without the re-installed grant
+    co_return c.value();
+}
+
+void test_access_context()
+{
+    tests::Counter c;
+    ts::Signal gate;
+    ts::Access_context ctx;
+    ctx.add(&c, ts::Access::read_write);
+
+    Task<int> t;
+    {
+        ts::Access_scope scope(ctx);
+        t = co_touch_after_await(c, gate);   // snapshots the grant; suspends on `gate`
+    }   // grant scope ends -- the coroutine keeps its snapshot copy
+
+    gate.trigger();               // resume runs here (no ambient grant) under the re-installed one
+    TS_CHECK(t.sync() == 1);
+}
+
 } // namespace
 
 void run_coroutine_tests()
@@ -122,6 +152,7 @@ void run_coroutine_tests()
     run("co when_all", test_when_all);
     run("co loop", test_loop);
     run("co cancel", test_cancel);
+    run("co access context", test_access_context);
 }
 
 #else   // no coroutine support in this toolchain

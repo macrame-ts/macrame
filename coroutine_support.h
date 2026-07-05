@@ -7,13 +7,13 @@
 // the block through the existing `detail::core_of` friend, and the return type is wired via
 // a `std::coroutine_traits` specialization.
 //
+// Per-segment `Access_context` re-install is DONE (below): a coroutine migrates threads
+// across suspension, but the harness keys off `thread_local current_access`, so the promise
+// snapshots the ambient grant at creation (`snapshot_access`, the same value the launcher
+// would inherit) and each resumed segment re-installs it (`Inherited_access_scope` around the
+// resume) -- so a resumed body may touch data the coroutine was granted, harness intact.
+//
 // FOLLOW-UPS (deliberately out of scope for the spike -- see docs/TODO.md "Coroutines"):
-//  1. Per-segment `Access_context` re-install. A coroutine migrates threads across
-//     suspension, but the access harness uses `thread_local current_access`. Each resumed
-//     segment must re-install the coroutine's `Access_context` (reuse the nested-task
-//     inheritance machinery: `snapshot_access` + `Inherited_access_scope`). Right now a
-//     resumed segment runs with NO access grant, so a resumed body touching guarded data
-//     would fault the harness. The tests below never touch guarded data across a suspension.
 //  2. `Thread_safe` async-lock guard: `auto g = co_await w.write();` -> suspend until the
 //     pipe grants, resume with an RAII guard over `T`, release on scope exit. Plus the
 //     harness-as-suspension-detector: fault if a pipe grant is held across a suspension.
@@ -27,6 +27,7 @@
 
 #include <atomic>
 #include <coroutine>
+#include <optional>
 #include <utility>
 
 namespace ts
@@ -62,17 +63,42 @@ struct Task_awaiter
     // machinery calls `await_resume`), while an async fire (the common case, on the settling
     // worker) resumes after we have fully suspended. `state_` lives in the frame, which
     // outlives the suspension, so it is valid when a later cross-thread callback reads it.
-    bool await_suspend(std::coroutine_handle<> h)
+    template<typename P>
+    bool await_suspend(std::coroutine_handle<P> h)
     {
         core_->attach([this, h](void*, bool)
         {
             if (state_.exchange(1, std::memory_order_acq_rel) == 2)
-                h.resume();   // await_suspend already suspended -> we own the resume
+                resume_with_access(h);   // await_suspend already suspended -> we own the resume
         });
 
         if (state_.exchange(2, std::memory_order_acq_rel) == 1)
             return false;     // callback already fired synchronously -> resume via await_resume
         return true;          // suspended; the callback will resume when the task settles
+    }
+
+    // The async resume runs on the thread that settled the awaited task (a worker), whose
+    // `current_access` is NOT the coroutine's. Re-install the coroutine's captured grant
+    // (`Task_promise::access_ctx_`, a `snapshot_access()` copy taken at creation) for the
+    // duration of this segment, so a resumed body may touch the data the coroutine was granted
+    // -- same mechanism as nested-task inheritance. The `requires` gate keeps `co_await` usable
+    // inside ANY coroutine (one whose promise has no `access_ctx_` just resumes plainly). Note
+    // the sync-fire path (`await_suspend` returns false) needs no re-install: it continues the
+    // current segment on the current thread, already under the coroutine's context. The scope's
+    // destructor only touches its saved `prev_`, so it stays valid even though `h.resume()` may
+    // destroy the frame (and `access_ctx_`) when the coroutine completes.
+    template<typename P>
+    static void resume_with_access(std::coroutine_handle<P> h)
+    {
+        if constexpr (requires { h.promise().access_ctx_; })
+        {
+            Inherited_access_scope scope(h.promise().access_ctx_);
+            h.resume();
+        }
+        else
+        {
+            h.resume();
+        }
     }
 
     decltype(auto) await_resume()
@@ -129,6 +155,10 @@ struct Task_promise
 
     Task_ptr core_;
     Result_block<R>* wrapper_ = nullptr;
+    // The ambient access grant at creation (empty if created outside any task). Re-installed
+    // around each resumed segment so the harness passes across thread migration. Snapshotted
+    // here (member init runs in the promise ctor, on the creating thread, before the body).
+    std::optional<Access_context> access_ctx_ = snapshot_access();
 };
 
 template<>
@@ -150,6 +180,7 @@ struct Task_promise<void>
     }
 
     Task_ptr core_;
+    std::optional<Access_context> access_ctx_ = snapshot_access();   // see Task_promise<R>
 };
 
 } // namespace detail
