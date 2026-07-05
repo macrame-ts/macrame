@@ -5,6 +5,7 @@
 
 #include "coroutine_support.h"
 #include "thread_safe.h"
+#include "parallel_for.h"
 #include "test_util.h"
 
 #include <atomic>
@@ -223,6 +224,72 @@ void test_death_await_under_guard()
     TS_CHECK(ts::test::expect_death("coro_await_under_guard"));
 }
 
+// 13. Feature showcase: one coroutine weaving the whole system into straight-line code --
+// prioritized producers joined by when_all (dependencies), a task that forks nested work,
+// a Thread_safe write-guard critical section, async_parallel_for, a Signal phase gate,
+// cooperative cancellation, and a final async read.
+Task<int> co_showcase(ts::Thread_safe<tests::Counter>& world, ts::Signal& phase, Cancellation_token tok)
+{
+    // (a) priority + dependency fan-in: a high- and a low-priority producer, joined.
+    Task<int> hi = ts::launch([] { return 3; }, { .priority = Priority::high });
+    Task<int> lo = ts::launch([] { return 4; }, { .priority = Priority::low });
+    auto [a, b] = co_await ts::when_all(std::move(hi), std::move(lo));      // 3, 4
+
+    // (b) nested tasks: a task body forks nested work; its completion gates on them.
+    // `nested_sum` lives in the coroutine frame, so it outlives the forked nested tasks.
+    std::atomic<int> nested_sum{ 0 };
+    co_await ts::launch([&nested_sum]
+    {
+        for (int k = 0; k < 4; ++k)
+            ts::nested([&nested_sum, k] { nested_sum.fetch_add(k, std::memory_order_relaxed); });
+    });                                                                     // nested_sum == 6
+
+    // (c) Thread_safe write-guard: a critical section over the object, in place.
+    {
+        auto g = co_await ts::write(world);
+        g->add(a + b);                                                     // +7
+        g->add(nested_sum.load(std::memory_order_relaxed));               // +6  -> world == 13
+    }   // pipe released
+
+    // (d) data-parallel fan-out, awaited.
+    std::atomic<int> pf{ 0 };
+    co_await ts::async_parallel_for(100, [&pf](int) { pf.fetch_add(1, std::memory_order_relaxed); });
+
+    // (e) phase gate: block on an external Signal.
+    co_await phase;
+
+    // (f) cooperative cancellation as ordinary control flow.
+    if (tok.is_cancel_requested())
+        co_return -1;
+
+    // (g) final read via async.
+    int total = co_await world.async([](const tests::Counter& c) { return c.value(); });   // 13
+    co_return total + pf.load(std::memory_order_relaxed);                  // 13 + 100 == 113
+}
+
+void test_showcase()
+{
+    // Full path: everything runs, phase released, not cancelled.
+    {
+        ts::Thread_safe<tests::Counter> world;
+        ts::Signal phase;
+        ts::Cancellation_source src;
+        Task<int> t = co_showcase(world, phase, src.token());
+        phase.trigger();
+        TS_CHECK(t.sync() == 113);
+    }
+    // Cancelled path: same pipeline, early-out after the phase gate.
+    {
+        ts::Thread_safe<tests::Counter> world;
+        ts::Signal phase;
+        ts::Cancellation_source src;
+        src.request_cancel();
+        Task<int> t = co_showcase(world, phase, src.token());
+        phase.trigger();
+        TS_CHECK(t.sync() == -1);
+    }
+}
+
 } // namespace
 
 void run_coroutine_tests()
@@ -240,6 +307,7 @@ void run_coroutine_tests()
     run("co guard loop", test_guard_loop);
     run("co guard contention", test_guard_contention);
     run("co await-under-guard fatal", test_death_await_under_guard);
+    run("co showcase", test_showcase);
 }
 
 #else   // no coroutine support in this toolchain
