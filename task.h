@@ -804,6 +804,10 @@ public:
     // full-expression and is always safe. To *move* the result out (ownership handoff, or a
     // move-only `R`) use `take()`. For a value task, fatal if it was cancelled (no result) —
     // check `is_cancelled()` first; a cancelled `void` sync() simply returns.
+    // NOTE: `sync()` waits for THIS task to settle, not for its downstream `then` continuations
+    // — `settle()` fires continuations AFTER waking waiters (`notify_all`), so a continuation may
+    // still be running (or not yet started) when `sync()` returns. To wait for a continuation,
+    // `sync()` the `Task` that `then()` returns.
     decltype(auto) sync()
     {
         detail::Task_control_block::retract_or_wait(core_);
@@ -1205,7 +1209,9 @@ Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
 // copies share one control block. Used as a done-signal, a barrier / pipeline-phase
 // gate, or an inter-task signal (the integrated equivalent of a manual-reset event
 // / a promise+future fused). `trigger()` is idempotent (first call wins), so it is
-// safe to trigger from multiple threads or more than once.
+// safe to trigger from multiple threads or more than once. As with any `Task`, `sync()`
+// returns when the signal is triggered — it does NOT wait for `then` continuations (they
+// fire after the waiter is woken); `sync()` the `Task` a `then()` returns to await one.
 class Signal : public Task<void>
 {
 public:

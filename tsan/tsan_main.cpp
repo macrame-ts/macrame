@@ -112,7 +112,10 @@ void stress_signal()
     {
         ts::Signal sig;
         std::atomic<int> fired{ 0 };
-        sig.then([&fired] { fired.fetch_add(1, std::memory_order_relaxed); });
+        // Capture the continuation as a task and join on IT: `sig.sync()` waits for the signal
+        // to settle, NOT for its downstream `then` continuation (which runs after `settle`'s
+        // `notify_all`), so asserting `fired` right after `sig.sync()` would be an over-assertion.
+        ts::Task<void> fired_done = sig.then([&fired] { fired.fetch_add(1, std::memory_order_relaxed); });
 
         {
             std::vector<std::jthread> threads;
@@ -121,6 +124,7 @@ void stress_signal()
             threads.emplace_back([&] { sig.sync(); });   // a concurrent waiter
         }   // join
         sig.sync();
+        fired_done.sync();   // the continuation has now run
         assert(fired.load() == 1);
     }
 }

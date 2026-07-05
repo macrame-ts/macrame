@@ -324,7 +324,10 @@ void test_signal_idempotent_trigger()
 {
     ts::Signal s;
     std::atomic<int> fired{ 0 };
-    s.then([&fired] { fired.fetch_add(1); });
+    // Join on the continuation task, not just the signal: `s.sync()` waits for the signal to
+    // settle, NOT for its `then` continuation (which runs after `settle`'s `notify_all`), so
+    // reading `fired` right after `s.sync()` would be an over-assertion.
+    ts::Task<void> fired_done = s.then([&fired] { fired.fetch_add(1); });
 
     // Many concurrent triggers must complete the signal exactly once.
     {
@@ -333,6 +336,7 @@ void test_signal_idempotent_trigger()
             threads.emplace_back([&] { s.trigger(); });
     }
     s.sync();
+    fired_done.sync();   // the continuation has now run
     TS_CHECK(fired.load() == 1);
 }
 
