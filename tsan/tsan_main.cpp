@@ -756,6 +756,32 @@ void stress_coroutine_guard()
     int final = w.async([](const int& v) { return v; }).sync();
     assert(final == threads * each);
 }
+
+// Deep coroutine cascade -- proves the bounded resume trampoline. A `depth`-deep chain of
+// coroutines each `co_await`s the previous; all are suspended on one `Signal`. Triggering it
+// resumes the innermost, whose completion resumes the next, ... -- a cascade that WITHOUT the
+// `schedule_resume` trampoline would recurse (settle -> resume -> complete -> settle -> ...) one
+// stack frame per level and overflow at this depth. With it, the cascade runs iteratively. Also
+// checks the result threads correctly through all `depth` awaits.
+ts::Task<int> co_gate(ts::Signal& gate)
+{
+    co_await gate;
+    co_return 0;
+}
+ts::Task<int> co_add_prev(ts::Task<int> prev)
+{
+    co_return 1 + co_await std::move(prev);
+}
+void stress_coroutine_deep()
+{
+    constexpr int depth = 50000;
+    ts::Signal gate;
+    ts::Task<int> t = co_gate(gate);
+    for (int i = 0; i < depth; ++i)
+        t = co_add_prev(std::move(t));
+    gate.trigger();   // cascade of `depth` resumes -- must not overflow the stack
+    assert(t.sync() == depth);
+}
 #endif
 
 } // namespace
@@ -788,6 +814,7 @@ int main()
 #if defined(__cpp_impl_coroutine)
     std::puts("tsan: coroutine stress");     stress_coroutine();
     std::puts("tsan: coroutine guard stress"); stress_coroutine_guard();
+    std::puts("tsan: coroutine deep cascade"); stress_coroutine_deep();
 #endif
     std::puts("tsan: graph nested stress");  stress_graph_nested();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);

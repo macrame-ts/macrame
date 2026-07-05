@@ -18,10 +18,12 @@
 // `T&`/`const T&`, released on scope exit. The harness doubles as a suspension detector: a
 // `co_await` that would suspend while a guard is held faults (`pipe_guard_depth`).
 //
-// FOLLOW-UPS (deliberately out of scope -- see docs/TODO.md "Coroutines"):
-//  3. Resume scheduling. `await_suspend` resumes INLINE on the thread that settles the
-//     awaited task; a production version should schedule the resume as a task-segment (via
-//     the scheduler / inline trampoline) carrying the coroutine's priority + access context.
+// Resume scheduling is DONE (below): a resume no longer recurses via inline `h.resume()` --
+// it goes through a bounded coroutine-resume trampoline (`schedule_resume`), mirroring
+// `Task_control_block::inline_pending`, so a deep cascade of coroutine completions runs
+// ITERATIVELY (O(1) stack) instead of overflowing. The resume stays on the settling thread (no
+// queue hop -> lowest latency); the coroutine's `priority_` is carried onto its block for the
+// queued paths (a fully-queued resume variant is a possible future refinement).
 
 #include "task.h"
 
@@ -33,6 +35,7 @@
 #include <coroutine>
 #include <optional>
 #include <utility>
+#include <vector>
 
 namespace ts
 {
@@ -66,6 +69,46 @@ inline void resume_with_access(std::coroutine_handle<P> h)
     {
         h.resume();
     }
+}
+
+// Bounded coroutine-resume trampoline. Without it a cascade of coroutine completions recurses
+// and overflows the stack for a deep chain: coroutine A's completion resumes B (which awaited
+// A), whose completion resumes C, ... -- i.e. settle -> awaiter callback -> resume -> return ->
+// complete -> settle -> ... nested per level. This mirrors `Task_control_block::inline_pending`
+// (task.h) EXACTLY in spirit -- we can't reuse that vector because it is typed to `Task_ptr` and
+// drives `block->execute()`, whereas here we drive a `coroutine_handle`. The first resume on a
+// thread starts a drain; a resume requested DURING the drain (the cascade) is pushed and run by
+// the outer loop, so the whole chain runs ITERATIVELY (O(1) stack). Type-erased to a thunk + one
+// pointer -> NO per-resume allocation (the vector retains capacity across drains, like task.h's).
+// The resume still runs on the settling thread (no queue hop -> lowest latency), just un-nested.
+struct Resume_item
+{
+    void (*thunk)(void*);
+    void* handle;
+};
+inline thread_local std::vector<Resume_item> resume_pending;
+inline thread_local bool resume_draining = false;
+
+template<typename P>
+void resume_thunk(void* addr)
+{
+    resume_with_access(std::coroutine_handle<P>::from_address(addr));
+}
+
+template<typename P>
+void schedule_resume(std::coroutine_handle<P> h)
+{
+    resume_pending.push_back({ &resume_thunk<P>, h.address() });
+    if (resume_draining)
+        return;   // an active drain on this thread will pick it up -- don't recurse
+    resume_draining = true;
+    for (std::size_t head = 0; head < resume_pending.size(); ++head)
+    {
+        Resume_item item = resume_pending[head];   // copy: a nested push may realloc the vector
+        item.thunk(item.handle);                   // re-install access + h.resume() (may destroy the frame)
+    }
+    resume_pending.clear();   // retains capacity -> no steady-state allocation
+    resume_draining = false;
 }
 
 // Awaiter for `co_await task`. Holds an owning `core_` (keeps the awaited block alive across
@@ -108,7 +151,7 @@ struct Task_awaiter
         core_->attach([this, h](void*, bool)
         {
             if (state_.exchange(1, std::memory_order_acq_rel) == 2)
-                resume_with_access(h);   // await_suspend already suspended -> we own the resume
+                schedule_resume(h);   // await_suspend already suspended -> we own the resume (via the bounded trampoline)
         });
 
         if (state_.exchange(2, std::memory_order_acq_rel) == 1)
@@ -151,6 +194,7 @@ struct Task_promise
         auto [c, w] = make_block<R>();
         core_ = std::move(c);
         wrapper_ = w;
+        core_->flags.priority = priority_;   // carry the coroutine's dispatch priority onto its block
     }
 
     Task<R> get_return_object() { return Task<R>(core_); }
@@ -174,6 +218,12 @@ struct Task_promise
     // around each resumed segment so the harness passes across thread migration. Snapshotted
     // here (member init runs in the promise ctor, on the creating thread, before the body).
     std::optional<Access_context> access_ctx_ = snapshot_access();
+    // The coroutine's dispatch priority, carried onto its block (`core_->flags.priority`) so a
+    // QUEUED use of the coroutine's `Task` (as a prerequisite / continuation) respects it. Default
+    // `normal`; there is no setter yet (a coroutine has no config channel), and the resumed segment
+    // runs inline via the bounded trampoline (no queue hop), so a resume itself carries no queue
+    // priority -- the field is wired for the queued paths and a future queued-resume variant.
+    Priority priority_ = Priority::normal;
 };
 
 template<>
@@ -181,7 +231,9 @@ struct Task_promise<void>
 {
     Task_promise()
         : core_(make_bare_block())
-    {}
+    {
+        core_->flags.priority = priority_;   // see Task_promise<R>
+    }
 
     Task<void> get_return_object() { return Task<void>(core_); }
     std::suspend_never initial_suspend() const noexcept { return {}; }
@@ -196,6 +248,7 @@ struct Task_promise<void>
 
     Task_ptr core_;
     std::optional<Access_context> access_ctx_ = snapshot_access();   // see Task_promise<R>
+    Priority priority_ = Priority::normal;                           // see Task_promise<R>
 };
 
 // RAII async-lock guard over a `Thread_safe<T>`'s pipe, held for direct `T` access. Returned by
@@ -283,7 +336,7 @@ struct Pipe_guard_awaiter
             [this, h]
             {
                 if (state_.exchange(1, std::memory_order_acq_rel) == 2)
-                    resume_with_access(h);   // re-install grant + resume
+                    schedule_resume(h);   // re-install grant + resume (via the bounded trampoline)
             });
         if (acquired)
             return false;   // held now -> don't suspend; `await_resume` builds the guard
