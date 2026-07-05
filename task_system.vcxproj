@@ -33,6 +33,7 @@
     <ClCompile Include="tests\access_tests.cpp" />
     <ClCompile Include="tests\graph_tests.cpp" />
     <ClCompile Include="tests\parallel_tests.cpp" />
+    <ClCompile Include="tests\coroutine_tests.cpp" />
     <ClCompile Include="tests\harness.cpp" />
     <ClCompile Include="tests\integration_tests.cpp" />
     <ClCompile Include="tests\scheduler_tests.cpp" />
@@ -42,6 +43,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="access.h" />
+    <ClInclude Include="coroutine_support.h" />
     <ClInclude Include="event_count.h" />
     <ClInclude Include="fatal.h" />
     <ClInclude Include="mpmc_queue.h" />
@@ -62,6 +64,7 @@
     <ClInclude Include="tests\access_tests.h" />
     <ClInclude Include="tests\graph_tests.h" />
     <ClInclude Include="tests\parallel_tests.h" />
+    <ClInclude Include="tests\coroutine_tests.h" />
     <ClInclude Include="tests\harness.h" />
     <ClInclude Include="tests\integration_tests.h" />
     <ClInclude Include="tests\scheduler_tests.h" />

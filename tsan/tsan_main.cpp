@@ -12,6 +12,10 @@
 #include "static_task_graph.h"
 #include "thread_safe.h"
 
+#if defined(__cpp_impl_coroutine)
+#include "coroutine_support.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -692,6 +696,37 @@ void stress_parallel_for()
     }
 }
 
+#if defined(__cpp_impl_coroutine)
+// Coroutine spike: the awaiter's resume fires on the thread that settles the awaited task
+// (cross-thread), racing `await_suspend`'s handshake (`state_`). Many external threads each
+// drive a coroutine that `co_await`s a chain of launched tasks; `sync()` joins. Exercises the
+// synchronous-vs-async resume handshake + the decoupled-block lifetime under contention.
+ts::Task<int> co_chain(int depth)
+{
+    int acc = 0;
+    for (int i = 0; i < depth; ++i)
+        acc = co_await ts::launch([acc] { return acc + 1; });
+    co_return acc;
+}
+
+void stress_coroutine()
+{
+    constexpr int threads = 8, per = 400, depth = 6;
+    std::atomic<int> bad{ 0 };
+    {
+        std::vector<std::jthread> drivers;
+        for (int t = 0; t < threads; ++t)
+            drivers.emplace_back([&]
+            {
+                for (int i = 0; i < per; ++i)
+                    if (co_chain(depth).sync() != depth)
+                        bad.fetch_add(1, std::memory_order_relaxed);
+            });
+    }   // join drivers
+    assert(bad.load() == 0);
+}
+#endif
+
 } // namespace
 
 int main()
@@ -719,6 +754,9 @@ int main()
     std::puts("tsan: spin_then_block stress"); stress_idle_policy(Idle_policy::spin_then_block);
     std::puts("tsan: handoff stress");        stress_idle_policy(Idle_policy::handoff);
     std::puts("tsan: parallel_for stress");  stress_parallel_for();
+#if defined(__cpp_impl_coroutine)
+    std::puts("tsan: coroutine stress");     stress_coroutine();
+#endif
     std::puts("tsan: graph nested stress");  stress_graph_nested();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);
     std::puts("tsan: done (no races)");

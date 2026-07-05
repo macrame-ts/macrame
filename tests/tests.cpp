@@ -10,6 +10,7 @@
 #include "task_tests.h"
 #include "graph_tests.h"
 #include "parallel_tests.h"
+#include "coroutine_tests.h"
 #include "integration_tests.h"
 
 #include <cstring>
@@ -23,6 +24,7 @@ void run_all_tests()
     run_task_tests();
     run_graph_tests();
     run_parallel_tests();
+    run_coroutine_tests();
     run_integration_tests();
 }
 
