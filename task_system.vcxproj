@@ -22,6 +22,7 @@
     <ClCompile Include="access.cpp" />
     <ClCompile Include="fatal.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="mem_profile.cpp" />
     <ClCompile Include="scheduler.cpp" />
     <ClCompile Include="static_task_graph.cpp" />
     <ClCompile Include="guarded.cpp" />
@@ -47,6 +48,7 @@
     <ClInclude Include="event_count.h" />
     <ClInclude Include="fatal.h" />
     <ClInclude Include="mpmc_queue.h" />
+    <ClInclude Include="mem_profile.h" />
     <ClInclude Include="parallel_for.h" />
     <ClInclude Include="priority.h" />
     <ClInclude Include="ref_count.h" />

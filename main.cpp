@@ -1,5 +1,6 @@
 #include "tests.h"
 #include "benchmarks.h"
+#include "mem_profile.h"
 #include "harness.h"
 #include "engine.h"
 
@@ -29,6 +30,11 @@ int main(int argc, char** argv)
     if (argc >= 2 && std::strcmp(argv[1], "--bench") == 0)
     {
         run_benchmarks();
+        return 0;
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--memprofile") == 0)
+    {
+        run_mem_profile();
         return 0;
     }
     if (argc >= 2 && std::strcmp(argv[1], "--tests") == 0)
