@@ -183,12 +183,18 @@ struct Task_control_block;
 void intrusive_inc(Task_control_block* p) noexcept;
 void intrusive_dec(Task_control_block* p) noexcept;
 
+// Tag for adopting an existing (already-counted) reference into a `Task_ptr` without an
+// extra `inc` -- pairs with `release()` to hand a ref across a raw-pointer boundary (e.g. a
+// queued dispatch that carries the block as `void*`).
+struct Adopt_ref {};
+
 class Task_ptr
 {
 public:
     Task_ptr() noexcept = default;
     Task_ptr(std::nullptr_t) noexcept {}
     explicit Task_ptr(Task_control_block* p) noexcept : p_(p) { if (p_) intrusive_inc(p_); }
+    Task_ptr(Task_control_block* p, Adopt_ref) noexcept : p_(p) {}   // adopt an existing ref (no inc)
     Task_ptr(const Task_ptr& o) noexcept : p_(o.p_) { if (p_) intrusive_inc(p_); }
     Task_ptr(Task_ptr&& o) noexcept : p_(o.p_) { o.p_ = nullptr; }
     Task_ptr& operator=(const Task_ptr& o) noexcept
@@ -209,6 +215,10 @@ public:
         return *this;
     }
     ~Task_ptr() { if (p_) intrusive_dec(p_); }
+
+    // Relinquish ownership: return the raw pointer WITHOUT decrementing (the ref is now the
+    // caller's to manage -- adopt it back with `Task_ptr(p, Adopt_ref{})`).
+    Task_control_block* release() noexcept { auto* p = p_; p_ = nullptr; return p; }
 
     Task_control_block* get() const noexcept { return p_; }
     Task_control_block* operator->() const noexcept { return p_; }
@@ -274,6 +284,14 @@ struct Task_control_block
     // `reset` (retraction queues a duplicate the reset would otherwise let re-run the
     // body) fails the CAS and skips.
     std::atomic<std::uint64_t> run_state{ 0 };
+    // The generation captured at the last *dispatch* (`submit_ready`), read by the queued block
+    // trampoline (`run_block_dispatch`) so the reuse generation need not ride in the 16-byte
+    // `Task_entry` (the work-stealing deque stores those as `std::atomic<Task_entry>`, lock-free
+    // only at two words). A stale dispatch reads either its own generation (`claim` fails) or a
+    // newer one that `submit_ready` only writes when that run is already ready (so re-running it
+    // is safe and `claim` de-dups) -- `claim` stays the correctness gate; this just feeds it a
+    // candidate. Written only by `submit_ready` (one run in flight); atomic for the read race.
+    std::atomic<std::uint64_t> dispatched_gen{ 0 };
     Cancellation_token token;          // checked by `execute` before running the body
 
     // --- one-byte cluster --------------------------------------------------------------

@@ -25,24 +25,33 @@ void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closur
         held, priority);
 }
 
+// Trampoline for a queued block dispatch: the block travels as the entry's `data_` (its ref
+// adopted from the queue), the reuse generation via the block's `dispatched_gen`. No heap
+// closure -- the block IS the payload -- so a bare task dispatch allocates nothing beyond its
+// own block (killing the per-dispatch `submit_closure` alloc that hit every queued task).
+static void run_block_dispatch(void* data)
+{
+    Task_ptr block(static_cast<Task_control_block*>(data), Adopt_ref{});   // adopt the queued ref
+    std::uint64_t gen = block->dispatched_gen.load(std::memory_order_acquire);
+    if (block->execute)
+        block->execute(block, gen);              // claims `gen` internally (dedup + stale-skip)
+    else if (block->claim(gen))                  // bodyless: claim so a stale/duplicate no-ops
+        block->complete();
+}   // `block` decrements here -> releases the ref the queue held
+
 // A block whose prerequisites are all met: schedule it to run (its body, or, if
 // bodyless, just complete). Bridges task.h's lock-counter to the scheduler.
 void submit_ready(Task_ptr block)
 {
-    // Capture the reuse generation: a dispatch left stale by a `reset` (retraction can
-    // queue a duplicate) must not re-run the body against the new run. `claim(gen)`
-    // (inside execute, or here for a bodyless block) is the atomic gate. See task.h.
+    // Publish the generation this run was dispatched for BEFORE handing the block to the queue
+    // (release pairs with the trampoline's acquire). A dispatch left stale by a `reset` reads
+    // either this gen (claim fails) or a newer already-ready one (safe re-run, claim de-dups);
+    // `claim(gen)` is the correctness gate. See `dispatched_gen` in task.h.
     std::uint64_t gen = block->generation();
     Priority priority = block->flags.priority;
-    submit_closure(default_scheduler(),
-        [block = std::move(block), gen]
-        {
-            if (block->execute)
-                block->execute(block, gen);      // claims `gen` internally (dedup + stale-skip)
-            else if (block->claim(gen))          // bodyless: claim so a stale/duplicate no-ops
-                block->complete();
-        },
-        priority);
+    block->dispatched_gen.store(gen, std::memory_order_release);
+    // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
+    default_scheduler().submit(&run_block_dispatch, block.release(), priority);
 }
 
 namespace

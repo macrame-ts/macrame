@@ -49,7 +49,10 @@ namespace detail
 {
 
 // A queued task: the func + its data. Priority is no longer a field -- it is the queue the
-// task lives in (one lock-free MPMC queue per priority, scanned high->low).
+// task lives in (one lock-free MPMC queue per priority, scanned high->low). MUST stay 16 bytes
+// (two words): the work-stealing deque stores cells as `std::atomic<Task_entry>`, lock-free only
+// while the element is double-word-CAS-able. A block dispatch fits here as `{trampoline, block}`;
+// the reuse generation rides on the block (`dispatched_gen`), not in this entry.
 struct Task_entry
 {
     Task_func_ptr func_ = nullptr;
