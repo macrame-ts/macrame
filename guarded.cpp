@@ -161,7 +161,7 @@ void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode)
         pipe.idle.notify_all();
 }
 
-void multi_acquire(std::shared_ptr<Multi_async_state> state,
+void multi_acquire(Ref_ptr<Multi_async_state> state,
                    Task_ptr block, std::size_t pos)
 {
     if (pos == state->holds.size())

@@ -49,6 +49,7 @@
     <ClInclude Include="mpmc_queue.h" />
     <ClInclude Include="parallel_for.h" />
     <ClInclude Include="priority.h" />
+    <ClInclude Include="ref_count.h" />
     <ClInclude Include="scheduler.h" />
     <ClInclude Include="static_task_graph.h" />
     <ClInclude Include="task.h" />

@@ -98,7 +98,7 @@ constexpr Access async_mode_of()
 
 // The pipes a multi-object async acquired (canonical / pipe-address order, deduped
 // write-wins), released at the task's completion.
-struct Multi_async_state
+struct Multi_async_state : Ref_counted<Multi_async_state>
 {
     Scheduler* scheduler = nullptr;
     std::vector<std::pair<Pipe*, Access>> holds;
@@ -109,7 +109,7 @@ struct Multi_async_state
 // callback. Canonical (pipe-address) order makes the multi-object acquire deadlock-free --
 // the same order the graph uses (`distinct_pipes_` is address-sorted), so nodes and
 // multi-object asyncs can't deadlock against each other.
-void multi_acquire(std::shared_ptr<Multi_async_state> state,
+void multi_acquire(Ref_ptr<Multi_async_state> state,
                    Task_ptr block, std::size_t pos);
 
 // Try to run an async job INLINE on the calling thread instead of enqueuing it (opt-in via
@@ -302,7 +302,7 @@ auto async_build(Task_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<
             it->second = Access::read_write;
     }
 
-    auto state = std::make_shared<Multi_async_state>();
+    auto state = make_ref<Multi_async_state>();
     state->scheduler = &default_scheduler();
     for (const auto& [p, m] : by_pipe)
         state->holds.push_back({ p, m });
