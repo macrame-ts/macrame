@@ -982,9 +982,20 @@ public:
         return *this;
     }
 
-    Task<R> launch(Cancellation_token token = {})
+    // Set the cancellation token for the task. Call BEFORE the first `launch()` — the token
+    // is fixed dispatch config, not per-run: `launch()` must NOT rewrite it, because a
+    // *reused* block can have a prior run's worker still reading `token` (in `Executable::run`)
+    // when the next round would write it, and that read/write is unsynchronized across the
+    // reuse×retraction path — a data race. Setting it once, before any dispatch, is
+    // happens-before the read. To re-run under a different token, make a fresh `ts::task`.
+    Task_builder& token(Cancellation_token t)
     {
-        core_->token = std::move(token);
+        core_->token = std::move(t);
+        return *this;
+    }
+
+    Task<R> launch()
+    {
         detail::Task_control_block::release(core_);   // remove the launch lock
         return Task<R>(core_);
     }

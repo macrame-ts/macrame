@@ -636,7 +636,7 @@ void test_task_builder_token_earlyout()
             std::this_thread::yield();
         stage.store(1);
         return 42;
-    }).launch(src.token());
+    }).token(src.token()).launch();
 
     wait_until([&] { return started.load(); });
     src.request_cancel();
