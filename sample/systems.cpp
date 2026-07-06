@@ -14,7 +14,7 @@ float time_scale = 1.0f;
 namespace
 {
 
-// `Thread_safe::async` demo instrumentation: concurrent `nav` queries in flight.
+// `Guarded::async` demo instrumentation: concurrent `nav` queries in flight.
 std::atomic<int> nav_active{ 0 };
 std::atomic<int> nav_peak{ 0 };
 // Nav queries that early-outed on the cancel token mid-flight (body-level cancellation).
@@ -95,13 +95,13 @@ void tick_networking(const Float_store& input, Float_store& net)
     spin(0.5);
 }
 
-void tick_streaming(ts::Thread_safe<Float_store>& asset_source,
+void tick_streaming(ts::Guarded<Float_store>& asset_source,
                     const Float_store& input, Float_store& assets)
 {
     read_all(input);
     fill(assets, 1.0f);
 
-    // Stream a batch of assets from the read-only source via `Thread_safe::async`,
+    // Stream a batch of assets from the read-only source via `Guarded::async`,
     // fire-and-forget. Each load is processed by a `then` continuation; a `when_all`
     // over the batch fires a finalize continuation once every load is in. The
     // continuations run on workers (not blocking this node), like the nav demo --
@@ -145,7 +145,7 @@ void tick_navigation(const Float_store& nav, const Float_store& world_xf_prev, F
     spin(1.0);
 }
 
-void tick_ai(ts::Thread_safe<Float_store>& nav,
+void tick_ai(ts::Guarded<Float_store>& nav,
              const Float_store& world_xf_prev, const Float_store& paths,
              const Float_store& game_state, Float_store& intents)
 {
@@ -154,7 +154,7 @@ void tick_ai(ts::Thread_safe<Float_store>& nav,
     read_all(game_state);
 
     // Per-agent path queries against the read-only `nav` service via the
-    // `Thread_safe::async` path: fired concurrently, they run as concurrent
+    // `Guarded::async` path: fired concurrently, they run as concurrent
     // readers on `nav`'s pipe (on other workers, overlapping AI's own logic
     // below). Safe because `nav` has no writer this frame -- the legitimate use of
     // async access outside the static graph's declared edges.

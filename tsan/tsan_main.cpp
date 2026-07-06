@@ -1,5 +1,5 @@
 // ThreadSanitizer stress driver. Exercises the concurrency paths (scheduler,
-// Thread_safe reader/writer pipe, Static_task_graph + parallel_for, then/when_all)
+// Guarded reader/writer pipe, Static_task_graph + parallel_for, then/when_all)
 // without the Windows-specific test harness, so it builds under clang/libstdc++
 // with -fsanitize=thread on Linux/macOS. See tsan/run.sh and tsan/README.md.
 //
@@ -10,7 +10,7 @@
 #include "parallel_for.h"
 #include "scheduler.h"
 #include "static_task_graph.h"
-#include "thread_safe.h"
+#include "guarded.h"
 
 #if defined(__cpp_impl_coroutine)
 #include "coroutine_support.h"
@@ -54,7 +54,7 @@ void stress_scheduler()
 void stress_thread_safe()
 {
     constexpr int threads = 8, per = 2000;
-    ts::Thread_safe<int> obj{ 0 };
+    ts::Guarded<int> obj{ 0 };
     std::atomic<int> reads{ 0 };
     {
         std::vector<std::jthread> producers;
@@ -81,7 +81,7 @@ void stress_thread_safe()
 void stress_inline_async()
 {
     constexpr int threads = 8, per = 2000;
-    ts::Thread_safe<int> obj{ 0 };
+    ts::Guarded<int> obj{ 0 };
     std::atomic<int> reads{ 0 };
     {
         std::vector<std::jthread> producers;
@@ -132,7 +132,7 @@ void stress_signal()
 // Graph with internal parallel bands, re-executed in a loop.
 void stress_graph()
 {
-    ts::Thread_safe<int> a{ 0 }, b{ 0 }, c{ 0 };
+    ts::Guarded<int> a{ 0 }, b{ 0 }, c{ 0 };
     ts::Static_task_graph g;
     g.add_node([](int& x) { x = 1; }, a);
     g.add_node([](const int& x, int& y) { y = x * 10; }, a, b);
@@ -150,7 +150,7 @@ void stress_graph()
 void stress_graph_nested()
 {
     constexpr int n = 32;
-    ts::Thread_safe<std::array<int, n>> arr{};
+    ts::Guarded<std::array<int, n>> arr{};
     std::atomic<int> sum{ 0 };
 
     ts::Static_task_graph g;
@@ -180,7 +180,7 @@ void stress_graph_nested()
 // counter, slot moves, and finish across threads.
 void stress_when_all()
 {
-    ts::Thread_safe<int> a{ 3 }, b{ 4 }, c{ 5 };
+    ts::Guarded<int> a{ 3 }, b{ 4 }, c{ 5 };
     std::atomic<int> total{ 0 };
     for (int i = 0; i < 3000; ++i)
     {
@@ -201,7 +201,7 @@ void stress_when_all()
 // exactly once (completed or cancelled) and never stall (the counter must still reach 0).
 void stress_when_all_cancel()
 {
-    ts::Thread_safe<int> a{ 1 }, b{ 2 }, c{ 3 };
+    ts::Guarded<int> a{ 1 }, b{ 2 }, c{ 3 };
     for (int i = 0; i < 3000; ++i)
     {
         ts::Cancellation_source src;
@@ -406,7 +406,7 @@ void stress_reuse()
 // token check (a load) and with then-propagation; the block must settle exactly once.
 void stress_cancel()
 {
-    ts::Thread_safe<int> d{ 0 };
+    ts::Guarded<int> d{ 0 };
 
     for (int i = 0; i < 2000; ++i)
     {
@@ -423,7 +423,7 @@ void stress_cancel()
     }
 
     // Graph cancellation racing the run.
-    ts::Thread_safe<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ 0 }, b{ 0 };
     ts::Static_task_graph g;
     g.add_node([](int& v) { ++v; }, a);
     g.add_node([](const int& x, int& y) { y = x; }, a, b);
@@ -469,7 +469,7 @@ void stress_token_body()
 
     // Same, through an async accessor (body runs on the pipe): request_cancel races the
     // accessor's polling read.
-    ts::Thread_safe<int> d{ 5 };
+    ts::Guarded<int> d{ 5 };
     for (int i = 0; i < 2000; ++i)
     {
         ts::Cancellation_source src;
@@ -545,7 +545,7 @@ void stress_cancel_callback()
 // concurrent reads may overlap (allowed).
 void stress_graph_async()
 {
-    ts::Thread_safe<int> x{ 0 }, y{ 0 };
+    ts::Guarded<int> x{ 0 }, y{ 0 };
     ts::Static_task_graph g;
     ts::Graph_node n1 = g.add_node([](int& a) { ++a; }, x);                       // write x
     ts::Graph_node n2 = g.add_node([](int& a, int& b) { ++a; ++b; }, x, y);       // write x (handoff from n1) + write y
@@ -583,7 +583,7 @@ void stress_graph_async()
 // same object exercises the trampoline + the release/re-acquire hand-off.
 void stress_graph_inline()
 {
-    ts::Thread_safe<int> x{ 0 };
+    ts::Guarded<int> x{ 0 };
     ts::Static_task_graph g;
     ts::Graph_node a = g.add_node([](int& v) { ++v; }, x).set_inline();
     ts::Graph_node b = g.add_node([](int& v) { ++v; }, x).set_inline();
@@ -615,7 +615,7 @@ void stress_graph_inline()
 // release-on-completion continuation, and cross-object hold-and-wait (no cycle).
 void stress_multi_async()
 {
-    ts::Thread_safe<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ 0 }, b{ 0 };
     {
         std::vector<std::jthread> firers;
         for (int t = 0; t < 4; ++t)
@@ -735,7 +735,7 @@ void stress_coroutine()
 // suspends -> resumes on the releasing thread, so this races `pipe_acquire`'s `on_acquired`
 // handshake + the cross-thread resume against `pipe_release`. The pipe serializes writers, so
 // the total must be exact.
-ts::Task<void> co_guard_bump(ts::Thread_safe<int>& w, int times)
+ts::Task<void> co_guard_bump(ts::Guarded<int>& w, int times)
 {
     for (int i = 0; i < times; ++i)
     {
@@ -747,7 +747,7 @@ ts::Task<void> co_guard_bump(ts::Thread_safe<int>& w, int times)
 void stress_coroutine_guard()
 {
     constexpr int threads = 8, each = 300;
-    ts::Thread_safe<int> w{ 0 };
+    ts::Guarded<int> w{ 0 };
     {
         std::vector<std::jthread> drivers;
         for (int t = 0; t < threads; ++t)

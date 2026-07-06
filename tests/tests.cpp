@@ -1,7 +1,7 @@
 #include "tests.h"
 #include "test_util.h"
 #include "access.h"
-#include "thread_safe.h"
+#include "guarded.h"
 #include "static_task_graph.h"
 
 #if defined(__cpp_impl_coroutine)
@@ -10,7 +10,7 @@
 
 #include "scheduler_tests.h"
 #include "access_tests.h"
-#include "thread_safe_tests.h"
+#include "guarded_tests.h"
 #include "task_tests.h"
 #include "graph_tests.h"
 #include "parallel_tests.h"
@@ -24,7 +24,7 @@ void run_all_tests()
 {
     run_scheduler_tests();
     run_access_tests();
-    run_thread_safe_tests();
+    run_guarded_tests();
     run_task_tests();
     run_graph_tests();
     run_parallel_tests();
@@ -33,11 +33,11 @@ void run_all_tests()
 }
 
 #if defined(__cpp_impl_coroutine)
-// Death scenario body: acquire a `Thread_safe` write guard, then `co_await` other work while
+// Death scenario body: acquire a `Guarded` write guard, then `co_await` other work while
 // still holding it -- the pipe-held-across-suspension anti-pattern. Runs eagerly, so the fatal
 // fires during the call below, before `sync()`. `never` is never triggered, so `co_await never`
 // always reaches `await_suspend` (the detector) rather than escaping.
-static ts::Task<int> coro_await_under_guard(ts::Thread_safe<tests::Counter>& w, ts::Signal& never)
+static ts::Task<int> coro_await_under_guard(ts::Guarded<tests::Counter>& w, ts::Signal& never)
 {
     auto g = co_await ts::write(w);
     co_await never;              // suspend while the guard is held -> fatal
@@ -73,7 +73,7 @@ void run_death_scenario(const char* name)
     }
     else if (std::strcmp(name, "graph_cycle") == 0)
     {
-        ts::Thread_safe<int> a{ 0 }, b{ 0 };
+        ts::Guarded<int> a{ 0 }, b{ 0 };
         ts::Static_task_graph g;
         ts::Graph_node na = g.add_node([](int&) {}, a);
         ts::Graph_node nb = g.add_node([](int&) {}, b);
@@ -89,7 +89,7 @@ void run_death_scenario(const char* name)
     else if (std::strcmp(name, "graph_undeclared") == 0)
     {
         Counter outside;
-        ts::Thread_safe<int> a{ 0 };
+        ts::Guarded<int> a{ 0 };
         ts::Static_task_graph g;
         g.add_node([&outside](int&) { outside.increment(); }, a);   // touches undeclared `outside`
         g.compile();
@@ -99,7 +99,7 @@ void run_death_scenario(const char* name)
     {
         ts::Cancellation_source src;
         src.request_cancel();
-        ts::Thread_safe<int> d{ 0 };
+        ts::Guarded<int> d{ 0 };
         ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });
         while (!t.is_done()) std::this_thread::yield();
         t.sync();   // cancelled value task has no result -> fatal
@@ -118,7 +118,7 @@ void run_death_scenario(const char* name)
 #if defined(__cpp_impl_coroutine)
     else if (std::strcmp(name, "coro_await_under_guard") == 0)
     {
-        ts::Thread_safe<Counter> w;
+        ts::Guarded<Counter> w;
         ts::Signal never;
         coro_await_under_guard(w, never).sync();   // fatals during the coroutine's eager run
     }

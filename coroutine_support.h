@@ -13,7 +13,7 @@
 // would inherit) and each resumed segment re-installs it (`Inherited_access_scope` around the
 // resume) -- so a resumed body may touch data the coroutine was granted, harness intact.
 //
-// The `Thread_safe` async-lock guard is DONE (below): `auto g = co_await ts::write(w);` (or
+// The `Guarded` async-lock guard is DONE (below): `auto g = co_await ts::write(w);` (or
 // `ts::read(w)`) suspends until the pipe grants, resumes with an RAII `Pipe_guard` giving direct
 // `T&`/`const T&`, released on scope exit. The harness doubles as a suspension detector: a
 // `co_await` that would suspend while a guard is held faults (`pipe_guard_depth`).
@@ -29,7 +29,7 @@
 
 #if defined(__cpp_impl_coroutine)
 
-#include "thread_safe.h"   // Pipe, pipe_acquire/release, Thread_safe(_access), default_scheduler
+#include "guarded.h"   // Pipe, pipe_acquire/release, Guarded(_access), default_scheduler
 
 #include <atomic>
 #include <coroutine>
@@ -146,7 +146,7 @@ struct Task_awaiter
         // this task suspends the coroutine. Doing so while holding a `Pipe_guard` would hold
         // that pipe across the suspension (serialize / deadlock) -- the anti-pattern.
         if (pipe_guard_depth > 0)
-            ts::fatal("co_await while holding a Thread_safe guard (pipe held across suspension)");
+            ts::fatal("co_await while holding a Guarded guard (pipe held across suspension)");
 
         core_->attach([this, h](void*, bool)
         {
@@ -251,7 +251,7 @@ struct Task_promise<void>
     Priority priority_ = Priority::normal;                           // see Task_promise<R>
 };
 
-// RAII async-lock guard over a `Thread_safe<T>`'s pipe, held for direct `T` access. Returned by
+// RAII async-lock guard over a `Guarded<T>`'s pipe, held for direct `T` access. Returned by
 // `co_await ts::read(w)` / `ts::write(w)`. NON-COPYABLE AND NON-MOVABLE on purpose: it installs
 // `current_access = &ctx_` (a member), so its address must be stable -- `await_resume` returns it
 // as a prvalue and `auto g = co_await ...;` constructs it in place via guaranteed copy elision
@@ -344,7 +344,7 @@ struct Pipe_guard_awaiter
         // Deferred: we are about to suspend. Suspending while holding another guard is the
         // lock-across-suspension anti-pattern.
         if (pipe_guard_depth > 0)
-            ts::fatal("co_await a Thread_safe guard while holding another (pipe held across suspension)");
+            ts::fatal("co_await a Guarded guard while holding another (pipe held across suspension)");
 
         if (state_.exchange(2, std::memory_order_acq_rel) == 1)
             return false;   // on_acquired already fired -> resume via await_resume
@@ -378,22 +378,22 @@ detail::Task_awaiter<R> operator co_await(Task<R>&& t)
     return detail::Task_awaiter<R>(detail::core_of(t));
 }
 
-// Async-lock a `Thread_safe<T>` in a coroutine: `auto g = co_await ts::write(w);` suspends until
+// Async-lock a `Guarded<T>` in a coroutine: `auto g = co_await ts::write(w);` suspends until
 // the pipe grants exclusive write access, then resumes with an RAII guard giving direct `T&`
 // (released on scope exit); `ts::read(w)` is the shared-reader form giving `const T&`. Linear
 // RAII in place of a callback `async(fn, obj)`, and the safe shape as long as you do NOT
 // `co_await` other work while the guard is alive (that holds the pipe across a suspension --
 // faulted by the harness-as-suspension-detector). Deduces nothing; the mode is the verb.
 template<typename T>
-detail::Pipe_guard_awaiter<T, Access::read_write> write(Thread_safe<T>& w)
+detail::Pipe_guard_awaiter<T, Access::read_write> write(Guarded<T>& w)
 {
-    return { default_scheduler(), detail::Thread_safe_access::pipe(w), detail::Thread_safe_access::instance(w) };
+    return { default_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
 }
 
 template<typename T>
-detail::Pipe_guard_awaiter<T, Access::read_only> read(Thread_safe<T>& w)
+detail::Pipe_guard_awaiter<T, Access::read_only> read(Guarded<T>& w)
 {
-    return { default_scheduler(), detail::Thread_safe_access::pipe(w), detail::Thread_safe_access::instance(w) };
+    return { default_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
 }
 
 } // namespace ts

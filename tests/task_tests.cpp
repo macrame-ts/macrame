@@ -1,5 +1,5 @@
 #include "task_tests.h"
-#include "thread_safe.h"
+#include "guarded.h"
 #include "harness.h"
 #include "test_util.h"
 
@@ -18,7 +18,7 @@ using tests::wait_until;
 namespace
 {
 
-ts::Task<int> read_async(ts::Thread_safe<int>& d)
+ts::Task<int> read_async(ts::Guarded<int>& d)
 {
     return d.async([](const int& v) { return v; });
 }
@@ -27,7 +27,7 @@ ts::Task<int> read_async(ts::Thread_safe<int>& d)
 
 void test_get_void()
 {
-    ts::Thread_safe<int> d{ 0 };
+    ts::Guarded<int> d{ 0 };
     ts::Task<void> t = d.async([](int& v) { v = 1; });
     t.sync();
     TS_CHECK(read_async(d).sync() == 1);
@@ -36,7 +36,7 @@ void test_get_void()
 void test_is_done()
 {
     std::atomic<bool> go{ false };
-    ts::Thread_safe<int> d{ 5 };
+    ts::Guarded<int> d{ 5 };
     ts::Task<int> t = d.async([&go](const int& v)
     {
         wait_until([&] { return go.load(); });
@@ -51,14 +51,14 @@ void test_is_done()
 
 void test_then_single()
 {
-    ts::Thread_safe<int> d{ 20 };
+    ts::Guarded<int> d{ 20 };
     int r = read_async(d).then([](int v) { return v + 1; }).sync();
     TS_CHECK(r == 21);
 }
 
 void test_then_chain()
 {
-    ts::Thread_safe<int> d{ 21 };
+    ts::Guarded<int> d{ 21 };
     int r = read_async(d)
                 .then([](int v) { return v * 2; })
                 .then([](int v) { return v + 1; })
@@ -68,7 +68,7 @@ void test_then_chain()
 
 void test_then_void_producer()
 {
-    ts::Thread_safe<int> d{ 0 };
+    ts::Guarded<int> d{ 0 };
     int r = d.async([](int& v) { v = 7; }).then([] { return 100; }).sync();
     TS_CHECK(r == 100);
 }
@@ -76,14 +76,14 @@ void test_then_void_producer()
 void test_then_void_result()
 {
     std::atomic<int> sink{ 0 };
-    ts::Thread_safe<int> d{ 9 };
+    ts::Guarded<int> d{ 9 };
     read_async(d).then([&sink](int v) { sink.store(v); }).sync();
     TS_CHECK(sink.load() == 9);
 }
 
 void test_then_after_completion()
 {
-    ts::Thread_safe<int> d{ 3 };
+    ts::Guarded<int> d{ 3 };
     ts::Task<int> t = read_async(d);
     wait_until([&] { return t.is_done(); });
     int r = t.then([](int v) { return v * 10; }).sync();   // attached after completion
@@ -94,7 +94,7 @@ void test_then_after_completion()
 
 void test_when_all_two()
 {
-    ts::Thread_safe<int> a{ 10 }, b{ 32 };
+    ts::Guarded<int> a{ 10 }, b{ 32 };
     int s = ts::when_all(read_async(a), read_async(b))
                 .then([](std::tuple<int, int>& r) { return std::get<0>(r) + std::get<1>(r); })
                 .sync();
@@ -103,7 +103,7 @@ void test_when_all_two()
 
 void test_when_all_three()
 {
-    ts::Thread_safe<int> a{ 1 }, b{ 2 }, c{ 3 };
+    ts::Guarded<int> a{ 1 }, b{ 2 }, c{ 3 };
     int s = ts::when_all(read_async(a), read_async(b), read_async(c))
                 .then([](std::tuple<int, int, int>& r)
                 {
@@ -115,7 +115,7 @@ void test_when_all_three()
 
 void test_when_all_single()
 {
-    ts::Thread_safe<int> a{ 7 };
+    ts::Guarded<int> a{ 7 };
     int s = ts::when_all(read_async(a))
                 .then([](std::tuple<int>& r) { return std::get<0>(r); })
                 .sync();
@@ -124,7 +124,7 @@ void test_when_all_single()
 
 void test_when_all_out_of_order()
 {
-    ts::Thread_safe<int> a{ 1 }, b{ 2 };
+    ts::Guarded<int> a{ 1 }, b{ 2 };
     ts::Task<int> ta = a.async([](const int& v) { std::this_thread::sleep_for(20ms); return v; });
     ts::Task<int> tb = b.async([](const int& v) { return v; });   // completes first
 
@@ -136,7 +136,7 @@ void test_when_all_out_of_order()
 
 void test_when_all_already_complete()
 {
-    ts::Thread_safe<int> a{ 4 }, b{ 5 };
+    ts::Guarded<int> a{ 4 }, b{ 5 };
     ts::Task<int> ta = read_async(a);
     ts::Task<int> tb = read_async(b);
     wait_until([&] { return ta.is_done() && tb.is_done(); });
@@ -149,7 +149,7 @@ void test_when_all_already_complete()
 
 void test_when_all_nested()
 {
-    ts::Thread_safe<int> a{ 1 }, b{ 2 }, c{ 3 };
+    ts::Guarded<int> a{ 1 }, b{ 2 }, c{ 3 };
     ts::Task<int> ab = ts::when_all(read_async(a), read_async(b))
                            .then([](std::tuple<int, int>& r) { return std::get<0>(r) + std::get<1>(r); });
 
@@ -163,7 +163,7 @@ void test_when_all_nested()
 
 void test_when_all_void_prereq()
 {
-    ts::Thread_safe<int> a{ 10 }, b{ 32 };
+    ts::Guarded<int> a{ 10 }, b{ 32 };
     std::atomic<int> side{ 0 };
     ts::Task<void> v = a.async([&side](int& x) { side.store(x); });   // void prerequisite
     ts::Task<int> r = b.async([](const int& x) { return x; });
@@ -175,7 +175,7 @@ void test_when_all_void_prereq()
 
 void test_when_all_all_void()
 {
-    ts::Thread_safe<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ 0 }, b{ 0 };
     std::atomic<int> count{ 0 };
     ts::Task<void> ta = a.async([&count](int&) { count.fetch_add(1); });
     ts::Task<void> tb = b.async([&count](int&) { count.fetch_add(1); });
@@ -186,7 +186,7 @@ void test_when_all_all_void()
 
 void test_when_all_move_only()
 {
-    ts::Thread_safe<int> a{ 5 }, b{ 7 };
+    ts::Guarded<int> a{ 5 }, b{ 7 };
     ts::Task<std::unique_ptr<int>> pa = a.async([](const int& x) { return std::make_unique<int>(x); });
     ts::Task<std::unique_ptr<int>> pb = b.async([](const int& x) { return std::make_unique<int>(x); });
 
@@ -201,7 +201,7 @@ void test_when_all_move_only()
 
 void test_when_all_apply_style()
 {
-    ts::Thread_safe<int> a{ 10 }, b{ 32 };
+    ts::Guarded<int> a{ 10 }, b{ 32 };
     int sum = ts::when_all(
             a.async([](const int& x) { return x; }),
             b.async([](const int& x) { return x; }))
@@ -212,7 +212,7 @@ void test_when_all_apply_style()
 
 void test_when_all_apply_void()
 {
-    ts::Thread_safe<int> a{ 1 }, b{ 2 };
+    ts::Guarded<int> a{ 1 }, b{ 2 };
     std::atomic<int> sink{ 0 };
     ts::when_all(
             a.async([](const int& x) { return x; }),
@@ -231,7 +231,7 @@ void test_when_all_cancelled_prereq()
     ts::Cancellation_source src;
     src.request_cancel();
 
-    ts::Thread_safe<int> a{ 1 }, b{ 2 };
+    ts::Guarded<int> a{ 1 }, b{ 2 };
     ts::Task<int> ta = a.async([](const int& x) { return x; });                // completes
     ts::Task<int> tb = b.async([](const int& x) { return x; }, { .token = src.token() });   // cancelled
 
@@ -246,7 +246,7 @@ void test_when_all_cancelled_void_prereq()
     ts::Cancellation_source src;
     src.request_cancel();
 
-    ts::Thread_safe<int> a{ 5 }, b{ 0 };
+    ts::Guarded<int> a{ 5 }, b{ 0 };
     ts::Task<int> r = a.async([](const int& x) { return x; });        // completes
     ts::Task<void> v = b.async([](int&) {}, { .token = src.token() });            // cancelled void prereq
 
@@ -261,7 +261,7 @@ void test_when_all_cancel_propagates_then()
     ts::Cancellation_source src;
     src.request_cancel();
 
-    ts::Thread_safe<int> a{ 1 }, b{ 2 };
+    ts::Guarded<int> a{ 1 }, b{ 2 };
     ts::Task<int> ta = a.async([](const int& x) { return x; });
     ts::Task<int> tb = b.async([](const int& x) { return x; }, { .token = src.token() });   // cancelled
 
@@ -371,7 +371,7 @@ void test_cancel_before_run()
     ts::Cancellation_source src;
     src.request_cancel();               // cancelled before the task is dispatched
 
-    ts::Thread_safe<int> d{ 0 };
+    ts::Guarded<int> d{ 0 };
     std::atomic<bool> ran{ false };
     ts::Task<int> t = d.async([&ran](int& v) { ran.store(true); return v; }, { .token = src.token() });
 
@@ -385,7 +385,7 @@ void test_cancel_propagates_through_then()
     ts::Cancellation_source src;
     src.request_cancel();
 
-    ts::Thread_safe<int> d{ 5 };
+    ts::Guarded<int> d{ 5 };
     ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });   // cancelled
     std::atomic<bool> then_ran{ false };
     ts::Task<int> u = t.then([&then_ran](int v) { then_ran.store(true); return v + 1; });
@@ -397,7 +397,7 @@ void test_cancel_propagates_through_then()
 
 void test_cancel_at_then_via_token()
 {
-    ts::Thread_safe<int> d{ 5 };
+    ts::Guarded<int> d{ 5 };
     ts::Task<int> t = d.async([](const int& v) { return v; });   // completes normally
     wait_until([&] { return t.is_done(); });
 
@@ -416,7 +416,7 @@ void test_cancel_void_get_unblocks()
     ts::Cancellation_source src;
     src.request_cancel();
 
-    ts::Thread_safe<int> d{ 0 };
+    ts::Guarded<int> d{ 0 };
     ts::Task<void> t = d.async([](int& v) { v = 1; }, { .token = src.token() });
     t.sync();                            // void: unblocks, no fatal
     TS_CHECK(t.is_cancelled());
@@ -424,7 +424,7 @@ void test_cancel_void_get_unblocks()
 
 void test_not_cancelled_normally()
 {
-    ts::Thread_safe<int> d{ 7 };
+    ts::Guarded<int> d{ 7 };
     ts::Task<int> t = d.async([](const int& v) { return v; });
     TS_CHECK(t.sync() == 7);
     TS_CHECK(!t.is_cancelled());
@@ -542,7 +542,7 @@ void test_launch_priority()
     TS_CHECK(ts::launch([] { return 1; }, { .priority = Priority::high }).sync() == 1);
     TS_CHECK(ts::task([] { return 2; }).priority(Priority::low).launch().sync() == 2);
 
-    ts::Thread_safe<int> d{ 40 };
+    ts::Guarded<int> d{ 40 };
     TS_CHECK(d.async([](const int& v) { return v + 2; }, { .priority = Priority::high }).sync() == 42);
 }
 
@@ -651,7 +651,7 @@ void test_async_body_token_earlyout()
     std::atomic<bool> started{ false };
     std::atomic<int> stage{ 0 };
 
-    ts::Thread_safe<int> d{ 5 };
+    ts::Guarded<int> d{ 5 };
     ts::Task<int> t = d.async([&started, &stage](const int& v, ts::Cancellation_token tok) -> int
     {
         started.store(true);
@@ -670,7 +670,7 @@ void test_async_body_token_earlyout()
 // A write accessor (T&) with a trailing token is still deduced read_write.
 void test_async_write_token()
 {
-    ts::Thread_safe<int> d{ 0 };
+    ts::Guarded<int> d{ 0 };
     d.async([](int& v, ts::Cancellation_token) { v = 9; }).sync();   // mutates -> write path
     TS_CHECK(d.async([](const int& v) { return v; }).sync() == 9);
 }
@@ -760,7 +760,7 @@ void test_then_body_token_shapes()
     TS_CHECK(stage.load() == 1);
 
     // apply-style + token (not cancelled: just exercises the branch's type deduction + run)
-    ts::Thread_safe<int> a{ 2 }, b{ 3 };
+    ts::Guarded<int> a{ 2 }, b{ 3 };
     ts::Task<int> ra = a.async([](const int& v) { return v; });
     ts::Task<int> rb = b.async([](const int& v) { return v; });
     int s = ts::when_all(ra, rb)

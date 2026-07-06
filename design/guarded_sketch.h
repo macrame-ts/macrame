@@ -1,7 +1,7 @@
 #pragma once
 //
 // DESIGN SKETCH — illustrative pseudo-C++. Not wired into the build, does not
-// compile. Exploring the public surface of Thread_safe<T> + Static_task_graph
+// compile. Exploring the public surface of Guarded<T> + Static_task_graph
 // + dynamic async. Implementation is elided (comments mark where it lives).
 //
 
@@ -40,7 +40,7 @@ public:
 // Task<void>: then(fn) takes no argument; otherwise identical.
 
 // ===========================================================================
-// Thread_safe<T> — the only sanctioned way to touch a T across threads.
+// Guarded<T> — the only sanctioned way to touch a T across threads.
 //
 // You never receive a bare T&. You hand a functor to async(); the scheduler
 // invokes it with a reference once non-conflicting access has been granted.
@@ -49,16 +49,16 @@ public:
 //     functor(const T&)  -> shared    (read)  access
 // ===========================================================================
 template<typename T>
-class Thread_safe
+class Guarded
 {
 public:
     // constructs the wrapped T in place
     template<typename... Args>
-    explicit Thread_safe(Args&&... args);
+    explicit Guarded(Args&&... args);
 
     // identity matters; non-copyable/movable
-    Thread_safe(const Thread_safe&) = delete;
-    Thread_safe& operator=(const Thread_safe&) = delete;
+    Guarded(const Guarded&) = delete;
+    Guarded& operator=(const Guarded&) = delete;
 
     // --- dynamic, single-object access ------------------------------------
     // write: functor invocable with T&
@@ -81,8 +81,8 @@ private:
 // ===========================================================================
 // Multi-object dynamic access (atomic over the whole set).
 //
-// NOTE: this cannot cleanly be a static member of Thread_safe (it's a class
-// template — `Thread_safe<?>::async` has no natural <?>). A free function reads
+// NOTE: this cannot cleanly be a static member of Guarded (it's a class
+// template — `Guarded<?>::async` has no natural <?>). A free function reads
 // better and unifies with the single-object case: async(fn, a) == a.async(fn).
 //
 // Per-object mode is deduced from each functor parameter's const-ness:
@@ -92,13 +92,13 @@ private:
 // never incrementally — so multi-object access cannot deadlock.
 // ===========================================================================
 template<typename Fn, typename... Ts>
-auto async(Fn&& fn, Thread_safe<Ts>&... objs)
+auto async(Fn&& fn, Guarded<Ts>&... objs)
     -> Task<std::invoke_result_t<Fn, /* per-arg const-qualified */ Ts&...>>;
 
 // ===========================================================================
 // Static_task_graph — declare nodes + access sets + ordering up front, compile
 // once, execute many times. Two edge kinds:
-//   (1) access-based: inferred from which Thread_safe<> each node touches and
+//   (1) access-based: inferred from which Guarded<> each node touches and
 //       how (R/W). The graph serializes conflicting access, parallelizes the
 //       rest. The user does NOT hand-order these.
 //   (2) order-based: explicit prerequisites between node handles.
@@ -106,7 +106,7 @@ auto async(Fn&& fn, Thread_safe<Ts>&... objs)
 class Static_task_graph
 {
 public:
-    // Add a node: functor + the Thread_safe<> instances it accesses. Returns a
+    // Add a node: functor + the Guarded<> instances it accesses. Returns a
     // normal Task — order edges are expressed with Task::after/before, the same
     // handle dynamic tasks use. (Execution is deferred to execute(), so wiring
     // order edges after creation is fine here.)
@@ -114,7 +114,7 @@ public:
     //   add_node([](Physics& p, const Nav& n){ ... }, physics, nav);
     // (name candidates: add_node / add_task / emplace / node)
     template<typename Fn, typename... Ts>
-    auto add_node(Fn&& fn, Thread_safe<Ts>&... access)
+    auto add_node(Fn&& fn, Guarded<Ts>&... access)
         -> Task<std::invoke_result_t<Fn, /* per-arg const-qualified */ Ts&...>>;
 
     // Resolve access conflicts into ordering, detect cycles, and report
@@ -152,7 +152,7 @@ enum class Access { read_only, read_write };
 
 // Per-task permission set. Small by design: most tasks touch 1-3 instances, so
 // an inline array + linear scan beats a hash set. Identity of an instance is
-// its address (== &Thread_safe<T>::instance_, which is also a method's `this`).
+// its address (== &Guarded<T>::instance_, which is also a method's `this`).
 class Access_context
 {
 public:
@@ -161,7 +161,7 @@ public:
     bool is_exclusive() const noexcept; // "grant everything" (single-threaded phases)
 private:
     // inline (address, mode) pairs; built by the scheduler from a task's
-    // declared Thread_safe<> set (single, multi, or a static-graph node).
+    // declared Guarded<> set (single, multi, or a static-graph node).
 };
 
 namespace detail
@@ -248,9 +248,9 @@ private:
     Vec3 g_;
 };
 
-Thread_safe<Physics> physics;
-Thread_safe<Nav_mesh> nav;
-Thread_safe<Render_scene> render;
+Guarded<Physics> physics;
+Guarded<Nav_mesh> nav;
+Guarded<Render_scene> render;
 
 // --- dynamic, single object ---
 Task<float> q = nav.async([](const Nav_mesh& n){ return n.nearest(player); }); // read

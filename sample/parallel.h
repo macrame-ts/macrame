@@ -1,7 +1,7 @@
 #pragma once
 
 #include "access.h"
-#include "thread_safe.h"
+#include "guarded.h"
 
 #include <algorithm>
 #include <atomic>

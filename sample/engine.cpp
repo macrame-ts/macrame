@@ -40,7 +40,7 @@ void run_sample(int frames, float scale)
     std::printf("\n[sample] %d frames, %d entities, scale %.2f\n", s.frames, 1000, scale);
     std::printf("  %.2f ms/frame  (serial budget %.2f ms -> %.2fx speedup)\n",
         s.avg_ms, s.serial_ms, s.serial_ms / s.avg_ms);
-    std::printf("  peak %d concurrent nav queries (Thread_safe::async during AI), %d early-outed on cancel\n",
+    std::printf("  peak %d concurrent nav queries (Guarded::async during AI), %d early-outed on cancel\n",
         observed_nav_concurrency(), nav_early_outs());
     std::printf("  streamed %d assets via then, %d batches via when_all\n",
         assets_streamed(), batches_streamed());

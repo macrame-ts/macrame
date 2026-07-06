@@ -33,7 +33,7 @@ late-install. Instead the single Task tier is made *cheap when its features are
 unused* (empty dependency lists cost no heap; the lock-counter doubles as the
 completion flag; SBO closure), and `submit` covers the "nothing needed" case.
 Users extend by writing their own coordinator over `submit`, exactly as the
-`Thread_safe` pipe, `Static_task_graph`, and `parallel_for` do — not by
+`Guarded` pipe, `Static_task_graph`, and `parallel_for` do — not by
 inheriting a task base class.
 
 ---
@@ -176,7 +176,7 @@ nested completes : n = --num_locks; if n == execution_flag -> Close()
 - Above `execution_flag`, the count is outstanding nested tasks; the last one to
   hit `execution_flag` closes the parent.
 
-(Pipe serialization is handled separately by `Thread_safe`'s reader/writer pipe,
+(Pipe serialization is handled separately by `Guarded`'s reader/writer pipe,
 not this counter; ordering-via-pipe is out of scope here.)
 
 ---
@@ -353,7 +353,7 @@ comparison hard.
 ## 10. Graph ↔ dynamic `async` coexistence (pipe reservation)
 
 Graph nodes access their objects **directly** (bypassing the pipe), ordered among
-themselves by conflict edges. `Thread_safe::async` goes through the **pipe**. Two
+themselves by conflict edges. `Guarded::async` goes through the **pipe**. Two
 independent serializers over one object → a node and an async on the same object
 would run concurrently → **data race**. The access harness does **not** catch this:
 both sides hold a valid declared `Access_context`, and the harness only catches
@@ -371,7 +371,7 @@ free in between. Async on a graph object thus coexists **per node**: it can't ov
 holding the object incompatibly (a writer node is exclusive), a read async overlaps a read
 node, and any async runs in the gaps. Generalises the old writer-only whole-run `pipe_reserve`.
 
-**Async inline (`pipe_try_inline`).** `Thread_safe::async(fn, {.run_inline = true})` opts
+**Async inline (`pipe_try_inline`).** `Guarded::async(fn, {.run_inline = true})` opts
 the body into running *synchronously on the calling thread* instead of a worker hop.
 `pipe_try_inline(pipe, mode, fn)` is the sibling of `pipe_reserve`'s try-acquire, but
 mode-aware and run-then-release: under the pipe mutex it admits the job only if the pipe is
@@ -438,7 +438,7 @@ acquires it synchronously and dispatches inline. Caveats mirror `Task_builder::s
 graph runs synchronously on the `execute()` caller.
 
 **Multi-object `ts::async`** reuses the *same* acquire primitive outside the graph: the free
-function `ts::async(fn, objs...)` runs `fn(*objs...)` over several `Thread_safe`s at once. It
+function `ts::async(fn, objs...)` runs `fn(*objs...)` over several `Guarded`s at once. It
 acquires each object's pipe mode-aware, in canonical (pipe-address) order, holding all
 (`multi_acquire`, the acquire chain), runs the body under an `Access_context` declaring every
 object, then releases at completion (a continuation `attach`ed to the block). Because the
@@ -450,7 +450,7 @@ load-bearing). A repeated object is deduped write-wins. Options are passed first
 argument; `run_inline` is ignored (multi-object inline is a follow-up).
 
 Note there is **no** class of objects that async can't reach: `async()` is public on
-every `Thread_safe`, so any graph object is potentially async-reachable — you can't
+every `Guarded`, so any graph object is potentially async-reachable — you can't
 statically skip reservation for "async-free" objects. A per-object user assertion
 ("graph-exclusive, never async'd during a run") could skip it, but that trades the
 safety guarantee for ~2 mutex ops per object per run (the reservation cost on an idle

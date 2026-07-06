@@ -1,7 +1,7 @@
 #pragma once
 
 #include "access.h"
-#include "thread_safe.h"
+#include "guarded.h"
 
 #include <vector>
 
@@ -55,29 +55,29 @@ struct World
     {}
 
     // read-only static inputs (no system writes them this frame)
-    ts::Thread_safe<Float_store> skeletons;
-    ts::Thread_safe<Float_store> nav;
-    ts::Thread_safe<Float_store> renderables;
-    ts::Thread_safe<Float_store> velocities;
-    ts::Thread_safe<Float_store> asset_source;   // Streaming loads from this
+    ts::Guarded<Float_store> skeletons;
+    ts::Guarded<Float_store> nav;
+    ts::Guarded<Float_store> renderables;
+    ts::Guarded<Float_store> velocities;
+    ts::Guarded<Float_store> asset_source;   // Streaming loads from this
 
     // single-writer outputs
-    ts::Thread_safe<Float_store> input;          // Input
-    ts::Thread_safe<Float_store> net;            // Networking
-    ts::Thread_safe<Float_store> assets;         // Streaming
-    ts::Thread_safe<Float_store> game_state;     // Gameplay
-    ts::Thread_safe<Float_store> paths;          // Navigation
-    ts::Thread_safe<Float_store> intents;        // AI
-    ts::Thread_safe<Float_store> local_xf;       // Animation
-    ts::Thread_safe<Float_store> bodies;         // Physics
-    ts::Thread_safe<Float_store> world_xf;       // Transform propagation (read-hot)
-    ts::Thread_safe<Float_store> world_xf_prev;  // Swap (last frame's transforms)
-    ts::Thread_safe<Float_store> cloth;          // Cloth
-    ts::Thread_safe<Float_store> visibility;     // Culling
-    ts::Thread_safe<Float_store> particles;      // Particles
-    ts::Thread_safe<Float_store> audio_out;      // Audio
-    ts::Thread_safe<Float_store> draw_lists;     // Render
-    ts::Thread_safe<Float_store> ui;             // UI
+    ts::Guarded<Float_store> input;          // Input
+    ts::Guarded<Float_store> net;            // Networking
+    ts::Guarded<Float_store> assets;         // Streaming
+    ts::Guarded<Float_store> game_state;     // Gameplay
+    ts::Guarded<Float_store> paths;          // Navigation
+    ts::Guarded<Float_store> intents;        // AI
+    ts::Guarded<Float_store> local_xf;       // Animation
+    ts::Guarded<Float_store> bodies;         // Physics
+    ts::Guarded<Float_store> world_xf;       // Transform propagation (read-hot)
+    ts::Guarded<Float_store> world_xf_prev;  // Swap (last frame's transforms)
+    ts::Guarded<Float_store> cloth;          // Cloth
+    ts::Guarded<Float_store> visibility;     // Culling
+    ts::Guarded<Float_store> particles;      // Particles
+    ts::Guarded<Float_store> audio_out;      // Audio
+    ts::Guarded<Float_store> draw_lists;     // Render
+    ts::Guarded<Float_store> ui;             // UI
 };
 
 } // namespace sample

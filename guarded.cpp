@@ -1,4 +1,4 @@
-#include "thread_safe.h"
+#include "guarded.h"
 
 namespace ts
 {

@@ -2,7 +2,7 @@
 
 TSan catches data races that ASan and stress-testing miss. It has **no Windows
 runtime** — it only works under clang on Linux/macOS. This directory holds a
-harness-free stress driver so the portable core (scheduler, `Thread_safe` pipe,
+harness-free stress driver so the portable core (scheduler, `Guarded` pipe,
 `Static_task_graph` + `parallel_for`, `then`/`when_all`) can be checked off-host.
 
 ## One-time host setup (pick one)

@@ -2,7 +2,7 @@
 
 #include "access.h"
 #include "scheduler.h"
-#include "thread_safe.h"
+#include "guarded.h"
 
 #include <cstdint>
 #include <memory>
@@ -15,7 +15,7 @@ namespace ts
 {
 
 // `detail::Function_traits` (per-argument type extraction for access-mode deduction) now
-// lives in `thread_safe.h` -- shared with multi-object `ts::async`.
+// lives in `guarded.h` -- shared with multi-object `ts::async`.
 
 class Static_task_graph;
 
@@ -57,7 +57,7 @@ private:
     int index_ = -1;
 };
 
-// Build once, execute many. Nodes declare access to `Thread_safe<>` systems and,
+// Build once, execute many. Nodes declare access to `Guarded<>` systems and,
 // optionally, explicit ordering edges. `compile()` turns access conflicts (plus
 // explicit edges) into a DAG; `execute()` runs it, parallelizing independent
 // nodes. Nodes are void (they mutate the systems they access).
@@ -75,16 +75,16 @@ public:
     Static_task_graph(Static_task_graph&&) noexcept;
     Static_task_graph& operator=(Static_task_graph&&) noexcept;
 
-    // Add a node: functor + the `Thread_safe<>` instances it accesses. Per-object
+    // Add a node: functor + the `Guarded<>` instances it accesses. Per-object
     // access mode is deduced from the functor's parameter const-ness
     //   add_node([](Physics& p, const Nav& n){ ... }, physics, nav);   // p:write, n:read
     // Returns a `Graph_node` ordering handle (`after`/`before`).
     template<typename Fn, typename... Ts>
-    Graph_node add_node(Fn&& fn, Thread_safe<Ts>&... access)
+    Graph_node add_node(Fn&& fn, Guarded<Ts>&... access)
     {
         using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
         static_assert(std::tuple_size_v<Args> == sizeof...(Ts),
-            "node functor arity must match the number of Thread_safe arguments");
+            "node functor arity must match the number of Guarded arguments");
 
         Node node;
         fill_node<Args>(node, std::index_sequence_for<Ts...>{}, std::forward<Fn>(fn), access...);
@@ -134,7 +134,7 @@ private:
     }
 
     template<typename Args, std::size_t... I, typename Fn, typename... Ts>
-    void fill_node(Node& node, std::index_sequence<I...>, Fn&& fn, Thread_safe<Ts>&... access)
+    void fill_node(Node& node, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... access)
     {
         auto instances = std::make_tuple(&access.instance_...);
 

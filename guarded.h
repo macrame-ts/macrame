@@ -118,7 +118,7 @@ void multi_acquire(std::shared_ptr<Multi_async_state> state,
 // joins as a concurrent reader, `read_write` as an exclusive writer. On success runs `fn()`
 // synchronously (the caller blocks for the body's duration), then releases, re-dispatches
 // the pipe, and returns true. On failure leaves `fn` untouched (so the caller can enqueue
-// it) and returns false. Caller-blocking + a nested access scope -- see `Thread_safe::async`.
+// it) and returns false. Caller-blocking + a nested access scope -- see `Guarded::async`.
 bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()>& fn);
 
 // An `async` accessor functor may, like the bare-task path, opt into cooperative
@@ -140,7 +140,7 @@ template<typename Fn, typename A> using Async_result_t = typename Async_result<F
 
 } // namespace detail
 
-// `Thread_safe::async` and the multi-object `ts::async` take `Task_options` (defined in
+// `Guarded::async` and the multi-object `ts::async` take `Task_options` (defined in
 // task.h) — the same aggregate as `then`: `{token, priority, run_inline}`. `run_inline` runs
 // the body synchronously on the calling thread when the pipe is immediately free (else it
 // enqueues as usual) -- see the note on `async`.
@@ -154,21 +154,21 @@ class Static_task_graph;
 
 namespace detail
 {
-// Grants the multi-object `ts::async` builder access to a `Thread_safe`'s instance + pipe
-// (the same internals `Static_task_graph` reaches as a friend). Defined below `Thread_safe`.
-struct Thread_safe_access;
+// Grants the multi-object `ts::async` builder access to a `Guarded`'s instance + pipe
+// (the same internals `Static_task_graph` reaches as a friend). Defined below `Guarded`.
+struct Guarded_access;
 }
 
 template<typename T>
-class Thread_safe
+class Guarded
 {
     friend class Static_task_graph;
-    friend struct detail::Thread_safe_access;
+    friend struct detail::Guarded_access;
 
 public:
-    // Non-explicit default ctor (value-initializes `T`) so arrays of `Thread_safe`
+    // Non-explicit default ctor (value-initializes `T`) so arrays of `Guarded`
     // work; the forwarding ctor below handles explicit argument construction.
-    Thread_safe() requires std::default_initializable<T>
+    Guarded() requires std::default_initializable<T>
         : instance_()
     {}
 
@@ -176,19 +176,19 @@ public:
     // 1+ args, and only when T is actually constructible from them.
     template<typename... Args>
         requires (sizeof...(Args) >= 1) && std::constructible_from<T, Args...>
-    explicit Thread_safe(Args&&... args)
+    explicit Guarded(Args&&... args)
         : instance_(std::forward<Args>(args)...)
     {}
 
     // Identity matters (it is the access key); waits out pending jobs so the
     // pipe outlives its last task.
-    ~Thread_safe()
+    ~Guarded()
     {
         pipe_.wait_until_idle();
     }
 
-    Thread_safe(const Thread_safe&) = delete;
-    Thread_safe& operator=(const Thread_safe&) = delete;
+    Guarded(const Guarded&) = delete;
+    Guarded& operator=(const Guarded&) = delete;
 
     // `read_write`: functor takes `T&` (and not `const T&`), optionally + a trailing token.
     // With `{.run_inline = true}` the body runs synchronously on the CALLING thread when the
@@ -263,10 +263,10 @@ private:
 namespace detail
 {
 
-struct Thread_safe_access
+struct Guarded_access
 {
-    template<typename T> static T* instance(Thread_safe<T>& t) { return &t.instance_; }
-    template<typename T> static Pipe& pipe(Thread_safe<T>& t) { return t.pipe_; }
+    template<typename T> static T* instance(Guarded<T>& t) { return &t.instance_; }
+    template<typename T> static Pipe& pipe(Guarded<T>& t) { return t.pipe_; }
 };
 
 // Build a multi-object async task: `fn(*objs...)` under an `Access_context` declaring every
@@ -274,10 +274,10 @@ struct Thread_safe_access
 // canonical order (deduped write-wins), releases them at completion via an attached
 // continuation. Returns the `Task<R>`.
 template<typename Args, std::size_t... I, typename Fn, typename... Ts>
-auto async_build(Task_options opts, std::index_sequence<I...>, Fn&& fn, Thread_safe<Ts>&... objs)
+auto async_build(Task_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... objs)
 {
     using R = std::invoke_result_t<Fn, Ts&...>;
-    auto instances = std::make_tuple(Thread_safe_access::instance(objs)...);
+    auto instances = std::make_tuple(Guarded_access::instance(objs)...);
 
     auto body = [instances, fn = std::forward<Fn>(fn)]() mutable -> R
     {
@@ -292,7 +292,7 @@ auto async_build(Task_options opts, std::index_sequence<I...>, Fn&& fn, Thread_s
 
     // Collect (pipe, mode) per object, dedup write-wins; a `std::map` keyed by pipe address
     // gives the canonical (ascending-address) acquire order for free.
-    Pipe* pipes[] = { &Thread_safe_access::pipe(objs)... };
+    Pipe* pipes[] = { &Guarded_access::pipe(objs)... };
     Access modes[] = { async_mode_of<std::tuple_element_t<I, Args>>()... };
     std::map<Pipe*, Access> by_pipe;
     for (std::size_t k = 0; k < sizeof...(Ts); ++k)
@@ -330,18 +330,18 @@ auto async_build(Task_options opts, std::index_sequence<I...>, Fn&& fn, Thread_s
 // `Task<R>` -- but do NOT block a graph node on it (same rule as single-object async).
 template<typename Fn, typename... Ts>
     requires (sizeof...(Ts) >= 1)
-auto async(Task_options opts, Fn&& fn, Thread_safe<Ts>&... objs)
+auto async(Task_options opts, Fn&& fn, Guarded<Ts>&... objs)
 {
     using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
     static_assert(std::tuple_size_v<Args> == sizeof...(Ts),
-        "multi-object async: functor arity must match the number of Thread_safe objects");
+        "multi-object async: functor arity must match the number of Guarded objects");
     return detail::async_build<Args>(std::move(opts), std::index_sequence_for<Ts...>{},
         std::forward<Fn>(fn), objs...);
 }
 
 template<typename Fn, typename... Ts>
     requires (sizeof...(Ts) >= 1)
-auto async(Fn&& fn, Thread_safe<Ts>&... objs)
+auto async(Fn&& fn, Guarded<Ts>&... objs)
 {
     return async(Task_options{}, std::forward<Fn>(fn), objs...);
 }

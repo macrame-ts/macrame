@@ -22,7 +22,7 @@ ts::Static_task_graph build_frame_graph(World& w)
     }, w.input, w.assets);
     g.add_node(&tick_gameplay, w.world_xf_prev, w.input, w.net, w.game_state);
     g.add_node(&tick_navigation, w.nav, w.world_xf_prev, w.paths);
-    // AI also issues concurrent `nav` queries (`Thread_safe::async`) outside the
+    // AI also issues concurrent `nav` queries (`Guarded::async`) outside the
     // declared edges, so its node captures the `nav` wrapper; graph access is
     // still just the four declared stores.
     g.add_node([&w](const Float_store& world_xf_prev, const Float_store& paths,

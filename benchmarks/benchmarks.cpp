@@ -1,6 +1,6 @@
 #include "benchmarks.h"
 #include "scheduler.h"
-#include "thread_safe.h"
+#include "guarded.h"
 #include "static_task_graph.h"
 #include "access.h"
 
@@ -191,10 +191,10 @@ std::vector<double> bench_fork_join(Idle_policy policy)
 
 // --- public feature benchmarks --------------------------------------------
 
-// Thread_safe write: serialized async writes through one object's pipe.
+// Guarded write: serialized async writes through one object's pipe.
 std::vector<double> bench_ts_write()
 {
-    ts::Thread_safe<uint64_t> obj{ 0 };
+    ts::Guarded<uint64_t> obj{ 0 };
     constexpr uint64_t batch = 20000;
     return measure([&]() -> uint64_t
     {
@@ -205,10 +205,10 @@ std::vector<double> bench_ts_write()
     });
 }
 
-// Thread_safe read: concurrent async reads through the reader/writer pipe.
+// Guarded read: concurrent async reads through the reader/writer pipe.
 std::vector<double> bench_ts_read()
 {
-    ts::Thread_safe<uint64_t> obj{ 7 };
+    ts::Guarded<uint64_t> obj{ 7 };
     std::atomic<uint64_t> done{ 0 };
     constexpr uint64_t batch = 20000;
     return measure([&]() -> uint64_t
@@ -225,7 +225,7 @@ std::vector<double> bench_ts_read()
 // Task::then: continuation chain length K fired off one producer.
 std::vector<double> bench_then()
 {
-    ts::Thread_safe<int> obj{ 0 };
+    ts::Guarded<int> obj{ 0 };
     constexpr int chain = 50;
     return measure([&]() -> uint64_t
     {
@@ -240,7 +240,7 @@ std::vector<double> bench_then()
 // when_all: typed join over 4 prerequisites + a consuming continuation.
 std::vector<double> bench_when_all()
 {
-    ts::Thread_safe<int> a{ 1 }, b{ 2 }, c{ 3 }, d{ 4 };
+    ts::Guarded<int> a{ 1 }, b{ 2 }, c{ 3 }, d{ 4 };
     auto read = [](const int& v) { return v; };
     return measure([&]() -> uint64_t
     {
@@ -255,7 +255,7 @@ std::vector<double> bench_when_all()
 std::vector<double> bench_graph_execute()
 {
     constexpr int nodes = 8;
-    std::array<ts::Thread_safe<int>, nodes> stores{};
+    std::array<ts::Guarded<int>, nodes> stores{};
     ts::Static_task_graph g;
     for (auto& s : stores)
         g.add_node([](int& v) { ++v; }, s);

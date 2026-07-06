@@ -761,7 +761,7 @@ inline void add_prerequisite(const Task_ptr& prereq,
 
 } // namespace detail
 
-// Dispatch options for a queued task body — a `then` continuation or a `Thread_safe`
+// Dispatch options for a queued task body — a `then` continuation or a `Guarded`
 // read/write (`async`). An aggregate, so it takes designated initializers at the call site:
 // `t.then(fn, {.priority = Priority::high})`, `obj.async(fn, {.run_inline = true})`. `token`
 // makes the body skippable before it runs (and, if the body declares a trailing

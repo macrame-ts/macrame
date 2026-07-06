@@ -1,5 +1,5 @@
 #include "graph_tests.h"
-#include "thread_safe.h"
+#include "guarded.h"
 #include "static_task_graph.h"
 #include "harness.h"
 #include "test_util.h"
@@ -16,7 +16,7 @@ using ts::test::run;
 namespace
 {
 
-int read_value(ts::Thread_safe<int>& d)
+int read_value(ts::Guarded<int>& d)
 {
     return d.async([](const int& v) { return v; }).sync();
 }
@@ -25,7 +25,7 @@ int read_value(ts::Thread_safe<int>& d)
 
 void test_access_ordering()
 {
-    ts::Thread_safe<int> a{ 0 }, b{ 0 }, c{ 0 };
+    ts::Guarded<int> a{ 0 }, b{ 0 }, c{ 0 };
 
     ts::Static_task_graph g;
     g.add_node([](int& x) { x = 1; }, a);
@@ -44,7 +44,7 @@ void test_access_ordering()
 
 void test_explicit_ordering()
 {
-    ts::Thread_safe<int> p{ 0 }, q{ 0 };
+    ts::Guarded<int> p{ 0 }, q{ 0 };
     std::atomic<int> seq{ 0 };
     std::atomic<int> p_order{ 0 }, q_order{ 0 };
 
@@ -62,7 +62,7 @@ void test_explicit_ordering()
 void test_independent_parallel()
 {
     tests::Parallel_gate gate{ 2 };
-    ts::Thread_safe<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ 0 }, b{ 0 };
 
     ts::Static_task_graph g;
     auto job = [&gate](int&) { gate.arrive(); };
@@ -76,7 +76,7 @@ void test_independent_parallel()
 
 void test_re_run_counts()
 {
-    ts::Thread_safe<int> a{ 0 };
+    ts::Guarded<int> a{ 0 };
     ts::Static_task_graph g;
     g.add_node([](int& v) { ++v; }, a);
     g.compile();
@@ -96,7 +96,7 @@ void test_empty_graph()
 
 void test_single_node()
 {
-    ts::Thread_safe<int> a{ 0 };
+    ts::Guarded<int> a{ 0 };
     ts::Static_task_graph g;
     g.add_node([](int& v) { v = 1; }, a);
     g.compile();
@@ -107,7 +107,7 @@ void test_single_node()
 void test_diamond()
 {
     tests::Parallel_gate gate{ 2 };
-    ts::Thread_safe<int> x{ 0 }, y{ 0 }, z{ 0 }, w{ 0 };
+    ts::Guarded<int> x{ 0 }, y{ 0 }, z{ 0 }, w{ 0 };
 
     ts::Static_task_graph g;
     g.add_node([](int& v) { v = 1; }, x);
@@ -125,7 +125,7 @@ constexpr int wide = 32;
 
 void test_completion_after_all()
 {
-    std::array<ts::Thread_safe<int>, wide> data{};
+    std::array<ts::Guarded<int>, wide> data{};
     std::atomic<int> ran{ 0 };
 
     ts::Static_task_graph g;
@@ -139,7 +139,7 @@ void test_completion_after_all()
 
 void test_graph_stress()
 {
-    std::array<ts::Thread_safe<int>, wide> data{};
+    std::array<ts::Guarded<int>, wide> data{};
     ts::Static_task_graph g;
     for (auto& d : data)
         g.add_node([](int& v) { ++v; }, d);
@@ -156,7 +156,7 @@ void test_graph_stress()
 
 void test_cancel_skips_nodes()
 {
-    std::array<ts::Thread_safe<int>, wide> data{};
+    std::array<ts::Guarded<int>, wide> data{};
     std::atomic<int> ran{ 0 };
 
     ts::Static_task_graph g;
@@ -177,7 +177,7 @@ void test_cancel_skips_nodes()
 void test_nested_gates_completion()
 {
     constexpr int n = 8;
-    ts::Thread_safe<int> owned{ 0 };
+    ts::Guarded<int> owned{ 0 };
     std::atomic<int> done_count{ 0 };
 
     ts::Static_task_graph g;
@@ -196,7 +196,7 @@ void test_nested_gates_completion()
 // inherited access grant, so the harness must accept it.
 void test_nested_inherits_access()
 {
-    ts::Thread_safe<tests::Counter> c;
+    ts::Guarded<tests::Counter> c;
 
     ts::Static_task_graph g;
     g.add_node([](tests::Counter& counter)
@@ -214,7 +214,7 @@ void test_nested_inherits_access()
 // -- not just ts::nested. Guards against the launch/task access-inheritance asymmetry.
 void test_builder_nested_inherits_access()
 {
-    ts::Thread_safe<tests::Counter> c;
+    ts::Guarded<tests::Counter> c;
 
     ts::Static_task_graph g;
     g.add_node([](tests::Counter& counter)
@@ -234,7 +234,7 @@ void test_builder_nested_inherits_access()
 void test_nested_before_successor()
 {
     constexpr int n = 16;
-    ts::Thread_safe<std::array<int, n>> arr{};
+    ts::Guarded<std::array<int, n>> arr{};
     std::atomic<int> sum_seen{ -1 };
 
     ts::Static_task_graph g;
@@ -261,7 +261,7 @@ void test_nested_before_successor()
 void test_node_priority_order()
 {
     Scheduler s{ { .num_threads = 1 } };
-    ts::Thread_safe<int> a{ 0 };
+    ts::Guarded<int> a{ 0 };
     std::atomic<int> seq{ 0 };
     std::atomic<int> high_ord{ 0 }, normal_ord{ 0 }, low_ord{ 0 };
 
@@ -282,7 +282,7 @@ void test_node_priority_order()
 // succeeds synchronously and the node dispatches inline on this thread.
 void test_graph_node_inline_on_caller()
 {
-    ts::Thread_safe<int> x{ 0 };
+    ts::Guarded<int> x{ 0 };
     std::atomic<std::thread::id> node_thread{};
 
     ts::Static_task_graph g;
@@ -299,7 +299,7 @@ void test_graph_node_inline_on_caller()
 // inline too (trampolined). Order preserved by the edge.
 void test_graph_inline_chain_on_caller()
 {
-    ts::Thread_safe<int> x{ 0 };
+    ts::Guarded<int> x{ 0 };
     std::atomic<int> seq{ 0 };
     std::atomic<int> a_ord{ 0 }, b_ord{ 0 };
     std::atomic<std::thread::id> a_thr{}, b_thr{};
@@ -320,7 +320,7 @@ void test_graph_inline_chain_on_caller()
 // Inline nodes are re-runnable like any node (the block re-arms; run_inline sticks).
 void test_graph_inline_rerun()
 {
-    ts::Thread_safe<int> x{ 0 };
+    ts::Guarded<int> x{ 0 };
     ts::Static_task_graph g;
     g.add_node([](int& v) { ++v; }, x).set_inline();
     g.compile();

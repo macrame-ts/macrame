@@ -2,7 +2,7 @@
 
 #include "scheduler.h"
 #include "task.h"
-#include "thread_safe.h"   // default_scheduler
+#include "guarded.h"   // default_scheduler
 
 #include <atomic>
 #include <cstddef>

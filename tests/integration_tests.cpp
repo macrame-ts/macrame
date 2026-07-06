@@ -1,5 +1,5 @@
 #include "integration_tests.h"
-#include "thread_safe.h"
+#include "guarded.h"
 #include "static_task_graph.h"
 #include "harness.h"
 #include "test_util.h"
@@ -21,7 +21,7 @@ using tests::wait_until;
 namespace
 {
 
-int read_value(ts::Thread_safe<int>& d)
+int read_value(ts::Guarded<int>& d)
 {
     return d.async([](const int& v) { return v; }).sync();
 }
@@ -29,7 +29,7 @@ int read_value(ts::Thread_safe<int>& d)
 // `then()` chained off the graph's `execute()` completion handle.
 void test_then_off_graph_completion()
 {
-    ts::Thread_safe<int> a{ 0 };
+    ts::Guarded<int> a{ 0 };
     ts::Static_task_graph g;
     g.add_node([](int& v) { v = 5; }, a);
     g.compile();
@@ -44,14 +44,14 @@ void test_then_off_graph_completion()
 // `when_all` over async results, feeding a value into a graph run.
 void test_when_all_into_graph()
 {
-    ts::Thread_safe<int> a{ 2 }, b{ 3 };
+    ts::Guarded<int> a{ 2 }, b{ 3 };
     int sum = ts::when_all(
             a.async([](const int& v) { return v; }),
             b.async([](const int& v) { return v; }))
         .then([](std::tuple<int, int>& r) { return std::get<0>(r) + std::get<1>(r); })
         .sync();
 
-    ts::Thread_safe<int> c{ 0 };
+    ts::Guarded<int> c{ 0 };
     ts::Static_task_graph g;
     g.add_node([sum](int& v) { v = sum; }, c);
     g.compile();
@@ -63,7 +63,7 @@ void test_when_all_into_graph()
 // graph run, then a dynamic async on the same object (sequential, no race).
 void test_graph_then_dynamic()
 {
-    ts::Thread_safe<int> a{ 0 };
+    ts::Guarded<int> a{ 0 };
     ts::Static_task_graph g;
     g.add_node([](int& v) { v = 7; }, a);
     g.compile();
@@ -91,8 +91,8 @@ struct Guarded
     }
 };
 
-int peak_of(ts::Thread_safe<Guarded>& x) { return x.async([](const Guarded& g) { return g.peak.load(); }).sync(); }
-int total_of(ts::Thread_safe<Guarded>& x) { return x.async([](const Guarded& g) { return g.total.load(); }).sync(); }
+int peak_of(ts::Guarded<Guarded>& x) { return x.async([](const Guarded& g) { return g.peak.load(); }).sync(); }
+int total_of(ts::Guarded<Guarded>& x) { return x.async([](const Guarded& g) { return g.total.load(); }).sync(); }
 
 // Static node access + dynamic async on the SAME object must not overlap: the run
 // reserves the object, so the asyncs queue behind the node. (`execute()` reserves
@@ -100,7 +100,7 @@ int total_of(ts::Thread_safe<Guarded>& x) { return x.async([](const Guarded& g) 
 // held reservation.)
 void test_graph_async_no_overlap_during()
 {
-    ts::Thread_safe<Guarded> x;
+    ts::Guarded<Guarded> x;
     ts::Static_task_graph g;
     g.add_node([](Guarded& gg) { gg.touch(); }, x);
     g.compile();
@@ -121,7 +121,7 @@ void test_graph_async_no_overlap_during()
 // (pipe not idle) and waits behind the async; the node runs after it.
 void test_async_before_graph_no_overlap()
 {
-    ts::Thread_safe<Guarded> x;
+    ts::Guarded<Guarded> x;
     auto pending = x.async([](Guarded& gg) { gg.touch(); });
 
     ts::Static_task_graph g;
@@ -138,7 +138,7 @@ void test_async_before_graph_no_overlap()
 // reservation would let a node and an async overlap -> peak == 2.
 void test_graph_async_stress()
 {
-    ts::Thread_safe<Guarded> x;
+    ts::Guarded<Guarded> x;
     ts::Static_task_graph g;
     g.add_node([](Guarded& gg) { gg.touch(); }, x);
     g.compile();
@@ -169,7 +169,7 @@ void test_graph_async_stress()
 // run" behavior would block the async until run end, so the flag would be unset.
 void test_early_release_frees_object_mid_run()
 {
-    ts::Thread_safe<int> x{ 0 }, y{ 0 };
+    ts::Guarded<int> x{ 0 }, y{ 0 };
     std::atomic<bool> async_ran{ false };
     std::atomic<bool> ran_during_run{ false };
 
@@ -198,7 +198,7 @@ void test_early_release_frees_object_mid_run()
 // slow predecessor (which does NOT touch x) records whether x's async already ran.
 void test_lazy_acquire_late_object_free_early()
 {
-    ts::Thread_safe<int> y{ 0 }, x{ 0 };
+    ts::Guarded<int> y{ 0 }, x{ 0 };
     std::atomic<bool> async_ran{ false };
     std::atomic<bool> ran_during_a{ false };
 
@@ -230,7 +230,7 @@ void test_lazy_acquire_late_object_free_early()
 // sleeps and records whether x's async already ran.
 void test_gap_frees_object_between_accessors()
 {
-    ts::Thread_safe<int> x{ 0 }, y{ 0 };
+    ts::Guarded<int> x{ 0 }, y{ 0 };
     std::atomic<bool> async_ran{ false };
     std::atomic<bool> ran_during_gap{ false };
 
@@ -262,7 +262,7 @@ void test_gap_frees_object_between_accessors()
 // reads run. Deterministic: the read node sleeps, then records whether the async read ran.
 void test_reader_node_overlaps_async_read()
 {
-    ts::Thread_safe<int> x{ 7 };
+    ts::Guarded<int> x{ 7 };
     std::atomic<bool> async_ran{ false };
     std::atomic<bool> ran_during_node{ false };
 
@@ -288,7 +288,7 @@ void test_reader_node_overlaps_async_read()
 // holding all their pipes for the body. Basic correctness (write one, read another).
 void test_multi_async_basic()
 {
-    ts::Thread_safe<int> a{ 10 }, b{ 20 };
+    ts::Guarded<int> a{ 10 }, b{ 20 };
     int result = ts::async([](int& x, const int& y) { x += y; return x; }, a, b).sync();   // a += b
     TS_CHECK(result == 30);
     TS_CHECK(read_value(a) == 30);
@@ -299,7 +299,7 @@ void test_multi_async_basic()
 // queue behind it -- never concurrent on either object.
 void test_multi_async_exclusion()
 {
-    ts::Thread_safe<Guarded> x, y;
+    ts::Guarded<Guarded> x, y;
     std::vector<ts::Task<void>> tasks;
     for (int i = 0; i < 4; ++i)
     {
@@ -317,7 +317,7 @@ void test_multi_async_exclusion()
 // acquire in canonical (pipe-address) order, so no hold-and-wait cycle forms. All complete.
 void test_multi_async_no_deadlock()
 {
-    ts::Thread_safe<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ 0 }, b{ 0 };
     std::vector<ts::Task<void>> tasks;
     for (int i = 0; i < 50; ++i)
     {
@@ -333,7 +333,7 @@ void test_multi_async_no_deadlock()
 // Options (first arg): priority + token skip.
 void test_multi_async_options()
 {
-    ts::Thread_safe<int> a{ 1 }, b{ 2 };
+    ts::Guarded<int> a{ 1 }, b{ 2 };
     int r = ts::async({ .priority = Priority::high }, [](const int& x, const int& y) { return x + y; }, a, b).sync();
     TS_CHECK(r == 3);
 
@@ -349,7 +349,7 @@ void test_multi_async_options()
 // through the chain -- and re-runnability confirm the hold is preserved across the handoffs.
 void test_handoff_write_chain()
 {
-    ts::Thread_safe<int> x{ 0 };
+    ts::Guarded<int> x{ 0 };
     ts::Static_task_graph g;
     ts::Graph_node a = g.add_node([](int& v) { v += 1; }, x);
     ts::Graph_node b = g.add_node([](int& v) { v *= 10; }, x);
@@ -370,7 +370,7 @@ void test_handoff_write_chain()
 // Correctness (the read sees the write) confirms the release/re-acquire path still works.
 void test_handoff_skips_mode_change()
 {
-    ts::Thread_safe<int> x{ 3 };
+    ts::Guarded<int> x{ 3 };
     std::atomic<int> seen{ -1 };
     ts::Static_task_graph g;
     ts::Graph_node w = g.add_node([](int& v) { v = 42; }, x);            // write
@@ -389,7 +389,7 @@ void test_repeat_stress()
     for (int iter = 0; iter < 20; ++iter)
     {
         tests::Parallel_gate gate{ 2 };
-        ts::Thread_safe<int> data{ 0 };
+        ts::Guarded<int> data{ 0 };
         std::vector<ts::Task<int>> tasks;
 
         for (int i = 0; i < 8; ++i)
@@ -402,7 +402,7 @@ void test_repeat_stress()
     TS_CHECK(all);
 }
 
-// Drive the whole mock engine (graph + internal parallelism + Thread_safe::async
+// Drive the whole mock engine (graph + internal parallelism + Guarded::async
 // + then/when_all) and assert frame-level invariants. Reaching the assertions at
 // all proves no deadlock and -- since the access harness is live -- zero access
 // violations (a violation would have aborted the process).
