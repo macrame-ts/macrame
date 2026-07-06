@@ -1004,6 +1004,12 @@ public:
     // Re-arm for another run: re-arm the block and restore the "not launched" lock, so
     // `after(...).launch()` runs it again. Precondition: the prior run settled and its
     // result was consumed (one run in flight). Chain: `t.reset().after(x).launch()`.
+    // The cancellation `token` is NOT reset — it is fixed dispatch config (set once via
+    // `.token()` before the first launch) and carries over every reuse round; `reset()`
+    // cannot swap it. Since cancellation is one-way, a reused task whose token was cancelled
+    // stays cancelled on every re-run — for a fresh cancellation scope, make a new `ts::task`.
+    // (Rewriting `token` per run would race a prior run's worker still reading it — see the
+    // `.token()` note.)
     Task_builder& reset()
     {
         core_->reset();
