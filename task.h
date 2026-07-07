@@ -284,14 +284,20 @@ struct Task_control_block
     // `reset` (retraction queues a duplicate the reset would otherwise let re-run the
     // body) fails the CAS and skips.
     std::atomic<std::uint64_t> run_state{ 0 };
-    // The generation captured at the last *dispatch* (`submit_ready`), read by the queued block
-    // trampoline (`run_block_dispatch`) so the reuse generation need not ride in the 16-byte
-    // `Task_entry` (the work-stealing deque stores those as `std::atomic<Task_entry>`, lock-free
-    // only at two words). A stale dispatch reads either its own generation (`claim` fails) or a
-    // newer one that `submit_ready` only writes when that run is already ready (so re-running it
-    // is safe and `claim` de-dups) -- `claim` stays the correctness gate; this just feeds it a
-    // candidate. Written only by `submit_ready` (one run in flight); atomic for the read race.
-    std::atomic<std::uint64_t> dispatched_gen{ 0 };
+    // Per-dispatch argument, published by the dispatcher right before handing the block to the
+    // scheduler queue (release; the trampoline's load is the acquire) so the payload need not
+    // ride in the 16-byte `Task_entry` (the work-stealing deque stores those as
+    // `std::atomic<Task_entry>`, lock-free only at two words). Interpreted by the MATCHING
+    // trampoline, so the meanings can't mix:
+    //   - `run_block_dispatch` (bare-scheduler dispatch, `submit_ready`): the reuse GENERATION.
+    //     A stale dispatch reads either its own generation (`claim` fails) or a newer one that
+    //     `submit_ready` only writes when that run is already ready (safe re-run, `claim`
+    //     de-dups) -- `claim` stays the correctness gate; this just feeds it a candidate.
+    //   - `run_pipe_job_read/write` (pipe-job dispatch, `Guarded::async`): the owning `Pipe*`
+    //     (a pipe block is created, dispatched once, and never `reset`, so its generation is
+    //     always 0 and the slot is free to carry the pipe instead).
+    // Single writer per dispatch (one run in flight / under the pipe mutex).
+    std::atomic<std::uint64_t> dispatch_arg{ 0 };
     Cancellation_token token;          // checked by `execute` before running the body
 
     // --- one-byte cluster --------------------------------------------------------------

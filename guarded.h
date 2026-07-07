@@ -29,12 +29,18 @@ namespace detail
 void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closure,
                     Priority priority = Priority::normal);
 
+// A queued pipe job, in one of two flavors. A normal async job carries its task BLOCK as the
+// payload (no closure -- the block is dispatched raw via a static trampoline, mirroring
+// `submit_ready`, so admitting a job allocates nothing). A `reservation` carries the
+// `pipe_acquire` on-acquired callback instead (the graph / multi-async path). The deque is
+// mutex-guarded, so `Job` may be any size -- unlike the 16-byte lock-free `Task_entry`.
 struct Job
 {
     Access mode;
-    std::move_only_function<void()> fn;
-    bool reservation = false;   // if set, `fn` is an on-acquired callback; see `pipe_reserve`
-    Priority priority = Priority::normal;   // queue position when this job is admitted
+    bool reservation = false;                      // if set, `on_acquired` is the payload
+    Priority priority = Priority::normal;          // queue position when this job is admitted
+    Task_ptr block;                                // normal async job: the block IS the payload
+    std::move_only_function<void()> on_acquired;   // reservation: signals the deferred holder
 };
 
 // A per-object reader/writer pipe. Jobs are admitted in FIFO order; consecutive
@@ -60,7 +66,10 @@ struct Pipe
     }
 };
 
-void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> fn,
+// Enqueue `block` as a pipe job in `mode`; when admitted (reader/writer rules, FIFO) it is
+// dispatched to the scheduler as a raw block trampoline (`block->execute`, gen 0 -- pipe
+// blocks are never reset) and the pipe is released when the body returns. Allocation-free.
+void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block,
                   Priority priority = Priority::normal);
 
 // Acquire a pipe for out-of-band direct access in `mode`, holding it (not auto-completing)
@@ -115,11 +124,11 @@ void multi_acquire(Ref_ptr<Multi_async_state> state,
 // Try to run an async job INLINE on the calling thread instead of enqueuing it (opt-in via
 // `Task_options::run_inline`). Admissible only when the pipe is immediately free for this
 // mode -- no queued jobs (FIFO preserved) and the reader/writer rules allow: `read_only`
-// joins as a concurrent reader, `read_write` as an exclusive writer. On success runs `fn()`
-// synchronously (the caller blocks for the body's duration), then releases, re-dispatches
-// the pipe, and returns true. On failure leaves `fn` untouched (so the caller can enqueue
-// it) and returns false. Caller-blocking + a nested access scope -- see `Guarded::async`.
-bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()>& fn);
+// joins as a concurrent reader, `read_write` as an exclusive writer. On success runs the
+// block's body synchronously (the caller blocks for its duration), then releases,
+// re-dispatches the pipe, and returns true. On failure returns false and the caller
+// enqueues the same block. Caller-blocking + a nested access scope -- see `Guarded::async`.
+bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_ptr& block);
 
 // An `async` accessor functor may, like the bare-task path, opt into cooperative
 // cancellation by taking a trailing `Cancellation_token` after the access argument `A`
@@ -247,12 +256,11 @@ private:
         }();
         core->flags.priority = opts.priority;
 
-        std::move_only_function<void()> job = [core, gen = core->generation()] { core->execute(core, gen); };
-        // Inline fast-path: if opted in and the pipe is free right now, run the body on this
-        // thread; otherwise enqueue as usual (`pipe_try_inline` leaves `job` untouched).
-        if (opts.run_inline && detail::pipe_try_inline(default_scheduler(), pipe_, mode, job))
+        // The block IS the pipe job -- no closure. Inline fast-path: if opted in and the pipe
+        // is free right now, run the body on this thread; otherwise enqueue as usual.
+        if (opts.run_inline && detail::pipe_try_inline(default_scheduler(), pipe_, mode, core))
             return Task<R>(core);
-        detail::pipe_enqueue(default_scheduler(), pipe_, mode, std::move(job), opts.priority);
+        detail::pipe_enqueue(default_scheduler(), pipe_, mode, core, opts.priority);
         return Task<R>(core);
     }
 

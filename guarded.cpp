@@ -1,5 +1,7 @@
 #include "guarded.h"
 
+#include <cstdint>
+
 namespace ts
 {
 
@@ -26,13 +28,13 @@ void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closur
 }
 
 // Trampoline for a queued block dispatch: the block travels as the entry's `data_` (its ref
-// adopted from the queue), the reuse generation via the block's `dispatched_gen`. No heap
+// adopted from the queue), the reuse generation via the block's `dispatch_arg`. No heap
 // closure -- the block IS the payload -- so a bare task dispatch allocates nothing beyond its
 // own block (killing the per-dispatch `submit_closure` alloc that hit every queued task).
 static void run_block_dispatch(void* data)
 {
     Task_ptr block(static_cast<Task_control_block*>(data), Adopt_ref{});   // adopt the queued ref
-    std::uint64_t gen = block->dispatched_gen.load(std::memory_order_acquire);
+    std::uint64_t gen = block->dispatch_arg.load(std::memory_order_acquire);
     if (block->execute)
         block->execute(block, gen);              // claims `gen` internally (dedup + stale-skip)
     else if (block->claim(gen))                  // bodyless: claim so a stale/duplicate no-ops
@@ -46,10 +48,10 @@ void submit_ready(Task_ptr block)
     // Publish the generation this run was dispatched for BEFORE handing the block to the queue
     // (release pairs with the trampoline's acquire). A dispatch left stale by a `reset` reads
     // either this gen (claim fails) or a newer already-ready one (safe re-run, claim de-dups);
-    // `claim(gen)` is the correctness gate. See `dispatched_gen` in task.h.
+    // `claim(gen)` is the correctness gate. See `dispatch_arg` in task.h.
     std::uint64_t gen = block->generation();
     Priority priority = block->flags.priority;
-    block->dispatched_gen.store(gen, std::memory_order_release);
+    block->dispatch_arg.store(gen, std::memory_order_release);
     // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
     default_scheduler().submit(&run_block_dispatch, block.release(), priority);
 }
@@ -59,29 +61,60 @@ namespace
 
 void dispatch(Scheduler& scheduler, Pipe& pipe);
 
-// Run one job as its own scheduler task; on completion, update pipe state and
-// re-dispatch. Because each job is an independent task, consecutive readers run
-// in parallel; a writer runs alone.
+// Release the pipe in `mode` and admit whatever the release unblocks; notify a
+// `wait_until_idle` waiter if the pipe drained. The tail shared by every way a pipe access
+// ends (queued job body returning, inline body returning, `pipe_release`).
+void release_and_redispatch(Scheduler& scheduler, Pipe& pipe, Access mode)
+{
+    std::scoped_lock lock(pipe.mutex);
+    if (mode == Access::read_only)
+        --pipe.active_readers;
+    else
+        pipe.writer_active = false;
+
+    dispatch(scheduler, pipe);
+
+    if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
+        pipe.idle.notify_all();
+}
+
+// Trampoline for an admitted pipe job (one per mode, so the mode needs no storage): the
+// block travels as the entry's `data_` (ref adopted from the queue), the owning pipe via
+// the block's `dispatch_arg` (free on this path -- a pipe block is created, dispatched once,
+// and never `reset`, so its generation is always 0). Runs the body on this worker, then
+// releases the pipe at body-return (the existing contract: nested tasks gate the task's
+// COMPLETION, not the pipe) and re-dispatches. Mirrors `run_block_dispatch` -- no heap
+// closure, so an async op allocates only its block.
+void run_pipe_job(void* data, Access mode)
+{
+    Task_ptr block(static_cast<Task_control_block*>(data), Adopt_ref{});   // adopt the queued ref
+    Pipe& pipe = *reinterpret_cast<Pipe*>(
+        static_cast<std::uintptr_t>(block->dispatch_arg.load(std::memory_order_acquire)));
+
+    block->execute(block, /*gen*/ 0);   // async blocks always have a body; claim(0) de-dups
+
+    // This trampoline only ever runs on a worker of the scheduler the job was submitted to
+    // (pipe blocks are not retractable and never inline-dispatched), so the ambient scheduler
+    // is the right one for the re-dispatch. The pipe outlives this call: `wait_until_idle`
+    // (Guarded's dtor) can't pass until the release below.
+    release_and_redispatch(*current_scheduler, pipe, mode);
+}   // `block` decrements here -> releases the ref the queue held
+
+void run_pipe_job_read(void* data) { run_pipe_job(data, Access::read_only); }
+void run_pipe_job_write(void* data) { run_pipe_job(data, Access::read_write); }
+
+// Hand an admitted job to the scheduler. Caller holds `pipe.mutex` (orders the
+// `dispatch_arg` publish before any later dispatch of the same block could exist -- there
+// is none: one dispatch per pipe block).
 void submit_job(Scheduler& scheduler, Pipe& pipe, Job job)
 {
-    Priority priority = job.priority;
-    submit_closure(scheduler,
-        [&scheduler, &pipe, job = std::move(job)]() mutable
-        {
-            job.fn();
-
-            std::scoped_lock lock(pipe.mutex);
-            if (job.mode == Access::read_only)
-                --pipe.active_readers;
-            else
-                pipe.writer_active = false;
-
-            dispatch(scheduler, pipe);
-
-            if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
-                pipe.idle.notify_all();
-        },
-        priority);
+    job.block->dispatch_arg.store(
+        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&pipe)),
+        std::memory_order_release);
+    Task_func_ptr trampoline = job.mode == Access::read_only ? &run_pipe_job_read
+                                                             : &run_pipe_job_write;
+    // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
+    scheduler.submit(trampoline, job.block.release(), job.priority);
 }
 
 // Admit as many front jobs as the reader/writer rules allow. Caller holds `pipe.mutex`.
@@ -114,7 +147,7 @@ void dispatch(Scheduler& scheduler, Pipe& pipe)
             // Signal the holder that it now owns the pipe; leave `writer_active` set
             // (the reservation is released explicitly via `pipe_release`, not on the
             // callback's completion).
-            submit_closure(scheduler, std::move(job.fn), job.priority);
+            submit_closure(scheduler, std::move(job.on_acquired), job.priority);
         else
             submit_job(scheduler, pipe, std::move(job));
     }
@@ -122,11 +155,11 @@ void dispatch(Scheduler& scheduler, Pipe& pipe)
 
 } // namespace
 
-void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> fn,
+void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block,
                   Priority priority)
 {
     std::scoped_lock lock(pipe.mutex);
-    pipe.jobs.push_back(Job{ mode, std::move(fn), /*reservation*/ false, priority });
+    pipe.jobs.push_back(Job{ mode, /*reservation*/ false, priority, std::move(block), {} });
     dispatch(scheduler, pipe);
 }
 
@@ -154,20 +187,13 @@ bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_
     // Deferred: sit behind the queued/active work; admitted (FIFO) when it drains. No
     // dispatch here -- the blocking condition still holds, so nothing can be admitted yet;
     // whatever releases it (a completing job or `pipe_release`) re-dispatches.
-    pipe.jobs.push_back(Job{ mode, std::move(on_acquired), /*reservation*/ true });
+    pipe.jobs.push_back(Job{ mode, /*reservation*/ true, Priority::normal, {}, std::move(on_acquired) });
     return false;
 }
 
 void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode)
 {
-    std::scoped_lock lock(pipe.mutex);
-    if (mode == Access::read_only)
-        --pipe.active_readers;
-    else
-        pipe.writer_active = false;
-    dispatch(scheduler, pipe);
-    if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
-        pipe.idle.notify_all();
+    release_and_redispatch(scheduler, pipe, mode);
 }
 
 void multi_acquire(Ref_ptr<Multi_async_state> state,
@@ -187,7 +213,7 @@ void multi_acquire(Ref_ptr<Multi_async_state> state,
         multi_acquire(std::move(state), std::move(block), pos + 1);
 }
 
-bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()>& fn)
+bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_ptr& block)
 {
     {
         std::scoped_lock lock(pipe.mutex);
@@ -208,17 +234,10 @@ bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_on
     }
 
     // Admitted: run the body inline on THIS thread (it installs its own access scope). The
-    // caller blocks for its duration. Then release + re-dispatch, mirroring `submit_job`.
-    fn();
+    // caller blocks for its duration. Then release + re-dispatch, mirroring `run_pipe_job`.
+    block->execute(block, /*gen*/ 0);
 
-    std::scoped_lock lock(pipe.mutex);
-    if (mode == Access::read_only)
-        --pipe.active_readers;
-    else
-        pipe.writer_active = false;
-    dispatch(scheduler, pipe);
-    if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
-        pipe.idle.notify_all();
+    release_and_redispatch(scheduler, pipe, mode);
     return true;
 }
 
