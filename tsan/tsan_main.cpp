@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -784,11 +785,124 @@ void stress_coroutine_deep()
 }
 #endif
 
+#if defined(TS_REUSE_FORENSICS)
+// Isolated forensic driver for the stress_reuse `dep.sync() == i` flake (see the forensics
+// ring in task.h). Runs ONLY the reuse+prereq+retraction loop, many times per process; on a
+// mismatch records everything and CONTINUES (no abort) so one long run collects many
+// captures. Enabled by env TS_REUSE_ONLY=1; outer iteration count via TS_REUSE_ITERS.
+const char* forensic_event_name(std::uint32_t id)
+{
+    using namespace ts::detail::forensics;
+    switch (id)
+    {
+    case E_round: return "ROUND      ";
+    case E_reset: return "RESET      ";
+    case E_release: return "RELEASE    ";
+    case E_submit: return "SUBMIT     ";
+    case E_pop: return "POP        ";
+    case E_claim_ok: return "CLAIM_OK   ";
+    case E_claim_fail: return "CLAIM_FAIL ";
+    case E_cancel_branch: return "CANCEL_BR  ";
+    case E_body: return "BODY       ";
+    case E_prereq_body: return "PREREQ_BODY";
+    case E_settle: return "SETTLE     ";
+    case E_retract_exec: return "RETRACT_EXE";
+    case E_sync_ret: return "SYNC_RET   ";
+    default: return "?          ";
+    }
+}
+
+void forensic_dump(std::uint32_t tail)
+{
+    using namespace ts::detail::forensics;
+    std::uint32_t end = ring_idx.load(std::memory_order_relaxed);
+    std::uint32_t begin = end > tail ? end - tail : 0;
+    std::printf("--- ring dump [%u..%u) ---\n", begin, end);
+    for (std::uint32_t s = begin; s < end; ++s)
+    {
+        const Entry& e = ring[s & (ring_size - 1)];
+        std::printf("  %8u %s a=%llu b=%llu tid=%04x\n", s, forensic_event_name(e.id.load(std::memory_order_relaxed)),
+                    static_cast<unsigned long long>(e.a.load(std::memory_order_relaxed)),
+                    static_cast<unsigned long long>(e.b.load(std::memory_order_relaxed)),
+                    e.tid.load(std::memory_order_relaxed));
+    }
+    std::printf("--- end dump ---\n");
+}
+
+int reuse_forensics_main()
+{
+    using namespace ts::detail::forensics;
+    int outer = 50;
+    if (const char* it = std::getenv("TS_REUSE_ITERS"))
+        outer = std::atoi(it);
+    int captures = 0;
+
+    for (int iter = 0; iter < outer; ++iter)
+    {
+        std::atomic<int> log{ 0 };
+        auto dep = ts::task([&log]
+        {
+            int v = log.load(std::memory_order_relaxed);
+            if (auto* w = watched.load(std::memory_order_relaxed))
+                rec(E_body, static_cast<std::uint64_t>(v), w->run_state.load(std::memory_order_relaxed));
+            return v;
+        });
+        watched.store(nullptr, std::memory_order_relaxed);   // re-arm per outer iter (fresh block)
+
+        for (int i = 1; i <= 3000; ++i)
+        {
+            if (i > 1)
+                dep.reset();
+            TS_FORENSIC_G(E_round, static_cast<std::uint64_t>(i), static_cast<std::uint64_t>(iter));
+            ts::Task<void> prereq = ts::launch([&log, i]
+            {
+                log.store(i, std::memory_order_relaxed);
+                TS_FORENSIC_G(E_prereq_body, static_cast<std::uint64_t>(i), 0);
+            });
+            ts::Task<int> h = dep.after(prereq).launch();
+            if (i == 1)
+                watched.store(ts::detail::core_of(h).get(), std::memory_order_relaxed);
+            int got = dep.sync();
+            TS_FORENSIC_G(E_sync_ret, static_cast<std::uint64_t>(got), static_cast<std::uint64_t>(i));
+            if (got != i)
+            {
+                ++captures;
+                auto* c = ts::detail::core_of(h).get();
+                bool completed_now, cancelled_now;
+                {
+                    std::scoped_lock lk(c->mutex);   // race-free capture read of the plain bools
+                    completed_now = c->completed;
+                    cancelled_now = c->cancelled;
+                }
+                std::printf("CAPTURE iter=%d round=%d got=%d run_state=%llu dispatch_arg=%llu num_locks=%u "
+                            "completed=%d cancelled=%d ready=%d\n",
+                            iter, i, got,
+                            static_cast<unsigned long long>(c->run_state.load(std::memory_order_relaxed)),
+                            static_cast<unsigned long long>(c->dispatch_arg.load(std::memory_order_relaxed)),
+                            c->num_locks.load(std::memory_order_relaxed),
+                            completed_now ? 1 : 0, cancelled_now ? 1 : 0,
+                            c->ready.load(std::memory_order_relaxed) ? 1 : 0);
+                forensic_dump(160);
+                std::fflush(stdout);
+            }
+        }
+        if ((iter + 1) % 10 == 0)
+            std::printf("heartbeat: iter %d/%d, captures %d\n", iter + 1, outer, captures);
+    }
+    std::printf("reuse forensics done: %d outer iters, %d captures\n", outer, captures);
+    return captures > 0 ? 42 : 0;
+}
+#endif // TS_REUSE_FORENSICS
+
 } // namespace
 
 int main()
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered: last stage is visible if it hangs
+#if defined(TS_REUSE_FORENSICS)
+    if (std::getenv("TS_REUSE_ONLY"))
+        return reuse_forensics_main();
+#endif
     std::puts("tsan: scheduler stress");   stress_scheduler();
     std::puts("tsan: thread_safe stress");  stress_thread_safe();
     std::puts("tsan: inline async stress");  stress_inline_async();
