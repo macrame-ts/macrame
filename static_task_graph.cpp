@@ -231,8 +231,13 @@ void Static_task_graph::acquire_next(Run_state& run, int index, int pos, bool sy
         // on the settling thread) runs here via the shared trampoline (its block has
         // `run_inline` set, so `dispatch_ready` takes the inline path -- bounded, iterative);
         // otherwise (queued node, or an acquire deferred to a worker) go through the queue.
+        // Reading the node's generation here is race-free: a node dispatches exactly once
+        // per run, runs are sequential, and re-arm happens only at the NEXT `execute()` --
+        // after every dispatch of this run has been consumed (the run's `done` gates on all
+        // node completions). No dispatch can coexist with a re-arm, unlike the reusable-
+        // builder path that needed release-time generation capture (see task.h `release`).
         if (synchronous && node.inline_dispatch)
-            detail::Task_control_block::dispatch_ready(node.block);
+            detail::Task_control_block::dispatch_ready(node.block, node.block->generation());
         else
             run_node(run, index);
         return;
@@ -265,7 +270,9 @@ void Static_task_graph::run_node(Run_state& run, int index)
 }
 
 // Raw scheduler entry: run the node's block. Kept alive by the graph (Node owns the
-// block); the trampoline holds no ownership.
+// block); the trampoline holds no ownership. The `generation()` read at run time is
+// race-free for graph nodes (sequential runs; every dispatch consumed before the run's
+// `done` settles; re-arm only at the next `execute()` -- see `acquire_next`).
 void Static_task_graph::node_trampoline(void* node)
 {
     auto* n = static_cast<Node*>(node);

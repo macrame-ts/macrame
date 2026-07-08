@@ -175,6 +175,75 @@ namespace detail
 
 struct Task_control_block;
 
+#if defined(TS_REUSE_FORENSICS)
+// Diagnostic-only lock-free event ring for the stress_reuse flake hunt (see the
+// `TS_REUSE_ONLY` driver in tsan/tsan_main.cpp). Compiled ONLY under TS_REUSE_FORENSICS;
+// the default build sees no-op macros and is unaffected. Hooks filter on one `watched`
+// block (the reused `dep`), record {event, a, b, tid} with relaxed atomics (minimal
+// perturbation, TSan-clean by construction), and the driver dumps the tail on a capture.
+namespace forensics
+{
+enum Event : std::uint32_t
+{
+    E_none = 0,
+    E_round,          // a = round i, b = outer iter        (driver)
+    E_reset,          // a = new gen                        (Task_control_block::reset)
+    E_release,        // a = num_locks after, b = prereq_cancelled (release)
+    E_submit,         // a = gen published to dispatch_arg  (submit_ready)
+    E_pop,            // a = gen read from dispatch_arg     (run_block_dispatch)
+    E_claim_ok,       // a = gen, b = path (1 queue, 2 retract, 3 other)
+    E_claim_fail,     // a = gen, b = path
+    E_cancel_branch,  // token/prereq-cancel skip taken     (Executable::run)
+    E_body,           // a = log value read, b = run_state raw (driver body)
+    E_prereq_body,    // a = i                              (driver prereq body)
+    E_settle,         // a = cancel flag, b = already-completed (settle, under lock)
+    E_retract_exec,   // a = gen about to execute inline    (retract)
+    E_sync_ret,       // a = value returned, b = round i    (driver)
+};
+
+struct Entry
+{
+    std::atomic<std::uint64_t> a{ 0 };
+    std::atomic<std::uint64_t> b{ 0 };
+    std::atomic<std::uint32_t> id{ 0 };
+    std::atomic<std::uint32_t> tid{ 0 };
+};
+
+inline constexpr std::uint32_t ring_size = 1u << 17;   // ~131k events, wraps
+inline Entry ring[ring_size];
+inline std::atomic<std::uint32_t> ring_idx{ 0 };
+inline std::atomic<Task_control_block*> watched{ nullptr };
+inline thread_local std::uint64_t claim_path = 0;   // 1 queue-dispatch, 2 retract, 3 other
+
+inline std::uint32_t tid_hash() noexcept
+{
+    return static_cast<std::uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xffffu);
+}
+
+inline void rec(Event id, std::uint64_t a, std::uint64_t b) noexcept
+{
+    std::uint32_t i = ring_idx.fetch_add(1, std::memory_order_relaxed) & (ring_size - 1);
+    ring[i].a.store(a, std::memory_order_relaxed);
+    ring[i].b.store(b, std::memory_order_relaxed);
+    ring[i].tid.store(tid_hash(), std::memory_order_relaxed);
+    ring[i].id.store(id, std::memory_order_relaxed);
+}
+
+inline void rec_if(const Task_control_block* c, Event id, std::uint64_t a, std::uint64_t b) noexcept
+{
+    if (c && c == watched.load(std::memory_order_relaxed))
+        rec(id, a, b);
+}
+} // namespace forensics
+#define TS_FORENSIC(c, ev, a, b) ::ts::detail::forensics::rec_if((c), ::ts::detail::forensics::ev, (a), (b))
+#define TS_FORENSIC_G(ev, a, b) ::ts::detail::forensics::rec(::ts::detail::forensics::ev, (a), (b))
+#define TS_FORENSIC_PATH(p) (::ts::detail::forensics::claim_path = (p))
+#else
+#define TS_FORENSIC(c, ev, a, b) ((void)0)
+#define TS_FORENSIC_G(ev, a, b) ((void)0)
+#define TS_FORENSIC_PATH(p) ((void)0)
+#endif
+
 // Intrusive strong-refcount ownership of a `Task_control_block`. The count + a `destroy`
 // thunk live IN the block (no separate control block), so a handle is ONE pointer (half a
 // `shared_ptr`) -- lighter in the successor/prerequisite/inline vectors and on every copy.
@@ -234,8 +303,10 @@ private:
 
 // Submit a block whose prerequisites are all met to run (defined in the scheduler
 // layer; task.h stays scheduler-independent). Runs `execute` if it has a body, else
-// `complete`s it.
-void submit_ready(Task_ptr block);
+// `complete`s it. `gen` is the generation the CALLER captured when the block became
+// ready (at/before the `num_locks` decrement that hit zero) -- never re-read at submit
+// time; see `release` and `dispatch_arg` for the TOCTOU this closes.
+void submit_ready(Task_ptr block, std::uint64_t gen);
 
 // --- Task control block ----------------------------------------------------
 //
@@ -289,14 +360,20 @@ struct Task_control_block
     // ride in the 16-byte `Task_entry` (the work-stealing deque stores those as
     // `std::atomic<Task_entry>`, lock-free only at two words). Interpreted by the MATCHING
     // trampoline, so the meanings can't mix:
-    //   - `run_block_dispatch` (bare-scheduler dispatch, `submit_ready`): the reuse GENERATION.
-    //     A stale dispatch reads either its own generation (`claim` fails) or a newer one that
-    //     `submit_ready` only writes when that run is already ready (safe re-run, `claim`
-    //     de-dups) -- `claim` stays the correctness gate; this just feeds it a candidate.
+    //   - `run_block_dispatch` (bare-scheduler dispatch, `submit_ready`): the reuse GENERATION,
+    //     captured by the releaser BEFORE its `num_locks` decrement (see `release` -- reading it
+    //     after the decrement was a TOCTOU: a releaser delayed past the retract+reset of the run
+    //     it released would stamp the NEXT generation, whose claim then succeeded with
+    //     prerequisites still unmet) and published with a MONOTONIC-MAX CAS (a delayed releaser
+    //     must not regress the slot below a newer round's publish -- that would orphan the newer
+    //     round's dispatch and hang a non-retracting waiter). Every value in the slot is
+    //     therefore a generation whose run genuinely released to zero, so a stale entry reads
+    //     either its own generation (claim fails after a reset) or a newer READY one (safe
+    //     early run; `claim` de-dups) -- `claim` stays the correctness gate.
     //   - `run_pipe_job_read/write` (pipe-job dispatch, `Guarded::async`): the owning `Pipe*`
     //     (a pipe block is created, dispatched once, and never `reset`, so its generation is
-    //     always 0 and the slot is free to carry the pipe instead).
-    // Single writer per dispatch (one run in flight / under the pipe mutex).
+    //     always 0 and the slot is free to carry the pipe instead; plain store under the pipe
+    //     mutex -- the monotonic-gen scheme above never touches pipe blocks, disjoint path).
     std::atomic<std::uint64_t> dispatch_arg{ 0 };
     Cancellation_token token;          // checked by `execute` before running the body
 
@@ -348,8 +425,13 @@ struct Task_control_block
     bool claim(std::uint64_t gen) noexcept
     {
         std::uint64_t expected = gen << 1;
-        return run_state.compare_exchange_strong(
+        const bool ok = run_state.compare_exchange_strong(
             expected, (gen << 1) | 1u, std::memory_order_acq_rel, std::memory_order_relaxed);
+#if defined(TS_REUSE_FORENSICS)
+        forensics::rec_if(this, ok ? forensics::E_claim_ok : forensics::E_claim_fail,
+                          gen, forensics::claim_path);
+#endif
+        return ok;
     }
 
     void complete() { settle(false); }
@@ -366,11 +448,21 @@ struct Task_control_block
     {
         if (prereq_cancelled)
             blk->prereq_cancelled.store(true, std::memory_order_relaxed);
+        // Capture the generation BEFORE the decrement. Our not-yet-released lock pins the
+        // current run (it cannot start, so it cannot complete, so `reset()` cannot re-arm
+        // it), so this read names exactly the run this lock belongs to. Reading it AFTER
+        // the decrement is a TOCTOU: once the count hits zero the run can complete via
+        // retraction and be re-armed, and a releaser preempted in that window would stamp
+        // its dispatch with the NEXT generation -- which then claims a run whose
+        // prerequisites are not yet met (proven by the stress_reuse forensics: `got == i-1`
+        // with the current generation claimed; see tsan/reuse_hunt.sh).
+        std::uint64_t gen = blk->generation();
         std::uint32_t now = blk->num_locks.fetch_sub(1, std::memory_order_acq_rel) - 1;
+        TS_FORENSIC(blk.get(), E_release, now, prereq_cancelled ? 1 : 0);
         if (now == 0)
-            dispatch_ready(blk);          // pre-execution: prerequisites met -> queue, or run inline
+            dispatch_ready(blk, gen);     // pre-execution: prerequisites met -> queue, or run inline
         else if (now == execution_flag)
-            blk->complete();              // post-execution: nested done -> complete
+            blk->complete();              // post-execution: nested done -> complete (`gen` unused)
     }
 
     // Per-thread FIFO trampoline for inline tasks: a ready inline task runs on THIS thread
@@ -379,25 +471,30 @@ struct Task_control_block
     // stack. The first inline dispatch on a thread starts the drain; inline tasks made
     // ready during the drain just push and are picked up in order (head advances as the
     // vector grows). `clear()` at the end retains capacity -> no steady-state allocation.
-    inline static thread_local std::vector<Task_ptr> inline_pending;
+    // Each entry carries the GENERATION captured at release time (same TOCTOU as the queued
+    // path: re-reading `generation()` at drain time could see a newer gen if the block was
+    // retracted + re-armed between the push and the drain step).
+    inline static thread_local std::vector<std::pair<Task_ptr, std::uint64_t>> inline_pending;
     inline static thread_local bool inline_draining = false;
 
-    static void dispatch_ready(const Task_ptr& blk)
+    // `gen` is the generation captured by the caller when the block became ready (see
+    // `release`); threaded through both dispatch routes, never re-read here.
+    static void dispatch_ready(const Task_ptr& blk, std::uint64_t gen)
     {
         if (!blk->flags.run_inline)
         {
-            submit_ready(blk);   // queued: the scheduler runs it (at blk->flags.priority)
+            submit_ready(blk, gen);   // queued: the scheduler runs it (at blk->flags.priority)
             return;
         }
-        inline_pending.push_back(blk);
+        inline_pending.push_back({ blk, gen });
         if (inline_draining)
             return;              // an active drain on this thread will run it
         inline_draining = true;
         for (std::size_t head = 0; head < inline_pending.size(); ++head)
         {
-            Task_ptr b = std::move(inline_pending[head]);
+            auto [b, g] = std::move(inline_pending[head]);
             if (b->execute)
-                b->execute(b, b->generation());   // claims + runs the body on this thread
+                b->execute(b, g);   // claims + runs the body on this thread
             else
                 b->complete();
         }
@@ -413,6 +510,7 @@ struct Task_control_block
         void* r = nullptr;               // the result for continuations, captured under the lock
         {
             std::scoped_lock lock(mutex);
+            TS_FORENSIC(this, E_settle, cancel_ ? 1 : 0, completed ? 1 : 0);
             if (completed)
                 return;
             completed = true;
@@ -478,6 +576,7 @@ struct Task_control_block
         prereq_cancelled.store(false, std::memory_order_relaxed);
         num_locks.store(0, std::memory_order_relaxed);
         ready.store(false, std::memory_order_release);
+        TS_FORENSIC(this, E_reset, generation(), 0);
     }
 
     // Deep retraction: run the un-started part of `blk`'s dependency subtree inline on
@@ -500,8 +599,18 @@ struct Task_control_block
         for (const auto& p : prereqs)
             retract(p);
 
+        // Reading `generation()` after the locks check is safe HERE (unlike `release`): the
+        // retractor is a `sync()` caller of the CURRENT run, and only the resetter advances
+        // the generation -- the builder contract (one run in flight; `reset()` only after the
+        // prior run settled and was consumed) means no thread can be re-arming the block
+        // while a same-run retractor is inside this call.
         if (blk->execute && blk->num_locks.load(std::memory_order_acquire) == 0)
+        {
+            TS_FORENSIC(blk.get(), E_retract_exec, blk->generation(), 0);
+            TS_FORENSIC_PATH(2);
             blk->execute(blk, blk->generation());   // ready & not started -> run inline (no-op if a worker beat us)
+            TS_FORENSIC_PATH(0);
+        }
     }
 
     static void retract_or_wait(const Task_ptr& blk)
@@ -600,6 +709,7 @@ struct Executable
         auto* self = reinterpret_cast<Executable*>(c.get());
         if (c->token.is_cancel_requested() || c->prereq_cancelled.load(std::memory_order_acquire))
         {
+            TS_FORENSIC(c.get(), E_cancel_branch, gen, 0);
             c->cancel();   // own token, or a prerequisite cancelled (no result to consume)
             return;
         }
@@ -1087,7 +1197,7 @@ auto launch(Fn&& fn, Launch_options opts = {})
     auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), std::move(opts.token));
     core->flags.retractable = true;   // bare scheduler task (no pipe binding): safe to run inline from a waiter
     core->flags.priority = opts.priority;
-    detail::submit_ready(core);
+    detail::submit_ready(core, core->generation());   // fresh block, pre-dispatch: gen 0, race-free read
     return Task<R>(core);
 }
 
