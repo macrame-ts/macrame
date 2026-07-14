@@ -57,12 +57,13 @@ public:
     Deferred(const Deferred&) = delete;
     Deferred& operator=(const Deferred&) = delete;
 
-    // Mint a producer handle. Slots live for the Deferred's lifetime (recorders
-    // never unregister) -- mint once per producer and REUSE across frames; a
-    // recorder() call per frame grows the journal forever.
+    // Mint a producer handle. A destroyed recorder's slot is recycled (free-list),
+    // so live slots are bounded by peak concurrent recorders -- but reuse inherits
+    // the released slot's APPLY-ORDER position (see the note in journal.h): where
+    // cross-producer order matters, mint at setup and keep recorders alive.
     Recorder<T> recorder()
     {
-        return Recorder<T>(journal_.add_slot());
+        return Recorder<T>(journal_, journal_.add_slot());
     }
 
     // Mint a per-worker handle for parallel staging (see `Parallel_recorder`).

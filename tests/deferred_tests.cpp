@@ -294,6 +294,79 @@ void test_parallel_recorder_on_versioned()
     TS_CHECK(v.read([](const int& x) { return x; }).sync() == n);
 }
 
+void test_released_slot_commands_survive()
+{
+    // A recorder destroyed with staged-but-uncommitted commands: the slot is
+    // recycled, the commands drain on the next cut -- nothing is lost.
+    ts::Guarded<int> target{ 0 };
+    ts::Deferred<int> d{ target };
+    {
+        auto rec = d.recorder();
+        rec.stage([](int& v) { v += 5; });
+    }   // released before any commit
+    d.commit_async().sync();
+    TS_CHECK(target.async([](const int& v) { return v; }).sync() == 5);
+}
+
+void test_slot_reuse_inherits_position()
+{
+    // r1 released -> r3 reuses r1's slot -> r3's commands apply at slot 0,
+    // BEFORE r2's (slot 1), even though r3 was minted last. The documented
+    // reuse-inherits-position semantics, pinned.
+    ts::Guarded<std::vector<int>> target;
+    ts::Deferred<std::vector<int>> d{ target };
+
+    auto r1 = d.recorder();
+    auto r2 = d.recorder();
+    r1 = ts::Recorder<std::vector<int>>{};   // release r1's slot (assign-over releases)
+    auto r3 = d.recorder();                  // reuses slot 0
+
+    r2.stage([](std::vector<int>& v) { v.push_back(2); });
+    r3.stage([](std::vector<int>& v) { v.push_back(1); });
+    d.commit_async().sync();
+
+    auto v = target.async([](const std::vector<int>& v) { return v; }).sync();
+    TS_CHECK((v == std::vector<int>{ 1, 2 }));
+}
+
+void test_recorder_churn_does_not_grow_journal()
+{
+    // Mint/stage/destroy far past max_slots (4096): the free-list recycles one
+    // slot the whole way -- no threshold fatal, every command applied.
+    constexpr int churn = static_cast<int>(ts::detail::Journal<int>::max_slots) + 1000;
+    ts::Guarded<int> target{ 0 };
+    ts::Deferred<int> d{ target };
+
+    for (int i = 0; i < churn; ++i)
+    {
+        auto rec = d.recorder();
+        rec.stage([](int& v) { ++v; });
+    }
+    d.commit_async().sync();
+    TS_CHECK(target.async([](const int& v) { return v; }).sync() == churn);
+}
+
+void test_parallel_recorder_churn()
+{
+    // Same for the per-worker handle: each mint takes worker_count+1 slots, each
+    // destroy returns them.
+    ts::Guarded<int> target{ 0 };
+    ts::Deferred<int> d{ target };
+
+    for (int i = 0; i < 2000; ++i)
+    {
+        auto rec = d.parallel_recorder();
+        rec.stage([](int& v) { ++v; });
+    }
+    d.commit_async().sync();
+    TS_CHECK(target.async([](const int& v) { return v; }).sync() == 2000);
+}
+
+void test_slot_overflow_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("journal_slot_overflow"));
+}
+
 void test_late_bound_recorder()
 {
     // The empty state's purpose: a member declared before the Deferred exists,
@@ -343,6 +416,11 @@ void run_deferred_tests()
     run("deferred: parallel recorder from parallel_for", test_parallel_recorder_from_parallel_for);
     run("deferred: parallel recorder overflow lane", test_parallel_recorder_overflow_lane);
     run("deferred: parallel recorder on versioned (replay exact)", test_parallel_recorder_on_versioned);
+    run("deferred: released slot's commands survive", test_released_slot_commands_survive);
+    run("deferred: slot reuse inherits apply position", test_slot_reuse_inherits_position);
+    run("deferred: recorder churn does not grow the journal", test_recorder_churn_does_not_grow_journal);
+    run("deferred: parallel recorder churn", test_parallel_recorder_churn);
+    run("deferred: keeping recorders alive past max_slots is fatal", test_slot_overflow_is_fatal);
     run("deferred: late-bound recorder", test_late_bound_recorder);
     run("deferred: destroy with staged commands is fatal", test_drop_staged_is_fatal);
     run("deferred: stage on moved-from recorder is fatal", test_moved_from_recorder_stage_is_fatal);

@@ -113,7 +113,7 @@ public:
     // order, FIFO within a recorder.
     Recorder<T> recorder()
     {
-        return Recorder<T>(journal_.add_slot());
+        return Recorder<T>(journal_, journal_.add_slot());
     }
 
     // Per-worker handle for parallel staging (see `Parallel_recorder` in

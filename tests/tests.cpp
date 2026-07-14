@@ -24,6 +24,7 @@
 
 #include <cstring>
 #include <thread>
+#include <vector>
 
 void run_all_tests()
 {
@@ -138,6 +139,14 @@ void run_death_scenario(const char* name)
         ts::Recorder<int> moved = std::move(rec);
         moved.stage([](int& v) { ++v; });
         rec.stage([](int& v) { ++v; });   // moved-from: empty -> fatal
+    }
+    else if (std::strcmp(name, "journal_slot_overflow") == 0)
+    {
+        ts::Guarded<int> target{ 0 };
+        ts::Deferred<int> d{ target };
+        std::vector<ts::Recorder<int>> alive;   // all kept alive: nothing recycles
+        for (std::size_t i = 0; i <= ts::detail::Journal<int>::max_slots; ++i)
+            alive.push_back(d.recorder());      // crossing max_slots -> fatal
     }
     else if (std::strcmp(name, "parallel_recorder_empty_stage") == 0)
     {

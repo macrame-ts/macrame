@@ -45,10 +45,44 @@ public:
         std::vector<Command> commands;
     };
 
+    // A destroyed recorder's slot goes to the free-list and the next mint reuses
+    // it, so live slot count is bounded by PEAK CONCURRENT recorders, not total
+    // ever -- mint-and-destroy per frame no longer grows the journal. The
+    // threshold below then only trips on the remaining pathology: minting
+    // recorders that are all kept alive.
+    // NOTE the reuse semantics: a reused slot keeps its POSITION, so a new
+    // producer inherits the released producer's place in the apply order (and
+    // any commands the released producer staged but never committed drain ahead
+    // of the new owner's, same slot). Deterministic iff the mint/destroy
+    // sequence is deterministic -- concurrent dynamic mint/destroy makes slot
+    // assignment racy. Where cross-producer order carries meaning, mint at
+    // setup and keep recorders alive; explicit sort keys (typed tier) are the
+    // planned answer for order under churn.
+    static constexpr std::size_t max_slots = 4096;
+
     Slot& add_slot()
     {
         std::lock_guard lock(register_mutex_);
+        if (!free_.empty())
+        {
+            Slot* slot = free_.back();
+            free_.pop_back();
+            return *slot;
+        }
+#if TS_SAFETY_CHECKS
+        if (slots_.size() >= max_slots)
+            fatal("Journal: slot count exceeded max_slots -- recorders are being minted "
+                  "and kept alive per frame; mint once per producer and reuse");
+#endif
         return slots_.emplace_back();
+    }
+
+    // Called by recorder destructors. The slot is recycled, NOT destroyed:
+    // commands staged but not yet cut stay in it and drain on the next cut.
+    void release_slot(Slot& slot)
+    {
+        std::lock_guard lock(register_mutex_);
+        free_.push_back(&slot);
     }
 
     // Take everything staged so far, flattened in slot-creation order (FIFO within
@@ -82,7 +116,8 @@ public:
 
 private:
     std::mutex register_mutex_;
-    std::deque<Slot> slots_;   // deque: stable addresses for outstanding recorders (and Slot holds a mutex -- immovable)
+    std::deque<Slot> slots_;      // deque: stable addresses for outstanding recorders (and Slot holds a mutex -- immovable)
+    std::vector<Slot*> free_;     // released by recorder dtors, reused by add_slot (see the reuse note above)
 };
 
 } // namespace detail
@@ -102,13 +137,28 @@ public:
     // empty recorder is fatal under TS_SAFETY_CHECKS.
     Recorder() = default;
 
+    // Destruction releases the slot back to the journal's free-list (bounding
+    // live slots by peak concurrent recorders); staged-but-uncommitted commands
+    // survive in the slot and drain on the next cut. Must not outlive the
+    // owning `Deferred`/`Versioned`.
+    ~Recorder()
+    {
+        release();
+    }
+
     Recorder(Recorder&& other) noexcept
-        : slot_(std::exchange(other.slot_, nullptr))
+        : journal_(std::exchange(other.journal_, nullptr))
+        , slot_(std::exchange(other.slot_, nullptr))
     {}
 
     Recorder& operator=(Recorder&& other) noexcept
     {
-        slot_ = std::exchange(other.slot_, nullptr);
+        if (this != &other)
+        {
+            release();
+            journal_ = std::exchange(other.journal_, nullptr);
+            slot_ = std::exchange(other.slot_, nullptr);
+        }
         return *this;
     }
 
@@ -134,10 +184,20 @@ private:
     template<typename> friend class Deferred;
     template<typename> friend class Versioned;
 
-    explicit Recorder(typename detail::Journal<T>::Slot& slot) noexcept
-        : slot_(&slot)
+    Recorder(detail::Journal<T>& journal, typename detail::Journal<T>::Slot& slot) noexcept
+        : journal_(&journal)
+        , slot_(&slot)
     {}
 
+    void release()
+    {
+        if (slot_)
+            journal_->release_slot(*slot_);
+        journal_ = nullptr;
+        slot_ = nullptr;
+    }
+
+    detail::Journal<T>* journal_ = nullptr;
     typename detail::Journal<T>::Slot* slot_ = nullptr;
 };
 
@@ -161,8 +221,34 @@ class Parallel_recorder
 {
 public:
     Parallel_recorder() = default;   // empty; bind via parallel_recorder(). Staging on empty is fatal.
-    Parallel_recorder(Parallel_recorder&&) = default;              // moved-from vector is empty -> inert
-    Parallel_recorder& operator=(Parallel_recorder&&) = default;
+
+    // Releases all its slots (see `Recorder::~Recorder`).
+    ~Parallel_recorder()
+    {
+        release();
+    }
+
+    Parallel_recorder(Parallel_recorder&& other) noexcept
+        : journal_(std::exchange(other.journal_, nullptr))
+        , scheduler_(std::exchange(other.scheduler_, nullptr))
+        , slots_(std::move(other.slots_))
+    {
+        other.slots_.clear();
+    }
+
+    Parallel_recorder& operator=(Parallel_recorder&& other) noexcept
+    {
+        if (this != &other)
+        {
+            release();
+            journal_ = std::exchange(other.journal_, nullptr);
+            scheduler_ = std::exchange(other.scheduler_, nullptr);
+            slots_ = std::move(other.slots_);
+            other.slots_.clear();
+        }
+        return *this;
+    }
+
     Parallel_recorder(const Parallel_recorder&) = delete;
     Parallel_recorder& operator=(const Parallel_recorder&) = delete;
 
@@ -186,12 +272,22 @@ private:
     template<typename> friend class Versioned;
 
     Parallel_recorder(detail::Journal<T>& journal, Scheduler& scheduler)
-        : scheduler_(&scheduler)
+        : journal_(&journal)
+        , scheduler_(&scheduler)
     {
         int workers = scheduler.worker_count();
         slots_.reserve(static_cast<std::size_t>(workers) + 1);
         for (int i = 0; i < workers + 1; ++i)
             slots_.push_back(&journal.add_slot());
+    }
+
+    void release()
+    {
+        for (auto* slot : slots_)
+            journal_->release_slot(*slot);
+        slots_.clear();
+        journal_ = nullptr;
+        scheduler_ = nullptr;
     }
 
     // This thread's slot: its worker index + 1 when it is a worker of the bound
@@ -204,8 +300,9 @@ private:
         return static_cast<std::size_t>(w) + 1;
     }
 
-    std::vector<typename detail::Journal<T>::Slot*> slots_;
+    detail::Journal<T>* journal_ = nullptr;
     Scheduler* scheduler_ = nullptr;
+    std::vector<typename detail::Journal<T>::Slot*> slots_;
 };
 
 } // namespace ts
