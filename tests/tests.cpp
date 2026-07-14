@@ -16,6 +16,11 @@
 #include "parallel_tests.h"
 #include "coroutine_tests.h"
 #include "integration_tests.h"
+#include "deferred_tests.h"
+#include "versioned_tests.h"
+
+#include "deferred.h"
+#include "versioned.h"
 
 #include <cstring>
 #include <thread>
@@ -30,6 +35,8 @@ void run_all_tests()
     run_parallel_tests();
     run_coroutine_tests();
     run_integration_tests();
+    run_deferred_tests();
+    run_versioned_tests();
 }
 
 #if defined(__cpp_impl_coroutine)
@@ -114,6 +121,40 @@ void run_death_scenario(const char* name)
     {
         auto t = ts::task([] { return 1; });   // built, not launched -> not settled
         t.reset();   // reset before the task has settled -> fatal
+    }
+    else if (std::strcmp(name, "deferred_drop_staged") == 0)
+    {
+        ts::Guarded<int> target{ 0 };
+        ts::Deferred<int> d{ target };
+        auto rec = d.recorder();
+        rec.stage([](int& v) { ++v; });
+        // `d` destroyed with a staged uncommitted command -> fatal (lost write)
+    }
+    else if (std::strcmp(name, "versioned_drop_staged") == 0)
+    {
+        ts::Versioned<int> v;
+        auto rec = v.recorder();
+        rec.stage([](int& x) { ++x; });
+        // destroyed with a staged unpublished command -> fatal (lost write)
+    }
+    else if (std::strcmp(name, "versioned_divergence") == 0)
+    {
+        ts::Versioned<int> v;
+        v.set_divergence_check([](const int& x) { return static_cast<std::size_t>(x); });
+        auto rec = v.recorder();
+        // Nondeterministic command: the two replay applications see different
+        // `n`, so the replicas diverge -> fatal at the post-resync hash compare.
+        rec.stage([](int& x) { static int n = 41; x = ++n; });
+        v.publish().sync();
+    }
+    else if (std::strcmp(name, "versioned_wrong_front") == 0)
+    {
+        ts::Versioned<int> v;
+        int other = 0;
+        ts::Access_context ctx;
+        ctx.add(&other, Access::read_write);
+        ts::Access_scope scope(ctx);
+        v.publish_into(other);   // not this Versioned's front -> fatal
     }
 #if defined(__cpp_impl_coroutine)
     else if (std::strcmp(name, "coro_await_under_guard") == 0)

@@ -1,6 +1,10 @@
 # Command buffers: design study
 
-Status: proposal / design study (2026-07). Follows up the `docs/TODO.md` item
+Status: **implemented** (2026-07) — design 4 shipped as `Deferred<T>` (`deferred.h`)
+plus its versioned-state sibling `Versioned<T>` (`versioned.h`); the physics sample
+(`sample/physics.cpp`) is the second fixture. See §7 for the outcome, the decisions
+as resolved, and what was deliberately deferred. Originally a proposal / design
+study following up the `docs/TODO.md` item
 "Deferred command-buffer writes" and its design points (the recording-front-end
 framing, the derived-strata phases discussion). Question under study: **do
 command buffers need something new, or can we bend what exists?**
@@ -481,3 +485,110 @@ recorder, and the access-declared graph as *three* named things.
    inboxes) shares the record→bin→apply skeleton; design the arena chunk +
    recorder machinery so both sit on it (already flagged in TODO 7.x — keep
    the storage layer common).
+
+---
+
+## 7. Outcome (implemented 2026-07)
+
+### 7.1 What shipped
+
+**Vocabulary.** The rendering-flavored names were dropped for the transaction
+metaphor, which carries the correct entailments (staging, isolation, atomic
+apply): `stage` for the deferred write everywhere, `commit` for applying into a
+single live state, `publish` for making a new version visible. Types:
+`Deferred<T>` (the command buffer of §3.2/§3.4) and `Versioned<T>` (the
+double-buffer sibling that emerged from the same analysis — named for what
+readers get, a stable version, not for the replica count, which is an
+implementation detail a triple-buffer upgrade shouldn't rename).
+
+**`Deferred<T>`** (`deferred.h`): binds to a `Guarded<T>`; `recorder()` mints
+move-only producer identities; `stage(closure)` appends to private per-recorder
+storage (`detail::Journal<T>` — shared with `Versioned`), no grant on the
+target; `commit_async(opts)` is one ordinary pipe write amortized over the
+batch (cut at execution time — a cancelled commit retains its commands);
+`commit(T&)` applies under a grant the caller already holds (the graph-node
+form; also the physics sample's "commit at the sim boundary"). Apply order:
+recorder-creation order, FIFO within — deterministic regardless of thread
+timing, exactly the §3.2 claim.
+
+**`Versioned<T>`** (`versioned.h`): journal + two replicas behind one `Guarded`
+front. The swap exchanges the replicas' *contents*, so the front's address is
+stable — graph declarations, the pipe, and the harness needed **zero changes**
+(the §3.4 `Access::append` mode turned out unnecessary for correctness, see
+7.2). Readers declare ordinary read access on `state()`; no read-your-writes —
+outputs arrive as the next version. `publish()` is three-phase, with only the
+swap under the write grant:
+
+1. cut + apply the batch to the shadow — grant-free (the shadow is
+   unobservable), overlapping all readers of the current version;
+2. swap — nanoseconds under the write grant;
+3. resync the shadow — a **read job on the front's pipe**: it overlaps every
+   reader of the new version, and pipe FIFO holds the next writer (a later
+   swap, or a graph flip node's `pipe_acquire`) behind it. The pipe *is* the
+   shadow-ownership chain; consecutive publishes additionally chain phase 1
+   after the previous resync. An empty publish doubles as a resync fence.
+
+Resync is a per-instance policy: `replay` (default — re-apply the same batch to
+the new shadow; both applications see bit-identical pre-states, so
+deterministic commands land bit-identical replicas at delta-proportional cost —
+the WAL answer to the copy problem; shadow-paging-style `copy` and no-resync
+`overwrite` cover nondeterministic commands and full-rewrite states). The
+determinism requirement is enforceable: `set_divergence_check(hash)` compares
+both replicas bitwise after every replay resync (valid — replay on one binary
+has no FP drift) and fatals on mismatch. It caught a real divergence bug during
+bring-up (default- vs value-initialized shadow).
+
+**The second fixture.** `sample/physics.cpp` implements the machine/extract
+decomposition: a sealed `Guarded<Physics_world>` with exactly two grant holders
+in the graph (one reader node for scene queries, the sim node), a
+`Deferred<Physics_world>` for staged inputs (impulses, spawns — with grant-free
+id reservation answering the ECS forward-reference case without reserved-handle
+support), and a `Versioned<Pose_snapshot>` publishing the outputs via the
+batch-extract idiom (one staged command per frame). Deterministic across runs,
+by construction. The selection rule it validates: **`Versioned` is for state
+whose per-frame delta is data; when producing version N+1 is heavy computation,
+version the output extract, not the machine.**
+
+### 7.2 Decision points, as resolved
+
+1. *Command representation*: closure tier only for v1; the typed-POD tier (and
+   with it merge/sort/dedup hooks) waits for the arena work. The batch-extract
+   idiom covers the hot case meanwhile.
+2. *Sub-buffer keying*: explicit `recorder()` handles, move-only. No TLS
+   implicit recorder.
+3. *`Access::append`*: **not added** — a new access mode adds a lattice
+   dimension and proved avoidable: staging touches only the journal (no grant
+   at all), and producer→commit/flip ordering is hand-wired `after` for now.
+   Append-edge derivation remains available as later sugar; it was never a
+   correctness requirement.
+4. *Flush coalescing*: explicit `commit_async` / `publish` / flip node only; no
+   auto-materialization.
+5. *Unflushed at destruction*: `ts::fatal` under `TS_SAFETY_CHECKS` (a lost
+   write, same severity as undeclared access); `discard()` is the explicit
+   escape.
+6. *Skipped-flush semantics*: carry — a cancelled commit/publish leaves the
+   commands staged for the next one (cut happens at execution, not submission).
+   A cancelled `publish` token completes the returned task (it is a phase gate,
+   not the skipped work); a cancelled `commit_async` settles cancelled like any
+   pipe job.
+7. *Cross-target commands*: deferred, unchanged. The physics sample suggests
+   the practical answer is decomposition (two buffers), not a multi-target CB.
+8. *Storage convergence*: `detail::Journal<T>` is the shared layer (`Deferred`
+   = journal + live state; `Versioned` = journal + two replicas); the arena
+   rebase applies to it once, for both.
+
+### 7.3 Deliberately deferred
+
+- Typed-POD command tier + sort/merge/reduce hooks (three different hook
+  shapes: sort = rendering, last-wins = ECS, reduce = physics accumulation).
+- Arena-backed journal storage (alloc-audit 3.1 #7) and lock-free recorder
+  slots (the per-slot mutex exists only for the dynamic stage-vs-cut race; it
+  is uncontended in one-producer use and edge-ordered-away in graphs).
+- `Access::append` edge derivation (`add_flush_node`) as compile-time sugar
+  over hand-wired `after`.
+- Reserved handles from `stage()` (the id-allocator pattern is the documented
+  answer), multi-target buffers, `read_pair()` on `Versioned` for
+  interpolation.
+- Single-publisher discipline on `Versioned` is documented, not enforced:
+  dynamic publishes chain among themselves, but don't run them concurrently
+  with a graph whose flip node publishes the same instance.

@@ -29,6 +29,7 @@
     <ClCompile Include="worker_thread.cpp" />
     <ClCompile Include="benchmarks\benchmarks.cpp" />
     <ClCompile Include="sample\engine.cpp" />
+    <ClCompile Include="sample\physics.cpp" />
     <ClCompile Include="sample\frame.cpp" />
     <ClCompile Include="sample\systems.cpp" />
     <ClCompile Include="tests\access_tests.cpp" />
@@ -41,6 +42,8 @@
     <ClCompile Include="tests\task_tests.cpp" />
     <ClCompile Include="tests\tests.cpp" />
     <ClCompile Include="tests\guarded_tests.cpp" />
+    <ClCompile Include="tests\deferred_tests.cpp" />
+    <ClCompile Include="tests\versioned_tests.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="access.h" />
@@ -56,10 +59,13 @@
     <ClInclude Include="static_task_graph.h" />
     <ClInclude Include="task.h" />
     <ClInclude Include="guarded.h" />
+    <ClInclude Include="deferred.h" />
+    <ClInclude Include="versioned.h" />
     <ClInclude Include="work_stealing_deque.h" />
     <ClInclude Include="worker_thread.h" />
     <ClInclude Include="benchmarks\benchmarks.h" />
     <ClInclude Include="sample\engine.h" />
+    <ClInclude Include="sample\physics.h" />
     <ClInclude Include="sample\frame.h" />
     <ClInclude Include="sample\parallel.h" />
     <ClInclude Include="sample\systems.h" />
@@ -75,6 +81,8 @@
     <ClInclude Include="tests\tests.h" />
     <ClInclude Include="tests\test_util.h" />
     <ClInclude Include="tests\guarded_tests.h" />
+    <ClInclude Include="tests\deferred_tests.h" />
+    <ClInclude Include="tests\versioned_tests.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>

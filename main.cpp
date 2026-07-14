@@ -3,6 +3,7 @@
 #include "mem_profile.h"
 #include "harness.h"
 #include "engine.h"
+#include "physics.h"
 
 #include <cstdio>
 #include <cstring>
@@ -45,6 +46,7 @@ int main(int argc, char** argv)
 
     run_all_tests();
     sample::run_sample();
+    sample::run_physics_sample();
     run_benchmarks();
 
     return ts::test::summary();

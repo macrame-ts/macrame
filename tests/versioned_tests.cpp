@@ -1,0 +1,337 @@
+#include "versioned_tests.h"
+#include "versioned.h"
+#include "static_task_graph.h"
+#include "harness.h"
+#include "test_util.h"
+
+#include <atomic>
+#include <cstddef>
+#include <thread>
+#include <type_traits>
+#include <vector>
+
+using ts::test::run;
+
+namespace
+{
+
+// --- compile-time contract --------------------------------------------------
+
+static_assert(!std::is_copy_constructible_v<ts::Versioned<int>>);
+static_assert(std::is_same_v<
+    decltype(std::declval<ts::Versioned<int>&>().publish()), ts::Task<void>>);
+
+// --- basics -------------------------------------------------------------------
+
+void test_initial_read()
+{
+    ts::Versioned<int> v;
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 0);
+}
+
+void test_stage_publish_read()
+{
+    ts::Versioned<int> v;
+    auto rec = v.recorder();
+    rec.stage([](int& x) { x = 42; });
+    v.publish().sync();
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 42);
+}
+
+void test_stability_before_publish()
+{
+    // The whole point: staged writes are invisible until the publish.
+    ts::Versioned<int> v;
+    auto rec = v.recorder();
+    rec.stage([](int& x) { x = 42; });
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 0);
+    v.publish().sync();
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 42);
+}
+
+void test_empty_publish_noop()
+{
+    ts::Versioned<int> v;
+    auto rec = v.recorder();
+    rec.stage([](int& x) { x = 5; });
+    v.publish().sync();
+    v.publish().sync();   // nothing staged: readers keep the current version
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 5);
+}
+
+// --- the replica invariant (the load-bearing test) -----------------------------
+
+void test_replay_resync_invariant()
+{
+    // Deltas accumulate across publishes. If the shadow were NOT resynced after
+    // each swap, publish N+1 would apply its delta to a version N-1 shadow and
+    // readers would observe dropped history.
+    ts::Versioned<int> v;   // Resync::replay
+    auto rec = v.recorder();
+
+    rec.stage([](int& x) { x += 1; });
+    v.publish().sync();
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 1);
+
+    rec.stage([](int& x) { x += 2; });
+    v.publish().sync();
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 3);   // 2 if the shadow was stale
+
+    rec.stage([](int& x) { x *= 2; });   // read-modify-write: sees identical pre-state on both replicas
+    v.publish().sync();
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 6);
+}
+
+void test_copy_resync_invariant()
+{
+    ts::Versioned<int> v{ ts::Resync::copy };
+    auto rec = v.recorder();
+    rec.stage([](int& x) { x += 1; });
+    v.publish().sync();
+    rec.stage([](int& x) { x += 2; });
+    v.publish().sync();
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 3);
+}
+
+void test_copy_custom_fn()
+{
+    ts::Versioned<int> v{ ts::Resync::copy };
+    std::atomic<int> copies{ 0 };
+    v.set_copy([&copies](int& dst, const int& src) { dst = src; copies.fetch_add(1); });
+
+    auto rec = v.recorder();
+    rec.stage([](int& x) { x = 11; });
+    v.publish().sync();
+    rec.stage([](int& x) { x += 1; });
+    v.publish().sync();
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 12);
+    // `publish().sync()` returns at the swap; the copy runs in the trailing
+    // resync. An EMPTY publish is a resync fence (its phase 1 gates on the
+    // previous shadow_ready), so sync it before counting.
+    v.publish().sync();
+    TS_CHECK(copies.load() == 2);
+}
+
+void test_overwrite_policy()
+{
+    // Contract: every version's staged writes fully overwrite the state, so the
+    // (stale) shadow contents never matter.
+    ts::Versioned<std::vector<int>> v{ ts::Resync::overwrite };
+    auto rec = v.recorder();
+
+    rec.stage([](std::vector<int>& x) { x = { 1, 2 }; });
+    v.publish().sync();
+    rec.stage([](std::vector<int>& x) { x = { 3, 4, 5 }; });
+    v.publish().sync();
+
+    auto out = v.read([](const std::vector<int>& x) { return x; }).sync();
+    TS_CHECK((out == std::vector<int>{ 3, 4, 5 }));
+}
+
+void test_divergence_check_passes_for_deterministic()
+{
+    ts::Versioned<int> v;
+    v.set_divergence_check([](const int& x) { return static_cast<std::size_t>(x); });
+    auto rec = v.recorder();
+    for (int i = 0; i < 5; ++i)
+    {
+        rec.stage([i](int& x) { x += i; });
+        v.publish().sync();   // hash compare after every replay resync -- must not fatal
+    }
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 0 + 1 + 2 + 3 + 4);
+}
+
+// --- ordering ------------------------------------------------------------------
+
+void test_multi_recorder_order()
+{
+    ts::Versioned<std::vector<int>> v;
+    auto rec1 = v.recorder();
+    auto rec2 = v.recorder();
+    rec2.stage([](std::vector<int>& x) { x.push_back(2); });
+    rec1.stage([](std::vector<int>& x) { x.push_back(1); });
+    v.publish().sync();
+    auto out = v.read([](const std::vector<int>& x) { return x; }).sync();
+    TS_CHECK((out == std::vector<int>{ 1, 2 }));
+}
+
+void test_chained_publishes_apply_exactly_once()
+{
+    // Publishes fired back-to-back without syncing chain internally (phase 1 of
+    // each gates on the previous resync); every staged command lands in exactly
+    // one cut.
+    ts::Versioned<int> v;
+    auto rec = v.recorder();
+    std::vector<ts::Task<void>> pubs;
+    for (int i = 0; i < 20; ++i)
+    {
+        rec.stage([](int& x) { x += 1; });
+        pubs.push_back(v.publish());
+    }
+    for (auto& p : pubs)
+        p.sync();
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 20);
+}
+
+void test_cancelled_publish_retains_commands()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();
+
+    ts::Versioned<int> v;
+    auto rec = v.recorder();
+    rec.stage([](int& x) { x = 7; });
+
+    // A cancelled token skips the version step; the returned task is a phase
+    // gate, so it COMPLETES (unlike a cancelled pipe job) and the commands stay
+    // staged for the next publish.
+    ts::Task<void> p = v.publish({ .token = src.token() });
+    p.sync();
+    TS_CHECK(!p.is_cancelled());
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 0);
+
+    v.publish().sync();
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 7);
+}
+
+void test_reader_overlaps_resync()
+{
+    // The phase-split's point: after the swap, the resync runs as a pipe READ
+    // job, so a reader of the new version is admitted WHILE the resync runs.
+    // The divergence hook doubles as the probe: its first call parks inside the
+    // resync until the reader arrives -- the gate is met only if both were in
+    // flight at once.
+    tests::Parallel_gate gate{ 2 };
+    std::atomic<int> hash_calls{ 0 };
+
+    ts::Versioned<int> v;
+    v.set_divergence_check([&gate, &hash_calls](const int& x)
+    {
+        if (hash_calls.fetch_add(1) == 0)
+            gate.arrive();   // parks the resync job (bounded)
+        return static_cast<std::size_t>(x);
+    });
+
+    auto rec = v.recorder();
+    rec.stage([](int& x) { x = 5; });
+    v.publish().sync();   // returns at the swap; the resync job is queued/running
+
+    int seen = v.read([&gate](const int& x)
+    {
+        gate.arrive();
+        return x;
+    }).sync();
+
+    TS_CHECK(gate.met());   // reader ran concurrently with the resync
+    TS_CHECK(seen == 5);    // and saw the NEW version
+}
+
+// --- concurrency -----------------------------------------------------------------
+
+void test_concurrent_readers_and_publishes()
+{
+    constexpr int publishes = 50;
+    constexpr int reader_threads = 4;
+
+    ts::Versioned<int> v;
+    std::atomic<bool> stop{ false };
+    std::atomic<int> bad{ 0 };
+
+    std::vector<std::jthread> readers;
+    for (int t = 0; t < reader_threads; ++t)
+        readers.emplace_back([&v, &stop, &bad]
+        {
+            while (!stop.load())
+            {
+                int x = v.read([](const int& val) { return val; }).sync();
+                // Every observed value must be a PUBLISHED version: 0..publishes.
+                if (x < 0 || x > publishes)
+                    bad.fetch_add(1);
+            }
+        });
+
+    auto rec = v.recorder();
+    for (int i = 0; i < publishes; ++i)
+    {
+        rec.stage([](int& x) { x += 1; });
+        v.publish().sync();
+    }
+    stop.store(true);
+    readers.clear();
+
+    TS_CHECK(bad.load() == 0);
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == publishes);
+}
+
+// --- graph integration ------------------------------------------------------------
+
+void test_graph_stale_then_fresh()
+{
+    // One frame: `before` (declared before the flip) reads version N-1, `after`
+    // (ordered after the flip) reads version N. Run twice to prove re-arming.
+    ts::Versioned<int> v;
+    ts::Guarded<std::vector<int>> seen_before, seen_after;
+
+    ts::Static_task_graph g;
+    g.add_node([](const int& x, std::vector<int>& log) { log.push_back(x); },
+               v.state(), seen_before);   // "before": declared before the flip -> derived read->write edge
+    auto producer = g.add_node([rec = v.recorder()](std::vector<int>&) mutable
+    {
+        rec.stage([](int& x) { x += 1; });
+    }, seen_after);   // touches seen_after only to have SOME declared access
+    auto flip = g.add_node(ts::publish_body(v), v.state());
+    flip.after(producer);
+    auto after = g.add_node([](const int& x, std::vector<int>& log) { log.push_back(x); },
+                            v.state(), seen_after);
+    after.after(flip);
+    g.compile();
+
+    g.execute().sync();
+    g.execute().sync();
+
+    auto b = seen_before.async([](const std::vector<int>& l) { return l; }).sync();
+    auto a = seen_after.async([](const std::vector<int>& l) { return l; }).sync();
+    TS_CHECK((b == std::vector<int>{ 0, 1 }));   // stale: version N-1 each frame
+    TS_CHECK((a == std::vector<int>{ 1, 2 }));   // fresh: version N each frame
+}
+
+// --- fatal paths --------------------------------------------------------------------
+
+void test_divergence_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("versioned_divergence"));
+}
+
+void test_wrong_front_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("versioned_wrong_front"));
+}
+
+void test_drop_staged_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("versioned_drop_staged"));
+}
+
+} // namespace
+
+void run_versioned_tests()
+{
+    run("versioned: initial read", test_initial_read);
+    run("versioned: stage + publish + read", test_stage_publish_read);
+    run("versioned: staged writes invisible until publish", test_stability_before_publish);
+    run("versioned: empty publish is a no-op", test_empty_publish_noop);
+    run("versioned: replay resync keeps replicas converged", test_replay_resync_invariant);
+    run("versioned: copy resync keeps replicas converged", test_copy_resync_invariant);
+    run("versioned: custom copy fn", test_copy_custom_fn);
+    run("versioned: overwrite policy", test_overwrite_policy);
+    run("versioned: divergence check passes when deterministic", test_divergence_check_passes_for_deterministic);
+    run("versioned: multi-recorder apply order", test_multi_recorder_order);
+    run("versioned: chained publishes apply exactly once", test_chained_publishes_apply_exactly_once);
+    run("versioned: cancelled publish retains commands", test_cancelled_publish_retains_commands);
+    run("versioned: reader overlaps the resync", test_reader_overlaps_resync);
+    run("versioned: concurrent readers during publishes", test_concurrent_readers_and_publishes);
+    run("versioned: graph -- stale before flip, fresh after", test_graph_stale_then_fresh);
+    run("versioned: nondeterministic replay is fatal", test_divergence_is_fatal);
+    run("versioned: publish_into wrong instance is fatal", test_wrong_front_is_fatal);
+    run("versioned: destroy with staged commands is fatal", test_drop_staged_is_fatal);
+}
