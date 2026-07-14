@@ -3,14 +3,10 @@
 #include "access.h"
 #include "fatal.h"
 #include "guarded.h"
+#include "journal.h"
 #include "task.h"
 
-#include <cstddef>
-#include <deque>
-#include <functional>
-#include <mutex>
 #include <utility>
-#include <vector>
 
 namespace ts
 {
@@ -28,124 +24,8 @@ namespace ts
 // commands must make a particular commit, order the producer before the commit
 // (graph edge / `after`); commands staged after a commit's cut ride the next one.
 //
-// See docs/command-buffer-design.md. v1 notes: commands are type-erased closures
-// (`std::move_only_function`), one small allocation per command when the capture
-// outgrows the SBO -- the typed-POD/arena tier is the planned follow-up; per-slot
-// mutexes are uncontended in the intended one-producer-per-recorder use.
-
-namespace detail
-{
-
-// Shared journal machinery: per-recorder slots with stable addresses, an atomic
-// per-slot cut. Used by `Deferred` (single live state) and `Versioned` (two states;
-// the same batch is applied twice there, so commands must be re-invocable --
-// `move_only_function` invocation does not consume).
-template<typename T>
-class Journal
-{
-public:
-    using Command = std::move_only_function<void(T&)>;
-
-    struct Slot
-    {
-        std::mutex mutex;
-        std::vector<Command> commands;
-    };
-
-    Slot& add_slot()
-    {
-        std::lock_guard lock(register_mutex_);
-        return slots_.emplace_back();
-    }
-
-    // Take everything staged so far, flattened in slot-creation order (FIFO within
-    // a slot). Stages racing the cut land wholly before or wholly after it -- a
-    // straggler simply rides the next cut.
-    std::vector<Command> cut()
-    {
-        std::vector<Command> batch;
-        std::lock_guard lock(register_mutex_);
-        for (Slot& slot : slots_)
-        {
-            std::lock_guard slot_lock(slot.mutex);
-            for (Command& cmd : slot.commands)
-                batch.push_back(std::move(cmd));
-            slot.commands.clear();
-        }
-        return batch;
-    }
-
-    bool has_staged()
-    {
-        std::lock_guard lock(register_mutex_);
-        for (Slot& slot : slots_)
-        {
-            std::lock_guard slot_lock(slot.mutex);
-            if (!slot.commands.empty())
-                return true;
-        }
-        return false;
-    }
-
-private:
-    std::mutex register_mutex_;
-    std::deque<Slot> slots_;   // deque: stable addresses for outstanding recorders
-};
-
-} // namespace detail
-
-// A producer identity: its own storage (contention-free staging) and a stable key
-// in the apply order (recorder creation order). Mint one per producer (one per
-// graph node / thread); move-only -- sharing one recorder across threads is safe
-// but reintroduces nondeterministic intra-slot order. Must not outlive the
-// `Deferred`/`Versioned` it came from.
-template<typename T>
-class Recorder
-{
-public:
-    // Empty (unbound) state -- for late binding (a member assigned from
-    // `recorder()` in init) and what a moved-from handle becomes. Staging on an
-    // empty recorder is fatal under TS_SAFETY_CHECKS.
-    Recorder() = default;
-
-    Recorder(Recorder&& other) noexcept
-        : slot_(std::exchange(other.slot_, nullptr))
-    {}
-
-    Recorder& operator=(Recorder&& other) noexcept
-    {
-        slot_ = std::exchange(other.slot_, nullptr);
-        return *this;
-    }
-
-    Recorder(const Recorder&) = delete;
-    Recorder& operator=(const Recorder&) = delete;
-
-    // Append a deferred write. No grant on the target is taken or needed; the
-    // closure runs later, under the commit's write access. Capture by value only
-    // (it outlives the staging scope). For `Versioned` targets the closure must be
-    // deterministic -- it is applied to both replicas (see `Resync::replay`).
-    template<typename Fn>
-    void stage(Fn&& fn)
-    {
-#if TS_SAFETY_CHECKS
-        if (!slot_)
-            fatal("Recorder::stage on an empty (default-constructed or moved-from) recorder");
-#endif
-        std::lock_guard lock(slot_->mutex);
-        slot_->commands.emplace_back(std::forward<Fn>(fn));
-    }
-
-private:
-    template<typename> friend class Deferred;
-    template<typename> friend class Versioned;
-
-    explicit Recorder(typename detail::Journal<T>::Slot& slot) noexcept
-        : slot_(&slot)
-    {}
-
-    typename detail::Journal<T>::Slot* slot_ = nullptr;
-};
+// The staging machinery (`detail::Journal`, `Recorder`, `Parallel_recorder`) lives
+// in journal.h, shared with `Versioned<T>`. See docs/command-buffer-design.md.
 
 // The command buffer: binds to a `Guarded<T>` for its lifetime. `recorder()` mints
 // producer handles; `commit_async()` applies everything as one pipe write job;
@@ -177,9 +57,19 @@ public:
     Deferred(const Deferred&) = delete;
     Deferred& operator=(const Deferred&) = delete;
 
+    // Mint a producer handle. Slots live for the Deferred's lifetime (recorders
+    // never unregister) -- mint once per producer and REUSE across frames; a
+    // recorder() call per frame grows the journal forever.
     Recorder<T> recorder()
     {
         return Recorder<T>(journal_.add_slot());
+    }
+
+    // Mint a per-worker handle for parallel staging (see `Parallel_recorder`).
+    // Same lifetime rule: mint once, reuse.
+    Parallel_recorder<T> parallel_recorder()
+    {
+        return Parallel_recorder<T>(journal_, default_scheduler());
     }
 
     // Apply everything staged so far to `target`, which the caller must already

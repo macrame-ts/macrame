@@ -139,6 +139,11 @@ void run_death_scenario(const char* name)
         moved.stage([](int& v) { ++v; });
         rec.stage([](int& v) { ++v; });   // moved-from: empty -> fatal
     }
+    else if (std::strcmp(name, "parallel_recorder_empty_stage") == 0)
+    {
+        ts::Parallel_recorder<int> rec;   // never bound
+        rec.stage([](int& v) { ++v; });   // -> fatal
+    }
     else if (std::strcmp(name, "versioned_drop_staged") == 0)
     {
         ts::Versioned<int> v;

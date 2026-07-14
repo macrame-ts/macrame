@@ -817,6 +817,23 @@ void stress_deferred()
         int final = target.async([](const int& v) { return v; }).sync();
         assert(final == threads * per);
     }
+
+    // Parallel_recorder: per-worker placement under parallel_for (workers hit their
+    // own slots, the participating caller hits the overflow lane), racing
+    // fire-and-forget commits.
+    {
+        ts::Guarded<int> target{ 0 };
+        ts::Deferred<int> d{ target };
+        auto rec = d.parallel_recorder();
+        constexpr int rounds_pr = 10, per_pr = 20000;
+        for (int r = 0; r < rounds_pr; ++r)
+        {
+            ts::parallel_for(per_pr, [&rec](int) { rec.stage([](int& v) { ++v; }); });
+            d.commit_async();
+        }
+        d.commit_async().sync();
+        assert(target.async([](const int& v) { return v; }).sync() == rounds_pr * per_pr);
+    }
 }
 
 // Versioned: concurrent staging + chained dynamic publishes + readers hammering the

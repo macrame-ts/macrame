@@ -1,9 +1,9 @@
 #pragma once
 
 #include "access.h"
-#include "deferred.h"
 #include "fatal.h"
 #include "guarded.h"
+#include "journal.h"
 #include "task.h"
 
 #include <concepts>
@@ -44,7 +44,7 @@ enum class Resync
 // Versioned state: readers always see a stable published version while the next
 // one is being staged. Two replicas of `T` behind one `Guarded` front -- readers
 // take ordinary read access on `state()`; writes are `stage()`d grant-free into a
-// journal (see deferred.h) and become visible atomically at `publish()`. The
+// journal (see journal.h) and become visible atomically at `publish()`. The
 // front's address never changes (the swap exchanges the replicas' CONTENTS), so
 // graph declarations, the pipe, and the harness all work unmodified.
 //
@@ -114,6 +114,15 @@ public:
     Recorder<T> recorder()
     {
         return Recorder<T>(journal_.add_slot());
+    }
+
+    // Per-worker handle for parallel staging (see `Parallel_recorder` in
+    // journal.h). Mint once, reuse; cross-thread placement order is
+    // nondeterministic, so commands should be per-key single or commutative --
+    // the batch order is still fixed at the cut, so `replay` resync stays exact.
+    Parallel_recorder<T> parallel_recorder()
+    {
+        return Parallel_recorder<T>(journal_, default_scheduler());
     }
 
     // Read the current published version -- an ordinary read job on the front's

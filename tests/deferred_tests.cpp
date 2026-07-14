@@ -1,5 +1,7 @@
 #include "deferred_tests.h"
 #include "deferred.h"
+#include "versioned.h"
+#include "parallel_for.h"
 #include "static_task_graph.h"
 #include "harness.h"
 #include "test_util.h"
@@ -243,6 +245,55 @@ void test_move_only_command()
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 31);
 }
 
+void test_parallel_recorder_from_parallel_for()
+{
+    // One logical producer parallelized over the pool: every stage lands
+    // (per-worker slots, guided chunking, caller participates via the overflow
+    // lane), applied exactly once.
+    constexpr int n = 20000;
+    ts::Guarded<Counter> target;
+    ts::Deferred<Counter> d{ target };
+
+    auto rec = d.parallel_recorder();
+    ts::parallel_for(n, [&rec](int) { rec.stage([](Counter& c) { c.increment(); }); });
+    d.commit_async().sync();
+
+    TS_CHECK(target.async([](const Counter& c) { return c.value(); }).sync() == n);
+}
+
+void test_parallel_recorder_overflow_lane()
+{
+    // Non-worker threads (this test thread + an external jthread) route to the
+    // shared overflow slot -- contended but correct.
+    ts::Guarded<Counter> target;
+    ts::Deferred<Counter> d{ target };
+
+    auto rec = d.parallel_recorder();
+    rec.stage([](Counter& c) { c.add(1); });   // main thread: not a worker
+    {
+        std::jthread ext([&rec] { rec.stage([](Counter& c) { c.add(2); }); });
+    }
+    d.commit_async().sync();
+    TS_CHECK(target.async([](const Counter& c) { return c.value(); }).sync() == 3);
+}
+
+void test_parallel_recorder_on_versioned()
+{
+    // Parallel staging into a Versioned: placement is nondeterministic but the
+    // batch order is fixed at the cut, so replay resync applies the identical
+    // sequence twice -- the divergence check must stay quiet.
+    constexpr int n = 5000;
+    ts::Versioned<int> v;
+    v.set_divergence_check([](const int& x) { return static_cast<std::size_t>(x); });
+
+    auto rec = v.parallel_recorder();
+    ts::parallel_for(n, [&rec](int) { rec.stage([](int& x) { ++x; }); });
+    v.publish().sync();
+    v.publish().sync();   // resync fence (runs the divergence check to completion)
+
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == n);
+}
+
 void test_late_bound_recorder()
 {
     // The empty state's purpose: a member declared before the Deferred exists,
@@ -267,6 +318,11 @@ void test_moved_from_recorder_stage_is_fatal()
     TS_CHECK(ts::test::expect_death("recorder_empty_stage"));
 }
 
+void test_empty_parallel_recorder_stage_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("parallel_recorder_empty_stage"));
+}
+
 } // namespace
 
 void run_deferred_tests()
@@ -284,7 +340,11 @@ void run_deferred_tests()
     run("deferred: cancelled commit retains commands", test_cancelled_commit_retains_commands);
     run("deferred: discard drops staged commands", test_discard);
     run("deferred: move-only command capture", test_move_only_command);
+    run("deferred: parallel recorder from parallel_for", test_parallel_recorder_from_parallel_for);
+    run("deferred: parallel recorder overflow lane", test_parallel_recorder_overflow_lane);
+    run("deferred: parallel recorder on versioned (replay exact)", test_parallel_recorder_on_versioned);
     run("deferred: late-bound recorder", test_late_bound_recorder);
     run("deferred: destroy with staged commands is fatal", test_drop_staged_is_fatal);
     run("deferred: stage on moved-from recorder is fatal", test_moved_from_recorder_stage_is_fatal);
+    run("deferred: stage on empty parallel recorder is fatal", test_empty_parallel_recorder_stage_is_fatal);
 }

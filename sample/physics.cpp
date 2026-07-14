@@ -3,6 +3,7 @@
 #include "access.h"
 #include "deferred.h"
 #include "guarded.h"
+#include "parallel_for.h"
 #include "static_task_graph.h"
 #include "versioned.h"
 
@@ -152,6 +153,17 @@ public:
         TS_CHECK_ACCESS();
         auto it = poses_.find(id);
         return it != poses_.end() ? it->second : Pose{};
+    }
+
+    // All published poses, in id order (deterministic iteration).
+    std::vector<Pose> all() const
+    {
+        TS_CHECK_ACCESS();
+        std::vector<Pose> out;
+        out.reserve(poses_.size());
+        for (const auto& [id, pose] : poses_)
+            out.push_back(pose);
+        return out;
     }
 
     bool has(Body_id id) const
@@ -304,12 +316,27 @@ Physics_stats run_physics_frames(int frames)
     ts::Static_task_graph g;
 
     // Gameplay: reads LAST frame's poses (stable all frame, overlaps everything),
-    // stages this frame's impulse. No grant on `world` anywhere in this node.
+    // stages this frame's inputs. No grant on `world` anywhere in this node.
+    // The drag loop stages in PARALLEL through a per-worker recorder: placement
+    // order is nondeterministic, but each body gets exactly one drag command and
+    // distinct bodies commute at the world level -- and the player's thrust
+    // (recorder created BEFORE the parallel slots) always applies before its
+    // drag -- so the frame stays bit-deterministic across runs.
     auto gameplay = g.add_node(
-        [rec = world_in.recorder()](const Pose_snapshot& p, const Player& pl) mutable
+        [rec = world_in.recorder(), drag = world_in.parallel_recorder()](const Pose_snapshot& p, const Player& pl) mutable
         {
             Vec3 f = pl.thrust_from(p.of(pl.body()));
             rec.stage([id = pl.body(), f](Physics_world& w) { w.add_impulse(id, f); });
+
+            std::vector<Pose> bodies = p.all();
+            ts::parallel_for(static_cast<int>(bodies.size()), [&drag, &bodies](int i)
+            {
+                const Pose& b = bodies[i];
+                drag.stage([id = b.id, dv = b.vel * -0.05f](Physics_world& w)
+                {
+                    w.add_impulse(id, dv);
+                });
+            });
         },
         poses.state(), player);
 

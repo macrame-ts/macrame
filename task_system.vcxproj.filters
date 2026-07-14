@@ -79,6 +79,7 @@
     <ClInclude Include="event_count.h" />
     <ClInclude Include="fatal.h" />
     <ClInclude Include="guarded.h" />
+    <ClInclude Include="journal.h" />
     <ClInclude Include="mem_profile.h" />
     <ClInclude Include="mpmc_queue.h" />
     <ClInclude Include="parallel_for.h" />
