@@ -7,6 +7,9 @@
 // these workloads; a race prints a report and (with halt_on_error) exits nonzero.
 
 #include "engine.h"          // sample::run_frames
+
+// Single-file sample (no header) -- see sample/blackboard.cpp.
+namespace sample { void run_blackboard_sample(); }
 #include "parallel_for.h"
 #include "scheduler.h"
 #include "static_task_graph.h"
@@ -1035,6 +1038,7 @@ int main()
     std::puts("tsan: deferred stress");      stress_deferred();
     std::puts("tsan: versioned stress");     stress_versioned();
     std::puts("tsan: physics frames");       stress_physics();
+    std::puts("tsan: blackboard frames");    sample::run_blackboard_sample();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);
     std::puts("tsan: done (no races)");
     return 0;

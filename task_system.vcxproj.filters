@@ -23,6 +23,9 @@
     <ClCompile Include="benchmarks\benchmarks.cpp">
       <Filter>benchmarks</Filter>
     </ClCompile>
+    <ClCompile Include="sample\blackboard.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
     <ClCompile Include="sample\engine.cpp">
       <Filter>sample</Filter>
     </ClCompile>

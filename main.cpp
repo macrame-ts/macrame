@@ -5,6 +5,10 @@
 #include "engine.h"
 #include "physics.h"
 
+// Single-file sample (sample/blackboard.cpp, by design -- no header): the
+// blackboard pattern recipe of docs/command-buffer-design.md §7.4.
+namespace sample { void run_blackboard_sample(); }
+
 #include <cstdio>
 #include <cstring>
 
@@ -47,6 +51,7 @@ int main(int argc, char** argv)
     run_all_tests();
     sample::run_sample();
     sample::run_physics_sample();
+    sample::run_blackboard_sample();
     run_benchmarks();
 
     return ts::test::summary();

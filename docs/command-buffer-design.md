@@ -621,3 +621,42 @@ version the output extract, not the machine.**
 - Single-publisher discipline on `Versioned` is documented, not enforced:
   dynamic publishes chain among themselves, but don't run them concurrently
   with a graph whose flip node publishes the same instance.
+
+### 7.4 Pattern recipe: the blackboard
+
+The blackboard (shared associative fact store decoupling fact producers from
+consumers — Hearsay-II originally; UE `UBlackboardComponent` + behavior trees
+as the shipping gamedev form) needs **no new type**: its concurrency half maps
+exactly onto the existing primitives, making it the third fixture (after
+rendering and physics) that lands on them without a stretch. Executable form:
+`sample/blackboard.cpp` (single file).
+
+The mapping:
+
+- **Private (per-agent) board** — owned by one agent, mutated only in its own
+  update: a plain member, no wrapper. The owning system's grant already covers
+  it.
+- **Shared (squad/global) board** — many readers per frame + few writers:
+  `Versioned<Blackboard>`. Readers get a *frame-coherent snapshot* — every
+  agent decides off the same facts within a frame (no torn decisions when
+  perception updates mid-tick), and the one-frame stimulus→reaction latency is
+  how game AI ticks anyway. Fact writes are staged (grant-free), published at
+  the frame boundary; read-modify-write facts (e.g. alert decay) are legal
+  staged commands — `Resync::replay` applies them to identical pre-states.
+- **Key ownership** — two systems staging the same key hit the journal's
+  cross-recorder ordering contract (arbitrary order, no semantics): the
+  library rule *is* UE's blackboard discipline — specific systems own specific
+  keys. Genuine multi-writer last-wins is the typed tier's dedup-by-key hook.
+- **Key-change notification** (UE's blackboard observers) decomposes into two
+  existing pieces: *when* = a dispatch node ordered after the flip (or `.then`
+  on the publish task); *what changed* = value diff against a per-subscriber
+  cache (polling-diff). With closure commands the journal cannot report which
+  keys a batch touched; the typed tier's `Set_cmd` stream is the dirty set for
+  free (§7.3) and upgrades polling-diff to push. Callbacks run under the
+  dispatch node's grant, so their side effects go through `async`/`stage`
+  (grant-free submission) — the standard never-touch-undeclared rule.
+
+What stays out of the library: the container half (key registry, variant
+values, layered agent→squad→global lookup) is domain data structure, not
+concurrency — UE keeps Blackboard in AIModule, not in Tasks, and the same
+layering applies here.
