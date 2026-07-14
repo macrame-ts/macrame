@@ -130,6 +130,15 @@ void run_death_scenario(const char* name)
         rec.stage([](int& v) { ++v; });
         // `d` destroyed with a staged uncommitted command -> fatal (lost write)
     }
+    else if (std::strcmp(name, "recorder_empty_stage") == 0)
+    {
+        ts::Guarded<int> target{ 0 };
+        ts::Deferred<int> d{ target };
+        ts::Recorder<int> rec = d.recorder();
+        ts::Recorder<int> moved = std::move(rec);
+        moved.stage([](int& v) { ++v; });
+        rec.stage([](int& v) { ++v; });   // moved-from: empty -> fatal
+    }
     else if (std::strcmp(name, "versioned_drop_staged") == 0)
     {
         ts::Versioned<int> v;

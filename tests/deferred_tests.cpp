@@ -243,9 +243,28 @@ void test_move_only_command()
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 31);
 }
 
+void test_late_bound_recorder()
+{
+    // The empty state's purpose: a member declared before the Deferred exists,
+    // bound in init. Move nulls the source; the moved-to handle stages normally.
+    ts::Guarded<int> target{ 0 };
+    ts::Deferred<int> d{ target };
+
+    ts::Recorder<int> rec;             // empty
+    rec = d.recorder();                // late-bound
+    rec.stage([](int& v) { v = 4; });
+    d.commit_async().sync();
+    TS_CHECK(target.async([](const int& v) { return v; }).sync() == 4);
+}
+
 void test_drop_staged_is_fatal()
 {
     TS_CHECK(ts::test::expect_death("deferred_drop_staged"));
+}
+
+void test_moved_from_recorder_stage_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("recorder_empty_stage"));
 }
 
 } // namespace
@@ -265,5 +284,7 @@ void run_deferred_tests()
     run("deferred: cancelled commit retains commands", test_cancelled_commit_retains_commands);
     run("deferred: discard drops staged commands", test_discard);
     run("deferred: move-only command capture", test_move_only_command);
+    run("deferred: late-bound recorder", test_late_bound_recorder);
     run("deferred: destroy with staged commands is fatal", test_drop_staged_is_fatal);
+    run("deferred: stage on moved-from recorder is fatal", test_moved_from_recorder_stage_is_fatal);
 }

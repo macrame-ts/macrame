@@ -103,9 +103,21 @@ template<typename T>
 class Recorder
 {
 public:
+    // Empty (unbound) state -- for late binding (a member assigned from
+    // `recorder()` in init) and what a moved-from handle becomes. Staging on an
+    // empty recorder is fatal under TS_SAFETY_CHECKS.
     Recorder() = default;
-    Recorder(Recorder&&) = default;
-    Recorder& operator=(Recorder&&) = default;
+
+    Recorder(Recorder&& other) noexcept
+        : slot_(std::exchange(other.slot_, nullptr))
+    {}
+
+    Recorder& operator=(Recorder&& other) noexcept
+    {
+        slot_ = std::exchange(other.slot_, nullptr);
+        return *this;
+    }
+
     Recorder(const Recorder&) = delete;
     Recorder& operator=(const Recorder&) = delete;
 
@@ -116,6 +128,10 @@ public:
     template<typename Fn>
     void stage(Fn&& fn)
     {
+#if TS_SAFETY_CHECKS
+        if (!slot_)
+            fatal("Recorder::stage on an empty (default-constructed or moved-from) recorder");
+#endif
         std::lock_guard lock(slot_->mutex);
         slot_->commands.emplace_back(std::forward<Fn>(fn));
     }
