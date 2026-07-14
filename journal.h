@@ -33,6 +33,19 @@ namespace detail
 // Per-recorder slots with stable addresses, an atomic per-slot cut. The same
 // batch may be applied twice (`Versioned`'s replay resync), so commands must be
 // re-invocable -- `move_only_function` invocation does not consume.
+//
+// THE ORDERING CONTRACT. Two properties, deliberately different in strength:
+//   - INTRA-recorder order is FIFO and semantic -- build on it (a producer's
+//     spawn-before-add is honored).
+//   - CROSS-recorder order is ARBITRARY -- never build semantics on it. If
+//     correctness depends on which producer's same-key write wins, that is a
+//     cross-producer conflict; the fixes are one writer per key, commutative
+//     commands, or (typed tier) explicit sort keys -- not ordering guarantees.
+//     It is, however, DETERMINISTIC given a deterministic mint/destroy
+//     sequence (slots drain in a fixed order every run), so behavior is
+//     reproducible -- including the behavior of bugs. `Parallel_recorder` is
+//     the explicit, localized surrender of that reproducibility across
+//     threads.
 template<typename T>
 class Journal
 {
@@ -50,14 +63,14 @@ public:
     // ever -- mint-and-destroy per frame no longer grows the journal. The
     // threshold below then only trips on the remaining pathology: minting
     // recorders that are all kept alive.
-    // NOTE the reuse semantics: a reused slot keeps its POSITION, so a new
-    // producer inherits the released producer's place in the apply order (and
-    // any commands the released producer staged but never committed drain ahead
-    // of the new owner's, same slot). Deterministic iff the mint/destroy
-    // sequence is deterministic -- concurrent dynamic mint/destroy makes slot
-    // assignment racy. Where cross-producer order carries meaning, mint at
-    // setup and keep recorders alive; explicit sort keys (typed tier) are the
-    // planned answer for order under churn.
+    // Reuse footnote: a recycled slot keeps its POSITION, so a new producer
+    // inherits the released producer's place in the (arbitrary) cross-recorder
+    // order, and any commands the released producer staged but never committed
+    // drain ahead of the new owner's. Under the ordering contract above this is
+    // observable only to programs already building semantics on cross-recorder
+    // order. It does interact with reproducibility: slot assignment is
+    // deterministic iff the mint/destroy sequence is -- concurrent dynamic
+    // mint/destroy makes it racy.
     static constexpr std::size_t max_slots = 4096;
 
     Slot& add_slot()

@@ -19,10 +19,12 @@ namespace ts
 // mechanism: the commit IS an ordinary write (an `async` job or a graph node's
 // declared write access); staging itself needs no synchronization with anyone.
 //
-// Apply order is deterministic: recorders drain in creation order, FIFO within a
-// recorder -- independent of which threads staged when. If a particular recorder's
-// commands must make a particular commit, order the producer before the commit
-// (graph edge / `after`); commands staged after a commit's cut ride the next one.
+// Ordering: FIFO within a recorder (semantic -- build on it); cross-recorder
+// order is arbitrary (never build semantics on it) but deterministic given a
+// deterministic mint/destroy sequence, so runs are reproducible -- see the
+// contract note in journal.h. If a particular recorder's commands must make a
+// particular commit, order the producer before the commit (graph edge /
+// `after`); commands staged after a commit's cut ride the next one.
 //
 // The staging machinery (`detail::Journal`, `Recorder`, `Parallel_recorder`) lives
 // in journal.h, shared with `Versioned<T>`. See docs/command-buffer-design.md.
@@ -58,9 +60,9 @@ public:
     Deferred& operator=(const Deferred&) = delete;
 
     // Mint a producer handle. A destroyed recorder's slot is recycled (free-list),
-    // so live slots are bounded by peak concurrent recorders -- but reuse inherits
-    // the released slot's APPLY-ORDER position (see the note in journal.h): where
-    // cross-producer order matters, mint at setup and keep recorders alive.
+    // so live slots are bounded by peak concurrent recorders. Cross-recorder
+    // order is arbitrary-but-reproducible -- see the ordering contract in
+    // journal.h.
     Recorder<T> recorder()
     {
         return Recorder<T>(journal_, journal_.add_slot());
