@@ -581,6 +581,35 @@ version the output extract, not the machine.**
 
 - Typed-POD command tier + sort/merge/reduce hooks (three different hook
   shapes: sort = rendering, last-wins = ECS, reduce = physics accumulation).
+  Design notes settled ahead of implementation:
+  - **Typed commands and closures intermix in one stream.** UE precedent:
+    `FRHICommandList` holds typed structs and `EnqueueLambda` records
+    interleaved in staging order — the closure is just another command record
+    whose payload is a callable. One recorder, two `stage` overloads
+    (`stage(Cmd)` / `stage(closure)`), order preserved across both. No second
+    buffer, no cross-buffer ordering problem.
+  - **Storage consequence: a record stream, not `vector<Cmd>`.** Intermixing
+    forces per-slot storage to `[header | payload][header | payload]…` (header
+    = execute fn-ptr + size; payload = the POD, or the placement-new'd callable
+    with destruction fused into execution, UE's `ExecuteAndDestruct`). Typed
+    stage = bump + memcpy; closure stage = bump + placement-new; zero per-
+    command heap. This is the same layout the arena rebase (TODO 3.1 #7) wants,
+    so the tier should NOT be built before the arena — `vector<Cmd>` would be
+    built and then rebuilt.
+  - **Closures are fences for the commit-time hooks (v1 policy).** A closure is
+    uninspectable, so sorting/deduping/reducing past one is unsound; the hooks
+    permute only the typed records BETWEEN closure records, and a closure's
+    staged position is a hard barrier. Sound by construction, no user
+    assertion. The later extension is *keyed closures* (`stage(key, fn)`
+    required in a sorted buffer, closure participates in the keyed order — the
+    same "order among distinct keys is meaningless" assertion the typed sort
+    already makes); fences degrade to it gracefully if a use case demands.
+  - **Migration is mechanical, one type family.** Today's closure tier already
+    is the mixed stream — a "typed command" today is a closure capturing a POD
+    (the physics sample's batch-extract idiom is the manual typed tier).
+    `Deferred<T>` stays the degenerate case of `Deferred<T, Cmd>`: the closure
+    overload is always present; naming a `Cmd` adds the typed overload and the
+    hooks. Existing call sites stay valid unchanged.
 - Arena-backed journal storage (alloc-audit 3.1 #7) and lock-free recorder
   slots (the per-slot mutex exists only for the dynamic stage-vs-cut race; it
   is uncontended in one-producer use and edge-ordered-away in graphs).
