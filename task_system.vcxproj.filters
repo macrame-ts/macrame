@@ -14,10 +14,11 @@
   <ItemGroup>
     <ClCompile Include="access.cpp" />
     <ClCompile Include="fatal.cpp" />
+    <ClCompile Include="guarded.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="mem_profile.cpp" />
     <ClCompile Include="scheduler.cpp" />
     <ClCompile Include="static_task_graph.cpp" />
-    <ClCompile Include="thread_safe.cpp" />
     <ClCompile Include="worker_thread.cpp" />
     <ClCompile Include="benchmarks\benchmarks.cpp">
       <Filter>benchmarks</Filter>
@@ -28,19 +29,34 @@
     <ClCompile Include="sample\frame.cpp">
       <Filter>sample</Filter>
     </ClCompile>
+    <ClCompile Include="sample\physics.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
     <ClCompile Include="sample\systems.cpp">
       <Filter>sample</Filter>
     </ClCompile>
     <ClCompile Include="tests\access_tests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
+    <ClCompile Include="tests\coroutine_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\deferred_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
     <ClCompile Include="tests\graph_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\guarded_tests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
     <ClCompile Include="tests\harness.cpp">
       <Filter>tests</Filter>
     </ClCompile>
     <ClCompile Include="tests\integration_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\parallel_tests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
     <ClCompile Include="tests\scheduler_tests.cpp">
@@ -52,17 +68,27 @@
     <ClCompile Include="tests\tests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
-    <ClCompile Include="tests\thread_safe_tests.cpp">
+    <ClCompile Include="tests\versioned_tests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="access.h" />
+    <ClInclude Include="coroutine_support.h" />
+    <ClInclude Include="deferred.h" />
+    <ClInclude Include="event_count.h" />
     <ClInclude Include="fatal.h" />
+    <ClInclude Include="guarded.h" />
+    <ClInclude Include="mem_profile.h" />
+    <ClInclude Include="mpmc_queue.h" />
+    <ClInclude Include="parallel_for.h" />
+    <ClInclude Include="priority.h" />
+    <ClInclude Include="ref_count.h" />
     <ClInclude Include="scheduler.h" />
     <ClInclude Include="static_task_graph.h" />
     <ClInclude Include="task.h" />
-    <ClInclude Include="thread_safe.h" />
+    <ClInclude Include="versioned.h" />
+    <ClInclude Include="work_stealing_deque.h" />
     <ClInclude Include="worker_thread.h" />
     <ClInclude Include="benchmarks\benchmarks.h">
       <Filter>benchmarks</Filter>
@@ -76,6 +102,9 @@
     <ClInclude Include="sample\parallel.h">
       <Filter>sample</Filter>
     </ClInclude>
+    <ClInclude Include="sample\physics.h">
+      <Filter>sample</Filter>
+    </ClInclude>
     <ClInclude Include="sample\systems.h">
       <Filter>sample</Filter>
     </ClInclude>
@@ -85,7 +114,16 @@
     <ClInclude Include="tests\access_tests.h">
       <Filter>tests</Filter>
     </ClInclude>
+    <ClInclude Include="tests\coroutine_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\deferred_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
     <ClInclude Include="tests\graph_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\guarded_tests.h">
       <Filter>tests</Filter>
     </ClInclude>
     <ClInclude Include="tests\harness.h">
@@ -94,19 +132,22 @@
     <ClInclude Include="tests\integration_tests.h">
       <Filter>tests</Filter>
     </ClInclude>
+    <ClInclude Include="tests\parallel_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
     <ClInclude Include="tests\scheduler_tests.h">
       <Filter>tests</Filter>
     </ClInclude>
     <ClInclude Include="tests\task_tests.h">
       <Filter>tests</Filter>
     </ClInclude>
-    <ClInclude Include="tests\tests.h">
-      <Filter>tests</Filter>
-    </ClInclude>
     <ClInclude Include="tests\test_util.h">
       <Filter>tests</Filter>
     </ClInclude>
-    <ClInclude Include="tests\thread_safe_tests.h">
+    <ClInclude Include="tests\tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\versioned_tests.h">
       <Filter>tests</Filter>
     </ClInclude>
   </ItemGroup>

@@ -11,6 +11,9 @@
 #include "scheduler.h"
 #include "static_task_graph.h"
 #include "guarded.h"
+#include "deferred.h"
+#include "versioned.h"
+#include "physics.h"
 
 #if defined(__cpp_impl_coroutine)
 #include "coroutine_support.h"
@@ -785,6 +788,87 @@ void stress_coroutine_deep()
 }
 #endif
 
+// Deferred: per-thread recorders staging concurrently with fire-and-forget commits
+// and pipe readers. Stresses the slot mutex (stage vs cut), the registration path,
+// and the cut-at-execution semantics (every command lands in exactly one commit).
+void stress_deferred()
+{
+    constexpr int threads = 6, per = 500, rounds = 20;
+    for (int r = 0; r < rounds; ++r)
+    {
+        ts::Guarded<int> target{ 0 };
+        ts::Deferred<int> d{ target };
+        {
+            std::vector<std::jthread> ps;
+            for (int t = 0; t < threads; ++t)
+                ps.emplace_back([rec = d.recorder(), &d, &target]() mutable
+                {
+                    for (int k = 0; k < per; ++k)
+                    {
+                        rec.stage([](int& v) { ++v; });
+                        if ((k & 63) == 0)
+                            d.commit_async();   // commits race staging (cut at execution)
+                        if ((k & 31) == 0)
+                            target.async([](const int& v) { (void)v; });   // readers race commits
+                    }
+                });
+        }   // join stagers
+        d.commit_async().sync();
+        int final = target.async([](const int& v) { return v; }).sync();
+        assert(final == threads * per);
+    }
+}
+
+// Versioned: concurrent staging + chained dynamic publishes + readers hammering the
+// front. Stresses the publish chain handoff (seq_mutex_), phase-1 apply racing
+// readers of the current version, the swap, and the resync READ job overlapping
+// readers of the new version (with the divergence hash reading both replicas).
+void stress_versioned()
+{
+    constexpr int stagers = 4, readers = 3, per = 400, publishes = 200;
+    ts::Versioned<int> v;
+    v.set_divergence_check([](const int& x) { return static_cast<std::size_t>(x); });
+
+    std::atomic<bool> stop{ false };
+    {
+        std::vector<std::jthread> threads;
+        for (int t = 0; t < stagers; ++t)
+            threads.emplace_back([rec = v.recorder()]() mutable
+            {
+                for (int k = 0; k < per; ++k)
+                    rec.stage([](int& x) { ++x; });
+            });
+        for (int t = 0; t < readers; ++t)
+            threads.emplace_back([&v, &stop]
+            {
+                int last = 0;
+                while (!stop.load(std::memory_order_acquire))
+                {
+                    int x = v.read([](const int& val) { return val; }).sync();
+                    assert(x >= last);   // versions are monotonic
+                    last = x;
+                }
+            });
+        for (int p = 0; p < publishes; ++p)
+            v.publish().sync();
+        stop.store(true, std::memory_order_release);
+    }   // join
+    v.publish().sync();   // catch stragglers
+    v.publish().sync();   // empty publish = resync fence
+    assert(v.read([](const int& x) { return x; }).sync() == stagers * per);
+}
+
+// The physics sample: sealed Guarded machine + Deferred inputs + Versioned poses,
+// graph flip via publish_into (phases 1-2 under the node grant, resync as a pipe
+// read job admitted at node release). Also re-checks run-to-run determinism.
+void stress_physics()
+{
+    sample::Physics_stats a = sample::run_physics_frames(30);
+    sample::Physics_stats b = sample::run_physics_frames(30);
+    assert(a.pose_hash == b.pose_hash);
+    (void)a; (void)b;
+}
+
 #if defined(TS_REUSE_FORENSICS)
 // Isolated forensic driver for the stress_reuse `dep.sync() == i` flake (see the forensics
 // ring in task.h). Runs ONLY the reuse+prereq+retraction loop, many times per process; on a
@@ -931,6 +1015,9 @@ int main()
     std::puts("tsan: coroutine deep cascade"); stress_coroutine_deep();
 #endif
     std::puts("tsan: graph nested stress");  stress_graph_nested();
+    std::puts("tsan: deferred stress");      stress_deferred();
+    std::puts("tsan: versioned stress");     stress_versioned();
+    std::puts("tsan: physics frames");       stress_physics();
     std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);
     std::puts("tsan: done (no races)");
     return 0;
