@@ -1,0 +1,47 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "windows-msvc",
+            "displayName": "Windows x64 (MSVC toolset)",
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "architecture": { "value": "x64", "strategy": "set" }
+        },
+        {
+            "name": "windows-clang-cl",
+            "displayName": "Windows x64 (clang-cl toolset, matches the vcxproj)",
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "architecture": { "value": "x64", "strategy": "set" },
+            "toolset": { "value": "ClangCL", "strategy": "set" }
+        },
+        {
+            "name": "linux-clang",
+            "displayName": "Linux (clang, plain stress driver)",
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_CXX_COMPILER": "clang++",
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "TS_TSAN": "OFF"
+            }
+        },
+        {
+            "name": "linux-tsan",
+            "displayName": "Linux (clang + ThreadSanitizer stress driver)",
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_CXX_COMPILER": "clang++",
+                "TS_TSAN": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        { "name": "windows-msvc", "configurePreset": "windows-msvc", "configuration": "Release" },
+        { "name": "windows-clang-cl", "configurePreset": "windows-clang-cl", "configuration": "Release" },
+        { "name": "linux-clang", "configurePreset": "linux-clang" },
+        { "name": "linux-tsan", "configurePreset": "linux-tsan" }
+    ]
+}
