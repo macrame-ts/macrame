@@ -1,5 +1,8 @@
 # Command buffers: design study
 
+(User-facing usage: [guide.md](guide.md) §9; condensed rationale:
+[design.md](design.md) §6. This is the full design study.)
+
 Status: **implemented** (2026-07) — design 4 shipped as `Deferred<T>` (`deferred.h`)
 plus its versioned-state sibling `Versioned<T>` (`versioned.h`); the physics sample
 (`sample/physics.cpp`) is the second fixture. See §7 for the outcome, the decisions

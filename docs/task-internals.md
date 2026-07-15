@@ -1,5 +1,8 @@
 # Task internals — structure, lifecycle, allocation
 
+(Start with [guide.md](guide.md) for usage and [design.md](design.md) for the
+rationale narrative; this document is the deep design-of-record.)
+
 Design of record for the dynamic task object: what a task *is*, the states it
 moves through, how prerequisites / nested tasks / retraction work, and how it is
 allocated. Distilled from the design discussion; grounded in the Unreal Engine
@@ -581,7 +584,7 @@ TSan): the block settles exactly once, either way.
   O(1) stack instead of `settle → release → execute → settle …` recursion. Caveats
   (documented, not enforced): runs on a nondeterministic / possibly external thread,
   bypasses priority, must not block. `run_inline` is a packed bit in `Flags`
-  (with `priority`/`retractable`). `then` takes the same knobs via a `Continuation_options`
+  (with `priority`/`retractable`). `then` takes the same knobs via the shared `Task_options`
   aggregate (`t.then(fn, {.priority = high})`, `{.run_inline = true}`, `{.token = ...}`) —
   `chain` sets the continuation's `flags.priority`/`flags.run_inline` before `release`, so
   a `then` dispatches inline / at a priority exactly as a builder task does. Graph/async

@@ -1,5 +1,8 @@
 # Deferred/Versioned: development state handoff
 
+(User-facing usage: [guide.md](guide.md) §9; condensed rationale:
+[design.md](design.md) §6.)
+
 Written 2026-07 at the wrap of the staged-write development push (commits
 `99b1b25`..`785fc93`). Intended to be absorbed by the main development session:
 what shipped, the load-bearing mechanisms and their WHY, verification state,
