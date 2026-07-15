@@ -61,6 +61,7 @@ Tests use the harness in `tests/harness.h`: `TS_CHECK(cond)` (non-fatal, prints 
 ## Session Guidance
 
 - Multiple sessions will work on different aspects — read this file for context each time
+- **Public docs contract**: `docs/guide.md` (user guide — mid-level devs, MT-literate, not gamedev) and `docs/design.md` (design rationale — expert engine devs) are the two public-facing documents; **update them with every push** that changes public API, behavior, or design decisions. `README.md` is the pitch + teaser only (don't duplicate the guide). This file (CLAUDE.md) stays internal, LLM-oriented.
 - Propose design options with tradeoffs before implementing non-trivial changes
 - Perf matters: flag any change that adds allocations or contention on hot paths
 - **Offload long or open-ended work to a background agent** so the main session stays interactive: bug investigations (deadlock/heisenbug hunts, TSan/ASan triage), long test/benchmark/loop runs, and multi-file research. Launch a `fork` (inherits context) or a fresh agent, keep chatting, and fold in its findings when it reports. Reserve the main session for design discussion and the actual edits.
