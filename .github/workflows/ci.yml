@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  windows-msvc:
+    name: Windows / MSVC / tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset windows-msvc
+      - name: Build
+        run: cmake --build --preset windows-msvc
+      - name: Tests
+        run: build/windows-msvc/Release/task_system.exe --tests
+
+  windows-clang-cl:
+    name: Windows / clang-cl / tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset windows-clang-cl
+      - name: Build
+        run: cmake --build --preset windows-clang-cl
+      - name: Tests
+        run: build/windows-clang-cl/Release/task_system.exe --tests
+
+  linux-tsan:
+    name: Linux / clang / ThreadSanitizer
+    runs-on: ubuntu-latest
+    env:
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang cmake
+      - name: Configure
+        run: cmake --preset linux-tsan
+      - name: Build
+        run: cmake --build --preset linux-tsan
+      - name: TSan stress
+        run: build/linux-tsan/ts_tsan

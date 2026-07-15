@@ -1,0 +1,36 @@
+Language: Cpp
+Standard: c++20
+IndentWidth: 4
+ColumnLimit: 100
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: true
+  AfterClass: true
+  AfterControlStatement: Always
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterStruct: true
+  AfterUnion: true
+  BeforeCatch: true
+  BeforeElse: true
+  BeforeLambdaBody: true
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+NamespaceIndentation: None
+FixNamespaceComments: true
+PointerAlignment: Left
+AccessModifierOffset: -4
+IndentCaseLabels: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLambdasOnASingleLine: All
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AlignTrailingComments:
+  Kind: Never
+AlignAfterOpenBracket: DontAlign
+BreakBeforeBinaryOperators: NonAssignment
+Cpp11BracedListStyle: false
+ReflowComments: false
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve

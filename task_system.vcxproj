@@ -59,6 +59,7 @@
     <ClInclude Include="scheduler.h" />
     <ClInclude Include="static_task_graph.h" />
     <ClInclude Include="task.h" />
+    <ClInclude Include="ts.h" />
     <ClInclude Include="guarded.h" />
     <ClInclude Include="deferred.h" />
     <ClInclude Include="journal.h" />

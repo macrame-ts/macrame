@@ -16,6 +16,20 @@ int main(int argc, char** argv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered: last line is visible if a test crashes
 
+    if (argc >= 2 && (std::strcmp(argv[1], "--help") == 0 || std::strcmp(argv[1], "-h") == 0))
+    {
+        std::printf(
+            "task_system -- test/benchmark/sample driver\n\n"
+            "usage: task_system [MODE]\n\n"
+            "  (no args)      run the test suite, all samples, and the benchmarks\n"
+            "  --tests        run the test suite only; exit code = failure count\n"
+            "  --bench        run the benchmarks only\n"
+            "  --stress       run the sample many frames at a fast scale (for sanitizers)\n"
+            "  --memprofile   run the allocation profiler (needs a TS_MEM_PROFILE build)\n"
+            "  --help, -h     show this message\n");
+        return 0;
+    }
+
     // Death-test child: run one fatal scenario (it is expected to abort).
     if (argc >= 3 && std::strcmp(argv[1], "--death") == 0)
     {

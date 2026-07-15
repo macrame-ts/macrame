@@ -366,3 +366,7 @@ tsan/ts_tsan
 # CMake
 build/
 CMakeUserPresets.json
+
+# Personal / local launcher scripts (not part of the library)
+claude_new.bat
+claude_resume.bat
