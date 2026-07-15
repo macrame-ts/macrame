@@ -1,6 +1,6 @@
 #include "worker_thread.h"
 
-namespace detail
+namespace ts::detail
 {
 
 Worker_thread::Worker_thread(Scheduler& scheduler, int index)
@@ -36,4 +36,4 @@ void Worker_thread::main(Scheduler& scheduler, int index)
     current_scheduler = nullptr;
 }
 
-} // namespace detail
+} // namespace ts::detail

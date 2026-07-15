@@ -334,7 +334,7 @@ void test_multi_async_no_deadlock()
 void test_multi_async_options()
 {
     ts::Guarded<int> a{ 1 }, b{ 2 };
-    int r = ts::async({ .priority = Priority::high }, [](const int& x, const int& y) { return x + y; }, a, b).sync();
+    int r = ts::async({ .priority = ts::Priority::high }, [](const int& x, const int& y) { return x + y; }, a, b).sync();
     TS_CHECK(r == 3);
 
     ts::Cancellation_source src;

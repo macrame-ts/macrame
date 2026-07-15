@@ -4,7 +4,7 @@
 
 #include <thread>
 
-namespace detail
+namespace ts::detail
 {
 
 class Worker_thread
@@ -18,4 +18,4 @@ private:
     static void main(Scheduler& scheduler, int index);
 };
 
-} // namespace detail
+} // namespace ts::detail

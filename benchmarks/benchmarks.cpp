@@ -64,9 +64,9 @@ void count_down(void* p) { static_cast<std::atomic<uint64_t>*>(p)->fetch_sub(1, 
 void count_up(void* p)   { static_cast<std::atomic<uint64_t>*>(p)->fetch_add(1, std::memory_order_release); }
 
 // single producer floods a batch, then drains; measures raw submit+execute throughput
-std::vector<double> bench_throughput(Idle_policy policy)
+std::vector<double> bench_throughput(ts::Idle_policy policy)
 {
-    Scheduler sched{ { .idle_policy = policy } };
+    ts::Scheduler sched{ { .idle_policy = policy } };
     std::atomic<uint64_t> remaining{ 0 };
     constexpr uint64_t batch = 50000;
 
@@ -83,9 +83,9 @@ std::vector<double> bench_throughput(Idle_policy policy)
 
 // one task in flight at a time; ns/op is the submit->execute round trip.
 // in `block` mode the pool re-sleeps between pings, so this captures wake latency.
-std::vector<double> bench_wake_latency(Idle_policy policy)
+std::vector<double> bench_wake_latency(ts::Idle_policy policy)
 {
-    Scheduler sched{ { .idle_policy = policy } };
+    ts::Scheduler sched{ { .idle_policy = policy } };
     std::atomic<uint64_t> done{ 0 };
 
     return measure([&]() -> uint64_t
@@ -99,9 +99,9 @@ std::vector<double> bench_wake_latency(Idle_policy policy)
 }
 
 // N producer threads hammer submit concurrently; measures `queue_mutex_` contention
-std::vector<double> bench_contention(Idle_policy policy, unsigned producers)
+std::vector<double> bench_contention(ts::Idle_policy policy, unsigned producers)
 {
-    Scheduler sched{ { .idle_policy = policy } };
+    ts::Scheduler sched{ { .idle_policy = policy } };
     std::atomic<uint64_t> completed{ 0 };
 
     auto run_once = [&]() -> uint64_t
@@ -153,7 +153,7 @@ std::vector<double> bench_contention(Idle_policy policy, unsigned producers)
 // to isolate scheduler throughput.
 struct Fj_ctx
 {
-    Scheduler* sched;
+    ts::Scheduler* sched;
     std::atomic<int64_t> budget;   // remaining child tasks to spawn (across the whole tree)
     std::atomic<int64_t> done;
 };
@@ -172,9 +172,9 @@ void fj_task(void* p)
     c->done.fetch_add(1, std::memory_order_relaxed);
 }
 
-std::vector<double> bench_fork_join(Idle_policy policy)
+std::vector<double> bench_fork_join(ts::Idle_policy policy)
 {
-    Scheduler sched{ { .idle_policy = policy } };
+    ts::Scheduler sched{ { .idle_policy = policy } };
     return measure([&]() -> uint64_t
     {
         constexpr int64_t n = 100000;
@@ -298,24 +298,24 @@ void run_benchmarks()
         reps, static_cast<long long>(target.count()), hw);
 
     std::printf("\nthroughput (1 producer, empty tasks):\n");
-    report("spin",    bench_throughput(Idle_policy::spin));
-    report("s+block", bench_throughput(Idle_policy::spin_then_block));
-    report("handoff", bench_throughput(Idle_policy::handoff));
+    report("spin",    bench_throughput(ts::Idle_policy::spin));
+    report("s+block", bench_throughput(ts::Idle_policy::spin_then_block));
+    report("handoff", bench_throughput(ts::Idle_policy::handoff));
 
     std::printf("\nwake latency (1 task in flight):\n");
-    report("spin",    bench_wake_latency(Idle_policy::spin));
-    report("s+block", bench_wake_latency(Idle_policy::spin_then_block));
-    report("handoff", bench_wake_latency(Idle_policy::handoff));
+    report("spin",    bench_wake_latency(ts::Idle_policy::spin));
+    report("s+block", bench_wake_latency(ts::Idle_policy::spin_then_block));
+    report("handoff", bench_wake_latency(ts::Idle_policy::handoff));
 
     std::printf("\ncontention (%u producers):\n", hw);
-    report("spin",    bench_contention(Idle_policy::spin, hw));
-    report("s+block", bench_contention(Idle_policy::spin_then_block, hw));
-    report("handoff", bench_contention(Idle_policy::handoff, hw));
+    report("spin",    bench_contention(ts::Idle_policy::spin, hw));
+    report("s+block", bench_contention(ts::Idle_policy::spin_then_block, hw));
+    report("handoff", bench_contention(ts::Idle_policy::handoff, hw));
 
     std::printf("\nfork-join (worker->worker submits, fanout %d):\n", fj_fanout);
-    report("spin",    bench_fork_join(Idle_policy::spin));
-    report("s+block", bench_fork_join(Idle_policy::spin_then_block));
-    report("handoff", bench_fork_join(Idle_policy::handoff));
+    report("spin",    bench_fork_join(ts::Idle_policy::spin));
+    report("s+block", bench_fork_join(ts::Idle_policy::spin_then_block));
+    report("handoff", bench_fork_join(ts::Idle_policy::handoff));
 
     std::printf("\nfeatures:\n");
     report("ts_write", bench_ts_write());

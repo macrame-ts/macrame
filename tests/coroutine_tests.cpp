@@ -231,8 +231,8 @@ void test_death_await_under_guard()
 Task<int> co_showcase(ts::Guarded<tests::Counter>& world, ts::Signal& phase, Cancellation_token tok)
 {
     // (a) priority + dependency fan-in: a high- and a low-priority producer, joined.
-    Task<int> hi = ts::launch([] { return 3; }, { .priority = Priority::high });
-    Task<int> lo = ts::launch([] { return 4; }, { .priority = Priority::low });
+    Task<int> hi = ts::launch([] { return 3; }, { .priority = ts::Priority::high });
+    Task<int> lo = ts::launch([] { return 4; }, { .priority = ts::Priority::low });
     auto [a, b] = co_await ts::when_all(std::move(hi), std::move(lo));      // 3, 4
 
     // (b) nested tasks: a task body forks nested work; its completion gates on them.

@@ -11,6 +11,9 @@
 #include <memory>
 #include <vector>
 
+namespace ts
+{
+
 // How an idle worker (one that found no work) waits for more. Chosen per `Scheduler` instance
 // at construction -- a runtime enum, not a compile-time switch: the only hot-path read is one
 // branch on the const `idle_policy_` member in `submit` (perfectly predicted) plus, in
@@ -131,3 +134,5 @@ private:
     const std::uint32_t spin_cycles_;
     std::vector<detail::Worker_thread> workers_;
 };
+
+} // namespace ts

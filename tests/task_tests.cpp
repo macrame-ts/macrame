@@ -537,13 +537,13 @@ void test_take_moves_move_only()
 
 void test_launch_priority()
 {
-    // Priority is accepted on every launch route (ordering is covered deterministically by
+    // ts::Priority is accepted on every launch route (ordering is covered deterministically by
     // the scheduler + graph tests; here just confirm the API threads through and runs).
-    TS_CHECK(ts::launch([] { return 1; }, { .priority = Priority::high }).sync() == 1);
-    TS_CHECK(ts::task([] { return 2; }).priority(Priority::low).launch().sync() == 2);
+    TS_CHECK(ts::launch([] { return 1; }, { .priority = ts::Priority::high }).sync() == 1);
+    TS_CHECK(ts::task([] { return 2; }).priority(ts::Priority::low).launch().sync() == 2);
 
     ts::Guarded<int> d{ 40 };
-    TS_CHECK(d.async([](const int& v) { return v + 2; }, { .priority = Priority::high }).sync() == 42);
+    TS_CHECK(d.async([](const int& v) { return v + 2; }, { .priority = ts::Priority::high }).sync() == 42);
 }
 
 // An inline task runs on the thread that settled its last prerequisite. Pinned
@@ -679,7 +679,7 @@ void test_async_write_token()
 void test_then_options()
 {
     ts::Task<int> a = ts::launch([] { return 10; });
-    TS_CHECK(a.then([](int v) { return v + 1; }, { .priority = Priority::high }).sync() == 11);
+    TS_CHECK(a.then([](int v) { return v + 1; }, { .priority = ts::Priority::high }).sync() == 11);
 
     ts::Task<int> c = ts::launch([] { return 20; });
     TS_CHECK(c.then([](int v) { return v + 2; }, { .run_inline = true }).sync() == 22);

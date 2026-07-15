@@ -9,6 +9,9 @@
     #include <immintrin.h>   // _mm_pause
 #endif
 
+namespace ts
+{
+
 thread_local Scheduler* current_scheduler = nullptr;
 thread_local int current_worker_index = -1;
 
@@ -264,3 +267,5 @@ bool Scheduler::all_empty() const
             return false;
     return true;
 }
+
+} // namespace ts

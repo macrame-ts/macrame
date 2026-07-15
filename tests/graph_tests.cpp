@@ -260,16 +260,16 @@ void test_nested_before_successor()
 // root queues all three (in its node_complete) before the worker picks the next task.
 void test_node_priority_order()
 {
-    Scheduler s{ { .num_threads = 1 } };
+    ts::Scheduler s{ { .num_threads = 1 } };
     ts::Guarded<int> a{ 0 };
     std::atomic<int> seq{ 0 };
     std::atomic<int> high_ord{ 0 }, normal_ord{ 0 }, low_ord{ 0 };
 
     ts::Static_task_graph g;
     g.add_node([](int& v) { v = 1; }, a);   // writer root -> the three readers run after it
-    g.add_node([&seq, &low_ord](const int&) { low_ord.store(seq.fetch_add(1)); }, a).priority(Priority::low);
-    g.add_node([&seq, &normal_ord](const int&) { normal_ord.store(seq.fetch_add(1)); }, a).priority(Priority::normal);
-    g.add_node([&seq, &high_ord](const int&) { high_ord.store(seq.fetch_add(1)); }, a).priority(Priority::high);
+    g.add_node([&seq, &low_ord](const int&) { low_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::low);
+    g.add_node([&seq, &normal_ord](const int&) { normal_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::normal);
+    g.add_node([&seq, &high_ord](const int&) { high_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::high);
     g.compile();
 
     g.execute(s).sync();

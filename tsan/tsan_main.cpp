@@ -44,7 +44,7 @@ void inc(void* p)
 void stress_scheduler()
 {
     constexpr int producers = 8, per = 5000;
-    Scheduler s;
+    ts::Scheduler s;
     std::atomic<int> done{ 0 };
     {
         std::vector<std::jthread> ps;
@@ -643,11 +643,11 @@ void stress_multi_async()
 // last-spinner-parks-vs-producer-wake race) and spin_then_block, driven by many concurrent
 // producers plus burst/drain cycles that fully park the pool between bursts (exercising the
 // 0->1 producer wake). A dedicated scheduler per policy; a counter increment per task.
-void stress_idle_policy(Idle_policy policy)
+void stress_idle_policy(ts::Idle_policy policy)
 {
     // Sustained multi-producer submit.
     {
-        Scheduler s{ { .idle_policy = policy } };
+        ts::Scheduler s{ { .idle_policy = policy } };
         std::atomic<int> n{ 0 };
         constexpr int per_producer = 20000, producers = 4;
         {
@@ -661,7 +661,7 @@ void stress_idle_policy(Idle_policy policy)
     }
     // Burst/drain: fully park the pool between bursts so the producer 0->1 wake restarts it.
     {
-        Scheduler s{ { .idle_policy = policy } };
+        ts::Scheduler s{ { .idle_policy = policy } };
         std::atomic<int> n{ 0 };
         constexpr int bursts = 200, per = 300;
         for (int b = 0; b < bursts; ++b)
@@ -1026,8 +1026,8 @@ int main()
     std::puts("tsan: graph+async stress");  stress_graph_async();
     std::puts("tsan: graph inline stress");  stress_graph_inline();
     std::puts("tsan: multi async stress");   stress_multi_async();
-    std::puts("tsan: spin_then_block stress"); stress_idle_policy(Idle_policy::spin_then_block);
-    std::puts("tsan: handoff stress");        stress_idle_policy(Idle_policy::handoff);
+    std::puts("tsan: spin_then_block stress"); stress_idle_policy(ts::Idle_policy::spin_then_block);
+    std::puts("tsan: handoff stress");        stress_idle_policy(ts::Idle_policy::handoff);
     std::puts("tsan: parallel_for stress");  stress_parallel_for();
 #if defined(__cpp_impl_coroutine)
     std::puts("tsan: coroutine stress");     stress_coroutine();

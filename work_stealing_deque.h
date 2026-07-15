@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace detail
+namespace ts::detail
 {
 
 // Chase-Lev bounded work-stealing deque, with the Lê-Pop-Cohen-Nardelli ("Correct and
@@ -121,4 +121,4 @@ private:
     std::vector<std::atomic<T>> buffer_;
 };
 
-} // namespace detail
+} // namespace ts::detail

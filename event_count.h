@@ -3,7 +3,7 @@
 #include <atomic>
 #include <cstdint>
 
-namespace detail
+namespace ts::detail
 {
 
 // A minimal event count (Vyukov / futex idiom) for parking idle workers. Replaces the
@@ -73,4 +73,4 @@ private:
     std::atomic<std::uint32_t> epoch_{ 0 };
 };
 
-} // namespace detail
+} // namespace ts::detail

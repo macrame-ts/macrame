@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace detail
+namespace ts::detail
 {
 
 // Bounded lock-free MPMC queue (Vyukov's array + per-cell sequence scheme) with an unbounded
@@ -148,4 +148,4 @@ private:
     std::atomic<std::size_t> overflow_count_{ 0 };
 };
 
-} // namespace detail
+} // namespace ts::detail
