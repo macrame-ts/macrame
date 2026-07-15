@@ -297,6 +297,36 @@ void test_graph_stale_then_fresh()
 
 // --- fatal paths --------------------------------------------------------------------
 
+void test_publish_sync_then_graph_flip()
+{
+    // The legal mixed pattern: a synced dynamic publish followed by a graph
+    // flip. sync() returning guarantees the resync job is already ON the pipe
+    // (enqueued before the phase gate triggers), so the flip's acquire orders
+    // behind it and the flip-entry enforcement check passes deterministically.
+    // 200 iterations amplify what used to be a timing window.
+    ts::Versioned<int> v;
+    auto rec = v.recorder();
+
+    ts::Static_task_graph g;
+    g.add_node(ts::publish_body(v), v.state());
+    g.compile();
+
+    constexpr int rounds = 200;
+    for (int i = 0; i < rounds; ++i)
+    {
+        rec.stage([](int& x) { x += 1; });
+        v.publish().sync();       // dynamic publish...
+        rec.stage([](int& x) { x += 1; });
+        g.execute().sync();       // ...then a graph flip: must neither fatal nor lose a write
+    }
+    TS_CHECK(v.read([](const int& x) { return x; }).sync() == 2 * rounds);
+}
+
+void test_mixed_publish_race_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("versioned_mixed_publish"));
+}
+
 void test_divergence_is_fatal()
 {
     TS_CHECK(ts::test::expect_death("versioned_divergence"));
@@ -331,6 +361,8 @@ void run_versioned_tests()
     run("versioned: reader overlaps the resync", test_reader_overlaps_resync);
     run("versioned: concurrent readers during publishes", test_concurrent_readers_and_publishes);
     run("versioned: graph -- stale before flip, fresh after", test_graph_stale_then_fresh);
+    run("versioned: synced publish then graph flip is legal", test_publish_sync_then_graph_flip);
+    run("versioned: flip catching an unresolved publish is fatal", test_mixed_publish_race_is_fatal);
     run("versioned: nondeterministic replay is fatal", test_divergence_is_fatal);
     run("versioned: publish_into wrong instance is fatal", test_wrong_front_is_fatal);
     run("versioned: destroy with staged commands is fatal", test_drop_staged_is_fatal);

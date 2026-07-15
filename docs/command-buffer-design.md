@@ -618,9 +618,15 @@ version the output extract, not the machine.**
 - Reserved handles from `stage()` (the id-allocator pattern is the documented
   answer), multi-target buffers, `read_pair()` on `Versioned` for
   interpolation.
-- Single-publisher discipline on `Versioned` is documented, not enforced:
-  dynamic publishes chain among themselves, but don't run them concurrently
-  with a graph whose flip node publishes the same instance.
+- ~~Single-publisher discipline on `Versioned` is documented, not enforced~~
+  **Enforced** (follow-up to the initial ship): a graph/inline publish that
+  catches a dynamic publish still unresolved is fatal at flip entry under
+  `TS_SAFETY_CHECKS` (the pipe cannot order a phase 1 that has not reached
+  it). The dynamic swap enqueues the resync *before* triggering the phase
+  gate, so `publish().sync()` followed by a run is deterministically legal,
+  and a dynamic publish arriving mid-flip chains behind the flip. Only
+  fire-and-forget publish racing a flip is rejected -- and the pre-fix test
+  demonstrated that exact interleaving silently losing a write.
 
 ### 7.4 Pattern recipe: the blackboard
 

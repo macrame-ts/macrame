@@ -22,6 +22,7 @@
 #include "deferred.h"
 #include "versioned.h"
 
+#include <atomic>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -169,6 +170,40 @@ void run_death_scenario(const char* name)
         // `n`, so the replicas diverge -> fatal at the post-resync hash compare.
         rec.stage([](int& x) { static int n = 41; x = ++n; });
         v.publish().sync();
+    }
+    else if (std::strcmp(name, "versioned_mixed_publish") == 0)
+    {
+        // A dynamic publish whose phase 1 is parked (the staged command spins on
+        // a flag) is invisible to the pipe; a graph flip that catches it must
+        // FATAL instead of racing its shadow apply. Pre-enforcement this child
+        // drains and exits normally -- the parent's expect_death then fails.
+        static std::atomic<bool> phase1_running{ false };
+        static std::atomic<bool> release{ false };
+        {
+            ts::Versioned<int> v;
+            auto rec = v.recorder();
+            rec.stage([](int& x)
+            {
+                phase1_running.store(true);
+                while (!release.load())
+                    std::this_thread::yield();
+                x += 1;
+            });
+            ts::Task<void> pending = v.publish();   // fire-and-forget: phase 1 parks on a worker
+            while (!phase1_running.load())
+                std::this_thread::yield();          // now provably unresolved
+
+            auto rec2 = v.recorder();
+            rec2.stage([](int& x) { x += 10; });
+            ts::Static_task_graph g;
+            g.add_node(ts::publish_body(v), v.state());
+            g.compile();
+            g.execute().sync();                     // flip catches the unresolved publish -> fatal
+
+            release.store(true);                    // pre-enforcement path: drain and exit 0
+            pending.sync();
+            v.publish().sync();
+        }
     }
     else if (std::strcmp(name, "versioned_wrong_front") == 0)
     {

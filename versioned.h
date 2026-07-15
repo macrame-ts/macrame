@@ -66,10 +66,14 @@ enum class Resync
 // the NEXT version. Readers wanting the fresh version order after the publish
 // (graph edge / `.after(publish_task)`).
 //
-// One publisher at a time: dynamic `publish()` calls may overlap each other (they
-// chain internally), but do not run dynamic publishes concurrently with a graph
-// whose flip node publishes the same `Versioned` -- same discipline as the
-// graph's one-run-at-a-time rule.
+// One publisher at a time, ENFORCED at flip entry (TS_SAFETY_CHECKS): a graph /
+// inline publish that catches a dynamic publish still unresolved is fatal --
+// the pipe cannot order a phase 1 that has not reached it, so proceeding would
+// race the shadow apply. The legal patterns: dynamic publishes freely overlap
+// each other (they chain); a SYNCED dynamic publish followed by a run is safe
+// (sync() returning guarantees the resync is on the pipe, which then orders
+// the flip behind it); a dynamic publish arriving mid-flip chains behind the
+// flip. Only fire-and-forget publish racing a flip is rejected.
 template<typename T>
 class Versioned
 {
@@ -175,12 +179,17 @@ public:
             }
             apply_to_shadow(*batch);
 
-            // Phase 2: the only write on the pipe -- swap and get out.
+            // Phase 2: the only write on the pipe -- swap and get out. The resync
+            // is enqueued BEFORE the phase gate triggers: anything ordered after
+            // the returned task (a sync(), an .after()) then finds the resync
+            // already on the pipe, so a following writer -- including a graph
+            // flip's acquire -- FIFO-orders behind it. The flip-entry enforcement
+            // check relies on exactly this.
             front_.async([this, batch, swapped, shadow_ready](T& front) mutable
             {
                 swap_replicas(front);
-                swapped.trigger();
                 start_resync(std::move(batch), std::move(shadow_ready));
+                swapped.trigger();
             }, { .priority = opts.priority });
         }, { .priority = opts.priority });
 
@@ -199,18 +208,32 @@ public:
             fatal("Versioned::publish_into: not this Versioned's front instance");
         access_check(&front);
 #endif
-        auto batch = std::make_shared<Batch>(journal_.cut());
-        if (batch->empty())
-            return;
-
-        apply_to_shadow(*batch);
-        swap_replicas(front);
-
+        // Enforcement + chain handoff, atomically at ENTRY. A dynamic publish
+        // whose phase 1 has not reached the pipe is invisible to this node's
+        // acquire -- proceeding would race its shadow apply and orphan its
+        // chain signal. Fatal is the only correct response (a node must never
+        // block). Installing our signal here also makes the OTHER direction
+        // legal: a dynamic publish arriving mid-flip chains behind us.
         Signal shadow_ready;
         {
             std::lock_guard lock(seq_mutex_);
-            chain_ = shadow_ready;   // single-publisher discipline: the previous chain is complete
+#if TS_SAFETY_CHECKS
+            if (!chain_.is_done())
+                fatal("Versioned: graph/inline publish while a dynamic publish is unresolved -- "
+                      "one publisher at a time; sync() the publish or order it before the run");
+#endif
+            chain_ = shadow_ready;
         }
+
+        auto batch = std::make_shared<Batch>(journal_.cut());
+        if (batch->empty())
+        {
+            shadow_ready.trigger();   // the chain must still resolve
+            return;
+        }
+
+        apply_to_shadow(*batch);
+        swap_replicas(front);
         start_resync(std::move(batch), std::move(shadow_ready));
     }
 
