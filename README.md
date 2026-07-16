@@ -185,7 +185,7 @@ Layered and composable — use as much as you need, and in a way that suits you 
 - **`Static_task_graph`** — build-once/run-many DAG whose edges are derived from access conflicts (plus explicit ordering where you want it); a re-run reuses the compiled nodes and allocates only its completion handle. Planned profiler-guided optimisation.
 - **Design patterns** — `Deferred<T>` / `Versioned<T>` — staged writes: record grant-free from any thread, apply the batch atomically at a defined point; `Versioned` gives readers a whole-frame stable snapshot. Deterministic by construction.
 
-Some areas are actively evolving (**WIP**): the allocation/performance campaign, a platform abstraction layer, an ambient (overridable) scheduler, and benchmark regression tracking. See [docs/TODO.md](docs/TODO.md) for the live roadmap.
+**v0.1.0** — pre-1.0: the API is stable in shape but not frozen. Some areas are actively evolving (**WIP**): the allocation/performance campaign, a platform abstraction layer, an ambient (overridable) scheduler, and benchmark regression tracking. See [docs/TODO.md](docs/TODO.md) for the live roadmap.
 
 ---
 

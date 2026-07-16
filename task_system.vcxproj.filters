@@ -91,6 +91,8 @@
     <ClInclude Include="scheduler.h" />
     <ClInclude Include="static_task_graph.h" />
     <ClInclude Include="task.h" />
+    <ClInclude Include="ts.h" />
+    <ClInclude Include="version.h" />
     <ClInclude Include="versioned.h" />
     <ClInclude Include="work_stealing_deque.h" />
     <ClInclude Include="worker_thread.h" />

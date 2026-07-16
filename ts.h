@@ -5,6 +5,7 @@
 //
 // Everything lives in namespace `ts` (internals in `ts::detail`).
 
+#include "version.h"            // TS_VERSION_* macros
 #include "scheduler.h"          // ts::Scheduler, Scheduler_config, Idle_policy, Priority
 #include "guarded.h"            // ts::Guarded<T>, ts::async (multi-object)
 #include "task.h"               // ts::Task<R>, launch/task/nested, then/when_all, Signal, cancellation

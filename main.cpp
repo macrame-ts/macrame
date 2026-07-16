@@ -4,6 +4,7 @@
 #include "harness.h"
 #include "engine.h"
 #include "physics.h"
+#include "version.h"
 
 // Single-file sample (sample/blackboard.cpp, by design -- no header): the
 // blackboard pattern recipe of docs/command-buffer-design.md §7.4.
@@ -16,17 +17,25 @@ int main(int argc, char** argv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered: last line is visible if a test crashes
 
+    if (argc >= 2 && (std::strcmp(argv[1], "--version") == 0 || std::strcmp(argv[1], "-v") == 0))
+    {
+        std::printf("task_system %s\n", TS_VERSION_STRING);
+        return 0;
+    }
+
     if (argc >= 2 && (std::strcmp(argv[1], "--help") == 0 || std::strcmp(argv[1], "-h") == 0))
     {
         std::printf(
-            "task_system -- test/benchmark/sample driver\n\n"
+            "task_system %s -- test/benchmark/sample driver\n\n"
             "usage: task_system [MODE]\n\n"
             "  (no args)      run the test suite, all samples, and the benchmarks\n"
             "  --tests        run the test suite only; exit code = failure count\n"
             "  --bench        run the benchmarks only\n"
             "  --stress       run the sample many frames at a fast scale (for sanitizers)\n"
             "  --memprofile   run the allocation profiler (needs a TS_MEM_PROFILE build)\n"
-            "  --help, -h     show this message\n");
+            "  --version, -v  print the version\n"
+            "  --help, -h     show this message\n",
+            TS_VERSION_STRING);
         return 0;
     }
 
