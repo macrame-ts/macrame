@@ -101,7 +101,7 @@ scheduler; per-scope scheduler selection is **WIP**.)
 ### 3.1 Declaring access
 
 Access is declared by *parameter const-ness*. A functor taking `T&` declares a
-write; `const T&` declares a read. You saw it in `async` above; the static
+write; `const T&` declares a read. You saw it in `access` above; the static
 graph (§6) uses the same rule across multiple objects at once:
 
 ```cpp
@@ -142,6 +142,20 @@ no grant — a stray pointer, a forgotten declaration, a lambda that captured a
 reference it shouldn't have — aborts with the type name, the required mode,
 and a stack trace. The check costs about a nanosecond; with
 `TS_SAFETY_CHECKS=0` it compiles out entirely.
+
+**Stronger than race detection.** Conventional tools — ThreadSanitizer, or a
+game engine's access detector such as Unreal's `FRWAccessDetector` — catch a data
+race only when it actually *happens*: two threads touching the data in the same
+window. A dormant violation that didn't happen to race on a given run stays
+invisible until the timing shifts (a different core count, a production build, a
+slower frame). The harness checks something different, and stronger: not "is
+another thread touching this right now?" but "did the running task *declare* this
+access?". An undeclared access therefore faults the first time its code path runs
+— deterministically, whether or not a real race occurred at that moment — so a
+latent bug surfaces at the point of the violation instead of waiting for unlucky
+timing. You are validating *intent* (the declared grant) rather than observing
+*collisions*, which is why a single test run over a code path is enough to catch
+what a race detector would only find under the right schedule.
 
 ### 3.3 The trust model, honestly
 
