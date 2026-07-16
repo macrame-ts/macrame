@@ -370,3 +370,6 @@ CMakeUserPresets.json
 # Personal / local launcher scripts (not part of the library)
 claude_new.bat
 claude_resume.bat
+
+# Local Claude Code config (not shipped)
+.claude/
