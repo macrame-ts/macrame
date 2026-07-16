@@ -25,6 +25,14 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
 
 ## Before the flip
 
+- [x] **Roadmap tidy + triage** — done; see `docs/TODO.md` (scannable index + pre-public candidates).
+- [ ] **Comprehensive code review** — whole codebase, concurrency-critical paths first
+      (scheduler, pipe, task block, graph acquire/handoff, the recent `access`/`async` + MSVC fixes).
+- [ ] **Docs review** — all docs *except* README (accuracy, coherence, currency after this session's churn).
+- [ ] **API-stability pass** — resolve the pre-public API inconsistencies (see `docs/TODO.md`
+      → "Inconsistencies to resolve"): `run_inline`-on-`access`, multi-object `access` semantics,
+      stale `async`→`access` comments, `pipe`/`queue` terminology. Lock the public surface while
+      still pre-1.0 — breaking changes after public are costly.
 - [ ] **Finalize the library name** (see `docs/naming.md`). Then update: `README.md` title
       + the placeholder header comment, `LICENSE` if needed, the `TS_VERSION`/`version.h`
       product string and any `--version` text, the namespace if it changes, and the GitHub
