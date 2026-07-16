@@ -1,5 +1,4 @@
-<!-- DRAFT README. Project name undecided (placeholder "task_system"); see naming.md.
-     Lives in docs/ until the name lands, then moves to repo root as README.md. -->
+<!-- Project name undecided (placeholder "task_system"); see docs/naming.md. -->
 
 # task_system
 
@@ -9,7 +8,7 @@ A comprehensive task system — work-stealing scheduler, dependency graphs, coro
 
 Inspired by game engines — high performance, low latency, soft real-time frame budgets, many interacting subsystems sharing state — but built to fit any system with similar requirements. No external dependencies.
 
-**New here? Start with the [Quick start](quickstart.md).**
+**New here? Start with the [Quick start](docs/quickstart.md).**
 
 <!-- badges (CI/license) go here once the repo is public -->
 
@@ -58,7 +57,7 @@ Inspired by Rust, adapted to C++.
 - **High-level patterns, built in** — command buffers (`Deferred`) and double buffering (`Versioned`): the state-sharing idioms every game engine reinvents, provided as primitives.
 - **Some functionality is uncommon or unique**: **retraction** (a blocking wait runs not-yet-started work inline, so fork-join can't deadlock the pool); scheduler's configurable idle policies; object hand-off between graph nodes; and a `co_await`-a-guard model where holding an access guard across a suspension is *detected and fails fast*.
 
-For a feature-by-feature comparison with Unreal Engine Tasks System, Taskflow, TBB, HPX, Folly, Go, and others, see [docs/task-systems-comparison.md](task-systems-comparison.md).
+For a feature-by-feature comparison with Unreal Engine Tasks System, Taskflow, TBB, HPX, Folly, Go, and others, see [docs/task-systems-comparison.md](docs/task-systems-comparison.md).
 
 ---
 
@@ -177,7 +176,7 @@ Layered and composable — use as much as you need, and in a way that suits you 
 - **`Static_task_graph`** — build-once/run-many DAG whose edges are derived from access conflicts (plus explicit ordering where you want it); a re-run reuses the compiled nodes and allocates only its completion handle. Planned profiler-guided optimisation.
 - **Design patterns** — `Deferred<T>` / `Versioned<T>` — staged writes: record grant-free from any thread, apply the batch atomically at a defined point; `Versioned` gives readers a whole-frame stable snapshot. Deterministic by construction.
 
-Some areas are actively evolving (**WIP**): the allocation/performance campaign, a platform abstraction layer, an ambient (overridable) scheduler, and benchmark regression tracking. See [docs/TODO.md](TODO.md) for the live roadmap.
+Some areas are actively evolving (**WIP**): the allocation/performance campaign, a platform abstraction layer, an ambient (overridable) scheduler, and benchmark regression tracking. See [docs/TODO.md](docs/TODO.md) for the live roadmap.
 
 ---
 
@@ -205,11 +204,11 @@ The driver runs everything; `--tests`, `--bench`, `--stress`, and `--help` isola
 
 ## Documentation
 
-- **[docs/quickstart.md](quickstart.md)** — zero to a running program: include, build, first task, first guarded object.
-- **[docs/guide.md](guide.md)** — the user guide: concepts, every layer with examples, patterns, when-to-use-what.
-- **[docs/design.md](design.md)** — design rationale: the decisions, the rejected alternatives, the references.
-- **[docs/task-systems-comparison.md](task-systems-comparison.md)** — how it compares to other task systems.
-- Deep dives: [task-internals](task-internals.md), [command-buffer-design](command-buffer-design.md), [deferred-versioned-state](deferred-versioned-state.md).
+- **[docs/quickstart.md](docs/quickstart.md)** — zero to a running program: include, build, first task, first guarded object.
+- **[docs/guide.md](docs/guide.md)** — the user guide: concepts, every layer with examples, patterns, when-to-use-what.
+- **[docs/design.md](docs/design.md)** — design rationale: the decisions, the rejected alternatives, the references.
+- **[docs/task-systems-comparison.md](docs/task-systems-comparison.md)** — how it compares to other task systems.
+- Deep dives: [task-internals](docs/task-internals.md), [command-buffer-design](docs/command-buffer-design.md), [deferred-versioned-state](docs/deferred-versioned-state.md).
 
 ---
 
