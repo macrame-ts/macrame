@@ -9,6 +9,8 @@ A comprehensive task system — work-stealing scheduler, dependency graphs, coro
 
 Inspired by game engines — high performance, low latency, soft real-time frame budgets, many interacting subsystems sharing state — but built to fit any system with similar requirements. No external dependencies.
 
+**New here? Start with the [Quick start](quickstart.md).**
+
 <!-- badges (CI/license) go here once the repo is public -->
 
 ---
@@ -18,7 +20,7 @@ Inspired by game engines — high performance, low latency, soft real-time frame
 This framework targets systems with **complex, coarse-grained concurrency**:
 
 - Multiple **separate internal parts** — subsystems, "data islands" — each thread-unsafe on its own (think physics simulation, animation, audio, AI; or a server's services, a simulation's modules).
-- **Intensive communication and data sharing** between those parts — though an embarrassingly-parallel loop over uniform data is supported too.
+- **Intensive communication and data sharing** between those parts — not an embarrassingly-parallel loop over uniform data (though that kind of work *within* a part is supported too, via `parallel_for`).
 - A need to give each part a **thread-safe API** so the rest of the system can drive it concurrently and correctly.
 - Often **soft real-time**: a frame, a tick, a request budget — you want all cores saturated and latency bounded.
 
@@ -37,7 +39,7 @@ Most task systems schedule *work* and leave *shared-data safety* to you — or o
 - **Locking** (mutexes around shared state) is the simplest and most popular approach, and it is **error-prone and inefficient**: a forgotten or mis-scoped lock races silently; correct locks serialise readers against writers and convoy under contention; correctness lives in scattered conventions that no tool verifies.
 - **Task dependencies alone are the wrong tool for data sharing.** Dependencies exist to express *ordering*. Retrofitting them to protect shared data means hand-encoding, for every pair of tasks, which access conflicts with which — O(N²) bookkeeping that yields **rigid, over-serialised graphs** and breaks the moment access patterns change. Ordering and data-access governance are different concerns; conflating them is where these systems get brittle.
 
-This framework separates them. You **declare the data each task accesses and how** — read-only or read/write — and the framework **derives** the ordering and exclusion needed for safety. A **runtime harness** then verifies, as work runs, that nothing touched shared state it did not declare, aborting with a stack trace instead of racing. Dependencies remain available for genuine ordering; they are no longer overloaded to mean "these tasks share data.".
+This framework separates them. You **declare the data each task accesses and how** — read-only or read/write — and the framework **derives** the ordering and exclusion needed for safety. A **runtime harness** then verifies, as work runs, that nothing touched shared state it did not declare, aborting with a stack trace instead of racing. Dependencies remain available for genuine ordering; they are no longer overloaded to mean "these tasks share data."
 
 ```cpp
 // The whole model in one line: the parameter's const-ness IS the access declaration.
@@ -53,7 +55,7 @@ Inspired by Rust, adapted to C++.
 
 - **Access orchestration is a first-class, novel feature.** `Guarded<T>` + the runtime harness give you a thread-safe API for a shared object with the safety *checked*, not merely conventional. To our knowledge no other C++ task system derives scheduling from declared data access and polices it at runtime.
 - **It is also a comprehensive, state-of-the-art task system**, not a thin wrapper: efficient work-stealing scheduler, typed continuations and joins, cooperative cancellation, reusable, nested and inline tasks, priorities, coroutine integration, and data-parallel loops.
-- **High-level design patterns** reinvented by every game engine. To streamline efficient inter-system collaboration.
+- **High-level patterns, built in** — command buffers (`Deferred`) and double buffering (`Versioned`): the state-sharing idioms every game engine reinvents, provided as primitives.
 - **Some functionality is uncommon or unique**: **retraction** (a blocking wait runs not-yet-started work inline, so fork-join can't deadlock the pool); scheduler's configurable idle policies; object hand-off between graph nodes; and a `co_await`-a-guard model where holding an access guard across a suspension is *detected and fails fast*.
 
 For a feature-by-feature comparison with Unreal Engine Tasks System, Taskflow, TBB, HPX, Folly, Go, and others, see [docs/task-systems-comparison.md](task-systems-comparison.md).
@@ -87,7 +89,7 @@ ts::Task<int> total_items()
 
 No lock is written, taken, or forgotten; concurrent `loot` calls serialise, reads run together, and any code that touches the inventory without a grant faults. (The same is available without coroutines as `inventory.async(fn)`.)
 
-### 2. A frame composition as a graph — edges derived from access
+### 2. A frame as a graph — edges derived from access
 
 Each subsystem is its own `Guarded<T>`. Declare what each node reads and writes; `compile()` derives the schedule from the access conflicts — you add explicit ordering only for intent that data access alone doesn't capture:
 
@@ -167,7 +169,7 @@ poses.publish().sync();
 
 Layered and composable — use as much as you need, and in a way that suits you best. Going from bottom-up:
 
-- **Scheduler** — efficient work-stealing, configurable idle policies, priorities. Minimal API, easy to replace or to use independently from the rest.
+- **Scheduler** — efficient work-stealing, configurable idle policies, priorities. Minimal API; usable independently of the rest.
 - **Tasks** — `launch` work with prerequisites (`after`), continuations (`then`), typed joins (`when_all`), cooperative cancellation (incl. mid-body early-out). Reusable (no allocs). Nested and inline tasks. Priorities. Blocking waits run not-yet-started work inline (retraction), so fork-join can't deadlock the pool while touching only related work and thus avoiding ubiquitous "busy waiting" issues.
 - **`parallel_for`** — for the data-parallel work that does live inside a part; caller-participating (nested-safe), with guided/balanced/unbalanced chunking. plus **`async_parallel_for`** for extra flexibility.
 - **Coroutines** — `co_await` any task; `co_await ts::read_only/read_write(obj)` yields an RAII access guard; holding one across a suspension is detected and fails fast.
@@ -192,7 +194,7 @@ Concurrency claims need evidence, not assertions:
 
 ## Requirements & building
 
-C++23, no external dependencies, exceptions disabled project-wide (failures are fatal-by-design) - gamedev influence, reach out if this is a problem. Compilers: MSVC and clang-cl on Windows; clang on Linux.
+C++23, no external dependencies, exceptions disabled project-wide (failures are fatal-by-design — see the docs). Compilers: MSVC and clang-cl on Windows; clang on Linux.
 
 - **Visual Studio 2022+**: open `task_system.slnx` (x64).
 - **CMake**: presets for `windows-msvc`, `windows-clang-cl`, and `linux-clang` (the ThreadSanitizer stress driver builds on Linux).
@@ -203,6 +205,7 @@ The driver runs everything; `--tests`, `--bench`, `--stress`, and `--help` isola
 
 ## Documentation
 
+- **[docs/quickstart.md](quickstart.md)** — zero to a running program: include, build, first task, first guarded object.
 - **[docs/guide.md](guide.md)** — the user guide: concepts, every layer with examples, patterns, when-to-use-what.
 - **[docs/design.md](design.md)** — design rationale: the decisions, the rejected alternatives, the references.
 - **[docs/task-systems-comparison.md](task-systems-comparison.md)** — how it compares to other task systems.
