@@ -397,9 +397,9 @@ Physics_stats run_physics_frames(int frames)
 
     Physics_stats stats;
     stats.frames = frames;
-    stats.bodies = world.async([](const Physics_world& w) { return w.body_count(); }).sync();
-    stats.spawned = spawns.async([](const Spawn_queue& q) { return q.spawned_count(); }).sync();
-    stats.vision_hits = ai.async([](const Ai_system& a) { return a.hits(); }).sync();
+    stats.bodies = world.access([](const Physics_world& w) { return w.body_count(); }).sync();
+    stats.spawned = spawns.access([](const Spawn_queue& q) { return q.spawned_count(); }).sync();
+    stats.vision_hits = ai.access([](const Ai_system& a) { return a.hits(); }).sync();
     stats.player_y = poses.read([player_body](const Pose_snapshot& s) { return s.of(player_body).pos.y; }).sync();
     stats.pose_hash = poses.read([](const Pose_snapshot& s) { return s.hash(); }).sync();
     return stats;

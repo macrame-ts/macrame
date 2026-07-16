@@ -896,14 +896,14 @@ inline void add_prerequisite(const Task_ptr& prereq,
 
 } // namespace detail
 
-// Dispatch options for a queued task body — a `then` continuation or a `Guarded`
-// read/write (`async`). An aggregate, so it takes designated initializers at the call site:
-// `t.then(fn, {.priority = Priority::high})`, `obj.async(fn, {.run_inline = true})`. `token`
-// makes the body skippable before it runs (and, if the body declares a trailing
-// `Cancellation_token`, is forwarded to it for a mid-run early-out). `run_inline` runs it on
-// the thread that makes it ready instead of queueing it — for `then`, the thread that settles
-// the producer; for `async`, the calling thread when the pipe is free (`pipe_try_inline`) —
-// same trade-offs as `Task_builder::set_inline`.
+// Dispatch options for a queued task body — a `then` continuation or a `Guarded` access
+// (`access`/`async`). An aggregate, so it takes designated initializers at the call site:
+// `t.then(fn, {.priority = Priority::high})`, `obj.access(fn, {.token = tok})`. `token` makes
+// the body skippable before it runs (and, if the body declares a trailing `Cancellation_token`,
+// is forwarded to it for a mid-run early-out). `run_inline` (used by `then`) runs the
+// continuation on the thread that settles the producer instead of queueing it — same trade-offs
+// as `Task_builder::set_inline`. `Guarded::access`/`async` choose inline-vs-enqueued by the verb
+// and do not read `run_inline` (`access` uses `pipe_try_inline`; `async` always enqueues).
 struct Task_options
 {
     Cancellation_token token = {};

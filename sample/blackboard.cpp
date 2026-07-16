@@ -291,10 +291,10 @@ Blackboard_stats run_blackboard_frames(int frames)
     // The callbacks' async writes were enqueued during the runs -- pipe FIFO
     // applies them before these reads.
     Blackboard_stats st;
-    st.notifications = subs.async([](const Subscriptions& s) { return s.fired(); }).sync();
-    st.barks = audio.async([](const Audio& a) { return a.barks(); }).sync();
-    st.order_changes = squad.async([](const Squad& sq) { return sq.order_changes(); }).sync();
-    st.agent_seen = agents.async([](const Agents& a) { return a.seen(); }).sync();
+    st.notifications = subs.access([](const Subscriptions& s) { return s.fired(); }).sync();
+    st.barks = audio.access([](const Audio& a) { return a.barks(); }).sync();
+    st.order_changes = squad.access([](const Squad& sq) { return sq.order_changes(); }).sync();
+    st.agent_seen = agents.access([](const Agents& a) { return a.seen(); }).sync();
     st.final_alert = bb.read([](const Blackboard& b) { return b.get<int>(Key::alert_level, 0); }).sync();
     return st;
 }

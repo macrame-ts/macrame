@@ -81,10 +81,10 @@ void stress_thread_safe()
     assert(final == threads * per / 2);
 }
 
-// Concurrent async on one object mixing run_inline and normal jobs across threads.
-// An inline job runs on the calling thread when the pipe is momentarily free, else defers
-// to the queue; either way every increment must land exactly once and the pipe must drain.
-// Stresses pipe_try_inline's acquire/run/release racing pipe_enqueue + job completion.
+// Concurrent access on one object mixing `access` (inline-when-free) and `async` (always
+// enqueued) jobs across threads. An `access` job runs on the calling thread when the pipe is
+// momentarily free, else defers to the queue; either way every increment must land exactly once
+// and the pipe must drain. Stresses pipe_try_inline's acquire/run/release racing pipe_enqueue.
 void stress_inline_async()
 {
     constexpr int threads = 8, per = 2000;
@@ -97,12 +97,18 @@ void stress_inline_async()
             {
                 for (int k = 0; k < per; ++k)
                 {
-                    ts::Task_options opts{ .run_inline = (k % 3) == 0 };
+                    bool opportunistic = (k % 3) == 0;   // some inline-when-free, some always enqueued
                     if (k & 1)
-                        obj.async([](int& v) { ++v; }, opts);
+                    {
+                        auto w = [](int& v) { ++v; };
+                        if (opportunistic) obj.access(w); else obj.async(w);
+                    }
                     else
-                        obj.async([&reads](const int& v)
-                            { reads.fetch_add(1, std::memory_order_relaxed); return v; }, opts);
+                    {
+                        auto r = [&reads](const int& v)
+                            { reads.fetch_add(1, std::memory_order_relaxed); return v; };
+                        if (opportunistic) obj.access(r); else obj.async(r);
+                    }
                 }
             });
     }   // join producers

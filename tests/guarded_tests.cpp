@@ -223,19 +223,19 @@ void test_pipe_stress()
     TS_CHECK(read_value(d) == 5000);
 }
 
-// --- inline dispatch (Task_options::run_inline) --------------------------
+// --- access (inline-when-free) vs async (always enqueued) ----------------
 
-// A write accessor with `run_inline` on a free pipe runs synchronously on the CALLING
-// thread; the returned task is already settled when the call returns.
-void test_inline_runs_synchronously()
+// A write `access` on a free pipe runs synchronously on the CALLING thread; the returned task
+// is already settled when the call returns.
+void test_access_runs_synchronously()
 {
     ts::Guarded<int> d{ 5 };
     std::thread::id body_thread{};
-    ts::Task<int> t = d.async([&body_thread](int& v)
+    ts::Task<int> t = d.access([&body_thread](int& v)
     {
         body_thread = std::this_thread::get_id();
         return ++v;   // 6
-    }, { .run_inline = true });
+    });
 
     TS_CHECK(t.is_done());                                  // ran before this line returned
     TS_CHECK(body_thread == std::this_thread::get_id());    // on the calling thread
@@ -243,28 +243,28 @@ void test_inline_runs_synchronously()
     TS_CHECK(read_value(d) == 6);
 }
 
-// A read accessor with `run_inline` on a free pipe joins as a reader and runs on the caller.
-void test_inline_read_on_caller()
+// A read `access` on a free pipe joins as a reader and runs on the caller.
+void test_access_read_on_caller()
 {
     ts::Guarded<int> d{ 9 };
     std::thread::id body_thread{};
-    int r = d.async([&body_thread](const int& v)
+    int r = d.access([&body_thread](const int& v)
     {
         body_thread = std::this_thread::get_id();
         return v;
-    }, { .run_inline = true }).sync();
+    }).sync();
     TS_CHECK(r == 9);
     TS_CHECK(body_thread == std::this_thread::get_id());
 }
 
-// When the pipe is busy (a writer holds it), an inline-requested async cannot acquire it,
-// so it defers to the queue and runs correctly on a worker once the pipe drains.
-void test_inline_falls_back_when_busy()
+// When the pipe is busy (a writer holds it), `access` cannot acquire it, so it defers to the
+// queue and runs correctly on a worker once the pipe drains.
+void test_access_falls_back_when_busy()
 {
     ts::Guarded<int> d{ 0 };
     std::atomic<bool> gate{ false };
     std::thread::id caller = std::this_thread::get_id();
-    std::atomic<std::thread::id> inline_thread{};
+    std::atomic<std::thread::id> body_thread{};
 
     // Occupy the pipe with a writer that holds it until `gate` (writer_active is set
     // synchronously by dispatch, so the pipe is busy by the time this call returns).
@@ -273,19 +273,43 @@ void test_inline_falls_back_when_busy()
         while (!gate.load()) std::this_thread::yield();
     });
 
-    // Request inline while the writer holds the pipe -> must defer (not run on the caller).
-    ts::Task<int> t = d.async([&inline_thread](int& v)
+    // `access` while the writer holds the pipe -> must defer (not run on the caller).
+    ts::Task<int> t = d.access([&body_thread](int& v)
     {
-        inline_thread.store(std::this_thread::get_id());
+        body_thread.store(std::this_thread::get_id());
         return ++v;
-    }, { .run_inline = true });
+    });
 
     TS_CHECK(!t.is_done());          // deferred behind the blocker, not run inline
 
     gate.store(true);
     TS_CHECK(t.sync() == 1);          // ran correctly after the blocker drained
-    TS_CHECK(inline_thread.load() != caller);   // on a worker, not the calling thread
+    TS_CHECK(body_thread.load() != caller);   // on a worker, not the calling thread
     blocker.sync();
+}
+
+// `async` always enqueues -- even on a free pipe it does NOT run on the calling thread.
+void test_async_always_schedules()
+{
+    ts::Guarded<int> d{ 0 };
+    std::thread::id caller = std::this_thread::get_id();
+    std::atomic<std::thread::id> body_thread{ caller };
+    ts::Task<int> t = d.async([&body_thread](int& v)
+    {
+        body_thread.store(std::this_thread::get_id());
+        return ++v;
+    });
+    TS_CHECK(!t.is_done());                    // not run inline on the free pipe
+    TS_CHECK(t.sync() == 1);
+    TS_CHECK(body_thread.load() != caller);    // ran on a worker
+    TS_CHECK(read_value(d) == 1);
+}
+
+// A read `async` also always enqueues and still deduces read (concurrent) access.
+void test_async_read_schedules()
+{
+    ts::Guarded<int> d{ 7 };
+    TS_CHECK(d.async([](const int& v) { return v; }).sync() == 7);
 }
 
 } // namespace
@@ -306,7 +330,9 @@ void run_guarded_tests()
     run("reentrant same object", test_reentrant_same_object);
     run("reentrant other object", test_reentrant_other_object);
     run("pipe stress", test_pipe_stress);
-    run("inline runs synchronously", test_inline_runs_synchronously);
-    run("inline read on caller", test_inline_read_on_caller);
-    run("inline falls back when busy", test_inline_falls_back_when_busy);
+    run("access runs synchronously", test_access_runs_synchronously);
+    run("access read on caller", test_access_read_on_caller);
+    run("access falls back when busy", test_access_falls_back_when_busy);
+    run("async always schedules", test_async_always_schedules);
+    run("async read schedules", test_async_read_schedules);
 }
