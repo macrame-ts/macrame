@@ -19,7 +19,7 @@
 namespace ts
 {
 
-// Ambient scheduler used by `async()` (v1: a process-wide default).
+// Ambient scheduler used by `access()` / `async()` (v1: a process-wide default).
 Scheduler& default_scheduler();
 
 namespace detail
@@ -121,9 +121,9 @@ struct Multi_async_state : Ref_counted<Multi_async_state>
 void multi_acquire(Ref_ptr<Multi_async_state> state,
                    Task_ptr block, std::size_t pos);
 
-// Try to run an async job INLINE on the calling thread instead of enqueuing it (opt-in via
-// `Task_options::run_inline`). Admissible only when the pipe is immediately free for this
-// mode -- no queued jobs (FIFO preserved) and the reader/writer rules allow: `read_only`
+// Try to run a job INLINE on the calling thread instead of enqueuing it (the `access` verb's
+// fast path). Admissible only when the pipe is immediately free for this mode -- no queued jobs
+// (FIFO preserved) and the reader/writer rules allow: `read_only`
 // joins as a concurrent reader, `read_write` as an exclusive writer. On success runs the
 // block's body synchronously (the caller blocks for its duration), then releases,
 // re-dispatches the pipe, and returns true. On failure returns false and the caller
@@ -162,9 +162,10 @@ template<typename Fn, typename A> using Async_result_t = typename Async_result<F
 
 } // namespace detail
 
-// `Guarded::access`/`async` and the multi-object `ts::access`/`ts::async` take `Task_options`
-// (defined in task.h) for `{token, priority}` (the `run_inline` field of that shared aggregate
-// is used by `then`, not by these -- the verb chooses inline vs enqueued).
+// `Guarded::access`/`async` and the multi-object `ts::access`/`ts::async` take `Access_options`
+// (defined in task.h) = `{token, priority}`. There is deliberately no `run_inline` field -- the
+// verb chooses inline vs enqueued (`access` inline-when-free, `async` always enqueued), so the
+// impossible option can't be passed. (`then`/task builders use `Task_options`, which has it.)
 
 // The only sanctioned way to touch a `T` across threads. You never receive a bare `T&`; you
 // hand a functor to `access()` (opportunistic -- inline when free) or `async()` (always
@@ -215,7 +216,7 @@ public:
     // Two verbs run a functor under this object's access. Both deduce the mode from the
     // functor's parameter const-ness -- `T&` = read_write (exclusive), `const T&` = read_only
     // (concurrent readers) -- accept a trailing `Cancellation_token` accessor, and take
-    // `Task_options` for `{token, priority}`. They do NOT read `run_inline`: the verb IS the mode.
+    // `Access_options` = `{token, priority}` (no `run_inline`: the verb IS the mode).
     //
     //   access(fn) -- opportunistic: runs `fn` on the CALLING thread when the pipe is free right
     //                 now (no scheduling), otherwise enqueues. Best for short functors. Because it
@@ -226,7 +227,7 @@ public:
     // access, read_write: functor takes `T&` (and not `const T&`), optionally + a trailing token.
     template<typename Fn>
         requires detail::Async_accessor<Fn, T&> && (!detail::Async_accessor<Fn, const T&>)
-    auto access(Fn&& fn, Task_options opts = {})
+    auto access(Fn&& fn, Access_options opts = {})
         -> Task<detail::Async_result_t<Fn, T&>>
     {
         return launch<detail::Async_result_t<Fn, T&>, Access::read_write>(
@@ -236,7 +237,7 @@ public:
     // access, read_only: functor takes `const T&`, optionally + a trailing token.
     template<typename Fn>
         requires detail::Async_accessor<Fn, const T&>
-    auto access(Fn&& fn, Task_options opts = {}) const
+    auto access(Fn&& fn, Access_options opts = {}) const
         -> Task<detail::Async_result_t<Fn, const T&>>
     {
         return launch<detail::Async_result_t<Fn, const T&>, Access::read_only>(
@@ -246,7 +247,7 @@ public:
     // async, read_write: always enqueued (never inline).
     template<typename Fn>
         requires detail::Async_accessor<Fn, T&> && (!detail::Async_accessor<Fn, const T&>)
-    auto async(Fn&& fn, Task_options opts = {})
+    auto async(Fn&& fn, Access_options opts = {})
         -> Task<detail::Async_result_t<Fn, T&>>
     {
         return launch<detail::Async_result_t<Fn, T&>, Access::read_write>(
@@ -256,7 +257,7 @@ public:
     // async, read_only: always enqueued (never inline).
     template<typename Fn>
         requires detail::Async_accessor<Fn, const T&>
-    auto async(Fn&& fn, Task_options opts = {}) const
+    auto async(Fn&& fn, Access_options opts = {}) const
         -> Task<detail::Async_result_t<Fn, const T&>>
     {
         return launch<detail::Async_result_t<Fn, const T&>, Access::read_only>(
@@ -265,7 +266,7 @@ public:
 
 private:
     template<typename R, Access mode, typename Inst, typename Fn>
-    Task<R> launch(Inst* inst, Fn&& fn, Task_options opts, bool try_inline) const
+    Task<R> launch(Inst* inst, Fn&& fn, Access_options opts, bool try_inline) const
     {
         // The body (stored in the block) runs `fn` under this object's access scope. If
         // `fn` takes a trailing token, the body does too and `Executable::run` forwards the
@@ -324,7 +325,7 @@ struct Guarded_access
 // canonical order (deduped write-wins), releases them at completion via an attached
 // continuation. Returns the `Task<R>`.
 template<typename Args, std::size_t... I, typename Fn, typename... Ts>
-auto async_build(Task_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... objs)
+auto async_build(Access_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... objs)
 {
     using R = std::invoke_result_t<Fn, Ts&...>;
     auto instances = std::make_tuple(Guarded_access::instance(objs)...);
@@ -375,12 +376,11 @@ auto async_build(Task_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<
 // access deduced from the functor's parameter const-ness (`Function_traits`; non-generic
 // lambdas / function pointers only). Deadlock-free (objects acquired in canonical order).
 // Options come FIRST (a function parameter pack can't be followed by a defaulted arg); the
-// no-options overload defaults them. `run_inline` on the options is ignored here (multi-object
-// inline is a follow-up); `token`/`priority` apply as usual. Fire-and-forget or consume the
-// `Task<R>` -- but do NOT block a graph node on it (same rule as single-object async).
+// no-options overload defaults them. `token`/`priority` apply as usual. Fire-and-forget or
+// consume the `Task<R>` -- but do NOT block a graph node on it (same rule as single-object async).
 template<typename Fn, typename... Ts>
     requires (sizeof...(Ts) >= 1)
-auto async(Task_options opts, Fn&& fn, Guarded<Ts>&... objs)
+auto async(Access_options opts, Fn&& fn, Guarded<Ts>&... objs)
 {
     using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
     static_assert(std::tuple_size_v<Args> == sizeof...(Ts),
@@ -393,14 +393,17 @@ template<typename Fn, typename... Ts>
     requires (sizeof...(Ts) >= 1)
 auto async(Fn&& fn, Guarded<Ts>&... objs)
 {
-    return async(Task_options{}, std::forward<Fn>(fn), objs...);
+    return async(Access_options{}, std::forward<Fn>(fn), objs...);
 }
 
-// Multi-object `access`: the opportunistic sibling of `ts::async(fn, objs...)`. The multi-object
-// inline fast path is a follow-up, so for now `access` here behaves exactly like `async`.
+// Multi-object `access`: the opportunistic sibling of `ts::async(fn, objs...)`. NOTE: the
+// multi-object inline fast path is unimplemented, so `access` here currently behaves exactly
+// like `async` (always enqueued) -- unlike single-object `access`, which runs inline when the
+// queue is free. Tracked in docs/TODO.md (Guarded/access). Documented so the difference is not
+// a silent surprise.
 template<typename Fn, typename... Ts>
     requires (sizeof...(Ts) >= 1)
-auto access(Task_options opts, Fn&& fn, Guarded<Ts>&... objs)
+auto access(Access_options opts, Fn&& fn, Guarded<Ts>&... objs)
 {
     return async(std::move(opts), std::forward<Fn>(fn), objs...);
 }

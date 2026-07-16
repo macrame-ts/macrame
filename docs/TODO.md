@@ -108,22 +108,24 @@ documented, and CI-gated.
 Small API/doc frictions introduced or exposed this session — cheap to fix, costly to
 change after public. Feed the going-public "API-stability pass".
 
-1. **`Task_options::run_inline` is dead for `access`/`async`.** After the verb split, the
-   method name chooses inline-eligibility; `run_inline` is only read on the `then`/task path.
-   A user passing `{.run_inline = true}` to `access`/`async` is silently ignored. Resolve:
-   document it as `then`-only, or split the options type so the access surface can't accept it.
-2. **Multi-object `ts::access` ≠ opportunistic.** Single-object `access` runs inline when free;
-   multi-object `ts::access` schedules like `ts::async` (inline path unimplemented). Same verb,
-   different behavior — implement multi-object inline, or document the difference loudly.
-3. **Stale `async` comments after the split.** e.g. `guarded.h` "Ambient scheduler used by
-   `async()`", `pipe_try_inline` "opt-in via `Task_options::run_inline`". Sweep comments that
-   still say `async` where `access` is now the opportunistic verb.
-4. **`pipe` vs `queue` terminology.** README says "reader/writer queue"; guide/design/internals
-   say "pipe" (defined in the guide glossary). Pick one public term (lean **pipe**, defined once)
-   and use it consistently in user-facing docs.
-5. **Reservation path still heap-boxes a closure.** `Pipe::Job::on_acquired`
-   (`move_only_function`) allocates on the graph / multi-async reservation path, unlike the
-   allocation-free block/async dispatch. Known, minor — fold into the SBO-`Function` work.
+1. **`run_inline` dead for `access`/`async` — RESOLVED (Access_options split).** The access
+   surface now takes `Access_options{token, priority}` (task.h), separate from
+   `Task_options{token, priority, run_inline}` (then/task builders) — passing `run_inline` to
+   `access`/`async` is now a compile error, not a silent no-op. *Revisit during code review*
+   (flagged in-code): whether the two option types should share a base or stay split.
+2. **Multi-object `ts::access` ≠ opportunistic — documented (implement later).** Single-object
+   `access` runs inline when free; multi-object `ts::access` schedules like `ts::async` (inline
+   path unimplemented). Documented at the call site so it isn't a silent surprise; the
+   multi-object inline fast path is deferred (Guarded/access "generic-lambda"-adjacent follow-up).
+3. **Stale `async` comments after the split — FIXED.** Swept `guarded.h` (`default_scheduler`,
+   `pipe_try_inline`, the two access/async doc blocks).
+4. **`pipe` vs `queue` terminology — deferred to the docs review.** Decision: use **queue** in
+   README + user guide (no "pipe"); keep **pipe** in the deeper docs (design/internals), and on
+   first use there explain the term + reference UE task pipes (with a doc link) as the exemplar.
+5. **Reservation path still heap-boxes a closure — folded into the allocation campaign.**
+   `Pipe::Job::on_acquired` (`move_only_function`) allocates on the graph / multi-async
+   reservation path (unlike the allocation-free block/async dispatch); the tunable-SBO
+   `Function<Sig,N>` item is the fix. Not a standalone task.
 
 ---
 

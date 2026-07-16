@@ -91,7 +91,7 @@ public:
     // Apply as an ordinary pipe write job: one acquisition amortized over the whole
     // batch. The cut happens when the job RUNS (pipe FIFO position), so it captures
     // everything staged before the write actually happens. Returns the completion.
-    Task<void> commit_async(Task_options opts = {})
+    Task<void> commit_async(Access_options opts = {})
     {
         return target_->async([this](T& t) { commit(t); }, opts);
     }

@@ -902,13 +902,26 @@ inline void add_prerequisite(const Task_ptr& prereq,
 // the body skippable before it runs (and, if the body declares a trailing `Cancellation_token`,
 // is forwarded to it for a mid-run early-out). `run_inline` (used by `then`) runs the
 // continuation on the thread that settles the producer instead of queueing it — same trade-offs
-// as `Task_builder::set_inline`. `Guarded::access`/`async` choose inline-vs-enqueued by the verb
-// and do not read `run_inline` (`access` uses `pipe_try_inline`; `async` always enqueues).
+// as `Task_builder::set_inline`. Used by `then` and the task-builder path.
 struct Task_options
 {
     Cancellation_token token = {};
     Priority priority = Priority::normal;
     bool run_inline = false;
+};
+
+// Options for a `Guarded` access (`access` / `async`, single- and multi-object). Deliberately
+// WITHOUT `run_inline`: the verb chooses inline-vs-enqueued (`access` runs inline when the queue
+// is free via `pipe_try_inline`; `async` always enqueues), so a `run_inline` field here would be
+// silently ignored — splitting the type makes passing it a compile error instead. `token` makes
+// the body skippable before it runs (and is forwarded to a trailing-`Cancellation_token` body for
+// a mid-run early-out); `priority` sets the queue position when enqueued.
+// TODO(code-review): revisit whether Access_options and Task_options should stay separate or share
+// a base once the review reaches the Guarded surface — the split is the conservative choice for now.
+struct Access_options
+{
+    Cancellation_token token = {};
+    Priority priority = Priority::normal;
 };
 
 // Dispatch options for launching a standalone task (`ts::launch`) or a nested one

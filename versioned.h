@@ -133,7 +133,7 @@ public:
     // pipe (concurrent readers overlap; a queued publish orders around it, FIFO).
     template<typename Fn>
         requires detail::Async_accessor<Fn, const T&>
-    auto read(Fn&& fn, Task_options opts = {}) const
+    auto read(Fn&& fn, Access_options opts = {}) const
     {
         return std::as_const(front_).async(std::forward<Fn>(fn), opts);
     }
