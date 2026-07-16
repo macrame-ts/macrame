@@ -10,7 +10,10 @@ Inspired by game engines — high performance, low latency, soft real-time frame
 
 **New here? Start with the [Quick start](docs/quickstart.md).**
 
-<!-- badges (CI/license) go here once the repo is public -->
+[![CI](https://github.com/Andriy06/task_system/actions/workflows/ci.yml/badge.svg)](https://github.com/Andriy06/task_system/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![C++23](https://img.shields.io/badge/C%2B%2B-23-blue.svg)
+<!-- NOTE: the CI badge URL embeds the owner/repo (Andriy06/task_system) -- refresh it if the repo is renamed or moved (see docs/going-public.md). -->
 
 ---
 
