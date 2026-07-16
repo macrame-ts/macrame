@@ -24,7 +24,7 @@ From Windows (PowerShell), invoke a **non-interactive** shell — never `-lic`
 (an interactive login shell blocks on a tty and never runs the script):
 
 ```powershell
-wsl.exe -e bash -c "bash /mnt/c/src/task_system/tsan/run.sh"
+wsl.exe -e bash -c "bash /mnt/c/path/to/task_system/tsan/run.sh"
 ```
 
 Clean exit + `tsan: done (no races)` = no races found. A race prints a report
