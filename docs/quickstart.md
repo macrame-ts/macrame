@@ -57,23 +57,28 @@ the only call that blocks; launching never does.
 ## Guard a shared object
 
 Wrap a thread-unsafe object in `Guarded<T>`. You never get a bare `T&`; you hand
-a function to `async`, and the parameter's const-ness declares your access — a
+a function to `access`, and the parameter's const-ness declares what you do — a
 non-`const` parameter is a write (exclusive), a `const` parameter is a read
 (concurrent with other reads):
 
 ```cpp
 ts::Guarded<std::vector<int>> numbers;
 
-numbers.async([](std::vector<int>& v) { v.push_back(1); });          // write: exclusive
-ts::Task<size_t> n = numbers.async([](const std::vector<int>& v)     // read: concurrent
+numbers.access([](std::vector<int>& v) { v.push_back(1); });          // write: exclusive
+ts::Task<size_t> n = numbers.access([](const std::vector<int>& v)     // read: concurrent
 {
     return v.size();
 });
 std::printf("%zu\n", n.sync());
 ```
 
-Both calls queue on the object in submission order; the write runs alone, reads
-run together, and the caller never blocks to submit.
+Accesses run on the object in submission order: the write runs alone, reads run
+together. `access` is *opportunistic* — if the object is free right now it runs
+your function immediately on the calling thread (no scheduling), otherwise it
+queues; it is the right default for the short functions typical of this API. For
+a heavy function you'd rather not run on the calling thread, use `async(fn)`
+instead — same access rules, but always scheduled onto a worker. Both return a
+`ts::Task<R>`.
 
 ## Make it safe by construction
 

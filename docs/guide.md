@@ -72,16 +72,17 @@ Guard a thread-unsafe object and access it from anywhere:
 ts::Guarded<std::vector<int>> numbers;
 
 // write: functor takes T& -- exclusive
-numbers.async([](std::vector<int>& v) { v.push_back(1); });
+numbers.access([](std::vector<int>& v) { v.push_back(1); });
 
 // read: functor takes const T& -- concurrent with other reads
-ts::Task<size_t> n = numbers.async([](const std::vector<int>& v) { return v.size(); });
+ts::Task<size_t> n = numbers.access([](const std::vector<int>& v) { return v.size(); });
 size_t count = n.sync();
 ```
 
-Both calls queue on the object's pipe: the write runs alone, reads run
-concurrently with other reads, and everything runs in submission order. The
-caller never blocks to *submit* — only `sync()` waits.
+Both accesses run on the object in submission order: the write runs alone, reads
+run concurrently with other reads. `access` is *opportunistic* — it runs the
+functor immediately on the calling thread when the object is free, otherwise it
+queues (see §5); either way you get a `Task<R>` and only `sync()` waits.
 
 The scheduler starts lazily with one worker per hardware thread. To configure
 it, construct your own:
@@ -322,14 +323,34 @@ mechanism.
 
 `Guarded<T>` owns a `T` (constructed in place; constructor arguments forward)
 and is the only sanctioned way to touch it across threads. You never hold a
-bare `T&`; you submit accessors:
+bare `T&`; you submit accessors with `access` (the default) or `async`:
 
 ```cpp
 ts::Guarded<World> world{ initial_seed };
 
-world.async([](World& w) { w.step(); });                      // exclusive write
-auto pop = world.async([](const World& w) { return w.population(); });  // concurrent read
+world.access([](World& w) { w.step(); });                      // exclusive write
+auto pop = world.access([](const World& w) { return w.population(); });  // concurrent read
+
+world.async([](World& w) { w.expensive_rebuild(); });          // heavy: always scheduled
 ```
+
+`access` and `async` differ only in *where* the functor may run; both declare
+the same access (write / read, from const-ness) and both return `Task<R>`:
+
+- **`access`** is **opportunistic**: when the object is free at call time it
+  runs the functor immediately on the *calling* thread — no scheduling — and
+  otherwise queues it. That fast path suits the many short critical sections
+  typical of this API, at the cost of briefly blocking the caller when it takes
+  it. This is the default; reach for it unless you have a reason not to.
+- **`async`** always schedules the functor onto a worker, never the caller's
+  thread. Use it for a heavy functor you don't want running inline (it would
+  block the caller and hold the object longer), or when you specifically want
+  fire-and-forget submission that never blocks.
+
+(This is distinct from *task* inline dispatch — `set_inline` / `run_inline` on
+`launch`/`then`/graph nodes — which is about running a ready task on the
+thread that settled its last prerequisite. `access` is about a free object at
+call time. Different mechanisms; only the task one is called "inline".)
 
 Semantics of the per-object pipe:
 
@@ -341,11 +362,13 @@ Semantics of the per-object pipe:
 - **Non-blocking**: submission never blocks the caller; completion drives
   admission.
 
-Options are the same `ts::Task_options` as `then`. Two notes:
+Options are the same `ts::Task_options` as `then` — `{ .token, .priority }`
+apply to `access` and `async` alike (a cancellation token, a scheduling
+priority). Two notes:
 
-- `.run_inline = true` runs the accessor synchronously on the *calling*
-  thread when the pipe is free right now (else it queues normally). It blocks
-  the caller for the body's duration — never opt in from inside a graph node.
+- Whether a functor may run inline is chosen by the verb (`access` vs `async`),
+  not by an option. From inside a graph node, prefer `async` for anything
+  non-trivial — an inline `access` blocks the worker for the body's duration.
 - The destructor waits until the pipe drains; the object outlives every
   pending accessor.
 
@@ -357,21 +380,26 @@ To touch several guarded objects in one body, use the free function:
 ts::Guarded<Physics> physics;
 ts::Guarded<Render> render;
 
-ts::async([](const Physics& p, Render& r) { r.mirror(p); }, physics, render);
-// options-first form: ts::async({ .priority = ts::Priority::high }, fn, objs...)
+ts::access([](const Physics& p, Render& r) { r.mirror(p); }, physics, render);
+// options-first form: ts::access({ .priority = ts::Priority::high }, fn, objs...)
 ```
 
-Per-argument modes come from const-ness, as always. The library acquires the
-pipes in a canonical global order and holds them for the body — the standard
-deadlock-free discipline, shared with the static graph, so dynamic
-multi-object work and graph nodes can never deadlock each other.
+The free functions `ts::access` / `ts::async` mirror the member verbs;
+`ts::async` always schedules. (The opportunistic inline fast path is not yet
+implemented across multiple objects, so multi-object `ts::access` currently
+schedules like `ts::async` — **WIP**.) Per-argument modes come from const-ness,
+as always. The library acquires the pipes in a canonical global order and holds
+them for the body — the standard deadlock-free discipline, shared with the
+static graph, so dynamic multi-object work and graph nodes can never deadlock
+each other.
 
 ### 5.2 What `Guarded` is not
 
-It is not a mutex wrapper: the body runs *later*, on a worker, when access is
-granted — the caller keeps going. If you need the result, you have a
-`Task<R>`; if you need it *now*, that is `sync()` and you should be sure you
-are allowed to block (§11.2).
+It is not a mutex wrapper: you submit a functor rather than lock/unlock around
+raw access. With `async` (or a contended `access`) the body runs later on a
+worker and the caller keeps going; with an uncontended `access` it runs inline
+right away. Either way you get a `Task<R>`; if you need the result *now*, that
+is `sync()` and you should be sure you are allowed to block (§11.2).
 
 ---
 
@@ -509,7 +537,7 @@ ts::Task<void> update(ts::Guarded<World>& world)
 }
 ```
 
-Unlike `async(fn)`, the guard gives you a scope with real control flow over
+Unlike a callback `access`/`async`, the guard gives you a scope with real control flow over
 the object. One hard rule: **never `co_await` anything else while holding a
 guard** — that would keep the object locked across a suspension of unknown
 duration. The library enforces it: such an await is fatal (the suspension
@@ -616,7 +644,7 @@ Key properties:
 | Per-frame delta is *data* (poses, events, facts) | `Versioned<T>` |
 | Producing the next state is heavy *computation* over the current one (a physics world) | one `Guarded<T>` machine + `Deferred` inputs + a `Versioned` *extract* of its outputs |
 | The delta is most of the state and rebuilding is cheap | plain snapshot swap (`shared_ptr<const T>`); no journal needed |
-| Many small writers into live state, readers can see partial progress | plain `Guarded::async` writes |
+| Many small writers into live state, readers can see partial progress | plain `Guarded` `access` writes |
 
 The physics decomposition (sealed simulation machine, staged inputs,
 versioned pose extract) is implemented end-to-end in `sample/physics.cpp`;
@@ -724,8 +752,8 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
 - **Cross-entity mutation inside `parallel_for`** (item *i* writes item *j*)
   — researched, primitives designed (gather/apply mailboxes, interaction
   coloring), not yet shipped.
-- **Generic lambdas** in access-deduced positions (`add_node`, `async`) are
-  not supported — parameter const-ness must be introspectable.
+- **Generic lambdas** in access-deduced positions (`add_node`, `access`,
+  `async`) are not supported — parameter const-ness must be introspectable.
 
 ---
 

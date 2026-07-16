@@ -353,11 +353,11 @@ comparison hard.
 
 ---
 
-## 10. Graph ↔ dynamic `async` coexistence (pipe reservation)
+## 10. Graph ↔ dynamic access coexistence (pipe reservation)
 
 Graph nodes access their objects **directly** (bypassing the pipe), ordered among
-themselves by conflict edges. `Guarded::async` goes through the **pipe**. Two
-independent serializers over one object → a node and an async on the same object
+themselves by conflict edges. `Guarded` access (`access`/`async`) goes through the
+**pipe**. Two independent serializers over one object → a node and an access on the same object
 would run concurrently → **data race**. The access harness does **not** catch this:
 both sides hold a valid declared `Access_context`, and the harness only catches
 *undeclared* access, never two-declared-concurrent. So the race is silent
@@ -374,8 +374,9 @@ free in between. Async on a graph object thus coexists **per node**: it can't ov
 holding the object incompatibly (a writer node is exclusive), a read async overlaps a read
 node, and any async runs in the gaps. Generalises the old writer-only whole-run `pipe_reserve`.
 
-**Async inline (`pipe_try_inline`).** `Guarded::async(fn, {.run_inline = true})` opts
-the body into running *synchronously on the calling thread* instead of a worker hop.
+**Access inline (`pipe_try_inline`).** `Guarded::access(fn)` (the opportunistic verb;
+`async(fn)` always schedules) runs the body *synchronously on the calling thread* instead
+of a worker hop when the pipe is free at call time.
 `pipe_try_inline(pipe, mode, fn)` is the sibling of `pipe_reserve`'s try-acquire, but
 mode-aware and run-then-release: under the pipe mutex it admits the job only if the pipe is
 immediately free for that mode — no queued jobs (FIFO preserved) and the reader/writer rules
@@ -440,8 +441,9 @@ acquires it synchronously and dispatches inline. Caveats mirror `Task_builder::s
 (runs on a nondeterministic thread — the caller for a root — must not block); an all-inline
 graph runs synchronously on the `execute()` caller.
 
-**Multi-object `ts::async`** reuses the *same* acquire primitive outside the graph: the free
-function `ts::async(fn, objs...)` runs `fn(*objs...)` over several `Guarded`s at once. It
+**Multi-object `ts::access` / `ts::async`** reuses the *same* acquire primitive outside the
+graph: the free function `ts::access(fn, objs...)` (or `ts::async`, always scheduled) runs
+`fn(*objs...)` over several `Guarded`s at once. It
 acquires each object's pipe mode-aware, in canonical (pipe-address) order, holding all
 (`multi_acquire`, the acquire chain), runs the body under an `Access_context` declaring every
 object, then releases at completion (a continuation `attach`ed to the block). Because the

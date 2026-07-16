@@ -142,7 +142,7 @@ render-thread pipeline, which is why §2 reads the UE source first.
    mutex enqueue, batch replay) *and* a fine per-list recorder (POD commands,
    lock-free thread-local recording, linear allocator) — with an order of
    magnitude between their command granularities and correspondingly different
-   storage. Our `Guarded::async` already *is* the coarse level (lambda job,
+   storage. Our `Guarded` access (`access`/`async`) already *is* the coarse level (lambda job,
    per-object pipe, batch admission). What we lack is the fine level. Don't
    bend the coarse mechanism to be the fine one — UE keeps them separate types.
 2. **Linear allocators for command storage, everywhere.** `FMemStackBase` /
