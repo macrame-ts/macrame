@@ -42,8 +42,8 @@ This framework separates them. You **declare the data each task accesses and how
 
 ```cpp
 // The whole model in one line: the parameter's const-ness IS the access declaration.
-inventory.async([](Inventory& inv) { inv.add(sword); }); // T& -> read/write access, exclusive
-inventory.async([](const Inventory& inv) { return inv.count(); }); // const T& -> read-only access, concurrent with other readers
+inventory.access([](Inventory& inv) { inv.add(sword); }); // T& -> read/write access, exclusive
+inventory.access([](const Inventory& inv) { return inv.count(); }); // const T& -> read-only access, concurrent with other readers
 ```
 
 Inspired by Rust, adapted to C++. 
@@ -65,28 +65,37 @@ For a feature-by-feature comparison with Unreal Engine Tasks System, Taskflow, T
 
 Just a glimpse at how it looks in practice.
 
-### 1. A thread-safe API for one object — with coroutines
+### 1. A thread-safe API for one object
 
-Wrap a thread-unsafe object in `Guarded<T>`; reach it by declaring access mode. With coroutines, that declaration reads as ordinary linear code — `co_await` suspends until access is granted, then hands you a guard with direct, harness-checked access:
+Wrap a thread-unsafe object in `Guarded<T>`; you never get a bare `T&` — you hand it a functor, and the parameter's const-ness declares your access (`T&` = write, exclusive; `const T&` = read, concurrent with other reads). Two verbs run that functor:
 
 ```cpp
 ts::Guarded<Inventory> inventory;
 
+// access -- runs on the calling thread if the object is free right now, otherwise it is
+// scheduled. The no-lock fast path; best for the short functors typical of this API:
+inventory.access([](Inventory& inv) { inv.add(sword); });                     // write
+auto n = inventory.access([](const Inventory& inv) { return inv.count(); });  // read
+
+// async -- always scheduled off the calling thread. For a heavy functor you don't want
+// running inline (it would block the caller and hold the object longer):
+inventory.async([](Inventory& inv) { inv.defragment(); });
+```
+
+`access` is *opportunistic*: when the object is uncontended it skips scheduling entirely and runs the functor right there — so it may briefly block the caller, which is the right trade for a short critical section. `async` is the explicit "not on my thread" form for expensive work. Both return a `ts::Task<R>`; both declare the same read/write access.
+
+With coroutines, the same access reads as ordinary linear code — `co_await` suspends until access is granted, then hands you an RAII guard with direct, harness-checked access:
+
+```cpp
 ts::Task<void> loot(ItemId id)
 {
     auto inv = co_await ts::read_write(inventory);   // suspend until EXCLUSIVE access; no thread blocked
     inv->add(id);   // direct Inventory& access, harness-checked
     inv->recompute_weight();
 }   // access released at scope exit
-
-ts::Task<int> total_items()
-{
-    const auto inv = co_await ts::read_only(inventory);   // SHARED read access, concurrent with other readers
-    co_return inv->count();
-}
 ```
 
-No lock is written, taken, or forgotten; concurrent `loot` calls serialise, reads run together, and any code that touches the inventory without a grant faults. (The same is available without coroutines as `inventory.async(fn)`.)
+No lock is written, taken, or forgotten; concurrent writes serialise, reads run together, and any code that touches the inventory without a grant faults.
 
 ### 2. A frame as a graph — edges derived from access
 
@@ -172,7 +181,7 @@ Layered and composable — use as much as you need, and in a way that suits you 
 - **Tasks** — `launch` work with prerequisites (`after`), continuations (`then`), typed joins (`when_all`), cooperative cancellation (incl. mid-body early-out). Reusable (no allocs). Nested and inline tasks. Priorities. Blocking waits run not-yet-started work inline (retraction), so fork-join can't deadlock the pool while touching only related work and thus avoiding ubiquitous "busy waiting" issues.
 - **`parallel_for`** — for the data-parallel work that does live inside a part; caller-participating (nested-safe), with guided/balanced/unbalanced chunking. plus **`async_parallel_for`** for extra flexibility.
 - **Coroutines** — `co_await` any task; `co_await ts::read_only/read_write(obj)` yields an RAII access guard; holding one across a suspension is detected and fails fast.
-- **`Guarded<T>`** — a thread-safe API for a shared object: a per-object reader/writer queue (concurrent reads, exclusive writes, FIFO, non-blocking submit), plus multi-object operations with deadlock-free ordered acquisition.
+- **`Guarded<T>`** — a thread-safe API for a shared object: a per-object reader/writer queue (concurrent reads, exclusive writes, FIFO) reached via `access` (opportunistic — runs inline when free) or `async` (always scheduled), plus multi-object operations with deadlock-free ordered acquisition.
 - **`Static_task_graph`** — build-once/run-many DAG whose edges are derived from access conflicts (plus explicit ordering where you want it); a re-run reuses the compiled nodes and allocates only its completion handle. Planned profiler-guided optimisation.
 - **Design patterns** — `Deferred<T>` / `Versioned<T>` — staged writes: record grant-free from any thread, apply the batch atomically at a defined point; `Versioned` gives readers a whole-frame stable snapshot. Deterministic by construction.
 
