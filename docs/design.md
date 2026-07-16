@@ -251,7 +251,7 @@ Three design points carry the weight:
   re-installs the coroutine's grant snapshot — the nested-task inheritance
   mechanism reused verbatim, no new concept.
 - **The pipe is already an async reader/writer lock**, so
-  `co_await ts::write(obj)` yields an RAII guard with direct object access —
+  `co_await ts::read_write(obj)` yields an RAII guard with direct object access —
   `folly::coro::Mutex::co_scoped_lock`'s shape on top of machinery that
   existed anyway. The canonical coroutine footgun — suspending while holding
   a lock — is *detected*: a `co_await` under a live guard is fatal. The

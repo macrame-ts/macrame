@@ -1,4 +1,4 @@
-#include "tests.h"
+﻿#include "tests.h"
 #include "test_util.h"
 #include "access.h"
 #include "guarded.h"
@@ -48,7 +48,7 @@ void run_all_tests()
 // always reaches `await_suspend` (the detector) rather than escaping.
 static ts::Task<int> coro_await_under_guard(ts::Guarded<tests::Counter>& w, ts::Signal& never)
 {
-    auto g = co_await ts::write(w);
+    auto g = co_await ts::read_write(w);
     co_await never;              // suspend while the guard is held -> fatal
     co_return g->value();
 }

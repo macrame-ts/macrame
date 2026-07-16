@@ -1,4 +1,4 @@
-#include "coroutine_tests.h"
+﻿#include "coroutine_tests.h"
 #include "harness.h"
 
 #if defined(__cpp_impl_coroutine)
@@ -143,17 +143,17 @@ void test_access_context()
     TS_CHECK(t.sync() == 1);
 }
 
-// 8. The async-lock guard: `co_await ts::write(w)` acquires the pipe and resumes with an RAII
+// 8. The async-lock guard: `co_await ts::read_write(w)` acquires the pipe and resumes with an RAII
 // guard giving direct `Counter&`; mutate it, release at scope end, then read it back via a read
 // guard. Straight-line RAII in place of a callback `async`.
 Task<int> co_write_guard(ts::Guarded<tests::Counter>& w)
 {
     {
-        auto g = co_await ts::write(w);   // exclusive; guard grants `Counter&`
+        auto g = co_await ts::read_write(w);   // exclusive; guard grants `Counter&`
         g->increment();
         g->add(5);
     }   // guard released -- pipe free again
-    auto r = co_await ts::read(w);        // shared reader; `const Counter&`
+    auto r = co_await ts::read_only(w);        // shared reader; `const Counter&`
     co_return r->value();
 }
 
@@ -166,7 +166,7 @@ void test_write_guard()
 // 9. Read guard: shared access, `const` view -- the harness passes for a const method inside it.
 Task<int> co_read_guard(ts::Guarded<tests::Counter>& w)
 {
-    auto g = co_await ts::read(w);
+    auto g = co_await ts::read_only(w);
     co_return g->value();
 }
 
@@ -181,7 +181,7 @@ void test_read_guard()
 // `async` lambda (no `co_await` in the loop, so the pipe is held for the whole critical section).
 Task<int> co_guard_loop(ts::Guarded<tests::Counter>& w, int n)
 {
-    auto g = co_await ts::write(w);
+    auto g = co_await ts::read_write(w);
     for (int i = 0; i < n; ++i)
         g->increment();
     co_return g->value();
@@ -200,7 +200,7 @@ Task<void> co_bump(ts::Guarded<tests::Counter>& w, int times)
 {
     for (int i = 0; i < times; ++i)
     {
-        auto g = co_await ts::write(w);   // may defer + resume cross-thread under contention
+        auto g = co_await ts::read_write(w);   // may defer + resume cross-thread under contention
         g->increment();
     }   // released each iteration -- no guard held across the next co_await
 }
@@ -246,7 +246,7 @@ Task<int> co_showcase(ts::Guarded<tests::Counter>& world, ts::Signal& phase, Can
 
     // (c) Guarded write-guard: a critical section over the object, in place.
     {
-        auto g = co_await ts::write(world);
+        auto g = co_await ts::read_write(world);
         g->add(a + b);                                                     // +7
         g->add(nested_sum.load(std::memory_order_relaxed));               // +6  -> world == 13
     }   // pipe released

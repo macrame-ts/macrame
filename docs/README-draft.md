@@ -74,13 +74,13 @@ ts::Guarded<Inventory> inventory;
 ts::Task<void> loot(ItemId id)
 {
     auto inv = co_await ts::read_write(inventory);   // suspend until EXCLUSIVE access; no thread blocked
-    inv->add(id);                               // direct Inventory& access, harness-checked
+    inv->add(id);   // direct Inventory& access, harness-checked
     inv->recompute_weight();
-}                                               // access released at scope exit
+}   // access released at scope exit
 
 ts::Task<int> total_items()
 {
-    const auto inv = co_await ts::read_only(inventory);    // SHARED read access — concurrent with other readers
+    const auto inv = co_await ts::read_only(inventory);   // SHARED read access, concurrent with other readers
     co_return inv->count();
 }
 ```
@@ -89,55 +89,75 @@ No lock is written, taken, or forgotten; concurrent `loot` calls serialise, read
 
 ### 2. A frame composition as a graph — edges derived from access
 
-Each subsystem is its own `Guarded<T>`. Declare what each node reads and writes; `compile()` derives the schedule from the access conflicts — no manual dependency wiring for shared data:
+Each subsystem is its own `Guarded<T>`. Declare what each node reads and writes; `compile()` derives the schedule from the access conflicts — you add explicit ordering only for intent that data access alone doesn't capture:
 
 ```cpp
-ts::Guarded<Physics>   physics;
+ts::Guarded<Physics> physics;
 ts::Guarded<Animation> anim;
-ts::Guarded<Renderer>  renderer;
+ts::Guarded<Audio> audio;
+ts::Guarded<Renderer> renderer;
 
 ts::Static_task_graph frame;
-frame.add_node([](Physics& p)                     { p.step(); },     physics);
-frame.add_node([](const Physics& p, Animation& a) { a.pose(p); },    physics, anim);
-frame.add_node([](const Physics& p, Renderer& r)  { r.submit(p); },  physics, renderer);
 
-frame.compile();          // pose() and submit() both READ physics -> they run in parallel,
-frame.execute().sync();   // both after step() (the writer). Build once, run every frame.
+// A node declares, per argument, read (const T&) or write (T&) access to each Guarded it
+// touches -- and may touch several at once.
+frame.add_node([](Physics& p) { p.step(); }, physics);
+frame.add_node([](const Physics& p, Animation& a) { a.pose(p); }, physics, anim);
+auto sfx = frame.add_node([](const Physics& p, Audio& s) { s.mix(p); }, physics, audio);
+
+// Reads physics AND anim, writes renderer:
+auto render = frame.add_node(
+    [](const Physics& p, const Animation& a, Renderer& r) { r.submit(p, a); },
+    physics, anim, renderer);
+
+render.after(sfx);   // explicit ordering, for intent that access alone doesn't capture
+
+frame.compile();   // edges = access conflicts + explicit after()/before()
+
+// Compile once, execute many: a run reuses the compiled nodes and allocates only its
+// completion handle -- no per-node allocation.
+for (int f = 0; f < frame_count; ++f)
+    frame.execute().sync();
 ```
 
-Change a node's access and the schedule changes with it — you never hand-maintain the edges.
+The two physics readers (`pose`, `mix`) run in parallel, both after `step` writes physics; `render` waits for both its inputs and for `sfx`. Change a node's access and the schedule changes with it — you never hand-maintain the derived edges.
 
 ### 3. Many producers, one atomic apply — `Deferred<T>`
 
-When many parts contribute writes to one target, serialising them through the pipe is wasteful. `Deferred<T>` lets each producer **record** changes with no access grant at all (so producers never contend), then applies the whole batch as a single write at a point you choose:
+`Deferred<T>` implements the **command buffer** pattern (familiar from game engines): instead of mutating shared state directly, each producer *records* its intended changes into a buffer, and a single later step applies them all at once. Recording takes no access to the target — so producers neither block each other nor block anyone reading it:
 
 ```cpp
-ts::Guarded<World>  world;
+ts::Guarded<World> world;
 ts::Deferred<World> staged{ world };
 
-// Each producer system mints one recorder and stages grant-free, in parallel, contention-free:
+// Producers record changes into the buffer -- no access taken on `world`, so they run in
+// parallel and never hold up its readers. Each producer mints its own recorder:
 ts::Recorder<World> rec = staged.recorder();
-rec.stage([e](World& w) { w.apply_damage(e); });   // records into private storage; never blocks
+rec.stage([e](World& w) { w.apply_damage(e); });   // recorded, not applied yet
 
-// At a chosen point, one write applies everything atomically, in a deterministic order:
+// Meanwhile other work reads `world` freely and concurrently -- recording holds nothing:
+auto hp = world.async([](const World& w) { return w.health_of(player); });
+
+// At a chosen point, the whole batch applies as one write, in a deterministic order:
 staged.commit_async().sync();
 ```
 
 ### 4. Stable reads while the next version is built — `Versioned<T>`
 
-Read-heavy shared state (transforms, poses, a blackboard) contends badly on the pipe: every reader waits behind the writer. `Versioned<T>` keeps two replicas behind one guarded front — readers see the last **published** version for the whole frame while producers stage the next one; `publish()` flips atomically:
+`Versioned<T>` implements the **double buffer** pattern: keep two copies of the state — the *published* one that readers see, and a *next* one being prepared — and swap them at a defined point. Readers get a stable, consistent view for the whole frame; producers build the next version without ever holding readers up:
 
 ```cpp
 ts::Versioned<Poses> poses;
-ts::Recorder<Poses>  rec = poses.recorder();
 
-// Producers write the NEXT version all frame, grant-free:
+// Producers build the NEXT version, all frame long, without taking access from readers:
+ts::Recorder<Poses> rec = poses.recorder();
 rec.stage([id, xf](Poses& p) { p.set(id, xf); });
 
-// Readers see the LAST published version all frame — stable, zero reader/writer contention:
+// Readers see the LAST published version, all frame -- stable and never contended:
 auto n = poses.read([](const Poses& p) { return p.count(); });
 
-// Once per frame, flip. Deterministic by construction — independent runs are bit-identical:
+// Once per frame, publish: the next version becomes the one readers see. Deterministic by
+// construction -- independent runs are bit-identical:
 poses.publish().sync();
 ```
 
@@ -150,9 +170,9 @@ Layered and composable — use as much as you need, and in a way that suits you 
 - **Scheduler** — efficient work-stealing, configurable idle policies, priorities. Minimal API, easy to replace or to use independently from the rest.
 - **Tasks** — `launch` work with prerequisites (`after`), continuations (`then`), typed joins (`when_all`), cooperative cancellation (incl. mid-body early-out). Reusable (no allocs). Nested and inline tasks. Priorities. Blocking waits run not-yet-started work inline (retraction), so fork-join can't deadlock the pool while touching only related work and thus avoiding ubiquitous "busy waiting" issues.
 - **`parallel_for`** — for the data-parallel work that does live inside a part; caller-participating (nested-safe), with guided/balanced/unbalanced chunking. plus **`async_parallel_for`** for extra flexibility.
-- **Coroutines** — `co_await` any task; `co_await ts::read/write(obj)` yields an RAII access guard; holding one across a suspension is detected and fails fast.
-- **`Guarded<T>`** — a thread-safe API for a shared object: a per-object reader/writer task pipe (concurrent reads, exclusive writes, FIFO, non-blocking submit), plus multi-object operations with deadlock-free ordered acquisition.
-- **`Static_task_graph`** — build-once/run-many DAG whose edges are derived from access conflicts (plus explicit ordering where you want it); re-runs are allocation-free. Planned profiler-guided optimisation.
+- **Coroutines** — `co_await` any task; `co_await ts::read_only/read_write(obj)` yields an RAII access guard; holding one across a suspension is detected and fails fast.
+- **`Guarded<T>`** — a thread-safe API for a shared object: a per-object reader/writer queue (concurrent reads, exclusive writes, FIFO, non-blocking submit), plus multi-object operations with deadlock-free ordered acquisition.
+- **`Static_task_graph`** — build-once/run-many DAG whose edges are derived from access conflicts (plus explicit ordering where you want it); a re-run reuses the compiled nodes and allocates only its completion handle. Planned profiler-guided optimisation.
 - **Design patterns** — `Deferred<T>` / `Versioned<T>` — staged writes: record grant-free from any thread, apply the batch atomically at a defined point; `Versioned` gives readers a whole-frame stable snapshot. Deterministic by construction.
 
 Some areas are actively evolving (**WIP**): the allocation/performance campaign, a platform abstraction layer, an ambient (overridable) scheduler, and benchmark regression tracking. See [docs/TODO.md](TODO.md) for the live roadmap.

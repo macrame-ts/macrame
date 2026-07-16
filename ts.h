@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // Umbrella header for the public API. Include this to get the whole library;
 // or include the individual headers below if you only need part of it.
@@ -17,5 +17,5 @@
 // Coroutine support is optional -- only pulled in when the compiler enables
 // coroutines (it is header-only and self-contained otherwise).
 #if defined(__cpp_impl_coroutine)
-#include "coroutine_support.h"  // co_await a Task, ts::read/ts::write pipe guards
+#include "coroutine_support.h"  // co_await a Task, ts::read_only/ts::read_write pipe guards
 #endif

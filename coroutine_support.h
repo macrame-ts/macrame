@@ -13,8 +13,8 @@
 // would inherit) and each resumed segment re-installs it (`Inherited_access_scope` around the
 // resume) -- so a resumed body may touch data the coroutine was granted, harness intact.
 //
-// The `Guarded` async-lock guard is DONE (below): `auto g = co_await ts::write(w);` (or
-// `ts::read(w)`) suspends until the pipe grants, resumes with an RAII `Pipe_guard` giving direct
+// The `Guarded` async-lock guard is DONE (below): `auto g = co_await ts::read_write(w);` (or
+// `ts::read_only(w)`) suspends until the pipe grants, resumes with an RAII `Pipe_guard` giving direct
 // `T&`/`const T&`, released on scope exit. The harness doubles as a suspension detector: a
 // `co_await` that would suspend while a guard is held faults (`pipe_guard_depth`).
 //
@@ -252,7 +252,7 @@ struct Task_promise<void>
 };
 
 // RAII async-lock guard over a `Guarded<T>`'s pipe, held for direct `T` access. Returned by
-// `co_await ts::read(w)` / `ts::write(w)`. NON-COPYABLE AND NON-MOVABLE on purpose: it installs
+// `co_await ts::read_only(w)` / `ts::read_write(w)`. NON-COPYABLE AND NON-MOVABLE on purpose: it installs
 // `current_access = &ctx_` (a member), so its address must be stable -- `await_resume` returns it
 // as a prvalue and `auto g = co_await ...;` constructs it in place via guaranteed copy elision
 // (a move would dangle the installed pointer; non-movable makes a stray copy a compile error).
@@ -309,7 +309,7 @@ private:
     const Access_context* prev_ = nullptr;
 };
 
-// Awaiter for `co_await ts::read(w)` / `ts::write(w)`. Acquires the pipe in `Mode` (holding it),
+// Awaiter for `co_await ts::read_only(w)` / `ts::read_write(w)`. Acquires the pipe in `Mode` (holding it),
 // then resumes with a `Pipe_guard`. The acquire/resume race (a deferred acquire's `on_acquired`
 // firing on another thread vs `await_suspend` finishing) uses the same two-state handshake as
 // `Task_awaiter`.
@@ -378,20 +378,20 @@ detail::Task_awaiter<R> operator co_await(Task<R>&& t)
     return detail::Task_awaiter<R>(detail::core_of(t));
 }
 
-// Async-lock a `Guarded<T>` in a coroutine: `auto g = co_await ts::write(w);` suspends until
-// the pipe grants exclusive write access, then resumes with an RAII guard giving direct `T&`
-// (released on scope exit); `ts::read(w)` is the shared-reader form giving `const T&`. Linear
-// RAII in place of a callback `async(fn, obj)`, and the safe shape as long as you do NOT
+// Async-lock a `Guarded<T>` in a coroutine: `auto g = co_await ts::read_write(w);` suspends
+// until the pipe grants exclusive write access, then resumes with an RAII guard giving direct
+// `T&` (released on scope exit); `ts::read_only(w)` is the shared-reader form giving `const T&`.
+// Linear RAII in place of a callback `async(fn, obj)`, and the safe shape as long as you do NOT
 // `co_await` other work while the guard is alive (that holds the pipe across a suspension --
 // faulted by the harness-as-suspension-detector). Deduces nothing; the mode is the verb.
 template<typename T>
-detail::Pipe_guard_awaiter<T, Access::read_write> write(Guarded<T>& w)
+detail::Pipe_guard_awaiter<T, Access::read_write> read_write(Guarded<T>& w)
 {
     return { default_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
 }
 
 template<typename T>
-detail::Pipe_guard_awaiter<T, Access::read_only> read(Guarded<T>& w)
+detail::Pipe_guard_awaiter<T, Access::read_only> read_only(Guarded<T>& w)
 {
     return { default_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
 }

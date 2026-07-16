@@ -499,12 +499,12 @@ The pipe doubles as an asynchronous reader/writer lock:
 ts::Task<void> update(ts::Guarded<World>& world)
 {
     {
-        auto w = co_await ts::write(world);   // suspends until exclusive access granted
+        auto w = co_await ts::read_write(world);   // suspends until exclusive access granted
         w->step();                            // direct World& access, harness-checked
         w->settle();
     }                                         // guard released at scope exit
 
-    auto r = co_await ts::read(world);        // shared read guard
+    auto r = co_await ts::read_only(world);        // shared read guard
     log(r->population());
 }
 ```

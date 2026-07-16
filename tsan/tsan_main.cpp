@@ -1,4 +1,4 @@
-// ThreadSanitizer stress driver. Exercises the concurrency paths (scheduler,
+﻿// ThreadSanitizer stress driver. Exercises the concurrency paths (scheduler,
 // Guarded reader/writer pipe, Static_task_graph + parallel_for, then/when_all)
 // without the Windows-specific test harness, so it builds under clang/libstdc++
 // with -fsanitize=thread on Linux/macOS. See tsan/run.sh and tsan/README.md.
@@ -738,7 +738,7 @@ void stress_coroutine()
 }
 
 // Coroutine async-lock guard under contention: many threads each drive a coroutine that
-// repeatedly `co_await ts::write(w)` the SAME object. A contended acquire defers -> the coroutine
+// repeatedly `co_await ts::read_write(w)` the SAME object. A contended acquire defers -> the coroutine
 // suspends -> resumes on the releasing thread, so this races `pipe_acquire`'s `on_acquired`
 // handshake + the cross-thread resume against `pipe_release`. The pipe serializes writers, so
 // the total must be exact.
@@ -746,7 +746,7 @@ ts::Task<void> co_guard_bump(ts::Guarded<int>& w, int times)
 {
     for (int i = 0; i < times; ++i)
     {
-        auto g = co_await ts::write(w);
+        auto g = co_await ts::read_write(w);
         ++*g;
     }   // guard released each iteration
 }
