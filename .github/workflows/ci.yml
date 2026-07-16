@@ -31,17 +31,19 @@ jobs:
         run: build/windows-clang-cl/Release/task_system.exe --tests
 
   linux-tsan:
-    name: Linux / clang / ThreadSanitizer
+    name: Linux / clang-21 / ThreadSanitizer
     runs-on: ubuntu-latest
-    env:
-      TSAN_OPTIONS: halt_on_error=1
     steps:
       - uses: actions/checkout@v4
-      - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y clang cmake
-      - name: Configure
-        run: cmake --preset linux-tsan
-      - name: Build
-        run: cmake --build --preset linux-tsan
-      - name: TSan stress
-        run: build/linux-tsan/ts_tsan
+      # tsan/run.sh is the canonical TSan path (its own timeout + TSAN_OPTIONS + exit handling);
+      # it needs a recent clang (the C++23 sources are verified with clang 21). Install it from
+      # apt.llvm.org -- the distro's default clang is older.
+      - name: Install clang 21
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lsb-release wget software-properties-common gnupg
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 21
+      - name: TSan stress (tsan/run.sh)
+        run: CXX=clang++-21 bash tsan/run.sh

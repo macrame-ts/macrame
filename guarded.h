@@ -141,10 +141,23 @@ concept Async_accessor = std::invocable<Fn, A> || std::invocable<Fn, A, const Ca
 template<typename Fn, typename A>
 inline constexpr bool accessor_takes_token_v = std::invocable<Fn, A, const Cancellation_token&>;
 
+// Result type of an accessor, picking the token-taking overload when present. Guarded by
+// an outer `Invocable` layer: forming `Async_result_t` for a NON-invocable (Fn, A) yields a
+// benign `void` instead of hard-instantiating `invoke_result_t` on a bad combination. MSVC
+// evaluates a *rejected* overload's trailing return type (the other access mode's
+// `Async_result_t<Fn, const T&>` for a write lambda) during overload resolution, where clang
+// SFINAEs it away; without this guard MSVC hard-errors (C2794/C2938).
 template<typename Fn, typename A, bool = accessor_takes_token_v<Fn, A>>
-struct Async_result { using type = std::invoke_result_t<Fn, A, const Cancellation_token&>; };
+struct Async_result_sel { using type = std::invoke_result_t<Fn, A, const Cancellation_token&>; };
 template<typename Fn, typename A>
-struct Async_result<Fn, A, false> { using type = std::invoke_result_t<Fn, A>; };
+struct Async_result_sel<Fn, A, false> { using type = std::invoke_result_t<Fn, A>; };
+
+template<typename Fn, typename A,
+         bool = std::invocable<Fn, A> || accessor_takes_token_v<Fn, A>>
+struct Async_result { using type = void; };
+template<typename Fn, typename A>
+struct Async_result<Fn, A, true> : Async_result_sel<Fn, A> {};
+
 template<typename Fn, typename A> using Async_result_t = typename Async_result<Fn, A>::type;
 
 } // namespace detail

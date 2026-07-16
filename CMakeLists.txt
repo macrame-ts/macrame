@@ -33,6 +33,16 @@ set(TS_SAMPLE_SOURCES
 )
 
 if(WIN32)
+    # Real MSVC (cl): the STL's invoke_result SFINAE fails under /std:c++23preview -- which is
+    # what CMAKE_CXX_STANDARD 23 maps to on cl -- but works under /std:c++latest, which is what
+    # the vcxproj uses (LanguageStandard=stdcpplatest) and what passes. Override the C++23 flag
+    # mapping to c++latest for cl only; clang-cl (COMPILER_ID Clang) keeps CMake's default and is
+    # unaffected. Must be set before the target so the standard flag is generated from it.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        set(CMAKE_CXX23_STANDARD_COMPILE_OPTION "-std:c++latest")
+        set(CMAKE_CXX23_EXTENSION_COMPILE_OPTION "-std:c++latest")
+    endif()
+
     add_executable(task_system
         ${TS_CORE_SOURCES}
         ${TS_SAMPLE_SOURCES}
@@ -54,9 +64,16 @@ if(WIN32)
     )
     target_include_directories(task_system PRIVATE . tests benchmarks sample)
     target_compile_definitions(task_system PRIVATE _CONSOLE _HAS_EXCEPTIONS=0)
-    # Exceptions off: strip CMake's default /EHsc, then disable explicitly (cl and clang-cl).
+    # Exceptions off: strip CMake's default /EHsc.
     string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-    target_compile_options(task_system PRIVATE /EHs-c-)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        # Match the vcxproj: ConformanceMode + NO /EH flag (ExceptionHandling=false). An explicit
+        # /EHs-c- makes cl's <type_traits> mis-specialize invoke_result for the sample's lambdas.
+        target_compile_options(task_system PRIVATE /permissive- /Zc:__cplusplus)
+    else()
+        # clang-cl: disable exceptions explicitly.
+        target_compile_options(task_system PRIVATE /EHs-c-)
+    endif()
 else()
     # The portable stress driver (Linux/macOS; TSan has no Windows runtime).
     option(TS_TSAN "Build the stress driver with ThreadSanitizer" ON)
