@@ -80,7 +80,7 @@ public:
     //   add_node([](Physics& p, const Nav& n){ ... }, physics, nav);   // p:write, n:read
     // A GENERIC lambda (`[](auto& p, auto& n){...}`) has no introspectable parameter const-ness,
     // so tag every object with an explicit mode instead:
-    //   add_node([](auto& p, auto& n){ n.query(p); }, ts::as_write(physics), ts::as_read(nav));
+    //   add_node([](auto& p, auto& n){ n.query(p); }, ts::as_read_write(physics), ts::as_read_only(nav));
     // Don't mix tagged and bare arguments in one node. Returns a `Graph_node` ordering handle.
     template<typename Fn, typename... Objs>
         requires (detail::Object_arg<Objs> && ...)
@@ -91,7 +91,7 @@ public:
         if constexpr (any_tagged)
         {
             static_assert((detail::is_access_arg_v<Objs> && ...),
-                "add_node: don't mix tagged (ts::as_read/as_write) and bare Guarded arguments "
+                "add_node: don't mix tagged (ts::as_read_only/as_read_write) and bare Guarded arguments "
                 "-- tag EVERY object argument (for a generic lambda), or tag none");
             fill_node_tagged(node, std::index_sequence_for<Objs...>{},
                 std::forward<Fn>(fn), std::forward<Objs>(objs)...);
@@ -174,7 +174,7 @@ private:
     }
 
     // The tagged sibling of `fill_node`: every `objs` is an `Access_arg<T, M>` (from
-    // `ts::as_read`/`as_write`), so the per-object mode is the tag's `M` -- no `Function_traits`,
+    // `ts::as_read_only`/`as_read_write`), so the per-object mode is the tag's `M` -- no `Function_traits`,
     // which lets the functor be a generic lambda. Builds `node.access`/`node.pipes`/`node.run`
     // identically to `fill_node`, so `compile()` derives the same edges and exclusion.
     template<std::size_t... I, typename Fn, typename... Objs>

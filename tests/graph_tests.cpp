@@ -43,7 +43,7 @@ void test_access_ordering()
 }
 
 // Generic-lambda nodes: `[](auto&...)` has no introspectable parameter const-ness, so mode is
-// declared with `ts::as_read`/`as_write` tags. Same graph shape as `test_access_ordering`; the
+// declared with `ts::as_read_only`/`as_read_write` tags. Same graph shape as `test_access_ordering`; the
 // tagged modes must derive the SAME edges (write-then-read chain), proven by the propagated
 // values.
 void test_generic_lambda_node()
@@ -51,10 +51,10 @@ void test_generic_lambda_node()
     ts::Guarded<int> a{ 0 }, b{ 0 }, c{ 0 };
 
     ts::Static_task_graph g;
-    g.add_node([](auto& x) { x = 1; }, ts::as_write(a));
-    g.add_node([](auto& x, auto& y) { y = x * 10; }, ts::as_read(a), ts::as_write(b));
+    g.add_node([](auto& x) { x = 1; }, ts::as_read_write(a));
+    g.add_node([](auto& x, auto& y) { y = x * 10; }, ts::as_read_only(a), ts::as_read_write(b));
     g.add_node([](auto& x, auto& y, auto& z) { z = x + y; },
-               ts::as_read(a), ts::as_read(b), ts::as_write(c));
+               ts::as_read_only(a), ts::as_read_only(b), ts::as_read_write(c));
     g.compile();
 
     g.execute().sync();
@@ -63,7 +63,7 @@ void test_generic_lambda_node()
     TS_CHECK(read_value(c) == 11);   // ordering held -> tagged modes derived the same edges
 }
 
-// `ts::as_read` tags produce read access: two generic-lambda reader nodes on the same object
+// `ts::as_read_only` tags produce read access: two generic-lambda reader nodes on the same object
 // run concurrently (a writer orders before them), matching the non-generic reader-overlap
 // behavior.
 void test_generic_lambda_readers_overlap()
@@ -72,9 +72,9 @@ void test_generic_lambda_readers_overlap()
     tests::Parallel_gate gate{ 2 };
 
     ts::Static_task_graph g;
-    g.add_node([](auto& v) { v = 1; }, ts::as_write(x));
-    g.add_node([&gate](auto& xv, auto& yv) { gate.arrive(); yv = xv; }, ts::as_read(x), ts::as_write(y));
-    g.add_node([&gate](auto& xv, auto& zv) { gate.arrive(); zv = xv; }, ts::as_read(x), ts::as_write(z));
+    g.add_node([](auto& v) { v = 1; }, ts::as_read_write(x));
+    g.add_node([&gate](auto& xv, auto& yv) { gate.arrive(); yv = xv; }, ts::as_read_only(x), ts::as_read_write(y));
+    g.add_node([&gate](auto& xv, auto& zv) { gate.arrive(); zv = xv; }, ts::as_read_only(x), ts::as_read_write(z));
     g.compile();
 
     g.execute().sync();

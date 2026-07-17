@@ -115,11 +115,11 @@ the graph's derived ordering edges, and the harness's grants.
 A **generic lambda** (`[](auto& p, auto& n){...}`) has no fixed parameter
 const-ness to introspect, so const-ness deduction can't see whether each object
 is read or written. Declare the mode explicitly instead, by tagging every object
-with `ts::as_read`/`ts::as_write`:
+with `ts::as_read_only`/`ts::as_read_write`:
 
 ```cpp
 graph.add_node([](auto& p, auto& n) { n.query(p); },
-               ts::as_write(physics), ts::as_read(nav));
+               ts::as_read_write(physics), ts::as_read_only(nav));
 ```
 
 The tags work anywhere access is deduced from parameters — `add_node` and the
@@ -422,11 +422,11 @@ static graph, so dynamic multi-object work and graph nodes can never deadlock
 each other.
 
 For a **generic lambda** (`[](auto&...)`), whose parameter const-ness can't be
-introspected, tag every object with `ts::as_read`/`ts::as_write` instead (§3.1):
+introspected, tag every object with `ts::as_read_only`/`ts::as_read_write` instead (§3.1):
 
 ```cpp
 ts::access([](auto& p, auto& r) { r.mirror(p); },
-           ts::as_read(physics), ts::as_write(render));
+           ts::as_read_only(physics), ts::as_read_write(render));
 ```
 
 ### 5.2 What `Guarded` is not
@@ -789,7 +789,7 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
   — researched, primitives designed (gather/apply mailboxes, interaction
   coloring), not yet shipped.
 - **Generic lambdas** in access-deduced positions (`add_node`, `access`,
-  `async`) need explicit `ts::as_read`/`ts::as_write` tags on every object
+  `async`) need explicit `ts::as_read_only`/`ts::as_read_write` tags on every object
   (§3.1) — a generic lambda's parameter const-ness can't be introspected, so
   the mode is declared rather than deduced.
 

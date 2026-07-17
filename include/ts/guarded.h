@@ -320,7 +320,7 @@ struct Guarded_access
     template<typename T> static Pipe& pipe(Guarded<T>& t) { return t.pipe_; }
 };
 
-// An access-mode-tagged object argument, produced by `ts::as_read(g)` / `ts::as_write(g)`. It
+// An access-mode-tagged object argument, produced by `ts::as_read_only(g)` / `ts::as_read_write(g)`. It
 // lets a GENERIC lambda (`[](auto& x){...}`) declare per-object access explicitly: a generic
 // lambda's `operator()` is a template with no introspectable parameter const-ness, so
 // `Function_traits` cannot deduce read-vs-write -- the tag supplies it. The mode is a compile-time
@@ -345,7 +345,7 @@ template<typename A> inline constexpr bool is_guarded_v = is_guarded<std::remove
 
 // A valid object argument to `add_node` / multi-object `ts::access`/`ts::async`: either a bare
 // `Guarded<T>&` (mode deduced from the functor's parameter const-ness) or an `Access_arg<T, M>`
-// from `ts::as_read`/`as_write` (mode explicit; for generic lambdas). Per call the two kinds must
+// from `ts::as_read_only`/`as_read_write` (mode explicit; for generic lambdas). Per call the two kinds must
 // not be mixed -- see the `static_assert` at each entry point.
 template<typename A>
 concept Object_arg = is_guarded_v<A> || is_access_arg_v<A>;
@@ -408,7 +408,7 @@ auto async_build(Access_options opts, std::index_sequence<I...>, Fn&& fn, Guarde
 }
 
 // The tagged sibling of `async_build`: every argument is an `Access_arg<T, M>` (from
-// `ts::as_read`/`as_write`), so the per-object mode is the tag's `M` -- no `Function_traits`,
+// `ts::as_read_only`/`as_read_write`), so the per-object mode is the tag's `M` -- no `Function_traits`,
 // which lets the functor be a generic lambda. Otherwise identical (same body shape, same
 // dispatch tail).
 template<std::size_t... I, typename Fn, typename... Objs>
@@ -437,19 +437,19 @@ auto async_build_tagged(Access_options opts, std::index_sequence<I...>, Fn&& fn,
 
 // Tag an object argument with an explicit access mode, for use with a GENERIC lambda (whose
 // parameter const-ness can't be introspected): `graph.add_node([](auto& p, auto& n){ n.q(p); },
-// ts::as_write(physics), ts::as_read(nav))`, and likewise `ts::access`/`ts::async`. With a
+// ts::as_read_write(physics), ts::as_read_only(nav))`, and likewise `ts::access`/`ts::async`. With a
 // NON-generic lambda you don't need these -- the mode is deduced from the parameter const-ness.
-// (Named `as_read`/`as_write` to avoid colliding with the coroutine pipe guards
+// (Named `as_read_only`/`as_read_write` to avoid colliding with the coroutine pipe guards
 // `ts::read_only`/`ts::read_write` in coroutine_support.h.)
 template<typename T>
-detail::Access_arg<T, Access::read_only> as_read(Guarded<T>& g) { return { &g }; }
+detail::Access_arg<T, Access::read_only> as_read_only(Guarded<T>& g) { return { &g }; }
 template<typename T>
-detail::Access_arg<T, Access::read_write> as_write(Guarded<T>& g) { return { &g }; }
+detail::Access_arg<T, Access::read_write> as_read_write(Guarded<T>& g) { return { &g }; }
 
 // Multi-object async: run `fn(*obj1, *obj2, ...)` once it holds all the objects. Per-object
 // access is deduced from the functor's parameter const-ness for bare `Guarded<T>&` arguments
 // (`Function_traits`; non-generic lambdas / function pointers), OR taken from an explicit
-// `ts::as_read`/`as_write` tag on every argument (which lets the functor be a GENERIC lambda).
+// `ts::as_read_only`/`as_read_write` tag on every argument (which lets the functor be a GENERIC lambda).
 // The two kinds must not be mixed in one call. Deadlock-free (objects acquired in canonical
 // order). Options come FIRST (a function parameter pack can't be followed by a defaulted arg);
 // the no-options overload defaults them. `token`/`priority` apply as usual. Fire-and-forget or
@@ -462,7 +462,7 @@ auto async(Access_options opts, Fn&& fn, Objs&&... objs)
     if constexpr (any_tagged)
     {
         static_assert((detail::is_access_arg_v<Objs> && ...),
-            "multi-object async: don't mix tagged (ts::as_read/as_write) and bare Guarded "
+            "multi-object async: don't mix tagged (ts::as_read_only/as_read_write) and bare Guarded "
             "arguments -- tag EVERY object argument, or tag none");
         return detail::async_build_tagged(std::move(opts), std::index_sequence_for<Objs...>{},
             std::forward<Fn>(fn), std::forward<Objs>(objs)...);

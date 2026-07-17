@@ -345,24 +345,24 @@ void test_multi_async_options()
 }
 
 // Multi-object async with a GENERIC lambda: `[](auto&...)` can't be introspected for const-ness,
-// so mode is declared with `ts::as_read`/`as_write` tags. Same effect as the non-generic
+// so mode is declared with `ts::as_read_only`/`as_read_write` tags. Same effect as the non-generic
 // `test_multi_async_basic` (write one, read the other).
 void test_multi_async_generic_lambda()
 {
     ts::Guarded<int> a{ 10 }, b{ 20 };
     int result = ts::async([](auto& x, const auto& y) { x += y; return x; },
-                           ts::as_write(a), ts::as_read(b)).sync();   // a += b
+                           ts::as_read_write(a), ts::as_read_only(b)).sync();   // a += b
     TS_CHECK(result == 30);
     TS_CHECK(read_value(a) == 30);
     TS_CHECK(read_value(b) == 20);
 
     // `ts::access` takes the same tags.
     int r2 = ts::access([](auto& x, auto& y) { return x + y; },
-                        ts::as_read(a), ts::as_read(b)).sync();
+                        ts::as_read_only(a), ts::as_read_only(b)).sync();
     TS_CHECK(r2 == 50);
 }
 
-// A tagged `as_write` on both objects holds them exclusively (matching the non-generic
+// A tagged `as_read_write` on both objects holds them exclusively (matching the non-generic
 // `test_multi_async_exclusion`): a concurrent single-object async never overlaps.
 void test_multi_async_generic_exclusion()
 {
@@ -371,7 +371,7 @@ void test_multi_async_generic_exclusion()
     for (int i = 0; i < 4; ++i)
     {
         tasks.push_back(ts::async([](auto& a, auto& b) { a.touch(); b.touch(); },
-                                  ts::as_write(x), ts::as_write(y)));
+                                  ts::as_read_write(x), ts::as_read_write(y)));
         tasks.push_back(x.async([](Guarded& g) { g.touch(); }));
         tasks.push_back(y.async([](Guarded& g) { g.touch(); }));
     }
