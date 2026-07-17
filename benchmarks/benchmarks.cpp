@@ -1,8 +1,8 @@
 #include "benchmarks.h"
-#include "scheduler.h"
-#include "guarded.h"
-#include "static_task_graph.h"
-#include "access.h"
+#include "ts/scheduler.h"
+#include "ts/guarded.h"
+#include "ts/static_task_graph.h"
+#include "ts/access.h"
 
 #include <algorithm>
 #include <array>

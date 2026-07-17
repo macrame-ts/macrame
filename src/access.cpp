@@ -1,5 +1,5 @@
-#include "access.h"
-#include "fatal.h"
+#include "ts/access.h"
+#include "ts/fatal.h"
 
 #include <cstdio>
 

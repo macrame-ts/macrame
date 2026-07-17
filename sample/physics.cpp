@@ -1,11 +1,11 @@
 #include "physics.h"
 
-#include "access.h"
-#include "deferred.h"
-#include "guarded.h"
-#include "parallel_for.h"
-#include "static_task_graph.h"
-#include "versioned.h"
+#include "ts/access.h"
+#include "ts/deferred.h"
+#include "ts/guarded.h"
+#include "ts/parallel_for.h"
+#include "ts/static_task_graph.h"
+#include "ts/versioned.h"
 
 #include <atomic>
 #include <cstdio>

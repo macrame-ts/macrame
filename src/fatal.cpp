@@ -1,4 +1,4 @@
-#include "fatal.h"
+#include "ts/fatal.h"
 
 #include <cstdio>
 #include <cstdlib>

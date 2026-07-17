@@ -1,5 +1,5 @@
 #include "scheduler_tests.h"
-#include "scheduler.h"
+#include "ts/scheduler.h"
 #include "harness.h"
 #include "test_util.h"
 

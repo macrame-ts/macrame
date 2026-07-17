@@ -10,16 +10,44 @@
     <Filter Include="sample">
       <UniqueIdentifier>{c3333333-3333-3333-3333-333333333333}</UniqueIdentifier>
     </Filter>
+    <Filter Include="src">
+      <UniqueIdentifier>{d4444444-4444-4444-4444-444444444444}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include">
+      <UniqueIdentifier>{e5555555-5555-5555-5555-555555555555}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\ts">
+      <UniqueIdentifier>{f6666666-6666-6666-6666-666666666666}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\ts\detail">
+      <UniqueIdentifier>{07777777-7777-7777-7777-777777777777}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="access.cpp" />
-    <ClCompile Include="fatal.cpp" />
-    <ClCompile Include="guarded.cpp" />
-    <ClCompile Include="main.cpp" />
-    <ClCompile Include="mem_profile.cpp" />
-    <ClCompile Include="scheduler.cpp" />
-    <ClCompile Include="static_task_graph.cpp" />
-    <ClCompile Include="worker_thread.cpp" />
+    <ClCompile Include="src\access.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\fatal.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\guarded.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\main.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mem_profile.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\scheduler.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\static_task_graph.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\worker_thread.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="benchmarks\benchmarks.cpp">
       <Filter>benchmarks</Filter>
     </ClCompile>
@@ -76,26 +104,66 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="access.h" />
-    <ClInclude Include="coroutine_support.h" />
-    <ClInclude Include="deferred.h" />
-    <ClInclude Include="event_count.h" />
-    <ClInclude Include="fatal.h" />
-    <ClInclude Include="guarded.h" />
-    <ClInclude Include="journal.h" />
-    <ClInclude Include="mem_profile.h" />
-    <ClInclude Include="mpmc_queue.h" />
-    <ClInclude Include="parallel_for.h" />
-    <ClInclude Include="priority.h" />
-    <ClInclude Include="ref_count.h" />
-    <ClInclude Include="scheduler.h" />
-    <ClInclude Include="static_task_graph.h" />
-    <ClInclude Include="task.h" />
-    <ClInclude Include="ts.h" />
-    <ClInclude Include="version.h" />
-    <ClInclude Include="versioned.h" />
-    <ClInclude Include="work_stealing_deque.h" />
-    <ClInclude Include="worker_thread.h" />
+    <ClInclude Include="include\ts\access.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\coroutine_support.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\deferred.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\fatal.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\guarded.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\parallel_for.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\priority.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\scheduler.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\static_task_graph.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\task.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\ts.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\version.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\versioned.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\detail\event_count.h">
+      <Filter>include\ts\detail</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\detail\journal.h">
+      <Filter>include\ts\detail</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\detail\mpmc_queue.h">
+      <Filter>include\ts\detail</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\detail\ref_count.h">
+      <Filter>include\ts\detail</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\detail\work_stealing_deque.h">
+      <Filter>include\ts\detail</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\detail\worker_thread.h">
+      <Filter>include\ts\detail</Filter>
+    </ClInclude>
+    <ClInclude Include="src\mem_profile.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="benchmarks\benchmarks.h">
       <Filter>benchmarks</Filter>
     </ClInclude>

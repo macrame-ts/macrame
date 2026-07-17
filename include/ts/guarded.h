@@ -1,8 +1,8 @@
 #pragma once
 
-#include "access.h"
-#include "scheduler.h"
-#include "task.h"
+#include "ts/access.h"
+#include "ts/scheduler.h"
+#include "ts/task.h"
 
 #include <concepts>
 #include <condition_variable>

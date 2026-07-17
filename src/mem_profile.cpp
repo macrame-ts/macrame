@@ -5,10 +5,10 @@
 // gets the stub at the bottom -- zero impact on the normal allocator.
 #if defined(TS_MEM_PROFILE)
 
-#include "guarded.h"
-#include "task.h"
-#include "parallel_for.h"
-#include "static_task_graph.h"
+#include "ts/guarded.h"
+#include "ts/task.h"
+#include "ts/parallel_for.h"
+#include "ts/static_task_graph.h"
 
 #include <atomic>
 #include <chrono>

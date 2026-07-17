@@ -1,10 +1,10 @@
 #pragma once
 
-#include "access.h"
-#include "fatal.h"
-#include "guarded.h"
-#include "journal.h"
-#include "task.h"
+#include "ts/access.h"
+#include "ts/fatal.h"
+#include "ts/guarded.h"
+#include "ts/detail/journal.h"
+#include "ts/task.h"
 
 #include <utility>
 

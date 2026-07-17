@@ -1,8 +1,8 @@
 #include "deferred_tests.h"
-#include "deferred.h"
-#include "versioned.h"
-#include "parallel_for.h"
-#include "static_task_graph.h"
+#include "ts/deferred.h"
+#include "ts/versioned.h"
+#include "ts/parallel_for.h"
+#include "ts/static_task_graph.h"
 #include "harness.h"
 #include "test_util.h"
 

@@ -23,12 +23,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(TS_SAFETY_CHECKS "Compile in the access-safety harness" ON)
 
 set(TS_CORE_SOURCES
-    access.cpp
-    fatal.cpp
-    guarded.cpp
-    scheduler.cpp
-    static_task_graph.cpp
-    worker_thread.cpp
+    src/access.cpp
+    src/fatal.cpp
+    src/guarded.cpp
+    src/scheduler.cpp
+    src/static_task_graph.cpp
+    src/worker_thread.cpp
 )
 
 set(TS_SAMPLE_SOURCES
@@ -53,8 +53,8 @@ if(WIN32)
     add_executable(task_system
         ${TS_CORE_SOURCES}
         ${TS_SAMPLE_SOURCES}
-        main.cpp
-        mem_profile.cpp
+        src/main.cpp
+        src/mem_profile.cpp
         benchmarks/benchmarks.cpp
         tests/access_tests.cpp
         tests/coroutine_tests.cpp
@@ -69,7 +69,7 @@ if(WIN32)
         tests/tests.cpp
         tests/versioned_tests.cpp
     )
-    target_include_directories(task_system PRIVATE . tests benchmarks sample)
+    target_include_directories(task_system PRIVATE include tests benchmarks sample)
     target_compile_definitions(task_system PRIVATE _CONSOLE _HAS_EXCEPTIONS=0)
     if(NOT TS_SAFETY_CHECKS)
         target_compile_definitions(task_system PRIVATE TS_SAFETY_CHECKS=0)
@@ -92,7 +92,7 @@ else()
         ${TS_SAMPLE_SOURCES}
         tsan/tsan_main.cpp
     )
-    target_include_directories(ts_tsan PRIVATE . sample)
+    target_include_directories(ts_tsan PRIVATE include sample)
     if(NOT TS_SAFETY_CHECKS)
         target_compile_definitions(ts_tsan PRIVATE TS_SAFETY_CHECKS=0)
     endif()

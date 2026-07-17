@@ -10,16 +10,16 @@
 
 // Single-file sample (no header) -- see sample/blackboard.cpp.
 namespace sample { void run_blackboard_sample(); }
-#include "parallel_for.h"
-#include "scheduler.h"
-#include "static_task_graph.h"
-#include "guarded.h"
-#include "deferred.h"
-#include "versioned.h"
+#include "ts/parallel_for.h"
+#include "ts/scheduler.h"
+#include "ts/static_task_graph.h"
+#include "ts/guarded.h"
+#include "ts/deferred.h"
+#include "ts/versioned.h"
 #include "physics.h"
 
 #if defined(__cpp_impl_coroutine)
-#include "coroutine_support.h"
+#include "ts/coroutine_support.h"
 #endif
 
 #include <algorithm>

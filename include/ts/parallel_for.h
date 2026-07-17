@@ -1,8 +1,8 @@
 #pragma once
 
-#include "scheduler.h"
-#include "task.h"
-#include "guarded.h"   // default_scheduler
+#include "ts/scheduler.h"
+#include "ts/task.h"
+#include "ts/guarded.h"   // default_scheduler
 
 #include <atomic>
 #include <cstddef>

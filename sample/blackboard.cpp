@@ -10,10 +10,10 @@
 // two runs are identical -- staged writes + snapshot reads keep the whole
 // thing deterministic.
 
-#include "access.h"
-#include "guarded.h"
-#include "static_task_graph.h"
-#include "versioned.h"
+#include "ts/access.h"
+#include "ts/guarded.h"
+#include "ts/static_task_graph.h"
+#include "ts/versioned.h"
 
 #include <algorithm>
 #include <cstdio>

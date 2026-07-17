@@ -1,5 +1,5 @@
-#include "static_task_graph.h"
-#include "fatal.h"
+#include "ts/static_task_graph.h"
+#include "ts/fatal.h"
 
 #include <atomic>
 #include <deque>

@@ -1,9 +1,9 @@
 #pragma once
 
-#include "event_count.h"
-#include "mpmc_queue.h"
-#include "priority.h"
-#include "work_stealing_deque.h"
+#include "ts/detail/event_count.h"
+#include "ts/detail/mpmc_queue.h"
+#include "ts/priority.h"
+#include "ts/detail/work_stealing_deque.h"
 
 #include <array>
 #include <atomic>

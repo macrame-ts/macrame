@@ -1,6 +1,6 @@
 #pragma once
 
-#include "static_task_graph.h"
+#include "ts/static_task_graph.h"
 #include "world.h"
 
 namespace sample

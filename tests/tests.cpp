@@ -1,11 +1,11 @@
 ﻿#include "tests.h"
 #include "test_util.h"
-#include "access.h"
-#include "guarded.h"
-#include "static_task_graph.h"
+#include "ts/access.h"
+#include "ts/guarded.h"
+#include "ts/static_task_graph.h"
 
 #if defined(__cpp_impl_coroutine)
-#include "coroutine_support.h"
+#include "ts/coroutine_support.h"
 #endif
 
 #include "scheduler_tests.h"
@@ -19,8 +19,8 @@
 #include "deferred_tests.h"
 #include "versioned_tests.h"
 
-#include "deferred.h"
-#include "versioned.h"
+#include "ts/deferred.h"
+#include "ts/versioned.h"
 
 #include <atomic>
 #include <cstring>

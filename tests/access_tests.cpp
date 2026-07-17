@@ -1,5 +1,5 @@
 #include "access_tests.h"
-#include "access.h"
+#include "ts/access.h"
 #include "harness.h"
 #include "test_util.h"
 

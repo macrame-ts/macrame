@@ -1,4 +1,4 @@
-#include "worker_thread.h"
+#include "ts/detail/worker_thread.h"
 
 namespace ts::detail
 {

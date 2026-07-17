@@ -3,9 +3,9 @@
 
 #if defined(__cpp_impl_coroutine)
 
-#include "coroutine_support.h"
-#include "guarded.h"
-#include "parallel_for.h"
+#include "ts/coroutine_support.h"
+#include "ts/guarded.h"
+#include "ts/parallel_for.h"
 #include "test_util.h"
 
 #include <atomic>

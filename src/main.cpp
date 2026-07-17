@@ -4,7 +4,7 @@
 #include "harness.h"
 #include "engine.h"
 #include "physics.h"
-#include "version.h"
+#include "ts/version.h"
 
 // Single-file sample (sample/blackboard.cpp, by design -- no header): the
 // blackboard pattern recipe of docs/command-buffer-design.md §7.4.

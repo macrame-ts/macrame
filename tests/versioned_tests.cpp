@@ -1,6 +1,6 @@
 #include "versioned_tests.h"
-#include "versioned.h"
-#include "static_task_graph.h"
+#include "ts/versioned.h"
+#include "ts/static_task_graph.h"
 #include "harness.h"
 #include "test_util.h"
 

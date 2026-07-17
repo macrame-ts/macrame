@@ -1,8 +1,8 @@
 #pragma once
 
-#include "access.h"
-#include "scheduler.h"
-#include "guarded.h"
+#include "ts/access.h"
+#include "ts/scheduler.h"
+#include "ts/guarded.h"
 
 #include <cstdint>
 #include <memory>

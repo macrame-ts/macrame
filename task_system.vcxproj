@@ -27,14 +27,14 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="access.cpp" />
-    <ClCompile Include="fatal.cpp" />
-    <ClCompile Include="main.cpp" />
-    <ClCompile Include="mem_profile.cpp" />
-    <ClCompile Include="scheduler.cpp" />
-    <ClCompile Include="static_task_graph.cpp" />
-    <ClCompile Include="guarded.cpp" />
-    <ClCompile Include="worker_thread.cpp" />
+    <ClCompile Include="src\access.cpp" />
+    <ClCompile Include="src\fatal.cpp" />
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\mem_profile.cpp" />
+    <ClCompile Include="src\scheduler.cpp" />
+    <ClCompile Include="src\static_task_graph.cpp" />
+    <ClCompile Include="src\guarded.cpp" />
+    <ClCompile Include="src\worker_thread.cpp" />
     <ClCompile Include="benchmarks\benchmarks.cpp" />
     <ClCompile Include="sample\blackboard.cpp" />
     <ClCompile Include="sample\engine.cpp" />
@@ -55,26 +55,26 @@
     <ClCompile Include="tests\versioned_tests.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="access.h" />
-    <ClInclude Include="coroutine_support.h" />
-    <ClInclude Include="event_count.h" />
-    <ClInclude Include="fatal.h" />
-    <ClInclude Include="mpmc_queue.h" />
-    <ClInclude Include="mem_profile.h" />
-    <ClInclude Include="parallel_for.h" />
-    <ClInclude Include="priority.h" />
-    <ClInclude Include="ref_count.h" />
-    <ClInclude Include="scheduler.h" />
-    <ClInclude Include="static_task_graph.h" />
-    <ClInclude Include="task.h" />
-    <ClInclude Include="ts.h" />
-    <ClInclude Include="version.h" />
-    <ClInclude Include="guarded.h" />
-    <ClInclude Include="deferred.h" />
-    <ClInclude Include="journal.h" />
-    <ClInclude Include="versioned.h" />
-    <ClInclude Include="work_stealing_deque.h" />
-    <ClInclude Include="worker_thread.h" />
+    <ClInclude Include="include\ts\access.h" />
+    <ClInclude Include="include\ts\coroutine_support.h" />
+    <ClInclude Include="include\ts\detail\event_count.h" />
+    <ClInclude Include="include\ts\fatal.h" />
+    <ClInclude Include="include\ts\detail\mpmc_queue.h" />
+    <ClInclude Include="src\mem_profile.h" />
+    <ClInclude Include="include\ts\parallel_for.h" />
+    <ClInclude Include="include\ts\priority.h" />
+    <ClInclude Include="include\ts\detail\ref_count.h" />
+    <ClInclude Include="include\ts\scheduler.h" />
+    <ClInclude Include="include\ts\static_task_graph.h" />
+    <ClInclude Include="include\ts\task.h" />
+    <ClInclude Include="include\ts\ts.h" />
+    <ClInclude Include="include\ts\version.h" />
+    <ClInclude Include="include\ts\guarded.h" />
+    <ClInclude Include="include\ts\deferred.h" />
+    <ClInclude Include="include\ts\detail\journal.h" />
+    <ClInclude Include="include\ts\versioned.h" />
+    <ClInclude Include="include\ts\detail\work_stealing_deque.h" />
+    <ClInclude Include="include\ts\detail\worker_thread.h" />
     <ClInclude Include="benchmarks\benchmarks.h" />
     <ClInclude Include="sample\engine.h" />
     <ClInclude Include="sample\physics.h" />
@@ -210,7 +210,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ExceptionHandling>false</ExceptionHandling>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -230,7 +230,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ExceptionHandling>false</ExceptionHandling>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -269,7 +269,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ExceptionHandling>false</ExceptionHandling>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>

@@ -1,5 +1,5 @@
-#include "scheduler.h"
-#include "worker_thread.h"
+#include "ts/scheduler.h"
+#include "ts/detail/worker_thread.h"
 
 #include <cstddef>
 #include <cstdint>

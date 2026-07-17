@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."
 CXX="${CXX:-clang++}"
 OUT="${TMPDIR:-/tmp}/ts_tsan"
 TIMEOUT="${TSAN_TIMEOUT:-180}"   # watchdog seconds; a deadlock fails fast, never hangs
-SRC="scheduler.cpp worker_thread.cpp guarded.cpp static_task_graph.cpp access.cpp fatal.cpp \
+SRC="src/scheduler.cpp src/worker_thread.cpp src/guarded.cpp src/static_task_graph.cpp src/access.cpp src/fatal.cpp \
      sample/systems.cpp sample/frame.cpp sample/engine.cpp sample/physics.cpp sample/blackboard.cpp tsan/tsan_main.cpp"
 
 # A previous run that deadlocked keeps the binary busy (a build can't overwrite a
@@ -27,7 +27,7 @@ pkill -9 -f "$OUT" 2>/dev/null || true
 rm -f "$OUT"
 
 "$CXX" -std=c++23 -fsanitize=thread -fno-exceptions -O1 -g -pthread \
-    -I. -Isample $SRC -o "$OUT"
+    -Iinclude -Isample $SRC -o "$OUT"
 
 # Symbolize reports (file:line) if llvm-symbolizer is available -- `sudo apt
 # install -y llvm`. Without it, reports still fire but show addresses only.

@@ -25,11 +25,11 @@
 // queue hop -> lowest latency); the coroutine's `priority_` is carried onto its block for the
 // queued paths (a fully-queued resume variant is a possible future refinement).
 
-#include "task.h"
+#include "ts/task.h"
 
 #if defined(__cpp_impl_coroutine)
 
-#include "guarded.h"   // Pipe, pipe_acquire/release, Guarded(_access), default_scheduler
+#include "ts/guarded.h"   // Pipe, pipe_acquire/release, Guarded(_access), default_scheduler
 
 #include <atomic>
 #include <coroutine>

@@ -1,6 +1,6 @@
 #include "integration_tests.h"
-#include "guarded.h"
-#include "static_task_graph.h"
+#include "ts/guarded.h"
+#include "ts/static_task_graph.h"
 #include "harness.h"
 #include "test_util.h"
 #include "engine.h"

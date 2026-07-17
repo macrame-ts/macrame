@@ -1,5 +1,5 @@
 #include "parallel_tests.h"
-#include "parallel_for.h"
+#include "ts/parallel_for.h"
 #include "harness.h"
 #include "test_util.h"
 

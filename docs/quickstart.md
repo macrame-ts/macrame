@@ -7,9 +7,9 @@ Get from zero to a running program. For the full tour of every layer, see the
 
 ## Get the code
 
-No package yet (pre-1.0). Clone the repository and add its root to your include
-path — the library is a set of headers plus a few `.cpp` files, no external
-dependencies.
+No package yet (pre-1.0). Clone the repository and add its `include/` directory
+to your include path — the library is a set of headers (under `include/ts/`)
+plus a few `.cpp` files (under `src/`), no external dependencies.
 
 ```
 git clone <repo-url> task_system
@@ -19,7 +19,7 @@ Include everything through the umbrella header, or the individual headers if you
 prefer:
 
 ```cpp
-#include "ts.h"   // the whole public API, in namespace ts
+#include "ts/ts.h"   // the whole public API, in namespace ts
 ```
 
 ## Build
@@ -41,7 +41,7 @@ call `ts::fatal` (message + stack trace + abort) rather than throwing.
 Launch a unit of work and wait for its result:
 
 ```cpp
-#include "ts.h"
+#include "ts/ts.h"
 #include <cstdio>
 
 int main()
@@ -87,7 +87,7 @@ Add `TS_CHECK_ACCESS()` to your type's methods and the runtime harness will faul
 stray reference, a missed declaration, a task the graph doesn't know about:
 
 ```cpp
-#include "ts.h"
+#include "ts/ts.h"
 
 class Inventory
 {

@@ -1,5 +1,5 @@
 #include "task_tests.h"
-#include "guarded.h"
+#include "ts/guarded.h"
 #include "harness.h"
 #include "test_util.h"
 

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "fatal.h"
-#include "scheduler.h"
+#include "ts/fatal.h"
+#include "ts/scheduler.h"
 
 #include <cstddef>
 #include <deque>

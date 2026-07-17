@@ -1,9 +1,9 @@
 #pragma once
 
-#include "access.h"   // grant inheritance for launched/nested sub-work (snapshot_access)
-#include "fatal.h"
-#include "priority.h"
-#include "ref_count.h"   // intrusive Ref_ptr / Ref_counted (preferred over shared_ptr)
+#include "ts/access.h"   // grant inheritance for launched/nested sub-work (snapshot_access)
+#include "ts/fatal.h"
+#include "ts/priority.h"
+#include "ts/detail/ref_count.h"   // intrusive Ref_ptr / Ref_counted (preferred over shared_ptr)
 
 #include <array>
 #include <atomic>
