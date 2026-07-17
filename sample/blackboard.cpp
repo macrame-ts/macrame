@@ -229,7 +229,13 @@ Blackboard_stats run_blackboard_frames(int frames)
 
     // Register subscriptions. The callbacks fire inside the dispatch node; both
     // route their side effects through `async` -- no grant needed to SUBMIT.
-    subs.async([&squad, &audio](Subscriptions& s)
+    // `async` (not `access`) is deliberate there: inside a node, `access` may run
+    // the body inline while the node still HOLDS its declared objects --
+    // stretching the critical window (every successor waits) and stacking a
+    // nested access scope; under contention it enqueues anyway, so the inline
+    // win is unreliable. Out here at setup it's the opposite -- short and
+    // uncontended -- so `access` runs the registration right on this thread.
+    subs.access([&squad, &audio](Subscriptions& s)
     {
         s.subscribe(Key::player_visible, [&audio](const Value& v)
         {
