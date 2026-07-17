@@ -320,33 +320,45 @@ struct Guarded_access
     template<typename T> static Pipe& pipe(Guarded<T>& t) { return t.pipe_; }
 };
 
-// Build a multi-object async task: `fn(*objs...)` under an `Access_context` declaring every
-// object (per-arg mode from `Args`), gated on holding all their pipes. Acquires the pipes in
-// canonical order (deduped write-wins), releases them at completion via an attached
-// continuation. Returns the `Task<R>`.
-template<typename Args, std::size_t... I, typename Fn, typename... Ts>
-auto async_build(Access_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... objs)
+// An access-mode-tagged object argument, produced by `ts::as_read(g)` / `ts::as_write(g)`. It
+// lets a GENERIC lambda (`[](auto& x){...}`) declare per-object access explicitly: a generic
+// lambda's `operator()` is a template with no introspectable parameter const-ness, so
+// `Function_traits` cannot deduce read-vs-write -- the tag supplies it. The mode is a compile-time
+// template argument, so everything downstream (the `Access_context`, edge derivation, acquire) is
+// identical to the deduced path. Used by the multi-object `ts::access`/`ts::async` and
+// `Static_task_graph::add_node`.
+template<typename T, Access M>
+struct Access_arg
 {
-    using R = std::invoke_result_t<Fn, Ts&...>;
-    auto instances = std::make_tuple(Guarded_access::instance(objs)...);
+    using value_type = T;
+    static constexpr Access mode = M;
+    Guarded<T>* obj;
+};
 
-    auto body = [instances, fn = std::forward<Fn>(fn)]() mutable -> R
-    {
-        Access_context ctx;
-        (ctx.add(static_cast<const void*>(std::get<I>(instances)),
-                 async_mode_of<std::tuple_element_t<I, Args>>()), ...);
-        Access_scope scope(ctx);
-        return fn(*std::get<I>(instances)...);
-    };
-    auto block = make_executable<R>(std::move(body), std::move(opts.token));
-    block->flags.priority = opts.priority;
+template<typename A> struct is_access_arg : std::false_type {};
+template<typename T, Access M> struct is_access_arg<Access_arg<T, M>> : std::true_type {};
+template<typename A> inline constexpr bool is_access_arg_v = is_access_arg<std::remove_cvref_t<A>>::value;
 
-    // Collect (pipe, mode) per object, dedup write-wins; a `std::map` keyed by pipe address
-    // gives the canonical (ascending-address) acquire order for free.
-    Pipe* pipes[] = { &Guarded_access::pipe(objs)... };
-    Access modes[] = { async_mode_of<std::tuple_element_t<I, Args>>()... };
+template<typename A> struct is_guarded : std::false_type {};
+template<typename T> struct is_guarded<Guarded<T>> : std::true_type {};
+template<typename A> inline constexpr bool is_guarded_v = is_guarded<std::remove_cvref_t<A>>::value;
+
+// A valid object argument to `add_node` / multi-object `ts::access`/`ts::async`: either a bare
+// `Guarded<T>&` (mode deduced from the functor's parameter const-ness) or an `Access_arg<T, M>`
+// from `ts::as_read`/`as_write` (mode explicit; for generic lambdas). Per call the two kinds must
+// not be mixed -- see the `static_assert` at each entry point.
+template<typename A>
+concept Object_arg = is_guarded_v<A> || is_access_arg_v<A>;
+
+// Shared tail for the multi-object builders: given the already-built `block` and this call's
+// per-object (pipe, mode) arrays, dedup write-wins into the canonical (ascending pipe-address)
+// acquire order, attach the release, and kick off `multi_acquire`. Identical for the deduced and
+// tagged paths -- only the body/mode source differs, above this.
+template<typename R>
+Task<R> async_dispatch(Task_ptr block, Pipe* const* pipes, const Access* modes, std::size_t n)
+{
     std::map<Pipe*, Access> by_pipe;
-    for (std::size_t k = 0; k < sizeof...(Ts); ++k)
+    for (std::size_t k = 0; k < n; ++k)
     {
         auto [it, inserted] = by_pipe.try_emplace(pipes[k], modes[k]);
         if (!inserted && modes[k] == Access::read_write)
@@ -370,49 +382,125 @@ auto async_build(Access_options opts, std::index_sequence<I...>, Fn&& fn, Guarde
     return result;
 }
 
-} // namespace detail
-
-// Multi-object async: run `fn(*obj1, *obj2, ...)` once it holds all the objects, with per-arg
-// access deduced from the functor's parameter const-ness (`Function_traits`; non-generic
-// lambdas / function pointers only). Deadlock-free (objects acquired in canonical order).
-// Options come FIRST (a function parameter pack can't be followed by a defaulted arg); the
-// no-options overload defaults them. `token`/`priority` apply as usual. Fire-and-forget or
-// consume the `Task<R>` -- but do NOT block a graph node on it (same rule as single-object async).
-template<typename Fn, typename... Ts>
-    requires (sizeof...(Ts) >= 1)
-auto async(Access_options opts, Fn&& fn, Guarded<Ts>&... objs)
+// Build a multi-object async task: `fn(*objs...)` under an `Access_context` declaring every
+// object (per-arg mode DEDUCED from `Args`, the functor's parameter types), gated on holding all
+// their pipes. The `access`/`async` entry points use this for bare `Guarded<T>&` arguments.
+template<typename Args, std::size_t... I, typename Fn, typename... Ts>
+auto async_build(Access_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... objs)
 {
-    using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
-    static_assert(std::tuple_size_v<Args> == sizeof...(Ts),
-        "multi-object async: functor arity must match the number of Guarded objects");
-    return detail::async_build<Args>(std::move(opts), std::index_sequence_for<Ts...>{},
-        std::forward<Fn>(fn), objs...);
+    using R = std::invoke_result_t<Fn, Ts&...>;
+    auto instances = std::make_tuple(Guarded_access::instance(objs)...);
+
+    auto body = [instances, fn = std::forward<Fn>(fn)]() mutable -> R
+    {
+        Access_context ctx;
+        (ctx.add(static_cast<const void*>(std::get<I>(instances)),
+                 async_mode_of<std::tuple_element_t<I, Args>>()), ...);
+        Access_scope scope(ctx);
+        return fn(*std::get<I>(instances)...);
+    };
+    auto block = make_executable<R>(std::move(body), std::move(opts.token));
+    block->flags.priority = opts.priority;
+
+    Pipe* pipes[] = { &Guarded_access::pipe(objs)... };
+    Access modes[] = { async_mode_of<std::tuple_element_t<I, Args>>()... };
+    return async_dispatch<R>(std::move(block), pipes, modes, sizeof...(Ts));
 }
 
-template<typename Fn, typename... Ts>
-    requires (sizeof...(Ts) >= 1)
-auto async(Fn&& fn, Guarded<Ts>&... objs)
+// The tagged sibling of `async_build`: every argument is an `Access_arg<T, M>` (from
+// `ts::as_read`/`as_write`), so the per-object mode is the tag's `M` -- no `Function_traits`,
+// which lets the functor be a generic lambda. Otherwise identical (same body shape, same
+// dispatch tail).
+template<std::size_t... I, typename Fn, typename... Objs>
+auto async_build_tagged(Access_options opts, std::index_sequence<I...>, Fn&& fn, Objs&&... objs)
 {
-    return async(Access_options{}, std::forward<Fn>(fn), objs...);
+    using R = std::invoke_result_t<Fn, typename std::remove_cvref_t<Objs>::value_type&...>;
+    auto instances = std::make_tuple(Guarded_access::instance(*objs.obj)...);
+
+    auto body = [instances, fn = std::forward<Fn>(fn)]() mutable -> R
+    {
+        Access_context ctx;
+        (ctx.add(static_cast<const void*>(std::get<I>(instances)),
+                 std::remove_cvref_t<Objs>::mode), ...);
+        Access_scope scope(ctx);
+        return fn(*std::get<I>(instances)...);
+    };
+    auto block = make_executable<R>(std::move(body), std::move(opts.token));
+    block->flags.priority = opts.priority;
+
+    Pipe* pipes[] = { &Guarded_access::pipe(*objs.obj)... };
+    Access modes[] = { std::remove_cvref_t<Objs>::mode... };
+    return async_dispatch<R>(std::move(block), pipes, modes, sizeof...(Objs));
+}
+
+} // namespace detail
+
+// Tag an object argument with an explicit access mode, for use with a GENERIC lambda (whose
+// parameter const-ness can't be introspected): `graph.add_node([](auto& p, auto& n){ n.q(p); },
+// ts::as_write(physics), ts::as_read(nav))`, and likewise `ts::access`/`ts::async`. With a
+// NON-generic lambda you don't need these -- the mode is deduced from the parameter const-ness.
+// (Named `as_read`/`as_write` to avoid colliding with the coroutine pipe guards
+// `ts::read_only`/`ts::read_write` in coroutine_support.h.)
+template<typename T>
+detail::Access_arg<T, Access::read_only> as_read(Guarded<T>& g) { return { &g }; }
+template<typename T>
+detail::Access_arg<T, Access::read_write> as_write(Guarded<T>& g) { return { &g }; }
+
+// Multi-object async: run `fn(*obj1, *obj2, ...)` once it holds all the objects. Per-object
+// access is deduced from the functor's parameter const-ness for bare `Guarded<T>&` arguments
+// (`Function_traits`; non-generic lambdas / function pointers), OR taken from an explicit
+// `ts::as_read`/`as_write` tag on every argument (which lets the functor be a GENERIC lambda).
+// The two kinds must not be mixed in one call. Deadlock-free (objects acquired in canonical
+// order). Options come FIRST (a function parameter pack can't be followed by a defaulted arg);
+// the no-options overload defaults them. `token`/`priority` apply as usual. Fire-and-forget or
+// consume the `Task<R>` -- but do NOT block a graph node on it (same rule as single-object async).
+template<typename Fn, typename... Objs>
+    requires (sizeof...(Objs) >= 1) && (detail::Object_arg<Objs> && ...)
+auto async(Access_options opts, Fn&& fn, Objs&&... objs)
+{
+    constexpr bool any_tagged = (detail::is_access_arg_v<Objs> || ...);
+    if constexpr (any_tagged)
+    {
+        static_assert((detail::is_access_arg_v<Objs> && ...),
+            "multi-object async: don't mix tagged (ts::as_read/as_write) and bare Guarded "
+            "arguments -- tag EVERY object argument, or tag none");
+        return detail::async_build_tagged(std::move(opts), std::index_sequence_for<Objs...>{},
+            std::forward<Fn>(fn), std::forward<Objs>(objs)...);
+    }
+    else
+    {
+        using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
+        static_assert(std::tuple_size_v<Args> == sizeof...(Objs),
+            "multi-object async: functor arity must match the number of Guarded objects");
+        return detail::async_build<Args>(std::move(opts), std::index_sequence_for<Objs...>{},
+            std::forward<Fn>(fn), objs...);
+    }
+}
+
+template<typename Fn, typename... Objs>
+    requires (sizeof...(Objs) >= 1) && (detail::Object_arg<Objs> && ...)
+auto async(Fn&& fn, Objs&&... objs)
+{
+    return async(Access_options{}, std::forward<Fn>(fn), std::forward<Objs>(objs)...);
 }
 
 // Multi-object `access`: the opportunistic sibling of `ts::async(fn, objs...)`. NOTE: the
 // multi-object inline fast path is unimplemented, so `access` here currently behaves exactly
 // like `async` (always enqueued) -- unlike single-object `access`, which runs inline when the
 // queue is free. Tracked in docs/TODO.md (Guarded/access). Documented so the difference is not
-// a silent surprise.
-template<typename Fn, typename... Ts>
-    requires (sizeof...(Ts) >= 1)
-auto access(Access_options opts, Fn&& fn, Guarded<Ts>&... objs)
+// a silent surprise. Accepts the same bare-or-tagged arguments as `ts::async`.
+template<typename Fn, typename... Objs>
+    requires (sizeof...(Objs) >= 1) && (detail::Object_arg<Objs> && ...)
+auto access(Access_options opts, Fn&& fn, Objs&&... objs)
 {
-    return async(std::move(opts), std::forward<Fn>(fn), objs...);
+    return async(std::move(opts), std::forward<Fn>(fn), std::forward<Objs>(objs)...);
 }
 
-template<typename Fn, typename... Ts>
-    requires (sizeof...(Ts) >= 1)
-auto access(Fn&& fn, Guarded<Ts>&... objs)
+template<typename Fn, typename... Objs>
+    requires (sizeof...(Objs) >= 1) && (detail::Object_arg<Objs> && ...)
+auto access(Fn&& fn, Objs&&... objs)
 {
-    return async(std::forward<Fn>(fn), objs...);
+    return async(std::forward<Fn>(fn), std::forward<Objs>(objs)...);
 }
 
 // `ts::launch` / `ts::nested` (bare scheduler tasks) live in task.h now — they dispatch

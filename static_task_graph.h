@@ -75,19 +75,35 @@ public:
     Static_task_graph(Static_task_graph&&) noexcept;
     Static_task_graph& operator=(Static_task_graph&&) noexcept;
 
-    // Add a node: functor + the `Guarded<>` instances it accesses. Per-object
-    // access mode is deduced from the functor's parameter const-ness
+    // Add a node: functor + the `Guarded<>` instances it accesses. Per-object access mode is
+    // deduced from the functor's parameter const-ness:
     //   add_node([](Physics& p, const Nav& n){ ... }, physics, nav);   // p:write, n:read
-    // Returns a `Graph_node` ordering handle (`after`/`before`).
-    template<typename Fn, typename... Ts>
-    Graph_node add_node(Fn&& fn, Guarded<Ts>&... access)
+    // A GENERIC lambda (`[](auto& p, auto& n){...}`) has no introspectable parameter const-ness,
+    // so tag every object with an explicit mode instead:
+    //   add_node([](auto& p, auto& n){ n.query(p); }, ts::as_write(physics), ts::as_read(nav));
+    // Don't mix tagged and bare arguments in one node. Returns a `Graph_node` ordering handle.
+    template<typename Fn, typename... Objs>
+        requires (detail::Object_arg<Objs> && ...)
+    Graph_node add_node(Fn&& fn, Objs&&... objs)
     {
-        using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
-        static_assert(std::tuple_size_v<Args> == sizeof...(Ts),
-            "node functor arity must match the number of Guarded arguments");
-
         Node node;
-        fill_node<Args>(node, std::index_sequence_for<Ts...>{}, std::forward<Fn>(fn), access...);
+        constexpr bool any_tagged = (detail::is_access_arg_v<Objs> || ...);
+        if constexpr (any_tagged)
+        {
+            static_assert((detail::is_access_arg_v<Objs> && ...),
+                "add_node: don't mix tagged (ts::as_read/as_write) and bare Guarded arguments "
+                "-- tag EVERY object argument (for a generic lambda), or tag none");
+            fill_node_tagged(node, std::index_sequence_for<Objs...>{},
+                std::forward<Fn>(fn), std::forward<Objs>(objs)...);
+        }
+        else
+        {
+            using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
+            static_assert(std::tuple_size_v<Args> == sizeof...(Objs),
+                "node functor arity must match the number of Guarded arguments");
+            fill_node<Args>(node, std::index_sequence_for<Objs...>{},
+                std::forward<Fn>(fn), objs...);
+        }
 
         int index = static_cast<int>(nodes_.size());
         nodes_.push_back(std::move(node));
@@ -152,6 +168,34 @@ private:
             Access_context ctx;
             (ctx.add(static_cast<const void*>(std::get<I>(instances)),
                      mode_of<std::tuple_element_t<I, Args>>()), ...);
+            Access_scope scope(ctx);
+            fn(*std::get<I>(instances)...);
+        };
+    }
+
+    // The tagged sibling of `fill_node`: every `objs` is an `Access_arg<T, M>` (from
+    // `ts::as_read`/`as_write`), so the per-object mode is the tag's `M` -- no `Function_traits`,
+    // which lets the functor be a generic lambda. Builds `node.access`/`node.pipes`/`node.run`
+    // identically to `fill_node`, so `compile()` derives the same edges and exclusion.
+    template<std::size_t... I, typename Fn, typename... Objs>
+    void fill_node_tagged(Node& node, std::index_sequence<I...>, Fn&& fn, Objs&&... objs)
+    {
+        auto instances = std::make_tuple(&objs.obj->instance_...);
+
+        node.access = {
+            std::pair<const void*, Access>{
+                static_cast<const void*>(std::get<I>(instances)),
+                std::remove_cvref_t<Objs>::mode
+            }...
+        };
+
+        node.pipes = { (&objs.obj->pipe_)... };
+
+        node.run = [fn = std::forward<Fn>(fn), instances]() mutable
+        {
+            Access_context ctx;
+            (ctx.add(static_cast<const void*>(std::get<I>(instances)),
+                     std::remove_cvref_t<Objs>::mode), ...);
             Access_scope scope(ctx);
             fn(*std::get<I>(instances)...);
         };

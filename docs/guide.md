@@ -112,6 +112,20 @@ graph.add_node([](Physics& p, const Nav& n) { /* writes p, reads n */ },
 This one convention drives everything: the pipe's reader/writer admission,
 the graph's derived ordering edges, and the harness's grants.
 
+A **generic lambda** (`[](auto& p, auto& n){...}`) has no fixed parameter
+const-ness to introspect, so const-ness deduction can't see whether each object
+is read or written. Declare the mode explicitly instead, by tagging every object
+with `ts::as_read`/`ts::as_write`:
+
+```cpp
+graph.add_node([](auto& p, auto& n) { n.query(p); },
+               ts::as_write(physics), ts::as_read(nav));
+```
+
+The tags work anywhere access is deduced from parameters — `add_node` and the
+multi-object `ts::access`/`ts::async` (§5.1). Tag every object in the call or
+none; mixing tagged and bare arguments is a compile error.
+
 ### 3.2 The harness
 
 Checking is opt-in per type: you instrument the methods of a guarded type
@@ -376,9 +390,9 @@ Semantics of the per-object pipe:
 - **Non-blocking**: submission never blocks the caller; completion drives
   admission.
 
-Options are the same `ts::Task_options` as `then` — `{ .token, .priority }`
-apply to `access` and `async` alike (a cancellation token, a scheduling
-priority). Two notes:
+Options are `ts::Access_options` — `{ .token, .priority }` apply to `access`
+and `async` alike (a cancellation token, a scheduling priority). There is no
+`run_inline` option: the verb chooses inline-vs-scheduled. Two notes:
 
 - Whether a functor may run inline is chosen by the verb (`access` vs `async`),
   not by an option. From inside a graph node, prefer `async` for anything
@@ -406,6 +420,14 @@ as always. The library acquires the pipes in a canonical global order and holds
 them for the body — the standard deadlock-free discipline, shared with the
 static graph, so dynamic multi-object work and graph nodes can never deadlock
 each other.
+
+For a **generic lambda** (`[](auto&...)`), whose parameter const-ness can't be
+introspected, tag every object with `ts::as_read`/`ts::as_write` instead (§3.1):
+
+```cpp
+ts::access([](auto& p, auto& r) { r.mirror(p); },
+           ts::as_read(physics), ts::as_write(render));
+```
 
 ### 5.2 What `Guarded` is not
 
@@ -767,7 +789,9 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
   — researched, primitives designed (gather/apply mailboxes, interaction
   coloring), not yet shipped.
 - **Generic lambdas** in access-deduced positions (`add_node`, `access`,
-  `async`) are not supported — parameter const-ness must be introspectable.
+  `async`) need explicit `ts::as_read`/`ts::as_write` tags on every object
+  (§3.1) — a generic lambda's parameter const-ness can't be introspected, so
+  the mode is declared rather than deduced.
 
 ---
 

@@ -42,6 +42,46 @@ void test_access_ordering()
     TS_CHECK(read_value(c) == 11);
 }
 
+// Generic-lambda nodes: `[](auto&...)` has no introspectable parameter const-ness, so mode is
+// declared with `ts::as_read`/`as_write` tags. Same graph shape as `test_access_ordering`; the
+// tagged modes must derive the SAME edges (write-then-read chain), proven by the propagated
+// values.
+void test_generic_lambda_node()
+{
+    ts::Guarded<int> a{ 0 }, b{ 0 }, c{ 0 };
+
+    ts::Static_task_graph g;
+    g.add_node([](auto& x) { x = 1; }, ts::as_write(a));
+    g.add_node([](auto& x, auto& y) { y = x * 10; }, ts::as_read(a), ts::as_write(b));
+    g.add_node([](auto& x, auto& y, auto& z) { z = x + y; },
+               ts::as_read(a), ts::as_read(b), ts::as_write(c));
+    g.compile();
+
+    g.execute().sync();
+    TS_CHECK(read_value(a) == 1);
+    TS_CHECK(read_value(b) == 10);
+    TS_CHECK(read_value(c) == 11);   // ordering held -> tagged modes derived the same edges
+}
+
+// `ts::as_read` tags produce read access: two generic-lambda reader nodes on the same object
+// run concurrently (a writer orders before them), matching the non-generic reader-overlap
+// behavior.
+void test_generic_lambda_readers_overlap()
+{
+    ts::Guarded<int> x{ 0 }, y{ 0 }, z{ 0 };
+    tests::Parallel_gate gate{ 2 };
+
+    ts::Static_task_graph g;
+    g.add_node([](auto& v) { v = 1; }, ts::as_write(x));
+    g.add_node([&gate](auto& xv, auto& yv) { gate.arrive(); yv = xv; }, ts::as_read(x), ts::as_write(y));
+    g.add_node([&gate](auto& xv, auto& zv) { gate.arrive(); zv = xv; }, ts::as_read(x), ts::as_write(z));
+    g.compile();
+
+    g.execute().sync();
+    TS_CHECK(read_value(y) == 1 && read_value(z) == 1);   // both read the writer's value
+    TS_CHECK(gate.met());                                 // the two readers ran concurrently
+}
+
 void test_explicit_ordering()
 {
     ts::Guarded<int> p{ 0 }, q{ 0 };
@@ -339,6 +379,8 @@ void run_graph_tests()
 {
     std::printf("\n[graph] tests\n");
     run("access ordering", test_access_ordering);
+    run("generic-lambda node", test_generic_lambda_node);
+    run("generic-lambda readers overlap", test_generic_lambda_readers_overlap);
     run("explicit ordering", test_explicit_ordering);
     run("independent parallel", test_independent_parallel);
     run("re-run counts", test_re_run_counts);
