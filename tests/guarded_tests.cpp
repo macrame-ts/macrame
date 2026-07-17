@@ -43,6 +43,25 @@ static_assert(Async_on_const<int, Read_fn>);
 static_assert(!Async_on_const<int, Write_fn>, "write must not be callable through a const handle");
 static_assert(!std::is_copy_constructible_v<ts::Guarded<int>>);
 static_assert(!std::is_move_constructible_v<ts::Guarded<int>>);
+
+// Generic (probed) classification: `auto&` = write (an rvalue cannot bind it), so it must not
+// be callable through a const handle; `const auto&` = read, so it must be.
+using Generic_write = decltype([](auto& v) { ++v; });
+using Generic_read = decltype([](const auto& v) { (void)v; });
+static_assert(Async_on_mutable<int, Generic_write>);
+static_assert(!Async_on_const<int, Generic_write>, "generic write probes read_write");
+static_assert(Async_on_const<int, Generic_read>, "generic const read probes read_only");
+
+#if 0   // Compile-time rejections, kept for documentation -- each of these must NOT compile:
+void must_not_compile(ts::Guarded<int>& g)
+{
+    g.async([](int v) { ++v; });            // by-value resource param: static_assert (a copy
+                                            // would silently discard the writes)
+    g.async([](int&& v) { (void)v; });      // rvalue-ref resource param: static_assert
+    g.async([](const auto& v) { ++v; });    // mutating body under a read classification:
+                                            // read bodies receive `const T&`
+}
+#endif
 static_assert(std::is_same_v<
     decltype(std::declval<ts::Guarded<int>&>().async(std::declval<Int_read>())), ts::Task<int>>);
 static_assert(std::is_same_v<
@@ -181,6 +200,36 @@ void test_independent_objects_parallel()
     ta.sync();
     tb.sync();
     TS_CHECK(gate.met());   // separate pipes ran concurrently
+}
+
+// --- D: generic (probed) accessors ----------------------------------------
+// No tags: a generic `[](const auto&)` probes read_only (it binds an rvalue), `[](auto&)`
+// probes read_write (it cannot). Same admission behavior as the spelled-out forms.
+
+void test_generic_readers_overlap()
+{
+    tests::Parallel_gate gate{ 2 };
+    ts::Guarded<int> data{ 7 };
+    std::vector<ts::Task<int>> tasks;
+
+    for (int i = 0; i < 8; ++i)
+        tasks.push_back(data.async([&gate](const auto& v)
+        {
+            gate.arrive();
+            return v;
+        }));
+
+    for (auto& t : tasks)
+        t.sync();
+    TS_CHECK(gate.met());   // probed read_only: readers ran concurrently
+}
+
+void test_generic_writer_serializes()
+{
+    ts::Guarded<int> d{ 0 };
+    for (int i = 0; i < 200; ++i)
+        d.async([](auto& v) { ++v; });   // probed read_write: exclusive, all land
+    TS_CHECK(read_value(d) == 200);
 }
 
 void test_reentrant_same_object()
@@ -327,6 +376,8 @@ void run_guarded_tests()
     run("writer exclusion", test_writer_exclusion);
     run("reader after writer", test_reader_after_writer);
     run("independent objects parallel", test_independent_objects_parallel);
+    run("generic readers overlap", test_generic_readers_overlap);
+    run("generic writer serializes", test_generic_writer_serializes);
     run("reentrant same object", test_reentrant_same_object);
     run("reentrant other object", test_reentrant_other_object);
     run("pipe stress", test_pipe_stress);

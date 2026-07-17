@@ -75,13 +75,14 @@ public:
     Static_task_graph(Static_task_graph&&) noexcept;
     Static_task_graph& operator=(Static_task_graph&&) noexcept;
 
-    // Add a node: functor + the `Guarded<>` instances it accesses. Per-object access mode is
-    // deduced from the functor's parameter const-ness:
+    // Add a node: functor + the `Guarded<>` instances it accesses. Per-object access mode, one
+    // rule (same as `Guarded::access`): parameter const-ness for a non-generic functor
     //   add_node([](Physics& p, const Nav& n){ ... }, physics, nav);   // p:write, n:read
-    // A GENERIC lambda (`[](auto& p, auto& n){...}`) has no introspectable parameter const-ness,
-    // so tag every object with an explicit mode instead:
-    //   add_node([](auto& p, auto& n){ n.query(p); }, ts::as_read_write(physics), ts::as_read_only(nav));
-    // Don't mix tagged and bare arguments in one node. Returns a `Graph_node` ordering handle.
+    // (by-value / `T&&` resource parameters are rejected); the rvalue probe for a GENERIC one
+    //   add_node([](const auto& p, auto& a){ a.pose(p); }, physics, anim);   // p:read, a:write
+    // or explicit `ts::as_read_only`/`as_read_write` tags on every object (don't mix tagged and
+    // bare in one node). Read positions receive `const T&`, so a mutating body under a read
+    // classification does not compile. Returns a `Graph_node` ordering handle.
     template<typename Fn, typename... Objs>
         requires (detail::Object_arg<Objs> && ...)
     Graph_node add_node(Fn&& fn, Objs&&... objs)
@@ -92,16 +93,21 @@ public:
         {
             static_assert((detail::is_access_arg_v<Objs> && ...),
                 "add_node: don't mix tagged (ts::as_read_only/as_read_write) and bare Guarded arguments "
-                "-- tag EVERY object argument (for a generic lambda), or tag none");
+                "-- tag EVERY object argument, or tag none");
             fill_node_tagged(node, std::index_sequence_for<Objs...>{},
                 std::forward<Fn>(fn), std::forward<Objs>(objs)...);
         }
-        else
+        else if constexpr (detail::introspectable_v<Fn>)
         {
             using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
             static_assert(std::tuple_size_v<Args> == sizeof...(Objs),
                 "node functor arity must match the number of Guarded arguments");
             fill_node<Args>(node, std::index_sequence_for<Objs...>{},
+                std::forward<Fn>(fn), objs...);
+        }
+        else
+        {
+            fill_node_probed(node, std::index_sequence_for<Objs...>{},
                 std::forward<Fn>(fn), objs...);
         }
 
@@ -143,21 +149,19 @@ private:
 
     struct Run_state;
 
-    template<typename Arg>
-    static constexpr Access mode_of()
-    {
-        return std::is_const_v<std::remove_reference_t<Arg>> ? Access::read_only : Access::read_write;
-    }
-
-    template<typename Args, std::size_t... I, typename Fn, typename... Ts>
-    void fill_node(Node& node, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... access)
+    // The one node builder: access list, pipes, and the body from the per-object
+    // (compile-time) `Modes...`. Read positions are invoked with `const T&` (`mode_ref`), so a
+    // mutating body under a read classification fails to compile -- structural, on top of the
+    // harness. The deduced / probed / tagged wrappers below differ only in the `Modes` source,
+    // so `compile()` derives identical edges and exclusion for all three.
+    template<Access... Modes, std::size_t... I, typename Fn, typename... Ts>
+    void fill_node_modes(Node& node, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... access)
     {
         auto instances = std::make_tuple(&access.instance_...);
 
         node.access = {
             std::pair<const void*, Access>{
-                static_cast<const void*>(std::get<I>(instances)),
-                mode_of<std::tuple_element_t<I, Args>>()
+                static_cast<const void*>(std::get<I>(instances)), Modes
             }...
         };
 
@@ -166,39 +170,43 @@ private:
         node.run = [fn = std::forward<Fn>(fn), instances]() mutable
         {
             Access_context ctx;
-            (ctx.add(static_cast<const void*>(std::get<I>(instances)),
-                     mode_of<std::tuple_element_t<I, Args>>()), ...);
+            (ctx.add(static_cast<const void*>(std::get<I>(instances)), Modes), ...);
             Access_scope scope(ctx);
-            fn(*std::get<I>(instances)...);
+            fn(detail::mode_ref<Modes>(std::get<I>(instances))...);
         };
     }
 
-    // The tagged sibling of `fill_node`: every `objs` is an `Access_arg<T, M>` (from
-    // `ts::as_read_only`/`as_read_write`), so the per-object mode is the tag's `M` -- no `Function_traits`,
-    // which lets the functor be a generic lambda. Builds `node.access`/`node.pipes`/`node.run`
-    // identically to `fill_node`, so `compile()` derives the same edges and exclusion.
-    template<std::size_t... I, typename Fn, typename... Objs>
-    void fill_node_tagged(Node& node, std::index_sequence<I...>, Fn&& fn, Objs&&... objs)
+    // Deduced (bare args, introspectable functor): modes from parameter const-ness; by-value /
+    // rvalue-ref resource parameters rejected.
+    template<typename Args, std::size_t... I, typename Fn, typename... Ts>
+    void fill_node(Node& node, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... access)
     {
-        auto instances = std::make_tuple(&objs.obj->instance_...);
+        static_assert((std::is_lvalue_reference_v<std::tuple_element_t<I, Args>> && ...),
+            "a guarded-resource parameter must be `T&` or `const T&`: taking it by value copies "
+            "the resource (writes hit the copy and are silently discarded), and `T&&` cannot "
+            "bind the stored instance");
+        fill_node_modes<detail::async_mode_of<std::tuple_element_t<I, Args>>()...>(
+            node, seq, std::forward<Fn>(fn), access...);
+    }
 
-        node.access = {
-            std::pair<const void*, Access>{
-                static_cast<const void*>(std::get<I>(instances)),
-                std::remove_cvref_t<Objs>::mode
-            }...
-        };
+    // Probed (bare args, GENERIC functor): modes from the per-position rvalue probe --
+    // `const auto&`/`auto&&` = read, `auto&` = write. No tags needed.
+    template<std::size_t... I, typename Fn, typename... Ts>
+    void fill_node_probed(Node& node, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... access)
+    {
+        static_assert(std::invocable<Fn, Ts&...>,
+            "node functor parameters must match the Guarded arguments "
+            "(same arity, each taken by reference)");
+        fill_node_modes<detail::probed_mode<Fn, I, Ts...>()...>(
+            node, seq, std::forward<Fn>(fn), access...);
+    }
 
-        node.pipes = { (&objs.obj->pipe_)... };
-
-        node.run = [fn = std::forward<Fn>(fn), instances]() mutable
-        {
-            Access_context ctx;
-            (ctx.add(static_cast<const void*>(std::get<I>(instances)),
-                     std::remove_cvref_t<Objs>::mode), ...);
-            Access_scope scope(ctx);
-            fn(*std::get<I>(instances)...);
-        };
+    // Tagged (`ts::as_read_only`/`as_read_write` on every arg): modes from the tags.
+    template<std::size_t... I, typename Fn, typename... Objs>
+    void fill_node_tagged(Node& node, std::index_sequence<I...> seq, Fn&& fn, Objs&&... objs)
+    {
+        fill_node_modes<std::remove_cvref_t<Objs>::mode...>(
+            node, seq, std::forward<Fn>(fn), *objs.obj...);
     }
 
     void add_edge(int prerequisite, int successor);

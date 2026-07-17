@@ -95,14 +95,96 @@ template<typename C, typename R, typename... A>
 struct Function_traits<R(C::*)(A...)> { using args = std::tuple<A...>; };
 template<typename C, typename R, typename... A>
 struct Function_traits<R(C::*)(A...) const> { using args = std::tuple<A...>; };
+template<typename C, typename R, typename... A>
+struct Function_traits<R(C::*)(A...) noexcept> { using args = std::tuple<A...>; };
+template<typename C, typename R, typename... A>
+struct Function_traits<R(C::*)(A...) const noexcept> { using args = std::tuple<A...>; };
 template<typename R, typename... A>
 struct Function_traits<R(*)(A...)> { using args = std::tuple<A...>; };
+template<typename R, typename... A>
+struct Function_traits<R(*)(A...) noexcept> { using args = std::tuple<A...>; };
 
 // `read_only` for a `const T&` parameter, `read_write` otherwise.
 template<typename Arg>
 constexpr Access async_mode_of()
 {
     return std::is_const_v<std::remove_reference_t<Arg>> ? Access::read_only : Access::read_write;
+}
+
+// SFINAE-friendly introspectability: a class with a single, non-template `operator()` (or a
+// function pointer/reference). A generic lambda's `operator()` is a TEMPLATE -- taking its
+// address without arguments is ill-formed -- so it lands in the `false` case and access modes
+// are classified by the rvalue probe below instead of `Function_traits`.
+template<typename Fn, typename = void>
+struct has_introspectable_call : std::false_type {};
+template<typename Fn>
+struct has_introspectable_call<Fn, std::void_t<decltype(&Fn::operator())>> : std::true_type {};
+
+template<typename Fn>
+inline constexpr bool introspectable_v =
+    has_introspectable_call<std::remove_cvref_t<Fn>>::value
+    || std::is_function_v<std::remove_pointer_t<std::remove_cvref_t<Fn>>>;
+
+// Rvalue-bindability probe for GENERIC functors: position `P` gets an rvalue `T&&`, every
+// other position an lvalue `T&`. `auto&` cannot bind an rvalue ([temp.deduct.call]) ->
+// `read_write`; `const auto&` / `auto&&` can -> `read_only`. Declaration-level only -- the
+// body is never instantiated by the probe, so this is exact and SFINAE-safe. (An `auto&&`
+// parameter that mutates is mis-probed as a read, but Part of the same design makes that a
+// compile error: read positions are invoked with `const T&`, so `auto&&` deduces `const T&`
+// and the mutation fails to compile. The one undetectable residual is an `auto` BY-VALUE
+// parameter -- it probes as a read and copies; writes hit the copy. Documented in the guide.)
+template<std::size_t P, std::size_t K, typename T>
+using Probe_arg_t = std::conditional_t<P == K, T&&, T&>;
+
+template<typename Fn, std::size_t P, typename... Ts, std::size_t... K>
+constexpr bool probe_binds_rvalue(std::index_sequence<K...>)
+{
+    return std::invocable<Fn, Probe_arg_t<P, K, Ts>...>;
+}
+
+template<typename Fn, std::size_t P, typename... Ts>
+constexpr Access probed_mode()
+{
+    return probe_binds_rvalue<Fn, P, Ts...>(std::index_sequence_for<Ts...>{})
+        ? Access::read_only : Access::read_write;
+}
+
+// Per-position access-corrected reference: a read position hands the body `const T&`, so a
+// mutating body under a read classification fails to COMPILE (structural const-correctness,
+// on top of the runtime harness); a write position hands `T&`.
+template<Access M, typename T>
+using Mode_ref_t = std::conditional_t<M == Access::read_only, const T&, T&>;
+
+template<Access M, typename T>
+constexpr Mode_ref_t<M, T> mode_ref(T* p) { return *p; }
+
+// Deduced access mode of a single-object accessor `Fn` against payload `T`:
+//  - introspectable (non-generic lambda / functor / function pointer): the resource
+//    parameter's const-ness decides -- `const T&` = read_only, `T&` = read_write. A by-value
+//    or rvalue-ref resource parameter is rejected outright.
+//  - generic (templated `operator()`): the rvalue probe -- `const auto&`/`auto&&` = read_only,
+//    `auto&` = read_write. Token-arity aware (a trailing `Cancellation_token` is allowed).
+template<typename Fn, typename T>
+constexpr Access accessor_mode()
+{
+    if constexpr (introspectable_v<Fn>)
+    {
+        using Args = typename Function_traits<std::decay_t<Fn>>::args;
+        static_assert(std::tuple_size_v<Args> >= 1,
+            "a guarded accessor must take the resource as its first parameter");
+        using Arg0 = std::tuple_element_t<0, Args>;
+        static_assert(std::is_lvalue_reference_v<Arg0>,
+            "a guarded-resource parameter must be `T&` or `const T&`: taking it by value copies "
+            "the resource (writes hit the copy and are silently discarded), and `T&&` cannot "
+            "bind the stored instance");
+        return async_mode_of<Arg0>();
+    }
+    else
+    {
+        return (std::invocable<Fn, T&&>
+                || std::invocable<Fn, T&&, const Cancellation_token&>)
+            ? Access::read_only : Access::read_write;
+    }
 }
 
 // The pipes a multi-object async acquired (canonical / pipe-address order, deduped
@@ -141,24 +223,37 @@ concept Async_accessor = std::invocable<Fn, A> || std::invocable<Fn, A, const Ca
 template<typename Fn, typename A>
 inline constexpr bool accessor_takes_token_v = std::invocable<Fn, A, const Cancellation_token&>;
 
-// Result type of an accessor, picking the token-taking overload when present. Guarded by
-// an outer `Invocable` layer: forming `Async_result_t` for a NON-invocable (Fn, A) yields a
-// benign `void` instead of hard-instantiating `invoke_result_t` on a bad combination. MSVC
-// evaluates a *rejected* overload's trailing return type (the other access mode's
-// `Async_result_t<Fn, const T&>` for a write lambda) during overload resolution, where clang
-// SFINAEs it away; without this guard MSVC hard-errors (C2794/C2938).
+// Result type of an accessor, picking the token-taking overload when present.
 template<typename Fn, typename A, bool = accessor_takes_token_v<Fn, A>>
 struct Async_result_sel { using type = std::invoke_result_t<Fn, A, const Cancellation_token&>; };
 template<typename Fn, typename A>
 struct Async_result_sel<Fn, A, false> { using type = std::invoke_result_t<Fn, A>; };
 
+// Result type for the `M`-mode accessor overload, guarded twice. It is `void` (benign) unless
+// the functor is invocable AND actually CLASSIFIES as `M` -- so a rejected overload's trailing
+// return type never computes `invoke_result_t`. Two hard errors hide behind an unguarded
+// compute: MSVC evaluates a rejected overload's return type during overload resolution where
+// clang SFINAEs it away (C2794/C2938 on a non-invocable combination), and for a GENERIC lambda
+// a deduced return type requires instantiating the BODY -- instantiating a mutating body
+// against `const T&` would hard-error inside the overload that was never going to be chosen.
+// LAYERED on purpose (not one `&&` expression): MSVC eagerly satisfies a concept-id in a
+// default template argument even when the left operand of `&&` is already false, which would
+// re-trigger the body instantiation the mode gate exists to prevent. Specialization makes the
+// invocability probe structurally unreachable on a mode mismatch.
 template<typename Fn, typename A,
          bool = std::invocable<Fn, A> || accessor_takes_token_v<Fn, A>>
-struct Async_result { using type = void; };
+struct Accessor_result_checked { using type = void; };
 template<typename Fn, typename A>
-struct Async_result<Fn, A, true> : Async_result_sel<Fn, A> {};
+struct Accessor_result_checked<Fn, A, true> : Async_result_sel<Fn, A> {};
 
-template<typename Fn, typename A> using Async_result_t = typename Async_result<Fn, A>::type;
+template<typename Fn, typename T, Access M,
+         bool = (accessor_mode<Fn, T>() == M)>   // gate FIRST: classifies without body instantiation
+struct Accessor_result { using type = void; };
+template<typename Fn, typename T, Access M>
+struct Accessor_result<Fn, T, M, true> : Accessor_result_checked<Fn, Mode_ref_t<M, T>> {};
+
+template<typename Fn, typename T, Access M>
+using Accessor_result_t = typename Accessor_result<Fn, T, M>::type;
 
 } // namespace detail
 
@@ -214,8 +309,14 @@ public:
     Guarded& operator=(const Guarded&) = delete;
 
     // Two verbs run a functor under this object's access. Both deduce the mode from the
-    // functor's parameter const-ness -- `T&` = read_write (exclusive), `const T&` = read_only
-    // (concurrent readers) -- accept a trailing `Cancellation_token` accessor, and take
+    // functor's resource parameter -- ONE rule, generic lambdas included:
+    //   `T&` / `auto&`               -> read_write (exclusive)
+    //   `const T&` / `const auto&`   -> read_only (concurrent readers)
+    //   by value or `T&&`            -> rejected (a copy silently discards writes)
+    //   `auto&&`                     -> read_only (probed); a mutating body then fails to
+    //                                  compile (read bodies receive `const T&`)
+    // Non-generic functors are introspected (`accessor_mode`); generic ones are classified by
+    // the rvalue-bindability probe. Both accept a trailing `Cancellation_token`, and take
     // `Access_options` = `{token, priority}` (no `run_inline`: the verb IS the mode).
     //
     //   access(fn) -- opportunistic: runs `fn` on the CALLING thread when the pipe is free right
@@ -224,43 +325,54 @@ public:
     //                 so prefer `async` for anything non-trivial inside a graph node.
     //   async(fn)  -- always enqueued off the calling thread. For heavy functors.
 
-    // access, read_write: functor takes `T&` (and not `const T&`), optionally + a trailing token.
+    // Constraint ORDER is load-bearing in all four overloads: the mode check comes first so
+    // that `Async_accessor` (an invocability probe) is never evaluated for the wrong mode --
+    // probing a GENERIC lambda's invocability with `const T&` deduces its return type, which
+    // instantiates the BODY; for a mutating body that is a hard error, not a substitution
+    // failure. `accessor_mode` classifies without ever instantiating a body (rvalue probe /
+    // introspection), so it is the safe gate.
+
+    // access, read_write.
     template<typename Fn>
-        requires detail::Async_accessor<Fn, T&> && (!detail::Async_accessor<Fn, const T&>)
+        requires (detail::accessor_mode<Fn, T>() == Access::read_write)
+            && detail::Async_accessor<Fn, T&>
     auto access(Fn&& fn, Access_options opts = {})
-        -> Task<detail::Async_result_t<Fn, T&>>
+        -> Task<detail::Accessor_result_t<Fn, T, Access::read_write>>
     {
-        return launch<detail::Async_result_t<Fn, T&>, Access::read_write>(
+        return launch<detail::Accessor_result_t<Fn, T, Access::read_write>, Access::read_write>(
             &instance_, std::forward<Fn>(fn), opts, /*try_inline=*/true);
     }
 
-    // access, read_only: functor takes `const T&`, optionally + a trailing token.
+    // access, read_only.
     template<typename Fn>
-        requires detail::Async_accessor<Fn, const T&>
+        requires (detail::accessor_mode<Fn, T>() == Access::read_only)
+            && detail::Async_accessor<Fn, const T&>
     auto access(Fn&& fn, Access_options opts = {}) const
-        -> Task<detail::Async_result_t<Fn, const T&>>
+        -> Task<detail::Accessor_result_t<Fn, T, Access::read_only>>
     {
-        return launch<detail::Async_result_t<Fn, const T&>, Access::read_only>(
+        return launch<detail::Accessor_result_t<Fn, T, Access::read_only>, Access::read_only>(
             &instance_, std::forward<Fn>(fn), opts, /*try_inline=*/true);
     }
 
     // async, read_write: always enqueued (never inline).
     template<typename Fn>
-        requires detail::Async_accessor<Fn, T&> && (!detail::Async_accessor<Fn, const T&>)
+        requires (detail::accessor_mode<Fn, T>() == Access::read_write)
+            && detail::Async_accessor<Fn, T&>
     auto async(Fn&& fn, Access_options opts = {})
-        -> Task<detail::Async_result_t<Fn, T&>>
+        -> Task<detail::Accessor_result_t<Fn, T, Access::read_write>>
     {
-        return launch<detail::Async_result_t<Fn, T&>, Access::read_write>(
+        return launch<detail::Accessor_result_t<Fn, T, Access::read_write>, Access::read_write>(
             &instance_, std::forward<Fn>(fn), opts, /*try_inline=*/false);
     }
 
     // async, read_only: always enqueued (never inline).
     template<typename Fn>
-        requires detail::Async_accessor<Fn, const T&>
+        requires (detail::accessor_mode<Fn, T>() == Access::read_only)
+            && detail::Async_accessor<Fn, const T&>
     auto async(Fn&& fn, Access_options opts = {}) const
-        -> Task<detail::Async_result_t<Fn, const T&>>
+        -> Task<detail::Accessor_result_t<Fn, T, Access::read_only>>
     {
-        return launch<detail::Async_result_t<Fn, const T&>, Access::read_only>(
+        return launch<detail::Accessor_result_t<Fn, T, Access::read_only>, Access::read_only>(
             &instance_, std::forward<Fn>(fn), opts, /*try_inline=*/false);
     }
 
@@ -382,78 +494,90 @@ Task<R> async_dispatch(Task_ptr block, Pipe* const* pipes, const Access* modes, 
     return result;
 }
 
-// Build a multi-object async task: `fn(*objs...)` under an `Access_context` declaring every
-// object (per-arg mode DEDUCED from `Args`, the functor's parameter types), gated on holding all
-// their pipes. The `access`/`async` entry points use this for bare `Guarded<T>&` arguments.
-template<typename Args, std::size_t... I, typename Fn, typename... Ts>
-auto async_build(Access_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... objs)
+// The one multi-object builder: `fn(...)` under an `Access_context` declaring every object at
+// its (compile-time) `Modes...`, gated on holding all their pipes. Read positions are invoked
+// with `const T&` (`mode_ref`) so a mutating body under a read classification fails to compile.
+// The deduced / probed / tagged entry paths differ only in where `Modes...` come from.
+template<Access... Modes, std::size_t... I, typename Fn, typename... Ts>
+auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... objs)
 {
-    using R = std::invoke_result_t<Fn, Ts&...>;
+    using R = std::invoke_result_t<Fn, Mode_ref_t<Modes, Ts>...>;
     auto instances = std::make_tuple(Guarded_access::instance(objs)...);
 
     auto body = [instances, fn = std::forward<Fn>(fn)]() mutable -> R
     {
         Access_context ctx;
-        (ctx.add(static_cast<const void*>(std::get<I>(instances)),
-                 async_mode_of<std::tuple_element_t<I, Args>>()), ...);
+        (ctx.add(static_cast<const void*>(std::get<I>(instances)), Modes), ...);
         Access_scope scope(ctx);
-        return fn(*std::get<I>(instances)...);
+        return fn(mode_ref<Modes>(std::get<I>(instances))...);
     };
     auto block = make_executable<R>(std::move(body), std::move(opts.token));
     block->flags.priority = opts.priority;
 
     Pipe* pipes[] = { &Guarded_access::pipe(objs)... };
-    Access modes[] = { async_mode_of<std::tuple_element_t<I, Args>>()... };
+    Access modes[] = { Modes... };
     return async_dispatch<R>(std::move(block), pipes, modes, sizeof...(Ts));
 }
 
-// The tagged sibling of `async_build`: every argument is an `Access_arg<T, M>` (from
-// `ts::as_read_only`/`as_read_write`), so the per-object mode is the tag's `M` -- no `Function_traits`,
-// which lets the functor be a generic lambda. Otherwise identical (same body shape, same
-// dispatch tail).
-template<std::size_t... I, typename Fn, typename... Objs>
-auto async_build_tagged(Access_options opts, std::index_sequence<I...>, Fn&& fn, Objs&&... objs)
+// Deduced path (bare args, introspectable functor): modes from the functor's parameter
+// const-ness; by-value / rvalue-ref resource parameters rejected.
+template<typename Args, std::size_t... I, typename Fn, typename... Ts>
+auto async_build(Access_options opts, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... objs)
 {
-    using R = std::invoke_result_t<Fn, typename std::remove_cvref_t<Objs>::value_type&...>;
-    auto instances = std::make_tuple(Guarded_access::instance(*objs.obj)...);
+    static_assert((std::is_lvalue_reference_v<std::tuple_element_t<I, Args>> && ...),
+        "a guarded-resource parameter must be `T&` or `const T&`: taking it by value copies "
+        "the resource (writes hit the copy and are silently discarded), and `T&&` cannot "
+        "bind the stored instance");
+    return async_build_modes<async_mode_of<std::tuple_element_t<I, Args>>()...>(
+        std::move(opts), seq, std::forward<Fn>(fn), objs...);
+}
 
-    auto body = [instances, fn = std::forward<Fn>(fn)]() mutable -> R
-    {
-        Access_context ctx;
-        (ctx.add(static_cast<const void*>(std::get<I>(instances)),
-                 std::remove_cvref_t<Objs>::mode), ...);
-        Access_scope scope(ctx);
-        return fn(*std::get<I>(instances)...);
-    };
-    auto block = make_executable<R>(std::move(body), std::move(opts.token));
-    block->flags.priority = opts.priority;
+// Probed path (bare args, GENERIC functor): modes from the per-position rvalue probe --
+// `const auto&`/`auto&&` = read, `auto&` = write. No tags needed.
+template<std::size_t... I, typename Fn, typename... Ts>
+auto async_build_probed(Access_options opts, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... objs)
+{
+    static_assert(std::invocable<Fn, Ts&...>,
+        "multi-object access/async: functor parameters must match the Guarded objects "
+        "(same arity, each taken by reference)");
+    return async_build_modes<probed_mode<Fn, I, Ts...>()...>(
+        std::move(opts), seq, std::forward<Fn>(fn), objs...);
+}
 
-    Pipe* pipes[] = { &Guarded_access::pipe(*objs.obj)... };
-    Access modes[] = { std::remove_cvref_t<Objs>::mode... };
-    return async_dispatch<R>(std::move(block), pipes, modes, sizeof...(Objs));
+// Tagged path (`ts::as_read_only`/`as_read_write` on every arg): modes from the tags.
+template<std::size_t... I, typename Fn, typename... Objs>
+auto async_build_tagged(Access_options opts, std::index_sequence<I...> seq, Fn&& fn, Objs&&... objs)
+{
+    return async_build_modes<std::remove_cvref_t<Objs>::mode...>(
+        std::move(opts), seq, std::forward<Fn>(fn), *objs.obj...);
 }
 
 } // namespace detail
 
-// Tag an object argument with an explicit access mode, for use with a GENERIC lambda (whose
-// parameter const-ness can't be introspected): `graph.add_node([](auto& p, auto& n){ n.q(p); },
-// ts::as_read_write(physics), ts::as_read_only(nav))`, and likewise `ts::access`/`ts::async`. With a
-// NON-generic lambda you don't need these -- the mode is deduced from the parameter const-ness.
-// (Named `as_read_only`/`as_read_write` to avoid colliding with the coroutine pipe guards
+// Tag an object argument with an EXPLICIT access mode: `graph.add_node([](auto& p, auto& n)
+// { n.q(p); }, ts::as_read_write(physics), ts::as_read_only(nav))`, and likewise
+// `ts::access`/`ts::async`. Tags are never required -- modes are deduced from parameter
+// const-ness for non-generic functors and probed (`const auto&` = read, `auto&` = write) for
+// generic ones -- but remain for those preferring explicit declaration at the call site, and
+// as the escape hatch for an `auto&&` parameter that must write. The tag wins over the
+// parameter spelling; an over-declared write (write tag, `const T&` parameter) is legal
+// conservative serialization. (Named `as_*` to avoid colliding with the coroutine pipe guards
 // `ts::read_only`/`ts::read_write` in coroutine_support.h.)
 template<typename T>
 detail::Access_arg<T, Access::read_only> as_read_only(Guarded<T>& g) { return { &g }; }
 template<typename T>
 detail::Access_arg<T, Access::read_write> as_read_write(Guarded<T>& g) { return { &g }; }
 
-// Multi-object async: run `fn(*obj1, *obj2, ...)` once it holds all the objects. Per-object
-// access is deduced from the functor's parameter const-ness for bare `Guarded<T>&` arguments
-// (`Function_traits`; non-generic lambdas / function pointers), OR taken from an explicit
-// `ts::as_read_only`/`as_read_write` tag on every argument (which lets the functor be a GENERIC lambda).
-// The two kinds must not be mixed in one call. Deadlock-free (objects acquired in canonical
-// order). Options come FIRST (a function parameter pack can't be followed by a defaulted arg);
-// the no-options overload defaults them. `token`/`priority` apply as usual. Fire-and-forget or
-// consume the `Task<R>` -- but do NOT block a graph node on it (same rule as single-object async).
+// Multi-object async: run `fn(obj1, obj2, ...)` once it holds all the objects. Per-object
+// access, one rule (same as single-object): parameter const-ness for a non-generic functor
+// (`const T&` = read, `T&` = write; by-value / `T&&` rejected), the rvalue probe for a generic
+// one (`const auto&`/`auto&&` = read, `auto&` = write), or explicit `ts::as_read_only` /
+// `as_read_write` tags on every argument (don't mix tagged and bare in one call). Read
+// positions receive `const T&`, so a mutating body under a read classification does not
+// compile. Deadlock-free (objects acquired in canonical order). Options come FIRST (a function
+// parameter pack can't be followed by a defaulted arg); the no-options overload defaults them.
+// `token`/`priority` apply as usual. Fire-and-forget or consume the `Task<R>` -- but do NOT
+// block a graph node on it (same rule as single-object async).
 template<typename Fn, typename... Objs>
     requires (sizeof...(Objs) >= 1) && (detail::Object_arg<Objs> && ...)
 auto async(Access_options opts, Fn&& fn, Objs&&... objs)
@@ -467,12 +591,17 @@ auto async(Access_options opts, Fn&& fn, Objs&&... objs)
         return detail::async_build_tagged(std::move(opts), std::index_sequence_for<Objs...>{},
             std::forward<Fn>(fn), std::forward<Objs>(objs)...);
     }
-    else
+    else if constexpr (detail::introspectable_v<Fn>)
     {
         using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
         static_assert(std::tuple_size_v<Args> == sizeof...(Objs),
             "multi-object async: functor arity must match the number of Guarded objects");
         return detail::async_build<Args>(std::move(opts), std::index_sequence_for<Objs...>{},
+            std::forward<Fn>(fn), objs...);
+    }
+    else
+    {
+        return detail::async_build_probed(std::move(opts), std::index_sequence_for<Objs...>{},
             std::forward<Fn>(fn), objs...);
     }
 }

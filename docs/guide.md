@@ -112,30 +112,52 @@ graph.add_node([](Physics& p, const Nav& n) { /* writes p, reads n */ },
 This one convention drives everything: the pipe's reader/writer admission,
 the graph's derived ordering edges, and the harness's grants.
 
-A **generic lambda** (`[](auto& p, auto& n){...}`) has no fixed parameter
-const-ness to introspect, so const-ness deduction can't see whether each object
-is read or written. Declare the mode explicitly instead, by tagging every object
-with `ts::as_read_only`/`ts::as_read_write`:
+The same rule extends to **generic lambdas**: write `const auto&` for a read
+and `auto&` for a write, and the mode is deduced from the spelling — no
+annotation needed:
+
+```cpp
+graph.add_node([](const auto& p, auto& a) { a.pose(p); },   // p: read, a: write
+               physics, anim);
+```
+
+(The library cannot see *inside* a generic lambda — its `operator()` is a
+template — so it classifies each parameter by whether it can bind an rvalue:
+`const auto&` can, plain `auto&` cannot. The effect is exactly "const means
+read", same as the non-generic form.)
+
+The full spelling table, for every access-deduced position (`access`/`async`,
+multi-object `ts::access`/`ts::async`, and `add_node`):
+
+| parameter spelling | classified as | if the body mutates |
+|---|---|---|
+| `T&` / `auto&` | write (exclusive) | fine |
+| `const T&` / `const auto&` | read (concurrent) | compile error |
+| `T` by value or `T&&` | **rejected** (`static_assert`) | — |
+| `auto&&` | read | compile error (read bodies receive `const T&`) |
+| `auto` by value | read | silent copy — avoid this spelling |
+
+Two of those rows deserve a word. A **by-value** resource parameter is rejected
+outright because it would copy the resource and silently discard writes — the
+one spelling the library cannot police is the *generic* by-value `auto`, which
+is indistinguishable from `const auto&` at the declaration level; don't write
+it. And every **read** position hands the body `const T&`, so mutating under a
+read classification is a compile error, not a runtime surprise.
+
+If you prefer declaring access explicitly at the call site instead of relying
+on parameter spelling, tag every object with `ts::as_read_only` /
+`ts::as_read_write` (the tag then wins; don't mix tagged and bare arguments in
+one call — that's a compile error):
 
 ```cpp
 graph.add_node([](auto& p, auto& n) { n.query(p); },
                ts::as_read_write(physics), ts::as_read_only(nav));
 ```
 
-The tags work anywhere access is deduced from parameters — `add_node` and the
-multi-object `ts::access`/`ts::async` (§5.1). Tag every object in the call or
-none; mixing tagged and bare arguments is a compile error.
-
-Tags are not restricted to generic lambdas: you may tag the objects of an
-ordinary (non-generic) functor too, if you prefer declaring access explicitly
-at the call site over relying on parameter const-ness. In a tagged call the tag
-is the declaration — the functor's parameter const-ness is not consulted.
-
-One caveat to be aware of: in a tagged call the body currently receives a
-plain `T&` even under `as_read_only`, so a mutation under a read tag is not a
-compile error — it is caught at runtime by the harness (§3.2), on instrumented
-methods. In the deduced form the `const T&` parameter itself makes mutation a
-compile error. Prefer the deduced form where a non-generic functor allows it.
+The tags are also the escape hatch for an `auto&&` parameter that must write
+(it classifies as a read by default), and a write tag over a `const T&`
+parameter is legal — a deliberate, conservative over-declaration that
+serializes where deduction would have allowed concurrency.
 
 ### 3.2 The harness
 
@@ -432,11 +454,14 @@ them for the body — the standard deadlock-free discipline, shared with the
 static graph, so dynamic multi-object work and graph nodes can never deadlock
 each other.
 
-For a **generic lambda** (`[](auto&...)`), whose parameter const-ness can't be
-introspected, tag every object with `ts::as_read_only`/`ts::as_read_write` instead (§3.1):
+Generic lambdas follow the same spelling rule as everywhere else (§3.1):
+`const auto&` positions are reads, `auto&` positions are writes — or tag every
+object with `ts::as_read_only`/`ts::as_read_write` to declare modes explicitly:
 
 ```cpp
-ts::access([](auto& p, auto& r) { r.mirror(p); },
+ts::access([](const auto& p, auto& r) { r.mirror(p); }, physics, render);
+
+ts::access([](auto& p, auto& r) { r.mirror(p); },   // same, spelled with tags
            ts::as_read_only(physics), ts::as_read_write(render));
 ```
 
@@ -799,10 +824,9 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
 - **Cross-entity mutation inside `parallel_for`** (item *i* writes item *j*)
   — researched, primitives designed (gather/apply mailboxes, interaction
   coloring), not yet shipped.
-- **Generic lambdas** in access-deduced positions (`add_node`, `access`,
-  `async`) need explicit `ts::as_read_only`/`ts::as_read_write` tags on every object
-  (§3.1) — a generic lambda's parameter const-ness can't be introspected, so
-  the mode is declared rather than deduced.
+- **Generic by-value parameters** (`[](auto v)`) in access-deduced positions
+  classify as reads and copy the resource — writes hit the copy, silently.
+  Undetectable at the declaration level (§3.1); use references.
 
 ---
 

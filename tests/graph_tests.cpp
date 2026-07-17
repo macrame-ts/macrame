@@ -82,6 +82,43 @@ void test_generic_lambda_readers_overlap()
     TS_CHECK(gate.met());                                 // the two readers ran concurrently
 }
 
+// BARE generic-lambda nodes (no tags): modes come from the rvalue probe -- `const auto&` =
+// read, `auto&` = write. Same shape as `test_generic_lambda_node`; the probed modes must derive
+// the same write-then-read edges, proven by the propagated values.
+void test_probed_generic_node()
+{
+    ts::Guarded<int> a{ 0 }, b{ 0 }, c{ 0 };
+
+    ts::Static_task_graph g;
+    g.add_node([](auto& x) { x = 1; }, a);
+    g.add_node([](const auto& x, auto& y) { y = x * 10; }, a, b);
+    g.add_node([](const auto& x, const auto& y, auto& z) { z = x + y; }, a, b, c);
+    g.compile();
+
+    g.execute().sync();
+    TS_CHECK(read_value(a) == 1);
+    TS_CHECK(read_value(b) == 10);
+    TS_CHECK(read_value(c) == 11);   // ordering held -> probed modes derived the same edges
+}
+
+// Probed `const auto&` positions are reads: two bare-generic reader nodes on the same object
+// run concurrently, matching the tagged and non-generic reader-overlap behavior.
+void test_probed_generic_readers_overlap()
+{
+    ts::Guarded<int> x{ 0 }, y{ 0 }, z{ 0 };
+    tests::Parallel_gate gate{ 2 };
+
+    ts::Static_task_graph g;
+    g.add_node([](auto& v) { v = 1; }, x);
+    g.add_node([&gate](const auto& xv, auto& yv) { gate.arrive(); yv = xv; }, x, y);
+    g.add_node([&gate](const auto& xv, auto& zv) { gate.arrive(); zv = xv; }, x, z);
+    g.compile();
+
+    g.execute().sync();
+    TS_CHECK(read_value(y) == 1 && read_value(z) == 1);
+    TS_CHECK(gate.met());   // the two probed readers ran concurrently
+}
+
 void test_explicit_ordering()
 {
     ts::Guarded<int> p{ 0 }, q{ 0 };
@@ -381,6 +418,8 @@ void run_graph_tests()
     run("access ordering", test_access_ordering);
     run("generic-lambda node", test_generic_lambda_node);
     run("generic-lambda readers overlap", test_generic_lambda_readers_overlap);
+    run("probed generic node", test_probed_generic_node);
+    run("probed generic readers overlap", test_probed_generic_readers_overlap);
     run("explicit ordering", test_explicit_ordering);
     run("independent parallel", test_independent_parallel);
     run("re-run counts", test_re_run_counts);

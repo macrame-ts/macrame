@@ -362,6 +362,32 @@ void test_multi_async_generic_lambda()
     TS_CHECK(r2 == 50);
 }
 
+// BARE generic lambda (no tags): per-position modes come from the rvalue probe --
+// `const auto&` = read, `auto&` = write. Same effect as the tagged and non-generic forms.
+void test_multi_async_probed_generic()
+{
+    ts::Guarded<int> a{ 3 }, b{ 0 };
+    ts::async([](const auto& x, auto& y) { y = x * 2; }, a, b).sync();
+    TS_CHECK(read_value(a) == 3);
+    TS_CHECK(read_value(b) == 6);
+
+    // Mixed spellings in one generic functor probe independently per position.
+    int r = ts::access([](auto& x, const auto& y) { x += y; return x; }, a, b).sync();
+    TS_CHECK(r == 9);              // a += b -> 3 + 6
+    TS_CHECK(read_value(a) == 9);
+    TS_CHECK(read_value(b) == 6);  // read position untouched
+}
+
+// A write tag over a functor that only READS (a `const T&` parameter) is a legal conservative
+// over-declaration: the object is held exclusively, and `T&` binds the `const T&` parameter.
+void test_multi_async_overdeclared_write()
+{
+    ts::Guarded<int> a{ 5 }, b{ 0 };
+    ts::async([](const int& x, int& y) { y = x; },
+              ts::as_read_write(a), ts::as_read_write(b)).sync();
+    TS_CHECK(read_value(b) == 5);
+}
+
 // A tagged `as_read_write` on both objects holds them exclusively (matching the non-generic
 // `test_multi_async_exclusion`): a concurrent single-object async never overlaps.
 void test_multi_async_generic_exclusion()
@@ -629,6 +655,8 @@ void run_integration_tests()
     run("multi async no deadlock", test_multi_async_no_deadlock);
     run("multi async options", test_multi_async_options);
     run("multi async generic lambda", test_multi_async_generic_lambda);
+    run("multi async probed generic", test_multi_async_probed_generic);
+    run("multi async overdeclared write", test_multi_async_overdeclared_write);
     run("multi async generic exclusion", test_multi_async_generic_exclusion);
     run("handoff write chain", test_handoff_write_chain);
     run("handoff skips mode change", test_handoff_skips_mode_change);
