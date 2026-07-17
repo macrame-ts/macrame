@@ -126,6 +126,17 @@ The tags work anywhere access is deduced from parameters — `add_node` and the
 multi-object `ts::access`/`ts::async` (§5.1). Tag every object in the call or
 none; mixing tagged and bare arguments is a compile error.
 
+Tags are not restricted to generic lambdas: you may tag the objects of an
+ordinary (non-generic) functor too, if you prefer declaring access explicitly
+at the call site over relying on parameter const-ness. In a tagged call the tag
+is the declaration — the functor's parameter const-ness is not consulted.
+
+One caveat to be aware of: in a tagged call the body currently receives a
+plain `T&` even under `as_read_only`, so a mutation under a read tag is not a
+compile error — it is caught at runtime by the harness (§3.2), on instrumented
+methods. In the deduced form the `const T&` parameter itself makes mutation a
+compile error. Prefer the deduced form where a non-generic functor allows it.
+
 ### 3.2 The harness
 
 Checking is opt-in per type: you instrument the methods of a guarded type
