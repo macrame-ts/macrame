@@ -47,59 +47,63 @@ documented, and CI-gated.
 
 ## Open work (index)
 
-### Guarded / access
-- `[~]` **(P1) Zero-alloc inline `access`** — void→done-sentinel, small-R→SBO handle, large/deferred→heap. [§D1]
-- `[ ]` **(P0) Multi-object `ts::access` isn't inline** — schedules like `ts::async`; implement or document the single-vs-multi difference. *(consistency)*
-- `[ ]` **(P1) Generic-lambda / `auto&` deduction** — `add_node`/`access` need non-generic lambdas; users hit this immediately.
-- `[ ]` **(P2) Access-check completeness** — clang-tidy "every public method calls `TS_CHECK_ACCESS()`" + a `Guarded_value<T>` for POD/no-method types. [§D2]
-- `[ ]` **(P2) Adopted `Guarded`** — wrap an existing instance (borrow) via an `adopt` ctor tag; access key = borrowed address.
-- `[ ]` **(P2) Sub-object / range harness** — grant on `S` covers `[&S, &S+sizeof)`, or a declarable `Region<T>`.
-- `[ ]` **(P3) Standalone public `Pipe`** — expose the reader/writer pipe (UE `FPipe`); defer until a non-single-object use case appears.
+Reference items as `area.item` (e.g. `3.1` = ambient scheduler). Numbers are stable
+IDs — when an item is done, mark it, don't renumber.
 
-### Static task graph
-- `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.
-- `[ ]` **(P2) Ambiguity detection** — `compile({.ambiguity = Warn|Error|Ignore})` determinism diagnostic; needs edge provenance; feeds profiler-guided reorder.
-- `[ ]` **(P3) Pipelined execution** — more than one `execute()` in flight (frame overlap).
-- `[ ]` **(P3) Profiler-guided optimization** — reorder/rebucket from measured task durations.
+1. **Guarded / access**
+   1. `[~]` **(P1) Zero-alloc inline `access`** — void→done-sentinel, small-R→SBO handle, large/deferred→heap. [§D1]
+   2. `[ ]` **(P1) Multi-object `ts::access` inline** — currently schedules like `ts::async` (documented); implement the inline fast path so single- and multi-object `access` match.
+   3. `[ ]` **(P1) Generic-lambda / `auto&` deduction** — `add_node`/`access` need non-generic lambdas; users hit this immediately.
+   4. `[ ]` **(P2) Access-check completeness** — clang-tidy "every public method calls `TS_CHECK_ACCESS()`" + a `Guarded_value<T>` for POD/no-method types. [§D2]
+   5. `[ ]` **(P2) Adopted `Guarded`** — wrap an existing instance (borrow) via an `adopt` ctor tag; access key = borrowed address.
+   6. `[ ]` **(P2) Sub-object / range harness** — grant on `S` covers `[&S, &S+sizeof)`, or a declarable `Region<T>`.
+   7. `[ ]` **(P3) Standalone public `Pipe`** — expose the reader/writer pipe (UE `FPipe`); defer until a non-single-object use case appears.
+   8. `[ ]` **(P1) `Access_options` vs `Task_options`** — revisit whether the two option aggregates share a base or stay split (flagged in `task.h`); resolve in the code-review API-stability pass.
 
-### Scheduler
-- `[ ]` **(P1) Ambient (overridable) scheduler** — `launch`/`task`/`access` resolve to an *ambient* scheduler; add `Scheduler_scope` override + optional `Launch_options{.scheduler}`. Retires testability / embedding / multi-pool / named-thread limits at once. Additive, but API-shape — consider pre-public. [§D3]
-- `[ ]` **(P2) Named-thread affinity** — model a named thread as a single-worker `Scheduler` (unifies with ambient; `co_await resume_on(render)`).
-- `[ ]` **(P2) Run-on-all-workers** — broadcast a functor to every worker (per-thread init / flush / warm-up).
-- `[ ]` **(P2) Timed / delayed tasks** — delay queue (timing wheel); one-shot / periodic / cancellable; re-arms a reusable task.
-- `[ ]` **(P2) M2 stage 5** — promote high/low to per-worker deques (profiling-gated); a proper low-contention worker-submit benchmark.
-- `[ ]` **(P2) Platform abstraction (~6 fns)** — `park`/`unpark`(+timeout), thread spawn/name/affinity, cpu_count/topology, `cpu_relax`. Unblocks eventcount timeout + standby workers; console fiber backend later. [§D4]
+2. **Static task graph**
+   1. `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.
+   2. `[ ]` **(P2) Ambiguity detection** — `compile({.ambiguity = Warn|Error|Ignore})` determinism diagnostic; needs edge provenance; feeds profiler-guided reorder.
+   3. `[ ]` **(P3) Pipelined execution** — more than one `execute()` in flight (frame overlap).
+   4. `[ ]` **(P3) Profiler-guided optimization** — reorder/rebucket from measured task durations.
 
-### Allocation / control block
-- `[ ]` **(P2)** Per-type recycling free-list (`Exec`/`Result_block`/bare block).
-- `[ ]` **(P2)** Tunable-SBO `Function<Sig, N>` replacing `move_only_function`/`function`.
-- `[ ]` **(P2)** Small-vector / intrusive links for block `successors`/`prerequisites`/`continuations` (also shrinks the block ~72 B).
-- `[ ]` **(P2)** Shrink `Task_control_block` — `completed`/`cancelled`→bits; a futex wait primitive roughly halves the 288 B block (ties to platform layer).
-- `[ ]` **(P3)** Multi-object `async` `std::map`→sorted `vector`.
-- `[ ]` **(P2)** Opt-in scoped bump arena (auto for `parallel_for`/graph-run, per-frame opt-in); rebase `journal.h` staging onto it.
+3. **Scheduler**
+   1. `[ ]` **(P1) Ambient (overridable) scheduler** — `launch`/`task`/`access` resolve to an *ambient* scheduler; add `Scheduler_scope` override + optional `Launch_options{.scheduler}`. Retires testability / embedding / multi-pool / named-thread limits at once. Additive, but API-shape — consider pre-public. [§D3]
+   2. `[ ]` **(P2) Named-thread affinity** — model a named thread as a single-worker `Scheduler` (unifies with ambient; `co_await resume_on(render)`).
+   3. `[ ]` **(P2) Run-on-all-workers** — broadcast a functor to every worker (per-thread init / flush / warm-up).
+   4. `[ ]` **(P2) Timed / delayed tasks** — delay queue (timing wheel); one-shot / periodic / cancellable; re-arms a reusable task.
+   5. `[ ]` **(P2) M2 stage 5** — promote high/low to per-worker deques (profiling-gated); a proper low-contention worker-submit benchmark.
+   6. `[ ]` **(P2) Platform abstraction (~6 fns)** — `park`/`unpark`(+timeout), thread spawn/name/affinity, cpu_count/topology, `cpu_relax`. Unblocks eventcount timeout + standby workers; console fiber backend later. [§D4]
 
-### Fork-join / parallel_for
-- `[ ]` **(P2) Intra-system entity interactions** — ship the primitive menu: `parallel_gather_apply` (mailbox), `parallel_for_colored` + `Interaction_coloring`, `Accumulator` (commutative), `Union_find` helper, + triage docs. Open author questions. [§D5]
-- `[S]` **Priority propagation / inheritance** — designed (pipe / graph / dynamic; opt-in surfaces; not OS thread priority); revisit on a demonstrated inversion. [§D6]
-- `[ ]` **(P3) Reserve / standby workers** — sequenced after the platform layer; caller-participation already covers the need.
+4. **Allocation / control block**
+   1. `[ ]` **(P2)** Per-type recycling free-list (`Exec`/`Result_block`/bare block).
+   2. `[ ]` **(P2)** Tunable-SBO `Function<Sig, N>` replacing `move_only_function`/`function` (also fixes the reservation-path closure alloc — inconsistency #5).
+   3. `[ ]` **(P2)** Small-vector / intrusive links for block `successors`/`prerequisites`/`continuations` (also shrinks the block ~72 B).
+   4. `[ ]` **(P2)** Shrink `Task_control_block` — `completed`/`cancelled`→bits; a futex wait primitive roughly halves the 288 B block (ties to platform layer).
+   5. `[ ]` **(P3)** Multi-object `async` `std::map`→sorted `vector`.
+   6. `[ ]` **(P2)** Opt-in scoped bump arena (auto for `parallel_for`/graph-run, per-frame opt-in); rebase `journal.h` staging onto it.
 
-### Coroutines
-- `[ ]` **(P2)** Inline-when-free for awaited accesses — `co_await obj.access(fn)` should try inline at the await (safe: the coroutine would suspend anyway).
-- `[ ]` **(P2)** Coroutine-frame / control-block fusion — one alloc for frame + block (coroutines *reduce* allocs, not add).
-- `[ ]` **(P3)** Priority setter on the promise (it stores one; no config channel yet).
+5. **Fork-join / parallel_for**
+   1. `[ ]` **(P2) Intra-system entity interactions** — ship the primitive menu: `parallel_gather_apply` (mailbox), `parallel_for_colored` + `Interaction_coloring`, `Accumulator` (commutative), `Union_find` helper, + triage docs. Open author questions. [§D5]
+   2. `[S]` **Priority propagation / inheritance** — designed (pipe / graph / dynamic; opt-in surfaces; not OS thread priority); revisit on a demonstrated inversion. [§D6]
+   3. `[ ]` **(P3) Reserve / standby workers** — sequenced after the platform layer; caller-participation already covers the need.
 
-### Deferred / Versioned
-- `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.
+6. **Coroutines**
+   1. `[ ]` **(P2)** Inline-when-free for awaited accesses — `co_await obj.access(fn)` should try inline at the await (safe: the coroutine would suspend anyway).
+   2. `[ ]` **(P2)** Coroutine-frame / control-block fusion — one alloc for frame + block (coroutines *reduce* allocs, not add).
+   3. `[ ]` **(P3)** Priority setter on the promise (it stores one; no config channel yet).
 
-### Task chaining
-- `[ ]` **(P3) Results-on-`after`** — leaning *no* (`when_all`+`then` covers it); revisit only if a concrete single-result-prerequisite use case appears.
+7. **Deferred / Versioned**
+   1. `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.
 
-### Research / shelved
-- `[S]` **std::execution senders** — shelved; model the concepts for interop, prototype *access-context-as-env* as the one novel spike; do **not** re-found the engine on senders (the monomorphic runtime block earns its keep). [§D7]
+8. **Task chaining**
+   1. `[ ]` **(P3) Results-on-`after`** — leaning *no* (`when_all`+`then` covers it); revisit only if a concrete single-result-prerequisite use case appears.
 
-### Tooling / infra
-- `[ ]` **(P2)** Benchmark regression baseline + compare step (store medians, flag regressions). *(postponed — not blocking)*
-- `[ ]` **(P2)** Proper ASan build config (reachable via `/p:EnableASAN=true` today); portable TSan build story.
+9. **Research / shelved**
+   1. `[S]` **std::execution senders** — shelved; model the concepts for interop, prototype *access-context-as-env* as the one novel spike; do **not** re-found the engine on senders (the monomorphic runtime block earns its keep). [§D7]
+
+10. **Tooling / infra**
+    1. `[ ]` **(P2)** Benchmark regression baseline + compare step (store medians, flag regressions). *(postponed — not blocking)*
+    2. `[ ]` **(P2)** Proper ASan build config (reachable via `/p:EnableASAN=true` today); portable TSan build story.
 
 ---
 
