@@ -77,7 +77,6 @@
     <ClInclude Include="include\ts\detail\worker_thread.h" />
     <ClInclude Include="benchmarks\benchmarks.h" />
     <ClInclude Include="sample\engine.h" />
-    <ClInclude Include="sample\physics.h" />
     <ClInclude Include="sample\frame.h" />
     <ClInclude Include="sample\parallel.h" />
     <ClInclude Include="sample\systems.h" />

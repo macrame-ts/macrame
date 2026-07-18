@@ -201,7 +201,8 @@ only if a flush becomes the critical path).
 - Per-frame delta is DATA (poses, facts, events) → `Versioned<T>`.
 - Producing version N+1 is heavy COMPUTATION over N (physics sim) → keep ONE
   instance behind `Guarded`, `Deferred` its inputs, `Versioned` its output
-  EXTRACT (the machine stays sealed; count its grant holders — physics has 2).
+  EXTRACT (the machine stays sealed; count its grant holders — physics has 1,
+  the sim's write; even its scene query reads the extract).
 - Delta ≈ whole state, rebuild cheap → `shared_ptr<const T>` swap, no journal.
 - One logical producer parallelized internally → `Parallel_recorder`
   (commutative / per-key-single commands) or index-keyed `Recorder` lanes

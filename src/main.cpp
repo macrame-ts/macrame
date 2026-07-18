@@ -3,12 +3,16 @@
 #include "mem_profile.h"
 #include "harness.h"
 #include "engine.h"
-#include "physics.h"
 #include "ts/version.h"
 
-// Single-file sample (sample/blackboard.cpp, by design -- no header): the
-// blackboard pattern recipe of docs/command-buffer-design.md §7.4.
-namespace sample { void run_blackboard_sample(); }
+// Single-file samples (by design -- no headers): the physics machine/extract
+// decomposition (sample/physics.cpp) and the blackboard pattern recipe of
+// docs/command-buffer-design.md §7.4 (sample/blackboard.cpp).
+namespace sample
+{
+void run_physics_sample(int frames = 60);
+void run_blackboard_sample();
+}
 
 #include <cstdio>
 #include <cstring>

@@ -1,10 +1,10 @@
 // The `Deferred`/`Versioned`/`Guarded` decomposition from the command-buffer
-// design study, executable: a sealed `Guarded<Physics_world>` machine with
-// exactly two grant holders, a `Deferred` staging its external inputs
-// (impulses, spawns), and a `Versioned<Pose_snapshot>` publishing its output
-// extract. Gameplay reads last frame's poses all frame; the flip is the only
-// write conflict on the snapshot. Runs twice and checks the runs are
-// bit-identical.
+// design study, executable: a sealed `Guarded<Physics_world>` machine with a
+// SINGLE grant holder -- the sim's write; everything else stages external
+// inputs (impulses, spawns) through a `Deferred` or reads the output extract
+// published as a `Versioned<Pose_snapshot>`. Gameplay reads last frame's poses
+// all frame; the flip is the only write conflict on the snapshot. Runs twice
+// and checks the runs are bit-identical.
 //
 // Two ideas this sample is built to show:
 //
@@ -22,8 +22,6 @@
 //   separation explicit and checkable (declared access, harness-verified)
 //   rather than implicit convention.
 
-#include "physics.h"
-
 #include "ts/access.h"
 #include "ts/deferred.h"
 #include "ts/guarded.h"
@@ -32,6 +30,7 @@
 #include "ts/versioned.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -74,8 +73,8 @@ struct Body_id_allocator
 // --- the machine ------------------------------------------------------------------
 
 // The heavy internal state: single instance, never replicated, never copied.
-// Exactly two graph accessors -- `vision` (read) and `sim` (write); everything
-// else stages into the machine's `Deferred` or reads the published snapshot.
+// A single graph accessor -- `sim` (write); everything else stages into the
+// machine's `Deferred` or reads the published snapshot.
 // Note the class itself is plain single-threaded code -- no atomics, no locks;
 // the library supplies all the concurrency safety around it.
 class Physics_world
@@ -129,22 +128,6 @@ public:
         return out;
     }
 
-    // Scene query -- needs the machine (readers of the snapshot can't answer
-    // spatial questions). Toy: does a downward ray from `from` pass within
-    // `radius` (in x/z) of any body below it?
-    bool raycast_down(Vec3 from, float radius) const
-    {
-        TS_CHECK_ACCESS();
-        for (const Body& b : bodies_)
-        {
-            float dx = b.pos.x - from.x;
-            float dz = b.pos.z - from.z;
-            if (b.pos.y <= from.y && dx * dx + dz * dz <= radius * radius)
-                return true;
-        }
-        return false;
-    }
-
     int body_count() const
     {
         TS_CHECK_ACCESS();
@@ -196,6 +179,22 @@ public:
         for (const auto& [id, pose] : poses_)
             out.push_back(pose);
         return out;
+    }
+
+    // Scene query over the published poses -- the same toy test the machine
+    // used to answer: does a downward ray from `from` pass within `radius`
+    // (in x/z) of any pose below it?
+    bool raycast_down(Vec3 from, float radius) const
+    {
+        TS_CHECK_ACCESS();
+        for (const auto& [id, pose] : poses_)
+        {
+            float dx = pose.pos.x - from.x;
+            float dz = pose.pos.z - from.z;
+            if (pose.pos.y <= from.y && dx * dx + dz * dz <= radius * radius)
+                return true;
+        }
+        return false;
     }
 
     bool has(Body_id id) const
@@ -303,9 +302,19 @@ private:
     Vec3 pos_;
 };
 
-} // namespace
-
 // --- the frame -----------------------------------------------------------------------
+
+// Results of driving the demo for some frames -- for the summary, the TSan
+// driver's fingerprint, and the determinism self-check.
+struct Physics_stats
+{
+    int frames = 0;
+    int bodies = 0;              // final body count in the world
+    int spawned = 0;             // bodies created via staged spawns
+    int vision_hits = 0;         // raycast hits accumulated by the AI node
+    float player_y = 0.0f;       // final published pose of the player body
+    std::size_t pose_hash = 0;   // bitwise hash of the final published snapshot
+};
 
 Physics_stats run_physics_frames(int frames)
 {
@@ -392,16 +401,23 @@ Physics_stats run_physics_frames(int frames)
         },
         spawns);
 
-    // Scene query: the one gameplay read of the machine (broadphase question the
-    // snapshot can't answer). Declared before `sim`, so conflict derivation runs
-    // it against last frame's world, parallel with gameplay/spawner.
+    // Scene query off the SNAPSHOT, not the machine. A machine read here bought
+    // nothing: declared before `sim`, it saw last frame's post-step world -- the
+    // exact vintage the snapshot publishes -- while paying a scheduling squeeze
+    // against the sim's exclusive window. On the snapshot the query overlaps the
+    // sim and every other reader, and the machine's single grant holder is the
+    // sim's write -- fully sealed. Real engines grow the extract into a "query
+    // snapshot" (poses + a light spatial index -- cf. PhysX buffered scene reads,
+    // Jolt query interfaces, UE Chaos's game-thread mirror), reserving direct
+    // machine reads for what the extract can't carry -- that serialization a
+    // visible graph edge you accept knowingly.
     g.add_node(
-        [](const Physics_world& w, Ai_system& a)
+        [](const Pose_snapshot& p, Ai_system& a)
         {
-            if (w.raycast_down({ 0.0f, 100.0f, 1.0f }, 2.5f))
+            if (p.raycast_down({ 0.0f, 100.0f, 1.0f }, 2.5f))
                 a.add_hit();
         },
-        world, ai);
+        poses.state(), ai);
 
     // The sim: exclusive write on the machine, heaviest node in the frame.
     // Boundary commit (under the grant this node already holds) -> step ->
@@ -444,6 +460,19 @@ Physics_stats run_physics_frames(int frames)
     return stats;
 }
 
+} // namespace
+
+// --- entry points (forward-declared by consumers -- single-file sample, no header) ---
+
+// Drives the demo for `frames` frames and returns the final published snapshot
+// hash -- the determinism fingerprint the TSan driver compares across runs.
+std::size_t physics_pose_hash(int frames)
+{
+    return run_physics_frames(frames).pose_hash;
+}
+
+// Runs the demo (twice -- the second run proves run-to-run determinism) and
+// prints a summary.
 void run_physics_sample(int frames)
 {
     Physics_stats a = run_physics_frames(frames);

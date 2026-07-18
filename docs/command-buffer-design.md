@@ -542,8 +542,8 @@ has no FP drift) and fatals on mismatch. It caught a real divergence bug during
 bring-up (default- vs value-initialized shadow).
 
 **The second fixture.** `sample/physics.cpp` implements the machine/extract
-decomposition: a sealed `Guarded<Physics_world>` with exactly two grant holders
-in the graph (one reader node for scene queries, the sim node), a
+decomposition: a sealed `Guarded<Physics_world>` with a single grant holder in
+the graph (the sim node's write — even the scene query reads the extract), a
 `Deferred<Physics_world>` for staged inputs (impulses, spawns — with grant-free
 id reservation answering the ECS forward-reference case without reserved-handle
 support), and a `Versioned<Pose_snapshot>` publishing the outputs via the

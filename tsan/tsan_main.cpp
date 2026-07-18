@@ -8,15 +8,20 @@
 
 #include "engine.h"          // sample::run_frames
 
-// Single-file sample (no header) -- see sample/blackboard.cpp.
-namespace sample { void run_blackboard_sample(); }
+#include <cstddef>
+
+// Single-file samples (no headers) -- see sample/blackboard.cpp, sample/physics.cpp.
+namespace sample
+{
+void run_blackboard_sample();
+std::size_t physics_pose_hash(int frames);   // final snapshot hash after `frames` frames
+}
 #include "ts/parallel_for.h"
 #include "ts/scheduler.h"
 #include "ts/static_task_graph.h"
 #include "ts/guarded.h"
 #include "ts/deferred.h"
 #include "ts/versioned.h"
-#include "physics.h"
 
 #if defined(__cpp_impl_coroutine)
 #include "ts/coroutine_support.h"
@@ -889,9 +894,9 @@ void stress_versioned()
 // read job admitted at node release). Also re-checks run-to-run determinism.
 void stress_physics()
 {
-    sample::Physics_stats a = sample::run_physics_frames(30);
-    sample::Physics_stats b = sample::run_physics_frames(30);
-    assert(a.pose_hash == b.pose_hash);
+    std::size_t a = sample::physics_pose_hash(30);
+    std::size_t b = sample::physics_pose_hash(30);
+    assert(a == b);
     (void)a; (void)b;
 }
 
