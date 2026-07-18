@@ -10,8 +10,7 @@
 //     (gameplay/nav/AI) read last frame's published transforms all frame; the
 //     propagation node stages this frame's batch grant-free; a publish node
 //     flips; late systems (cloth/culling/particles/audio/render) read the fresh
-//     version. (Earlier revisions of this sample hand-rolled this with two
-//     stores and a swap system -- `Versioned` is that idiom, packaged.)
+//     version.
 //   - Dynamic work outside the graph: streaming fires `async` loads consumed by
 //     `then` continuations and joined by `when_all`; AI fires speculative,
 //     cancellable `async` queries against the nav service (body-level early-out

@@ -60,7 +60,7 @@ public:
 
     // A destroyed recorder's slot goes to the free-list and the next mint reuses
     // it, so live slot count is bounded by PEAK CONCURRENT recorders, not total
-    // ever -- mint-and-destroy per frame no longer grows the journal. The
+    // ever -- mint-and-destroy per frame does not grow the journal. The
     // threshold below then only trips on the remaining pathology: minting
     // recorders that are all kept alive.
     // Reuse footnote: a recycled slot keeps its POSITION, so a new producer

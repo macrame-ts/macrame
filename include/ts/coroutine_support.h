@@ -1,29 +1,29 @@
 #pragma once
 
-// Coroutine support SPIKE -- makes `ts::Task<R>` awaitable and provides a `promise_type`
+// Coroutine support -- makes `ts::Task<R>` awaitable and provides a `promise_type`
 // so a coroutine can return `Task<R>` and `co_await` other tasks. Header-only, opt-in
 // include (nothing else pulls it in). Guarded on `__cpp_impl_coroutine`, so a toolchain
 // without coroutines simply sees an empty header. No edits to task.h: the awaiter reaches
 // the block through the existing `detail::core_of` friend, and the return type is wired via
 // a `std::coroutine_traits` specialization.
 //
-// Per-segment `Access_context` re-install is DONE (below): a coroutine migrates threads
-// across suspension, but the harness keys off `thread_local current_access`, so the promise
-// snapshots the ambient grant at creation (`snapshot_access`, the same value the launcher
-// would inherit) and each resumed segment re-installs it (`Inherited_access_scope` around the
-// resume) -- so a resumed body may touch data the coroutine was granted, harness intact.
+// Per-segment `Access_context` re-install: a coroutine migrates threads across suspension,
+// but the harness keys off `thread_local current_access`, so the promise snapshots the
+// ambient grant at creation (`snapshot_access`, the same value the launcher would inherit)
+// and each resumed segment re-installs it (`Inherited_access_scope` around the resume) --
+// a resumed body may touch data the coroutine was granted, harness intact.
 //
-// The `Guarded` async-lock guard is DONE (below): `auto g = co_await ts::read_write(w);` (or
-// `ts::read_only(w)`) suspends until the pipe grants, resumes with an RAII `Pipe_guard` giving direct
-// `T&`/`const T&`, released on scope exit. The harness doubles as a suspension detector: a
-// `co_await` that would suspend while a guard is held faults (`pipe_guard_depth`).
+// The `Guarded` async-lock guard: `auto g = co_await ts::read_write(w);` (or
+// `ts::read_only(w)`) suspends until the pipe grants, resumes with an RAII `Pipe_guard`
+// giving direct `T&`/`const T&`, released on scope exit. The harness doubles as a suspension
+// detector: a `co_await` that would suspend while a guard is held faults (`pipe_guard_depth`).
 //
-// Resume scheduling is DONE (below): a resume no longer recurses via inline `h.resume()` --
-// it goes through a bounded coroutine-resume trampoline (`schedule_resume`), mirroring
-// `Task_control_block::inline_pending`, so a deep cascade of coroutine completions runs
-// ITERATIVELY (O(1) stack) instead of overflowing. The resume stays on the settling thread (no
+// Resume scheduling: a resume goes through a bounded coroutine-resume trampoline
+// (`schedule_resume`), mirroring `Task_control_block::inline_pending`, rather than recursing
+// via inline `h.resume()` -- a deep cascade of coroutine completions runs iteratively
+// (O(1) stack) instead of overflowing. The resume stays on the settling thread (no
 // queue hop -> lowest latency); the coroutine's `priority_` is carried onto its block for the
-// queued paths (a fully-queued resume variant is a possible future refinement).
+// queued paths.
 
 #include "ts/task.h"
 

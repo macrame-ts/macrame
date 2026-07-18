@@ -303,7 +303,7 @@ void test_publish_sync_then_graph_flip()
     // flip. sync() returning guarantees the resync job is already ON the pipe
     // (enqueued before the phase gate triggers), so the flip's acquire orders
     // behind it and the flip-entry enforcement check passes deterministically.
-    // 200 iterations amplify what used to be a timing window.
+    // 200 iterations amplify the timing window.
     ts::Versioned<int> v;
     auto rec = v.recorder();
 

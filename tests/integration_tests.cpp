@@ -264,9 +264,9 @@ void test_gap_frees_object_between_accessors()
 }
 
 // Mode-aware acquire: a READ node holds its object as a reader, so a concurrent async READ
-// on the same object overlaps it. The old whole-run reservation was writer-exclusive and
-// blocked any async (even a read) for the run; per-node mode-aware acquire lets concurrent
-// reads run. Deterministic: the read node sleeps, then records whether the async read ran.
+// on the same object overlaps it (a writer hold is exclusive; a whole-object reservation
+// would block even reads for the whole run). Deterministic: the read node sleeps, then
+// records whether the async read ran.
 void test_reader_node_overlaps_async_read()
 {
     ts::Guarded<int> x{ 7 };

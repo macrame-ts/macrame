@@ -1283,9 +1283,8 @@ constexpr std::array<int, sizeof...(Rs)> when_all_slots()
     return slot;
 }
 
-// A `when_all` join's shared state, ONE intrusive allocation shared by every prerequisite's
-// continuation + the finish (replaces the old four separate `make_shared` for slots / an
-// `atomic<int>` / an `atomic<bool>` / a `std::function` — the worst per-op allocator offender).
+// A `when_all` join's shared state: one intrusive allocation shared by every prerequisite's
+// continuation + the finish.
 // `next_core` (owned) keeps the join block alive; for a value join the block is a
 // `Result_block<Result>` that `next_core` aliases, recovered by `reinterpret_cast` in `finish`.
 template<typename Slots, typename Result>

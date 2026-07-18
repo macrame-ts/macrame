@@ -51,7 +51,7 @@ using Task_func_ptr = void(*)(void* data);
 namespace detail
 {
 
-// A queued task: the func + its data. Priority is no longer a field -- it is the queue the
+// A queued task: the func + its data. Priority is not a field -- it is the queue the
 // task lives in (one lock-free MPMC queue per priority, scanned high->low). MUST stay 16 bytes
 // (two words): the work-stealing deque stores cells as `std::atomic<Task_entry>`, lock-free only
 // while the element is double-word-CAS-able. A block dispatch fits here as `{trampoline, block}`;
@@ -125,7 +125,7 @@ private:
     // no shared cache line -- the producer fast path); thieves steal FIFO. One per worker.
     std::vector<std::unique_ptr<detail::Work_stealing_deque<detail::Task_entry>>> local_normal_;
     std::atomic<bool> quit_ = false;
-    detail::Event_count events_;   // wakes idle (parking) workers; replaces the semaphore
+    detail::Event_count events_;   // wakes idle (parking) workers
     // `handoff` policy: advisory count of workers currently spinning. Correctness rides the
     // always-advanced epoch (see `signal_submit`), so this can be read/written relaxed -- it
     // only gates the wake syscall and the successor-promotion decision.

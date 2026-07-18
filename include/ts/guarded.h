@@ -78,8 +78,8 @@ void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block,
 // a read_only holder joins concurrent readers (so two reader nodes, or a reader node and an
 // async reader, overlap), a read_write holder is exclusive. Returns true if acquired now
 // (admissible at the front, per the reader/writer rules); false if deferred, in which case
-// `on_acquired` runs once the pipe drains to it (FIFO). Generalizes the old writer-only
-// `pipe_reserve`; async coexistence is now per-node, not whole-run (see docs §10).
+// `on_acquired` runs once the pipe drains to it (FIFO). Async coexistence is per-node,
+// not whole-run (see docs §10).
 bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired);
 
 // Release a hold taken by `pipe_acquire` in `mode`; admits queued jobs.

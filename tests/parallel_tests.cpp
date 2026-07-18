@@ -89,10 +89,9 @@ void test_parallel_for_nested()
     TS_CHECK(total.load() == static_cast<long long>(outer) * inner);
 }
 
-// A guarded store touched from INSIDE parallel_for chunks, under the caller's write grant.
+// A guarded store touched from inside parallel_for chunks, under the caller's write grant.
 // Helpers run on other workers and must inherit the caller's `Access_context` (by-value
-// snapshot in `Parallel_state`) or the harness faults -- the regression that crashed the
-// game_frame sample when it moved onto the core `parallel_for`. Many small items so helpers
+// snapshot in `Parallel_state`) or the harness faults. Many small items so helpers
 // reliably claim some before the participating caller drains the range.
 void test_parallel_for_inherits_grant()
 {

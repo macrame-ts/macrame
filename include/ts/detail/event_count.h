@@ -6,20 +6,18 @@
 namespace ts::detail
 {
 
-// A minimal event count (Vyukov / futex idiom) for parking idle workers. Replaces the
-// counting semaphore: a worker that finds no work snapshots the epoch (`prepare_wait`),
-// RE-CHECKS its predicate (is there work / are we shutting down?), and parks
-// (`commit_wait`) only if the epoch is unchanged. A `notify` that races the park is never
-// lost -- it bumped the epoch, so `commit_wait` returns at once. The re-check between
-// `prepare_wait` and `commit_wait` is essential: it catches work that was enqueued (and
-// notified) just before the snapshot, which would otherwise park against a notify that has
-// already fired.
+// A minimal event count (Vyukov / futex idiom) for parking idle workers: a worker that
+// finds no work snapshots the epoch (`prepare_wait`), re-checks its predicate (is there
+// work / are we shutting down?), and parks (`commit_wait`) only if the epoch is unchanged.
+// A `notify` that races the park is never lost -- it bumped the epoch, so `commit_wait`
+// returns at once. The re-check between `prepare_wait` and `commit_wait` is essential: it
+// catches work that was enqueued (and notified) just before the snapshot, which would
+// otherwise park against a notify that has already fired.
 //
 // Built on `std::atomic::wait`/`notify` (a direct futex / WaitOnAddress wrapper); `notify`
-// is a no-op when nothing is parked, so it is cheap to call. Unlike the semaphore this has
-// no per-task count to keep balanced -- so the class of shutdown permit-accounting bug is
-// gone -- and it extends to "is there work anywhere?" once tasks live in per-worker deques
-// (stage 3), which a count-based semaphore cannot express.
+// is a no-op when nothing is parked, so it is cheap to call. Unlike a counting semaphore
+// there is no per-task count to keep balanced (no permit-accounting bugs at shutdown), and
+// "is there work anywhere?" over per-worker deques is expressible, which a count cannot.
 class Event_count
 {
 public:

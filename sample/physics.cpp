@@ -181,9 +181,8 @@ public:
         return out;
     }
 
-    // Scene query over the published poses -- the same toy test the machine
-    // used to answer: does a downward ray from `from` pass within `radius`
-    // (in x/z) of any pose below it?
+    // Scene query over the published poses: does a downward ray from `from`
+    // pass within `radius` (in x/z) of any pose below it?
     bool raycast_down(Vec3 from, float radius) const
     {
         TS_CHECK_ACCESS();

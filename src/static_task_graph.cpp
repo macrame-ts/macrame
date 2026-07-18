@@ -374,7 +374,7 @@ void Static_task_graph::node_complete(Run_state& run, int index)
     // SAME mode -- the pipe state is then already correct for it, so a release + re-acquire
     // round-trip is pure waste. The handed object stays held across the edge (no gap), which
     // is fine: the successor runs immediately (it just went ready). Otherwise RELEASE (freeing
-    // the object for async / a later node -- the gap-freeing of M1.1a). Runs post-completion
+    // the object for async / a later node -- the gap-freeing). Runs post-completion
     // (after any nested sub-work).
     for (size_t k = 0; k < node.pipe_indices.size(); ++k)
     {
@@ -397,8 +397,7 @@ void Static_task_graph::node_complete(Run_state& run, int index)
         // Keep `done` alive across the settle: completing it notifies its cv, which can
         // wake a waiter (`execute().sync()`) that immediately starts the next run --
         // overwriting `run.done` and dropping its own handle -- destroying this block
-        // mid-notify. The local ref holds it until settle returns. (The old per-run
-        // Run_state kept it alive via the worker closures; the reused slot does not.)
+        // mid-notify. The local ref holds it until settle returns.
         detail::Task_ptr done = run.done;
         if (run.token.is_cancel_requested())
             done->cancel();

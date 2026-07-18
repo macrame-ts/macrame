@@ -17,10 +17,11 @@ namespace ts::detail
 // scheduler drains fast) and read only when `overflow_count_ > 0`, so under load both push
 // and pop touch no lock. `T` must be trivially/cheaply movable (we store `Task_entry`).
 //
-// Caveat (stage-1): once items spill to the overflow they are FIFO among themselves but are
+// Caveat: once items spill to the overflow they are FIFO among themselves but are
 // only drained after the ring empties, so under *sustained* overflow they are delayed
 // relative to newer ring items (not lost -- every pop path reaches them once the ring
-// drains). Per-worker deques (stage 3) supersede this global structure.
+// drains). In the full scheduler this is rare: worker-to-worker submits go to per-worker
+// deques, leaving this global queue for external submits, high/low priorities, and overflow.
 template<typename T>
 class Mpmc_queue
 {
