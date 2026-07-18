@@ -95,7 +95,7 @@ public:
         subs_.push_back({ k, std::move(cb), std::nullopt });
     }
 
-    // Runs inside the dispatch node, under ITS grant -- callbacks must not
+    // Runs inside the dispatch node, under its grant -- callbacks must not
     // touch other guarded state directly; side effects go through
     // `async`/`stage` (grant-free submission).
     void dispatch(const Blackboard& bb)
@@ -227,9 +227,9 @@ Blackboard_stats run_blackboard_frames(int frames)
     ts::Guarded<Subscriptions> subs;
 
     // Register subscriptions. The callbacks fire inside the dispatch node; both
-    // route their side effects through `async` -- no grant needed to SUBMIT.
+    // route their side effects through `async` -- no grant needed to submit.
     // `async` (not `access`) is deliberate there: inside a node, `access` may run
-    // the body inline while the node still HOLDS its declared objects --
+    // the body inline while the node still holds its declared objects --
     // stretching the critical window (every successor waits) and stacking a
     // nested access scope; under contention it enqueues anyway, so the inline
     // win is unreliable. Out here at setup it's the opposite -- short and
@@ -255,7 +255,7 @@ Blackboard_stats run_blackboard_frames(int frames)
     // Senses: reads the world, stages facts -- no grant on the board, so it
     // never contends with the thinkers. The alert decay is a read-modify-write
     // command: legal under `Resync::replay` (both replicas see identical
-    // pre-states), and it OWNS its keys -- the key-ownership convention that
+    // pre-states), and it owns its keys -- the key-ownership convention that
     // the cross-recorder ordering contract enforces by making the alternative
     // meaningless.
     auto sense = g.add_node([rec = bb.recorder()](const World& w) mutable
@@ -271,7 +271,7 @@ Blackboard_stats run_blackboard_frames(int frames)
         });
     }, world);
 
-    // Thinkers: read the STABLE previous version all frame (declared before the
+    // Thinkers: read the stable previous version all frame (declared before the
     // flip -> derived read->write edge). Every agent sees the same facts --
     // frame-coherent decisions, one frame of stimulus latency by design.
     g.add_node([](const Blackboard& b, Agents& ag)
@@ -282,7 +282,7 @@ Blackboard_stats run_blackboard_frames(int frames)
     auto flip = g.add_node(ts::publish_body(bb), bb.state());
     flip.after(sense);
 
-    // Notification: after the flip, diff-and-fire off the FRESH version.
+    // Notification: after the flip, diff-and-fire off the fresh version.
     auto notify = g.add_node([](const Blackboard& b, Subscriptions& s)
     {
         s.dispatch(b);

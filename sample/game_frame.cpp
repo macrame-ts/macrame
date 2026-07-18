@@ -1,20 +1,20 @@
 // A mock game-engine frame -- the breadth sample. Sixteen systems and a publish
-// node; the ENTIRE schedule is derived from declared data access (zero explicit
+// node; the whole schedule is derived from declared data access (zero explicit
 // ordering edges except one, called out below).
 //
 // What it shows, layer by layer:
 //   - `Static_task_graph` -- 17 nodes over 19 guarded stores; every edge derived
 //     from parameter const-ness (fn-pointer nodes, lambda nodes, and one bare
-//     GENERIC lambda -- `const auto&` deduces a read via the rvalue probe).
+//     generic lambda -- `const auto&` deduces a read via the rvalue probe).
 //   - `Versioned<Transforms>` -- the packaged double-buffer. Early systems
-//     (gameplay/nav/AI) read LAST frame's published transforms all frame; the
+//     (gameplay/nav/AI) read last frame's published transforms all frame; the
 //     propagation node stages this frame's batch grant-free; a publish node
 //     flips; late systems (cloth/culling/particles/audio/render) read the fresh
 //     version. (Earlier revisions of this sample hand-rolled this with two
 //     stores and a swap system -- `Versioned` is that idiom, packaged.)
 //   - Dynamic work outside the graph: streaming fires `async` loads consumed by
 //     `then` continuations and joined by `when_all`; AI fires speculative,
-//     CANCELLABLE `async` queries against the nav service (body-level early-out
+//     cancellable `async` queries against the nav service (body-level early-out
 //     via a trailing `Cancellation_token`).
 //   - Internal parallelism: the heavy systems split their work with
 //     `ts::parallel_for` under the node's access grant.
@@ -96,7 +96,7 @@ void spin(double ms)
 
 // A component store (one float per entity) -- stands in for an ECS component
 // array. Plain single-threaded code; every public method asserts the caller
-// declared access, which is ALL it has to do to participate in the frame graph.
+// declared access, which is all it has to do to participate in the frame graph.
 class Float_store
 {
 public:
@@ -240,7 +240,7 @@ void parallel_fill(Float_store& out, float v, double total_ms)
 }
 
 // --- the systems ------------------------------------------------------------------
-// Free functions with typed parameters: the const-ness IS the access
+// Free functions with typed parameters: the const-ness is the access
 // declaration the graph reads. Budgets (ms @ scale 1.0) in comments.
 
 void tick_input(Float_store& input)                                               // 0.1
@@ -257,7 +257,7 @@ void tick_networking(const Float_store& input, Float_store& net)                
 }
 
 // Streaming: loads a batch of assets from the read-only source via
-// `Guarded::async` -- `async`, not `access`: the loads must run on OTHER
+// `Guarded::async` -- `async`, not `access`: the loads must run on other
 // workers, overlapping this node's own cost below. Each load is consumed by a
 // `then` continuation; a `when_all` joins the batch. Fire-and-forget: the
 // handles are dropped, the chain stays alive through the queued work.
@@ -311,10 +311,10 @@ void tick_navigation(const Float_store& nav_mesh, const Transforms& prev_xf,
 // `Guarded::async` -- concurrent readers on the service, on other workers,
 // overlapping AI's own logic. Fire-and-forget (consuming a result would mean
 // blocking inside a graph node -- the anti-pattern; feeding results into a
-// downstream node is the clean shape). The queries are SPECULATIVE: each runs a
+// downstream node is the clean shape). The queries are speculative: each runs a
 // longer budget than AI needs, and AI cancels the batch once its own work is
 // done. The query body opts into cooperative cancellation by taking a trailing
-// `Cancellation_token` and polling it -- cancellation arriving MID-body
+// `Cancellation_token` and polling it -- cancellation arriving mid-body
 // early-outs (a cooperative return settles the task completed, not cancelled).
 void tick_ai(ts::Guarded<Float_store>& nav_service,
              const Transforms& prev_xf, const Float_store& paths,
@@ -420,9 +420,9 @@ double serial_budget_ms()
 // --- the frame graph --------------------------------------------------------------
 
 // Nodes are added in frame order, so the conflict tiebreak (declaration index)
-// matches intent: everything before the publish node reads LAST frame's
+// matches intent: everything before the publish node reads last frame's
 // transforms, everything after it reads this frame's. The one explicit edge is
-// `flip.after(propagation)` -- propagation holds NO grant on the transforms
+// `flip.after(propagation)` -- propagation holds no grant on the transforms
 // (staging is grant-free), so no conflict edge exists to derive; the ordering
 // is intent, and is declared as such.
 ts::Static_task_graph build_frame_graph(World& w)
@@ -431,7 +431,7 @@ ts::Static_task_graph build_frame_graph(World& w)
 
     g.add_node(&tick_input, w.input);
     g.add_node(&tick_networking, w.input, w.net);
-    // Streaming and AI capture the service WRAPPERS (they submit async work);
+    // Streaming and AI capture the service wrappers (they submit async work);
     // their graph access is still just the declared stores.
     g.add_node([&w](const Float_store& input, Float_store& assets)
     {
@@ -448,7 +448,7 @@ ts::Static_task_graph build_frame_graph(World& w)
     g.add_node(&tick_physics, w.velocities, w.game_state, w.bodies);
 
     // Propagation: computes this frame's transforms from animation + physics
-    // output and STAGES the batch -- one command, cheap to replay. No grant on
+    // output and stages the batch -- one command, cheap to replay. No grant on
     // the transforms; it never contends with their readers.
     auto propagation = g.add_node(
         [rec = w.transforms.recorder()](const Float_store& local_xf, const Float_store& bodies) mutable
@@ -470,7 +470,7 @@ ts::Static_task_graph build_frame_graph(World& w)
     g.add_node(&tick_audio, w.transforms.state(), w.audio_out);
     g.add_node(&tick_render, w.transforms.state(), w.visibility, w.particles, w.draw_lists);
     g.add_node(&tick_ui, w.game_state, w.ui);
-    // Debug overlay -- a bare GENERIC lambda: `const auto&` classifies as a
+    // Debug overlay -- a bare generic lambda: `const auto&` classifies as a
     // read via the rvalue probe, same "const = read" rule as everywhere else.
     g.add_node([](const auto& game_state, const auto& xf)                         // 0.2
     {

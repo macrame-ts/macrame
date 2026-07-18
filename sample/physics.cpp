@@ -1,6 +1,6 @@
 // The `Deferred`/`Versioned`/`Guarded` decomposition from the command-buffer
 // design study, executable: a sealed `Guarded<Physics_world>` machine with a
-// SINGLE grant holder -- the sim's write; everything else stages external
+// single grant holder -- the sim's write; everything else stages external
 // inputs (impulses, spawns) through a `Deferred` or reads the output extract
 // published as a `Versioned<Pose_snapshot>`. Gameplay reads last frame's poses
 // all frame; the flip is the only write conflict on the snapshot. Runs twice
@@ -17,7 +17,7 @@
 // - Separating the machine (`Physics_world`) from its published extract
 //   (`Pose_snapshot`) is honest parallelisation work: more code than a
 //   single-threaded sim needs, but the split is what lets readers run against
-//   a stable snapshot while the sim mutates -- it pays off under ANY
+//   a stable snapshot while the sim mutates -- it pays off under any
 //   parallelisation approach. The library's contribution is making the
 //   separation explicit and checkable (declared access, harness-verified)
 //   rather than implicit convention.
@@ -61,7 +61,7 @@ struct Pose
     Vec3 vel;
 };
 
-// Grant-free id reservation: gameplay gets a body's identity at STAGE time even
+// Grant-free id reservation: gameplay gets a body's identity at stage time even
 // though the body exists only once the sim commits the staged creation -- the
 // forward-reference pattern (no reserved-handle support needed in `Deferred`).
 struct Body_id_allocator
@@ -245,7 +245,7 @@ public:
     void set_body(Body_id id) { TS_CHECK_ACCESS(); body_ = id; }
     Body_id body() const { TS_CHECK_ACCESS(); return body_; }
 
-    // Hover controller off LAST frame's pose: thrust up when low. Deterministic.
+    // Hover controller off last frame's pose: thrust up when low. Deterministic.
     Vec3 thrust_from(const Pose& pose) const
     {
         TS_CHECK_ACCESS();
@@ -341,12 +341,12 @@ Physics_stats run_physics_frames(int frames)
     // batch of spawn requests the spawner drains over the first frames.
     const Body_id player_body = ids.reserve();
     {
-        // `boot` dies at this scope's exit, BEFORE the graph mints its
+        // `boot` dies at this scope's exit, before the graph mints its
         // recorders; its staged `create_body` survives the slot release
         // (journal contract). Correctness hinges on apply order == recorder
         // creation order, FIFO within a slot, a reused slot keeping its
         // position -- so gameplay's frame-1 `add_impulse(player_body)` always
-        // applies AFTER this create. If that ordering ever broke, the impulse
+        // applies after this create. If that ordering ever broke, the impulse
         // would silently no-op (see `add_impulse`) -- deterministic but wrong.
         auto boot = world_in.recorder();
         boot.stage([player_body](Physics_world& w)
@@ -363,12 +363,12 @@ Physics_stats run_physics_frames(int frames)
 
     ts::Static_task_graph g;
 
-    // Gameplay: reads LAST frame's poses (stable all frame, overlaps everything),
+    // Gameplay: reads last frame's poses (stable all frame, overlaps everything),
     // stages this frame's inputs. No grant on `world` anywhere in this node.
-    // The drag loop stages in PARALLEL through a per-worker recorder: placement
+    // The drag loop stages in parallel through a per-worker recorder: placement
     // order is nondeterministic, but each body gets exactly one drag command and
     // distinct bodies commute at the world level -- and the player's thrust
-    // (recorder created BEFORE the parallel slots) always applies before its
+    // (recorder created before the parallel slots) always applies before its
     // drag -- so the frame stays bit-deterministic across runs.
     auto gameplay = g.add_node(
         [rec = world_in.recorder(), drag = world_in.parallel_recorder()](const Pose_snapshot& p, const Player& pl) mutable
@@ -401,7 +401,7 @@ Physics_stats run_physics_frames(int frames)
         },
         spawns);
 
-    // Scene query off the SNAPSHOT, not the machine. A machine read here bought
+    // Scene query off the snapshot, not the machine. A machine read here bought
     // nothing: declared before `sim`, it saw last frame's post-step world -- the
     // exact vintage the snapshot publishes -- while paying a scheduling squeeze
     // against the sim's exclusive window. On the snapshot the query overlaps the
@@ -421,7 +421,7 @@ Physics_stats run_physics_frames(int frames)
 
     // The sim: exclusive write on the machine, heaviest node in the frame.
     // Boundary commit (under the grant this node already holds) -> step ->
-    // batch-extract into ONE staged command (cheap to replay twice).
+    // batch-extract into one staged command (cheap to replay twice).
     auto sim = g.add_node(
         [&world_in, out = poses.recorder()](Physics_world& w) mutable
         {
