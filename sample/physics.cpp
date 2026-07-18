@@ -462,7 +462,7 @@ Physics_stats run_physics_frames(int frames)
 
 } // namespace
 
-// --- entry points (forward-declared by consumers -- single-file sample, no header) ---
+// --- entry points -----------------------------------------------------------------
 
 // Drives the demo for `frames` frames and returns the final published snapshot
 // hash -- the determinism fingerprint the TSan driver compares across runs.

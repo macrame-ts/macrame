@@ -1,8 +1,6 @@
 // A mock game-engine frame -- the breadth sample. Sixteen systems and a publish
 // node; the ENTIRE schedule is derived from declared data access (zero explicit
-// ordering edges except one, called out below). Deliberately a single file:
-// the pattern needs no library support beyond the primitives, and consumers
-// forward-declare the two entry points at the bottom.
+// ordering edges except one, called out below).
 //
 // What it shows, layer by layer:
 //   - `Static_task_graph` -- 17 nodes over 19 guarded stores; every edge derived
@@ -487,7 +485,7 @@ ts::Static_task_graph build_frame_graph(World& w)
 
 } // namespace
 
-// --- entry points (forward-declared by consumers; no header) ----------------------
+// --- entry points -----------------------------------------------------------------
 
 // Run `frames` frames at `scale`; returns the measured average ms/frame, the
 // serial budget at that scale, and entity 0's published transform (a

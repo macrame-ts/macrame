@@ -1,7 +1,6 @@
 // The blackboard pattern on `Versioned<T>` -- the pattern recipe of
-// docs/command-buffer-design.md §7.4, executable. Deliberately a SINGLE file
-// (declaration extern'd in main.cpp): the point is that the pattern needs no
-// library support beyond the existing primitives.
+// docs/command-buffer-design.md §7.4, executable. The pattern needs no library
+// support beyond the existing primitives.
 //
 // A stealth-guard toy: the world ticks a patrolling player; a senses system
 // stages facts onto a shared squad blackboard (grant-free); a flip publishes
