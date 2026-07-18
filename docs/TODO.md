@@ -94,6 +94,7 @@ IDs — when an item is done, mark it, don't renumber.
 
 7. **Deferred / Versioned**
    1. `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.
+   2. `[ ]` **(P2) Lock-free `stage()`** — kill the per-slot mutex (it exists ONLY for the dynamic stage-vs-cut race; single producer per slot otherwise — handoff doc §5). Falls out of 7.1's arena step: single-producer chunked bump allocation makes `stage` a lock-free bump, and the cut becomes a chain-head exchange. `Parallel_recorder` already gives thread-keyed slots (per-worker + overflow lane); this removes the last lock on the staging path. Split out of 7.1 for referenceability — implement together with the arena.
 
 8. **Task chaining**
    1. `[ ]` **(P3) Results-on-`after`** — leaning *no* (`when_all`+`then` covers it); revisit only if a concrete single-result-prerequisite use case appears.
