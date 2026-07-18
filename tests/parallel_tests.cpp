@@ -89,6 +89,38 @@ void test_parallel_for_nested()
     TS_CHECK(total.load() == static_cast<long long>(outer) * inner);
 }
 
+// A guarded store touched from INSIDE parallel_for chunks, under the caller's write grant.
+// Helpers run on other workers and must inherit the caller's `Access_context` (by-value
+// snapshot in `Parallel_state`) or the harness faults -- the regression that crashed the
+// game_frame sample when it moved onto the core `parallel_for`. Many small items so helpers
+// reliably claim some before the participating caller drains the range.
+void test_parallel_for_inherits_grant()
+{
+    class Store
+    {
+    public:
+        explicit Store(int n) : data_(n, 0) {}
+        int size() const { TS_CHECK_ACCESS(); return static_cast<int>(data_.size()); }
+        void set(int i, int v) { TS_CHECK_ACCESS(); data_[i] = v; }
+        long long sum() const
+        {
+            TS_CHECK_ACCESS();
+            return std::accumulate(data_.begin(), data_.end(), 0ll);
+        }
+    private:
+        std::vector<int> data_;
+    };
+
+    constexpr int n = 20000;
+    ts::Guarded<Store> store{ n };
+    long long total = store.access([](Store& s)
+    {
+        ts::parallel_for(s.size(), [&s](int i) { s.set(i, 1); });
+        return s.sum();
+    }).sync();
+    TS_CHECK(total == n);
+}
+
 } // namespace
 
 void run_parallel_tests()
@@ -101,4 +133,5 @@ void run_parallel_tests()
     run("parallel_for edges", test_parallel_for_edges);
     run("async_parallel_for", test_async_parallel_for);
     run("parallel_for nested", test_parallel_for_nested);
+    run("parallel_for inherits grant", test_parallel_for_inherits_grant);
 }

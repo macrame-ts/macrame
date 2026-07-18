@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <optional>
 #include <type_traits>
 #include <utility>
 
@@ -45,11 +46,17 @@ struct Parallel_state
     int base_grain;            // ceil(n / concurrency), for `balanced`
     int concurrency;
     Balance balance;
+    // The caller's access grant, snapshotted BY VALUE on the calling thread at creation --
+    // helpers install it around their loop, so a chunk touching guarded state the caller
+    // owns passes the harness on any worker (and, for `async_parallel_for`, even after the
+    // caller's own scope unwinds). Same inheritance model as `ts::launch`/`ts::nested`.
+    std::optional<Access_context> inherited_ctx;
     std::atomic<int> next{ 0 };   // next item index to claim
     std::atomic<int> done{ 0 };   // items processed (acq_rel: publishes body writes to the waiter)
 
     Parallel_state(Body b, int n_, int conc, Balance bal)
         : body(std::move(b)), n(n_), concurrency(conc), balance(bal)
+        , inherited_ctx(snapshot_access())
     {
         base_grain = (n_ + conc - 1) / conc;
         if (base_grain < 1)
@@ -92,14 +99,19 @@ void parallel_loop(Parallel_state<Body>* st)
     }
 }
 
-// Raw scheduler entry for a helper: run the loop, then drop this helper's refcount (may free
-// the state if the loop already completed and the handle is gone). A late-queued helper finds
-// the counter drained, does no work, and just releases its ref -- harmless.
+// Raw scheduler entry for a helper: install the caller's inherited grant, run the loop, then
+// drop this helper's refcount (may free the state if the loop already completed and the handle
+// is gone). A late-queued helper finds the counter drained, does no work, and just releases
+// its ref -- harmless. (The participating CALLER needs no install -- its context is already
+// the live one.)
 template<typename Body>
 void parallel_helper(void* p)
 {
     auto* st = static_cast<Parallel_state<Body>*>(p);
-    parallel_loop(st);
+    {
+        Inherited_access_scope scope(st->inherited_ctx);
+        parallel_loop(st);
+    }
     intrusive_dec(&st->core);
 }
 
