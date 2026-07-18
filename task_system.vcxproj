@@ -37,10 +37,8 @@
     <ClCompile Include="src\worker_thread.cpp" />
     <ClCompile Include="benchmarks\benchmarks.cpp" />
     <ClCompile Include="sample\blackboard.cpp" />
-    <ClCompile Include="sample\engine.cpp" />
+    <ClCompile Include="sample\game_frame.cpp" />
     <ClCompile Include="sample\physics.cpp" />
-    <ClCompile Include="sample\frame.cpp" />
-    <ClCompile Include="sample\systems.cpp" />
     <ClCompile Include="tests\access_tests.cpp" />
     <ClCompile Include="tests\graph_tests.cpp" />
     <ClCompile Include="tests\parallel_tests.cpp" />
@@ -76,11 +74,6 @@
     <ClInclude Include="include\ts\detail\work_stealing_deque.h" />
     <ClInclude Include="include\ts\detail\worker_thread.h" />
     <ClInclude Include="benchmarks\benchmarks.h" />
-    <ClInclude Include="sample\engine.h" />
-    <ClInclude Include="sample\frame.h" />
-    <ClInclude Include="sample\parallel.h" />
-    <ClInclude Include="sample\systems.h" />
-    <ClInclude Include="sample\world.h" />
     <ClInclude Include="tests\access_tests.h" />
     <ClInclude Include="tests\graph_tests.h" />
     <ClInclude Include="tests\parallel_tests.h" />

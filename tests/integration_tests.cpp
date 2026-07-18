@@ -3,7 +3,14 @@
 #include "ts/static_task_graph.h"
 #include "harness.h"
 #include "test_util.h"
-#include "engine.h"
+
+// The game-frame sample is a single self-contained .cpp (no header); its test
+// surface is forward-declared.
+namespace sample
+{
+void game_frame_stats(int frames, float time_scale,
+                      double& avg_ms, double& serial_ms, float& transform0);
+}
 
 #include <algorithm>
 #include <atomic>
@@ -465,24 +472,28 @@ void test_repeat_stress()
     TS_CHECK(all);
 }
 
-// Drive the whole mock engine (graph + internal parallelism + Guarded::async
-// + then/when_all) and assert frame-level invariants. Reaching the assertions at
-// all proves no deadlock and -- since the access harness is live -- zero access
-// violations (a violation would have aborted the process).
+// Drive the whole mock game-engine frame (graph + Versioned transforms +
+// internal parallelism + Guarded::async + then/when_all) and assert frame-level
+// invariants. Reaching the assertions at all proves no deadlock and -- since
+// the access harness is live -- zero access violations (a violation would have
+// aborted the process).
 void test_engine_frame()
 {
-    sample::Frame_stats s = sample::run_frames(10, 1.0f);
+    double avg_ms = 0.0, serial_ms = 0.0;
+    float transform0 = 0.0f;
+    sample::game_frame_stats(10, 1.0f, avg_ms, serial_ms, transform0);
 
-    TS_CHECK(s.frames == 10);                    // every frame completed
-    TS_CHECK(s.world_xf_value == 5.0f);          // deterministic, correct output (2 + 3)
-    TS_CHECK(s.avg_ms * 1.3 < s.serial_ms);      // the graph actually parallelized (>1.3x)
+    TS_CHECK(transform0 == 5.0f);           // deterministic, correct output (2 + 3)
+    TS_CHECK(avg_ms * 1.3 < serial_ms);     // the graph actually parallelized (>1.3x)
 }
 
 void test_engine_determinism()
 {
-    sample::Frame_stats a = sample::run_frames(5, 0.3f);
-    sample::Frame_stats b = sample::run_frames(5, 0.3f);
-    TS_CHECK(a.world_xf_value == b.world_xf_value);
+    double avg_ms = 0.0, serial_ms = 0.0;
+    float a = 0.0f, b = 0.0f;
+    sample::game_frame_stats(5, 0.3f, avg_ms, serial_ms, a);
+    sample::game_frame_stats(5, 0.3f, avg_ms, serial_ms, b);
+    TS_CHECK(a == b);
 }
 
 // A naive blocking fork-join: launch a task per item, then get() each.

@@ -6,13 +6,14 @@
 // Run after every major change: a clean exit means TSan found no data races in
 // these workloads; a race prints a report and (with halt_on_error) exits nonzero.
 
-#include "engine.h"          // sample::run_frames
-
 #include <cstddef>
 
-// Single-file samples (no headers) -- see sample/blackboard.cpp, sample/physics.cpp.
+// Single-file samples (no headers) -- see sample/game_frame.cpp,
+// sample/physics.cpp, sample/blackboard.cpp.
 namespace sample
 {
+void game_frame_stats(int frames, float time_scale,
+                      double& avg_ms, double& serial_ms, float& transform0);
 void run_blackboard_sample();
 std::size_t physics_pose_hash(int frames);   // final snapshot hash after `frames` frames
 }
@@ -1050,7 +1051,13 @@ int main()
     std::puts("tsan: versioned stress");     stress_versioned();
     std::puts("tsan: physics frames");       stress_physics();
     std::puts("tsan: blackboard frames");    sample::run_blackboard_sample();
-    std::puts("tsan: engine frames");       for (int i = 0; i < 20; ++i) sample::run_frames(20, 0.2f);
+    std::puts("tsan: game_frame frames");
+    for (int i = 0; i < 20; ++i)
+    {
+        double avg = 0.0, serial = 0.0;
+        float xf = 0.0f;
+        sample::game_frame_stats(20, 0.2f, avg, serial, xf);
+    }
     std::puts("tsan: done (no races)");
     return 0;
 }

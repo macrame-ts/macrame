@@ -2,14 +2,15 @@
 #include "benchmarks.h"
 #include "mem_profile.h"
 #include "harness.h"
-#include "engine.h"
 #include "ts/version.h"
 
-// Single-file samples (by design -- no headers): the physics machine/extract
-// decomposition (sample/physics.cpp) and the blackboard pattern recipe of
+// Single-file samples (by design -- no headers): the mock game-engine frame
+// (sample/game_frame.cpp), the physics machine/extract decomposition
+// (sample/physics.cpp), and the blackboard pattern recipe of
 // docs/command-buffer-design.md §7.4 (sample/blackboard.cpp).
 namespace sample
 {
+void run_game_frame_sample(int frames = 20, float time_scale = 1.0f);
 void run_physics_sample(int frames = 60);
 void run_blackboard_sample();
 }
@@ -54,7 +55,7 @@ int main(int argc, char** argv)
     // Stress entry: just the sample, many frames, fast scale (for sanitizers).
     if (argc >= 2 && std::strcmp(argv[1], "--stress") == 0)
     {
-        sample::run_sample(2000, 0.2f);
+        sample::run_game_frame_sample(2000, 0.2f);
         return 0;
     }
 
@@ -76,7 +77,7 @@ int main(int argc, char** argv)
     }
 
     run_all_tests();
-    sample::run_sample();
+    sample::run_game_frame_sample();
     sample::run_physics_sample();
     sample::run_blackboard_sample();
     run_benchmarks();

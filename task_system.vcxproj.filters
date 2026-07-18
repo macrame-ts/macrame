@@ -54,16 +54,10 @@
     <ClCompile Include="sample\blackboard.cpp">
       <Filter>sample</Filter>
     </ClCompile>
-    <ClCompile Include="sample\engine.cpp">
-      <Filter>sample</Filter>
-    </ClCompile>
-    <ClCompile Include="sample\frame.cpp">
+    <ClCompile Include="sample\game_frame.cpp">
       <Filter>sample</Filter>
     </ClCompile>
     <ClCompile Include="sample\physics.cpp">
-      <Filter>sample</Filter>
-    </ClCompile>
-    <ClCompile Include="sample\systems.cpp">
       <Filter>sample</Filter>
     </ClCompile>
     <ClCompile Include="tests\access_tests.cpp">
@@ -166,21 +160,6 @@
     </ClInclude>
     <ClInclude Include="benchmarks\benchmarks.h">
       <Filter>benchmarks</Filter>
-    </ClInclude>
-    <ClInclude Include="sample\engine.h">
-      <Filter>sample</Filter>
-    </ClInclude>
-    <ClInclude Include="sample\frame.h">
-      <Filter>sample</Filter>
-    </ClInclude>
-    <ClInclude Include="sample\parallel.h">
-      <Filter>sample</Filter>
-    </ClInclude>
-    <ClInclude Include="sample\systems.h">
-      <Filter>sample</Filter>
-    </ClInclude>
-    <ClInclude Include="sample\world.h">
-      <Filter>sample</Filter>
     </ClInclude>
     <ClInclude Include="tests\access_tests.h">
       <Filter>tests</Filter>

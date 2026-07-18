@@ -33,10 +33,8 @@ set(TS_CORE_SOURCES
 
 set(TS_SAMPLE_SOURCES
     sample/blackboard.cpp
-    sample/engine.cpp
-    sample/frame.cpp
+    sample/game_frame.cpp
     sample/physics.cpp
-    sample/systems.cpp
 )
 
 if(WIN32)
