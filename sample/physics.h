@@ -17,11 +17,8 @@ struct Physics_stats
     std::size_t pose_hash = 0;   // bitwise hash of the final published snapshot
 };
 
-// The `Deferred`/`Versioned`/`Guarded` decomposition from the command-buffer
-// design study: a sealed `Guarded<Physics_world>` machine, a `Deferred` staging
-// its external inputs (impulses, spawns), and a `Versioned<Pose_snapshot>`
-// publishing its outputs. Gameplay reads last frame's poses all frame; the flip
-// is the only write conflict on the snapshot.
+// Drives the physics demo for `frames` frames (see physics.cpp for what the
+// sample shows and how).
 Physics_stats run_physics_frames(int frames);
 
 // Runs the demo (twice -- the second run proves run-to-run determinism) and

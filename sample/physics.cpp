@@ -1,3 +1,27 @@
+// The `Deferred`/`Versioned`/`Guarded` decomposition from the command-buffer
+// design study, executable: a sealed `Guarded<Physics_world>` machine with
+// exactly two grant holders, a `Deferred` staging its external inputs
+// (impulses, spawns), and a `Versioned<Pose_snapshot>` publishing its output
+// extract. Gameplay reads last frame's poses all frame; the flip is the only
+// write conflict on the snapshot. Runs twice and checks the runs are
+// bit-identical.
+//
+// Two ideas this sample is built to show:
+//
+// - The core logic is plainly thread-unsafe, and that's the point.
+//   `Physics_world` and the gameplay systems are clean single-threaded
+//   classes -- no atomics, no locks, only domain logic. The library is what
+//   turns them into safely parallelisable work; the classes never learn about
+//   threading.
+//
+// - Separating the machine (`Physics_world`) from its published extract
+//   (`Pose_snapshot`) is honest parallelisation work: more code than a
+//   single-threaded sim needs, but the split is what lets readers run against
+//   a stable snapshot while the sim mutates -- it pays off under ANY
+//   parallelisation approach. The library's contribution is making the
+//   separation explicit and checkable (declared access, harness-verified)
+//   rather than implicit convention.
+
 #include "physics.h"
 
 #include "ts/access.h"
@@ -52,6 +76,8 @@ struct Body_id_allocator
 // The heavy internal state: single instance, never replicated, never copied.
 // Exactly two graph accessors -- `vision` (read) and `sim` (write); everything
 // else stages into the machine's `Deferred` or reads the published snapshot.
+// Note the class itself is plain single-threaded code -- no atomics, no locks;
+// the library supplies all the concurrency safety around it.
 class Physics_world
 {
 public:
@@ -61,6 +87,9 @@ public:
         bodies_.push_back({ id, pos, vel });
     }
 
+    // Unknown id is a deliberate no-op: staged impulses may target bodies
+    // created later in the same batch or already destroyed, so silence -- not
+    // a fatal -- is the policy.
     void add_impulse(Body_id id, Vec3 dv)
     {
         TS_CHECK_ACCESS();
@@ -137,7 +166,10 @@ private:
 
 // Small, flat, POD-valued -- the extract, not the machine. `apply` is idempotent
 // stores keyed by id, so the replay resync is trivially deterministic and bodies
-// inactive in a frame keep their (still correct) old values.
+// inactive in a frame keep their (still correct) old values. Splitting this out
+// of `Physics_world` is deliberate extra work that any parallelisation approach
+// would want (readers run against a stable snapshot while the sim mutates);
+// here the split is declared access, not convention.
 class Pose_snapshot
 {
 public:
@@ -300,17 +332,24 @@ Physics_stats run_physics_frames(int frames)
     // batch of spawn requests the spawner drains over the first frames.
     const Body_id player_body = ids.reserve();
     {
+        // `boot` dies at this scope's exit, BEFORE the graph mints its
+        // recorders; its staged `create_body` survives the slot release
+        // (journal contract). Correctness hinges on apply order == recorder
+        // creation order, FIFO within a slot, a reused slot keeping its
+        // position -- so gameplay's frame-1 `add_impulse(player_body)` always
+        // applies AFTER this create. If that ordering ever broke, the impulse
+        // would silently no-op (see `add_impulse`) -- deterministic but wrong.
         auto boot = world_in.recorder();
         boot.stage([player_body](Physics_world& w)
         {
             w.create_body(player_body, { 0.0f, 5.0f, 0.0f }, {});
         });
-        player.async([player_body](Player& p) { p.set_body(player_body); }).sync();
-        spawns.async([](Spawn_queue& q)
+        player.access([player_body](Player& p) { p.set_body(player_body); });
+        spawns.access([](Spawn_queue& q)
         {
             for (int i = 0; i < 8; ++i)
                 q.request({ static_cast<float>(i) - 4.0f, 6.0f, 1.0f });
-        }).sync();
+        });
     }
 
     ts::Static_task_graph g;
@@ -414,7 +453,9 @@ void run_physics_sample(int frames)
     // deterministic regardless of thread timing: two runs must be bit-identical.
     const bool deterministic = a.pose_hash == b.pose_hash
         && std::memcmp(&a.player_y, &b.player_y, sizeof a.player_y) == 0
-        && a.bodies == b.bodies;
+        && a.bodies == b.bodies
+        && a.spawned == b.spawned
+        && a.vision_hits == b.vision_hits;
 
     std::printf("physics sample: %d frames, %d bodies (%d spawned), %d vision hits, player y %.3f, %s\n",
         a.frames, a.bodies, a.spawned, a.vision_hits, a.player_y,
