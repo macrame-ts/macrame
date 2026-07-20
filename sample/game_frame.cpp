@@ -439,7 +439,11 @@ void tick_ui(const Game_state& game_state, Ui& ui)                      // 0.5
     spin(0.5);
 }
 
-// Sum of the budgets above (ms @ 1.0) -- the serial baseline to beat.
+// Sum of the budgets above (ms @ 1.0). The metric that matters is resource
+// utilization: `serial_budget / workers` is the perfect-utilization lower bound
+// on ms/frame, and measured-vs-ideal says how well the cores were used. The
+// achievable floor is `max(serial / workers, critical path)` -- the longest
+// dependency chain through the frame bounds it once workers are plentiful.
 double serial_budget_ms()
 {
     return 0.1 + 0.5 + 0.5 + 2.0 + 1.0 + 1.5 + 3.0 + 3.0 + 1.0
@@ -551,9 +555,12 @@ void run_game_frame_sample(int frames, float scale)
     float transform0 = 0.0f;
     game_frame_stats(frames, scale, avg_ms, serial_ms, transform0);
 
+    int workers = ts::default_scheduler().worker_count();
+    double ideal_ms = serial_ms / workers;
     std::printf("\n[game_frame] %d frames, 1000 entities, scale %.2f\n", frames, scale);
-    std::printf("  %.2f ms/frame  (serial budget %.2f ms -> %.2fx speedup)\n",
-        avg_ms, serial_ms, serial_ms / avg_ms);
+    std::printf("  %.2f ms/frame; %.2f ms of work across %d workers -> ideal %.2f ms/frame, "
+                "%.0f%% utilization\n",
+        avg_ms, serial_ms, workers, ideal_ms, 100.0 * ideal_ms / avg_ms);
     std::printf("  peak %d concurrent nav queries (Guarded::async during AI), %d early-outed on cancel\n",
         nav_peak.load(), nav_early.load());
     std::printf("  streamed %d assets via then, %d batches via when_all\n",
