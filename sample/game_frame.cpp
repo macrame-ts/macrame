@@ -8,9 +8,9 @@
 //     from parameter const-ness (fn-pointer nodes, lambda nodes, and one bare
 //     generic lambda -- `const auto&` deduces a read via the rvalue probe).
 //   - `Versioned<Transforms>` -- the packaged double-buffer. Early systems
-//     (gameplay/nav/AI) read last frame's published transforms all frame; the
+//     (gameplay/nav/AI/audio) read last frame's published transforms all frame; the
 //     propagation node stages this frame's batch grant-free; a publish node
-//     flips; late systems (cloth/culling/particles/audio/render) read the fresh
+//     flips; late systems (cloth/culling/particles/render) read the fresh
 //     version.
 //   - `Deferred<Draw_lists>` -- the command buffer. Culling, particles, and UI
 //     each stage draw commands grant-free (no contention among producers, none
@@ -347,7 +347,7 @@ void tick_networking(const Input& input, Net& net)                              
 // `then` continuation; a `when_all` joins the batch. Fire-and-forget: the
 // handles are dropped, the chain stays alive through the queued work.
 void tick_streaming(ts::Guarded<Asset_source>& asset_source,
-                    const Input& input, Assets& assets)                           // 0.5
+                    const Input& input, Assets& assets)                           // 1.5
 {
     read_all(input);
     fill(assets, 1.0f);
@@ -370,7 +370,7 @@ void tick_streaming(ts::Guarded<Asset_source>& asset_source,
         batches.fetch_add(1, std::memory_order_relaxed);
     });
 
-    spin(0.5);   // the node's own cost, overlapping the async loads
+    spin(1.5);   // the node's own cost (decompression), overlapping the async loads
 }
 
 // Gameplay is three systems, not one monolith: they share inputs (all read last
@@ -409,12 +409,11 @@ void tick_quests(const Transforms& prev_xf, const Input& input,
 }
 
 void tick_navigation(const Nav_mesh& nav_mesh, const Transforms& prev_xf,
-                     Paths& paths)                                                // 1.0
+                     Paths& paths)                                                // 2.5
 {
     read_all(nav_mesh);
     read_all(prev_xf);
-    fill(paths, 1.0f);
-    spin(1.0);
+    parallel_fill(paths, 1.0f, 2.5);      // internal parallelism: per-query batch
 }
 
 // AI: per-agent path queries against the read-only nav service via
@@ -473,17 +472,17 @@ void tick_animation(const Skeletons& skeletons, const Intents& intents,
 }
 
 void tick_physics(const Velocities& velocities, const Combat& combat,
-                  Bodies& bodies)                                                 // 3.0
+                  Bodies& bodies)                                                 // 4.5
 {
     read_all(velocities);
     read_all(combat);
-    parallel_fill(bodies, 3.0f, 3.0);     // internal parallelism: per-island
+    parallel_fill(bodies, 3.0f, 4.5);     // internal parallelism: per-island
 }
 
-void tick_cloth(const Transforms& xf, Cloth& cloth)                               // 1.0
+void tick_cloth(const Transforms& xf, Cloth& cloth)                               // 2.0
 {
     read_all(xf);
-    parallel_fill(cloth, 1.0f, 1.0);      // internal parallelism: per-patch
+    parallel_fill(cloth, 1.0f, 2.0);      // internal parallelism: per-patch
 }
 
 // Culling produces the visible set and stages its draw batch -- no grant on the
@@ -499,18 +498,23 @@ void tick_culling(const Transforms& xf, const Renderables& renderables,
 }
 
 void tick_particles(const Transforms& xf, Particles& particles,
-                    ts::Recorder<Draw_lists>& draws)                              // 1.5
+                    ts::Recorder<Draw_lists>& draws)                              // 2.0
 {
     read_all(xf);
-    parallel_fill(particles, 1.0f, 1.5);    // internal parallelism: per-system
+    parallel_fill(particles, 1.0f, 2.0);    // internal parallelism: per-system
     draws.stage([n = particles.size() / 4](Draw_lists& d) { d.push_batch(n); });
 }
 
-void tick_audio(const Transforms& xf, Audio_out& audio_out)                       // 0.5
+// Audio mixes off LAST frame's transforms (its node is declared before the
+// flip): one frame of positional latency is inaudible, and reading the previous
+// version takes the serial mixer out of the post-flip tail -- the same
+// version-choice lever the gameplay systems use, applied to shorten the
+// critical path.
+void tick_audio(const Transforms& prev_xf, Audio_out& audio_out)                  // 1.5
 {
-    read_all(xf);
+    read_all(prev_xf);
     fill(audio_out, 1.0f);
-    spin(0.5);   // deliberately serial: a single-threaded mixer is realistic
+    spin(1.5);   // deliberately serial: a single-threaded mixer is realistic
 }
 
 void tick_ui(const Quests& quests, Ui& ui, ts::Recorder<Draw_lists>& draws)       // 0.5
@@ -541,8 +545,8 @@ void tick_submit(ts::Deferred<Draw_lists>& staged,
 // dependency chain through the frame bounds it once workers are plentiful.
 double serial_budget_ms()
 {
-    return 0.1 + 0.5 + 0.5 + 0.7 + 0.7 + 0.7 + 1.0 + 1.5 + 3.0 + 3.0 + 1.0
-         + 1.0 + 1.5 + 1.5 + 0.5 + 2.5 + 0.5 + 0.2;
+    return 0.1 + 0.5 + 1.5 + 0.7 + 0.7 + 0.7 + 2.5 + 1.5 + 3.0 + 4.5 + 1.0
+         + 2.0 + 1.5 + 2.0 + 1.5 + 2.5 + 0.5 + 0.2;
 }
 
 // --- the frame graph --------------------------------------------------------------
@@ -570,6 +574,7 @@ ts::Static_task_graph build_frame_graph(World& w)
     g.add_node(&tick_economy, w.transforms.state(), w.input, w.net, w.economy);
     g.add_node(&tick_quests, w.transforms.state(), w.input, w.net, w.quests);
     g.add_node(&tick_navigation, w.nav_mesh, w.transforms.state(), w.paths);
+    g.add_node(&tick_audio, w.transforms.state(), w.audio_out);   // prev transforms: pre-flip reader
     g.add_node([&w](const Transforms& prev_xf, const Paths& paths, const Combat& combat,
                     const Economy& economy, const Quests& quests, Intents& intents)
     {
@@ -610,7 +615,6 @@ ts::Static_task_graph build_frame_graph(World& w)
         {
             tick_particles(xf, p, rec);
         }, w.transforms.state(), w.particles);
-    g.add_node(&tick_audio, w.transforms.state(), w.audio_out);
     auto ui = g.add_node(
         [rec = w.draw_staged.recorder()](const Quests& quests, Ui& u) mutable
         {
