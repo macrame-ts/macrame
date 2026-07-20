@@ -151,6 +151,28 @@ private:
     std::vector<float> data_;
 };
 
+// Role aliases over the one mock store type: system signatures then say which
+// store they touch (`const Net&` instead of a second `const Float_store&`).
+using Skeletons = Float_store;
+using Nav_mesh = Float_store;
+using Renderables = Float_store;
+using Velocities = Float_store;
+using Asset_source = Float_store;
+using Input = Float_store;
+using Net = Float_store;
+using Assets = Float_store;
+using Game_state = Float_store;
+using Paths = Float_store;
+using Intents = Float_store;
+using Local_xf = Float_store;
+using Bodies = Float_store;
+using Cloth = Float_store;
+using Visibility = Float_store;
+using Particles = Float_store;
+using Audio_out = Float_store;
+using Draw_lists = Float_store;
+using Ui = Float_store;
+
 // --- the world --------------------------------------------------------------------
 
 // Every mutable store has a single writer system, so the frame graph derives a
@@ -167,31 +189,31 @@ struct World
     {}
 
     // read-only static inputs (no system writes them this frame)
-    ts::Guarded<Float_store> skeletons;
-    ts::Guarded<Float_store> nav_mesh;       // Navigation reads the store; AI queries the service
-    ts::Guarded<Float_store> renderables;
-    ts::Guarded<Float_store> velocities;
-    ts::Guarded<Float_store> asset_source;   // Streaming loads from this
+    ts::Guarded<Skeletons> skeletons;
+    ts::Guarded<Nav_mesh> nav_mesh;          // Navigation reads the store; AI queries the service
+    ts::Guarded<Renderables> renderables;
+    ts::Guarded<Velocities> velocities;
+    ts::Guarded<Asset_source> asset_source;  // Streaming loads from this
 
-    // single-writer outputs
-    ts::Guarded<Float_store> input;          // Input
-    ts::Guarded<Float_store> net;            // Networking
-    ts::Guarded<Float_store> assets;         // Streaming
-    ts::Guarded<Float_store> game_state;     // Gameplay
-    ts::Guarded<Float_store> paths;          // Navigation
-    ts::Guarded<Float_store> intents;        // AI
-    ts::Guarded<Float_store> local_xf;       // Animation
-    ts::Guarded<Float_store> bodies;         // Physics
+    // single-writer outputs (writer named by the type)
+    ts::Guarded<Input> input;
+    ts::Guarded<Net> net;
+    ts::Guarded<Assets> assets;
+    ts::Guarded<Game_state> game_state;
+    ts::Guarded<Paths> paths;
+    ts::Guarded<Intents> intents;
+    ts::Guarded<Local_xf> local_xf;
+    ts::Guarded<Bodies> bodies;
 
     // the published transforms: staged by propagation, flipped by the publish node
     ts::Versioned<Transforms> transforms;
 
-    ts::Guarded<Float_store> cloth;          // Cloth
-    ts::Guarded<Float_store> visibility;     // Culling
-    ts::Guarded<Float_store> particles;      // Particles
-    ts::Guarded<Float_store> audio_out;      // Audio
-    ts::Guarded<Float_store> draw_lists;     // Render
-    ts::Guarded<Float_store> ui;             // UI
+    ts::Guarded<Cloth> cloth;
+    ts::Guarded<Visibility> visibility;
+    ts::Guarded<Particles> particles;
+    ts::Guarded<Audio_out> audio_out;
+    ts::Guarded<Draw_lists> draw_lists;
+    ts::Guarded<Ui> ui;
 };
 
 // --- shared helpers ---------------------------------------------------------------
@@ -242,13 +264,13 @@ void parallel_fill(Float_store& out, float v, double total_ms)
 // Free functions with typed parameters: the const-ness is the access
 // declaration the graph reads. Budgets (ms @ scale 1.0) in comments.
 
-void tick_input(Float_store& input)                                               // 0.1
+void tick_input(Input& input)                                               // 0.1
 {
     fill(input, 1.0f);
     spin(0.1);
 }
 
-void tick_networking(const Float_store& input, Float_store& net)                  // 0.5
+void tick_networking(const Input& input, Net& net)                  // 0.5
 {
     read_all(input);
     fill(net, 1.0f);
@@ -260,13 +282,13 @@ void tick_networking(const Float_store& input, Float_store& net)                
 // workers, overlapping this node's own cost below. Each load is consumed by a
 // `then` continuation; a `when_all` joins the batch. Fire-and-forget: the
 // handles are dropped, the chain stays alive through the queued work.
-void tick_streaming(ts::Guarded<Float_store>& asset_source,
-                    const Float_store& input, Float_store& assets)                // 0.5
+void tick_streaming(ts::Guarded<Asset_source>& asset_source,
+                    const Input& input, Assets& assets)                // 0.5
 {
     read_all(input);
     fill(assets, 1.0f);
 
-    auto load = [](const Float_store& src) { spin(0.2); return src.size() > 0 ? src.get(0) : 1.0f; };
+    auto load = [](const Asset_source& src) { spin(0.2); return src.size() > 0 ? src.get(0) : 1.0f; };
     auto process = [](float) { streamed.fetch_add(1, std::memory_order_relaxed); };
 
     ts::Task<float> a = asset_source.async(load);
@@ -287,8 +309,8 @@ void tick_streaming(ts::Guarded<Float_store>& asset_source,
     spin(0.5);   // the node's own cost, overlapping the async loads
 }
 
-void tick_gameplay(const Transforms& prev_xf, const Float_store& input,
-                   const Float_store& net, Float_store& game_state)               // 2.0
+void tick_gameplay(const Transforms& prev_xf, const Input& input,
+                   const Net& net, Game_state& game_state)               // 2.0
 {
     read_all(prev_xf);
     read_all(input);
@@ -297,8 +319,8 @@ void tick_gameplay(const Transforms& prev_xf, const Float_store& input,
     spin(2.0);
 }
 
-void tick_navigation(const Float_store& nav_mesh, const Transforms& prev_xf,
-                     Float_store& paths)                                          // 1.0
+void tick_navigation(const Nav_mesh& nav_mesh, const Transforms& prev_xf,
+                     Paths& paths)                                          // 1.0
 {
     read_all(nav_mesh);
     read_all(prev_xf);
@@ -315,9 +337,9 @@ void tick_navigation(const Float_store& nav_mesh, const Transforms& prev_xf,
 // done. The query body opts into cooperative cancellation by taking a trailing
 // `Cancellation_token` and polling it -- cancellation arriving mid-body
 // early-outs (a cooperative return settles the task completed, not cancelled).
-void tick_ai(ts::Guarded<Float_store>& nav_service,
-             const Transforms& prev_xf, const Float_store& paths,
-             const Float_store& game_state, Float_store& intents)                 // 1.5
+void tick_ai(ts::Guarded<Nav_mesh>& nav_service,
+             const Transforms& prev_xf, const Paths& paths,
+             const Game_state& game_state, Intents& intents)                 // 1.5
 {
     read_all(prev_xf);
     read_all(paths);
@@ -326,7 +348,7 @@ void tick_ai(ts::Guarded<Float_store>& nav_service,
     ts::Cancellation_source nav_cancel;
     constexpr int queries = 6;
     for (int q = 0; q < queries; ++q)
-        nav_service.async([](const Float_store& n, ts::Cancellation_token tok)
+        nav_service.async([](const Nav_mesh& n, ts::Cancellation_token tok)
         {
             update_max(nav_peak, nav_active.fetch_add(1) + 1);
             bool bailed = false;
@@ -349,52 +371,52 @@ void tick_ai(ts::Guarded<Float_store>& nav_service,
     fill(intents, 1.0f);
 }
 
-void tick_animation(const Float_store& skeletons, const Float_store& intents,
-                    Float_store& local_xf)                                        // 3.0
+void tick_animation(const Skeletons& skeletons, const Intents& intents,
+                    Local_xf& local_xf)                                        // 3.0
 {
     read_all(skeletons);
     read_all(intents);
     parallel_fill(local_xf, 2.0f, 3.0);   // internal parallelism: per-skeleton
 }
 
-void tick_physics(const Float_store& velocities, const Float_store& game_state,
-                  Float_store& bodies)                                            // 3.0
+void tick_physics(const Velocities& velocities, const Game_state& game_state,
+                  Bodies& bodies)                                            // 3.0
 {
     read_all(velocities);
     read_all(game_state);
     parallel_fill(bodies, 3.0f, 3.0);     // internal parallelism: per-island
 }
 
-void tick_cloth(const Transforms& xf, Float_store& cloth)                         // 1.0
+void tick_cloth(const Transforms& xf, Cloth& cloth)                         // 1.0
 {
     read_all(xf);
     fill(cloth, 1.0f);
     spin(1.0);
 }
 
-void tick_culling(const Transforms& xf, const Float_store& renderables,
-                  Float_store& visibility)                                        // 1.5
+void tick_culling(const Transforms& xf, const Renderables& renderables,
+                  Visibility& visibility)                                        // 1.5
 {
     read_all(xf);
     read_all(renderables);
     parallel_fill(visibility, 1.0f, 1.5);   // internal parallelism: per-view
 }
 
-void tick_particles(const Transforms& xf, Float_store& particles)                 // 1.5
+void tick_particles(const Transforms& xf, Particles& particles)                 // 1.5
 {
     read_all(xf);
     parallel_fill(particles, 1.0f, 1.5);    // internal parallelism: per-system
 }
 
-void tick_audio(const Transforms& xf, Float_store& audio_out)                     // 0.5
+void tick_audio(const Transforms& xf, Audio_out& audio_out)                     // 0.5
 {
     read_all(xf);
     fill(audio_out, 1.0f);
     spin(0.5);
 }
 
-void tick_render(const Transforms& xf, const Float_store& visibility,
-                 const Float_store& particles, Float_store& draw_lists)           // 2.5
+void tick_render(const Transforms& xf, const Visibility& visibility,
+                 const Particles& particles, Draw_lists& draw_lists)           // 2.5
 {
     read_all(xf);
     read_all(visibility);
@@ -402,7 +424,7 @@ void tick_render(const Transforms& xf, const Float_store& visibility,
     parallel_fill(draw_lists, 1.0f, 2.5);   // internal parallelism: per-pass
 }
 
-void tick_ui(const Float_store& game_state, Float_store& ui)                      // 0.5
+void tick_ui(const Game_state& game_state, Ui& ui)                      // 0.5
 {
     read_all(game_state);
     fill(ui, 1.0f);
@@ -432,14 +454,14 @@ ts::Static_task_graph build_frame_graph(World& w)
     g.add_node(&tick_networking, w.input, w.net);
     // Streaming and AI capture the service wrappers (they submit async work);
     // their graph access is still just the declared stores.
-    g.add_node([&w](const Float_store& input, Float_store& assets)
+    g.add_node([&w](const Input& input, Assets& assets)
     {
         tick_streaming(w.asset_source, input, assets);
     }, w.input, w.assets);
     g.add_node(&tick_gameplay, w.transforms.state(), w.input, w.net, w.game_state);
     g.add_node(&tick_navigation, w.nav_mesh, w.transforms.state(), w.paths);
-    g.add_node([&w](const Transforms& prev_xf, const Float_store& paths,
-                    const Float_store& game_state, Float_store& intents)
+    g.add_node([&w](const Transforms& prev_xf, const Paths& paths,
+                    const Game_state& game_state, Intents& intents)
     {
         tick_ai(w.nav_mesh, prev_xf, paths, game_state, intents);
     }, w.transforms.state(), w.paths, w.game_state, w.intents);
@@ -450,7 +472,7 @@ ts::Static_task_graph build_frame_graph(World& w)
     // output and stages the batch -- one command, cheap to replay. No grant on
     // the transforms; it never contends with their readers.
     auto propagation = g.add_node(
-        [rec = w.transforms.recorder()](const Float_store& local_xf, const Float_store& bodies) mutable
+        [rec = w.transforms.recorder()](const Local_xf& local_xf, const Bodies& bodies) mutable
         {
             std::vector<float> out(static_cast<std::size_t>(local_xf.size()));
             for (int i = 0, n = local_xf.size(); i < n; ++i)
