@@ -1,9 +1,10 @@
-// A mock game-engine frame -- the breadth sample. Sixteen systems and a publish
-// node; the whole schedule is derived from declared data access (zero explicit
-// ordering edges except one, called out below).
+// A mock game-engine frame -- the breadth sample. Eighteen systems and a publish
+// node; the schedule is derived from declared data access. The only explicit
+// edges are the grant-free orderings (called out below), where staging leaves
+// no conflict to derive from.
 //
 // What it shows, layer by layer:
-//   - `Static_task_graph` -- 17 nodes over 19 guarded stores; every edge derived
+//   - `Static_task_graph` -- nodes over guarded stores; every edge derived
 //     from parameter const-ness (fn-pointer nodes, lambda nodes, and one bare
 //     generic lambda -- `const auto&` deduces a read via the rvalue probe).
 //   - `Versioned<Transforms>` -- the packaged double-buffer. Early systems
@@ -11,11 +12,15 @@
 //     propagation node stages this frame's batch grant-free; a publish node
 //     flips; late systems (cloth/culling/particles/audio/render) read the fresh
 //     version.
+//   - `Deferred<Draw_lists>` -- the command buffer. Culling, particles, and UI
+//     each stage draw commands grant-free (no contention among producers, none
+//     with the queue's owner); the submit node applies the whole batch as one
+//     write. The draw queue is the classic engine use of this shape.
 //   - Dynamic work outside the graph: streaming fires `async` loads consumed by
 //     `then` continuations and joined by `when_all`; AI fires speculative,
 //     cancellable `async` queries against the nav service (body-level early-out
 //     via a trailing `Cancellation_token`).
-//   - Internal parallelism: the heavy systems split their work with
+//   - Internal parallelism: heavy systems split their work with
 //     `ts::parallel_for` under the node's access grant.
 //
 // Two ideas this sample is built to show (shared with the physics sample):
@@ -24,12 +29,14 @@
 //     atomics, no locks, only domain logic. The library is what turns them into
 //     safely parallelisable work; they never learn about threading.
 //   - Parallelism follows from separation. Splitting the frame into
-//     single-writer stores (and transforms into a published version) is honest
+//     single-writer stores (three gameplay systems instead of one monolith,
+//     transforms into a published version, draws into a staged queue) is honest
 //     parallelisation work -- but the split is what creates the wide, safe DAG,
 //     and the library's access declarations make it explicit and checkable
 //     rather than implicit convention.
 
 #include "ts/access.h"
+#include "ts/deferred.h"
 #include "ts/guarded.h"
 #include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
@@ -63,6 +70,8 @@ std::atomic<int> nav_early{ 0 };
 // Streaming demo: assets processed via `then`, batches joined via `when_all`.
 std::atomic<int> streamed{ 0 };
 std::atomic<int> batches{ 0 };
+// Deferred demo: draw commands applied by the submit node.
+std::atomic<long long> drawn{ 0 };
 
 void update_max(std::atomic<int>& max, int value)
 {
@@ -77,6 +86,7 @@ void reset_stats()
     nav_early.store(0);
     streamed.store(0);
     batches.store(0);
+    drawn.store(0);
 }
 
 // Mock a system's CPU cost: spin-wait for the budget. Precise (unlike
@@ -151,6 +161,33 @@ private:
     std::vector<float> data_;
 };
 
+// The render queue -- the `Deferred` target. Producers never touch it directly:
+// they stage commands; the submit node applies them under its write grant.
+class Draw_lists
+{
+public:
+    void push_batch(int commands)
+    {
+        TS_CHECK_ACCESS();
+        pending_ += commands;
+    }
+
+    int count() const
+    {
+        TS_CHECK_ACCESS();
+        return pending_;
+    }
+
+    void clear()
+    {
+        TS_CHECK_ACCESS();
+        pending_ = 0;
+    }
+
+private:
+    int pending_ = 0;
+};
+
 // Role aliases over the one mock store type: system signatures then say which
 // store they touch (`const Net&` instead of a second `const Float_store&`).
 using Skeletons = Float_store;
@@ -161,7 +198,9 @@ using Asset_source = Float_store;
 using Input = Float_store;
 using Net = Float_store;
 using Assets = Float_store;
-using Game_state = Float_store;
+using Combat = Float_store;
+using Economy = Float_store;
+using Quests = Float_store;
 using Paths = Float_store;
 using Intents = Float_store;
 using Local_xf = Float_store;
@@ -170,22 +209,24 @@ using Cloth = Float_store;
 using Visibility = Float_store;
 using Particles = Float_store;
 using Audio_out = Float_store;
-using Draw_lists = Float_store;
 using Ui = Float_store;
 
 // --- the world --------------------------------------------------------------------
 
 // Every mutable store has a single writer system, so the frame graph derives a
-// clean DAG from the declarations. Transforms are `Versioned`: readers declared
+// clean DAG from the declarations. Transforms are `Versioned` (readers declared
 // before the publish node see last frame's version, readers after it see this
-// frame's -- no reader ever waits on the writer.
+// frame's); the draw queue is `Deferred` (producers stage, submit applies).
+// Destruction order matters: the graph (declared later, destroyed first) holds
+// the recorders; then `draw_staged` verifies nothing staged was lost; then the
+// stores.
 struct World
 {
     explicit World(int n)
         : skeletons{ n }, nav_mesh{ n }, renderables{ n }, velocities{ n }, asset_source{ n }
-        , input{ n }, net{ n }, assets{ n }, game_state{ n }, paths{ n }, intents{ n }
-        , local_xf{ n }, bodies{ n }
-        , cloth{ n }, visibility{ n }, particles{ n }, audio_out{ n }, draw_lists{ n }, ui{ n }
+        , input{ n }, net{ n }, assets{ n }, combat{ n }, economy{ n }, quests{ n }
+        , paths{ n }, intents{ n }, local_xf{ n }, bodies{ n }
+        , cloth{ n }, visibility{ n }, particles{ n }, audio_out{ n }, ui{ n }
     {}
 
     // read-only static inputs (no system writes them this frame)
@@ -199,7 +240,9 @@ struct World
     ts::Guarded<Input> input;
     ts::Guarded<Net> net;
     ts::Guarded<Assets> assets;
-    ts::Guarded<Game_state> game_state;
+    ts::Guarded<Combat> combat;
+    ts::Guarded<Economy> economy;
+    ts::Guarded<Quests> quests;
     ts::Guarded<Paths> paths;
     ts::Guarded<Intents> intents;
     ts::Guarded<Local_xf> local_xf;
@@ -212,8 +255,11 @@ struct World
     ts::Guarded<Visibility> visibility;
     ts::Guarded<Particles> particles;
     ts::Guarded<Audio_out> audio_out;
-    ts::Guarded<Draw_lists> draw_lists;
     ts::Guarded<Ui> ui;
+
+    // the render queue: culling/particles/UI stage into it, submit applies
+    ts::Guarded<Draw_lists> draw_lists;
+    ts::Deferred<Draw_lists> draw_staged{ draw_lists };
 };
 
 // --- shared helpers ---------------------------------------------------------------
@@ -241,9 +287,9 @@ void read_all(const Transforms& t)
     (void)sink;
 }
 
-// Heavy systems run their work through `ts::parallel_for`, under the calling
-// node's access grant (the node holds exclusive access to `out`; the slices are
-// disjoint by construction).
+// Internally-parallel systems run their work through `ts::parallel_for`, under
+// the calling node's access grant (the node holds exclusive access to its
+// output; slices are disjoint by construction).
 //
 // The manual slicing below is an artifact of MOCKING the cost: the real
 // per-item work (`set`) is trivial, and the simulated cost is a `spin`, which
@@ -268,17 +314,27 @@ void parallel_fill(Float_store& out, float v, double total_ms)
     });
 }
 
+// Cost-only variant: the system's real writes are elsewhere (or trivial), but
+// its simulated compute is internally parallel.
+void parallel_cost(double total_ms)
+{
+    ts::parallel_for(cost_slices, [total_ms](int)
+    {
+        spin(total_ms / cost_slices);
+    });
+}
+
 // --- the systems ------------------------------------------------------------------
 // Free functions with typed parameters: the const-ness is the access
 // declaration the graph reads. Budgets (ms @ scale 1.0) in comments.
 
-void tick_input(Input& input)                                               // 0.1
+void tick_input(Input& input)                                                     // 0.1
 {
     fill(input, 1.0f);
     spin(0.1);
 }
 
-void tick_networking(const Input& input, Net& net)                  // 0.5
+void tick_networking(const Input& input, Net& net)                                // 0.5
 {
     read_all(input);
     fill(net, 1.0f);
@@ -291,7 +347,7 @@ void tick_networking(const Input& input, Net& net)                  // 0.5
 // `then` continuation; a `when_all` joins the batch. Fire-and-forget: the
 // handles are dropped, the chain stays alive through the queued work.
 void tick_streaming(ts::Guarded<Asset_source>& asset_source,
-                    const Input& input, Assets& assets)                // 0.5
+                    const Input& input, Assets& assets)                           // 0.5
 {
     read_all(input);
     fill(assets, 1.0f);
@@ -317,18 +373,43 @@ void tick_streaming(ts::Guarded<Asset_source>& asset_source,
     spin(0.5);   // the node's own cost, overlapping the async loads
 }
 
-void tick_gameplay(const Transforms& prev_xf, const Input& input,
-                   const Net& net, Game_state& game_state)               // 2.0
+// Gameplay is three systems, not one monolith: they share inputs (all read last
+// frame's transforms, input, net) but own disjoint outputs, so they run in
+// parallel. Splitting the coarse "gameplay" store is where the frame's serial
+// spine shortens -- granularity decides parallelism.
+
+void tick_combat(const Transforms& prev_xf, const Input& input,
+                 const Net& net, Combat& combat)                                  // 0.7
 {
     read_all(prev_xf);
     read_all(input);
     read_all(net);
-    fill(game_state, 1.0f);
-    spin(2.0);
+    fill(combat, 1.0f);
+    spin(0.7);
+}
+
+void tick_economy(const Transforms& prev_xf, const Input& input,
+                  const Net& net, Economy& economy)                               // 0.7
+{
+    read_all(prev_xf);
+    read_all(input);
+    read_all(net);
+    fill(economy, 1.0f);
+    spin(0.7);
+}
+
+void tick_quests(const Transforms& prev_xf, const Input& input,
+                 const Net& net, Quests& quests)                                  // 0.7
+{
+    read_all(prev_xf);
+    read_all(input);
+    read_all(net);
+    fill(quests, 1.0f);
+    spin(0.7);
 }
 
 void tick_navigation(const Nav_mesh& nav_mesh, const Transforms& prev_xf,
-                     Paths& paths)                                          // 1.0
+                     Paths& paths)                                                // 1.0
 {
     read_all(nav_mesh);
     read_all(prev_xf);
@@ -345,13 +426,17 @@ void tick_navigation(const Nav_mesh& nav_mesh, const Transforms& prev_xf,
 // done. The query body opts into cooperative cancellation by taking a trailing
 // `Cancellation_token` and polling it -- cancellation arriving mid-body
 // early-outs (a cooperative return settles the task completed, not cancelled).
+// AI's own evaluation is per-agent and internally parallel, like the other
+// heavy systems.
 void tick_ai(ts::Guarded<Nav_mesh>& nav_service,
-             const Transforms& prev_xf, const Paths& paths,
-             const Game_state& game_state, Intents& intents)                 // 1.5
+             const Transforms& prev_xf, const Paths& paths, const Combat& combat,
+             const Economy& economy, const Quests& quests, Intents& intents)      // 1.5
 {
     read_all(prev_xf);
     read_all(paths);
-    read_all(game_state);
+    read_all(combat);
+    read_all(economy);
+    read_all(quests);
 
     ts::Cancellation_source nav_cancel;
     constexpr int queries = 6;
@@ -374,69 +459,79 @@ void tick_ai(ts::Guarded<Nav_mesh>& nav_service,
             return v;
         }, { .token = nav_cancel.token() });
 
-    spin(1.5);                     // AI's own logic, overlapping the queries
+    parallel_cost(1.5);            // per-agent evaluation, overlapping the queries
     nav_cancel.request_cancel();   // AI has what it needs -> stragglers early-out
     fill(intents, 1.0f);
 }
 
 void tick_animation(const Skeletons& skeletons, const Intents& intents,
-                    Local_xf& local_xf)                                        // 3.0
+                    Local_xf& local_xf)                                           // 3.0
 {
     read_all(skeletons);
     read_all(intents);
     parallel_fill(local_xf, 2.0f, 3.0);   // internal parallelism: per-skeleton
 }
 
-void tick_physics(const Velocities& velocities, const Game_state& game_state,
-                  Bodies& bodies)                                            // 3.0
+void tick_physics(const Velocities& velocities, const Combat& combat,
+                  Bodies& bodies)                                                 // 3.0
 {
     read_all(velocities);
-    read_all(game_state);
+    read_all(combat);
     parallel_fill(bodies, 3.0f, 3.0);     // internal parallelism: per-island
 }
 
-void tick_cloth(const Transforms& xf, Cloth& cloth)                         // 1.0
+void tick_cloth(const Transforms& xf, Cloth& cloth)                               // 1.0
 {
     read_all(xf);
-    fill(cloth, 1.0f);
-    spin(1.0);
+    parallel_fill(cloth, 1.0f, 1.0);      // internal parallelism: per-patch
 }
 
+// Culling produces the visible set and stages its draw batch -- no grant on the
+// draw queue, so the three draw producers never contend with each other or with
+// the submit node's other inputs.
 void tick_culling(const Transforms& xf, const Renderables& renderables,
-                  Visibility& visibility)                                        // 1.5
+                  Visibility& visibility, ts::Recorder<Draw_lists>& draws)        // 1.5
 {
     read_all(xf);
     read_all(renderables);
     parallel_fill(visibility, 1.0f, 1.5);   // internal parallelism: per-view
+    draws.stage([n = visibility.size()](Draw_lists& d) { d.push_batch(n); });
 }
 
-void tick_particles(const Transforms& xf, Particles& particles)                 // 1.5
+void tick_particles(const Transforms& xf, Particles& particles,
+                    ts::Recorder<Draw_lists>& draws)                              // 1.5
 {
     read_all(xf);
     parallel_fill(particles, 1.0f, 1.5);    // internal parallelism: per-system
+    draws.stage([n = particles.size() / 4](Draw_lists& d) { d.push_batch(n); });
 }
 
-void tick_audio(const Transforms& xf, Audio_out& audio_out)                     // 0.5
+void tick_audio(const Transforms& xf, Audio_out& audio_out)                       // 0.5
 {
     read_all(xf);
     fill(audio_out, 1.0f);
-    spin(0.5);
+    spin(0.5);   // deliberately serial: a single-threaded mixer is realistic
 }
 
-void tick_render(const Transforms& xf, const Visibility& visibility,
-                 const Particles& particles, Draw_lists& draw_lists)           // 2.5
+void tick_ui(const Quests& quests, Ui& ui, ts::Recorder<Draw_lists>& draws)       // 0.5
 {
-    read_all(xf);
-    read_all(visibility);
-    read_all(particles);
-    parallel_fill(draw_lists, 1.0f, 2.5);   // internal parallelism: per-pass
-}
-
-void tick_ui(const Game_state& game_state, Ui& ui)                      // 0.5
-{
-    read_all(game_state);
+    read_all(quests);
     fill(ui, 1.0f);
     spin(0.5);
+    draws.stage([n = ui.size() / 10](Draw_lists& d) { d.push_batch(n); });
+}
+
+// Submit: applies the staged draw batches as one write (`commit` under the
+// grant this node already holds), consumes the queue, clears it for the next
+// frame. One acquisition amortized over every producer's commands.
+void tick_submit(ts::Deferred<Draw_lists>& staged,
+                 const Transforms& xf, Draw_lists& draw_lists)                    // 2.5
+{
+    read_all(xf);
+    staged.commit(draw_lists);
+    drawn.fetch_add(draw_lists.count(), std::memory_order_relaxed);
+    parallel_cost(2.5);                     // internal parallelism: per-pass
+    draw_lists.clear();
 }
 
 // Sum of the budgets above (ms @ 1.0). The metric that matters is resource
@@ -446,7 +541,7 @@ void tick_ui(const Game_state& game_state, Ui& ui)                      // 0.5
 // dependency chain through the frame bounds it once workers are plentiful.
 double serial_budget_ms()
 {
-    return 0.1 + 0.5 + 0.5 + 2.0 + 1.0 + 1.5 + 3.0 + 3.0 + 1.0
+    return 0.1 + 0.5 + 0.5 + 0.7 + 0.7 + 0.7 + 1.0 + 1.5 + 3.0 + 3.0 + 1.0
          + 1.0 + 1.5 + 1.5 + 0.5 + 2.5 + 0.5 + 0.2;
 }
 
@@ -454,10 +549,11 @@ double serial_budget_ms()
 
 // Nodes are added in frame order, so the conflict tiebreak (declaration index)
 // matches intent: everything before the publish node reads last frame's
-// transforms, everything after it reads this frame's. The one explicit edge is
-// `flip.after(propagation)` -- propagation holds no grant on the transforms
-// (staging is grant-free), so no conflict edge exists to derive; the ordering
-// is intent, and is declared as such.
+// transforms, everything after it reads this frame's. The explicit edges are
+// exactly the grant-free orderings: `flip.after(propagation)` and
+// `submit.after(<the three draw producers>)` -- staging holds no grant on its
+// target, so there is no conflict edge to derive; the ordering is intent, and
+// is declared as such.
 ts::Static_task_graph build_frame_graph(World& w)
 {
     ts::Static_task_graph g;
@@ -470,15 +566,17 @@ ts::Static_task_graph build_frame_graph(World& w)
     {
         tick_streaming(w.asset_source, input, assets);
     }, w.input, w.assets);
-    g.add_node(&tick_gameplay, w.transforms.state(), w.input, w.net, w.game_state);
+    g.add_node(&tick_combat, w.transforms.state(), w.input, w.net, w.combat);
+    g.add_node(&tick_economy, w.transforms.state(), w.input, w.net, w.economy);
+    g.add_node(&tick_quests, w.transforms.state(), w.input, w.net, w.quests);
     g.add_node(&tick_navigation, w.nav_mesh, w.transforms.state(), w.paths);
-    g.add_node([&w](const Transforms& prev_xf, const Paths& paths,
-                    const Game_state& game_state, Intents& intents)
+    g.add_node([&w](const Transforms& prev_xf, const Paths& paths, const Combat& combat,
+                    const Economy& economy, const Quests& quests, Intents& intents)
     {
-        tick_ai(w.nav_mesh, prev_xf, paths, game_state, intents);
-    }, w.transforms.state(), w.paths, w.game_state, w.intents);
+        tick_ai(w.nav_mesh, prev_xf, paths, combat, economy, quests, intents);
+    }, w.transforms.state(), w.paths, w.combat, w.economy, w.quests, w.intents);
     g.add_node(&tick_animation, w.skeletons, w.intents, w.local_xf);
-    g.add_node(&tick_physics, w.velocities, w.game_state, w.bodies);
+    g.add_node(&tick_physics, w.velocities, w.combat, w.bodies);
 
     // Propagation: computes this frame's transforms from animation + physics
     // output and stages the batch -- one command, cheap to replay. No grant on
@@ -489,7 +587,7 @@ ts::Static_task_graph build_frame_graph(World& w)
             std::vector<float> out(static_cast<std::size_t>(local_xf.size()));
             for (int i = 0, n = local_xf.size(); i < n; ++i)
                 out[static_cast<std::size_t>(i)] = local_xf.get(i) + bodies.get(i);
-            spin(1.0);
+            parallel_cost(1.0);   // internal parallelism: per-subtree
             rec.stage([batch = std::move(out)](Transforms& t) { t.apply(batch); });
         },
         w.local_xf, w.bodies);
@@ -498,19 +596,41 @@ ts::Static_task_graph build_frame_graph(World& w)
     flip.after(propagation);
 
     g.add_node(&tick_cloth, w.transforms.state(), w.cloth);
-    g.add_node(&tick_culling, w.transforms.state(), w.renderables, w.visibility);
-    g.add_node(&tick_particles, w.transforms.state(), w.particles);
+    // The three draw producers mint their recorders here, in declaration order
+    // -- the apply order at commit is recorder-creation order, so it is fixed
+    // at build time, independent of thread timing.
+    auto culling = g.add_node(
+        [rec = w.draw_staged.recorder()](const Transforms& xf, const Renderables& r,
+                                         Visibility& v) mutable
+        {
+            tick_culling(xf, r, v, rec);
+        }, w.transforms.state(), w.renderables, w.visibility);
+    auto particles = g.add_node(
+        [rec = w.draw_staged.recorder()](const Transforms& xf, Particles& p) mutable
+        {
+            tick_particles(xf, p, rec);
+        }, w.transforms.state(), w.particles);
     g.add_node(&tick_audio, w.transforms.state(), w.audio_out);
-    g.add_node(&tick_render, w.transforms.state(), w.visibility, w.particles, w.draw_lists);
-    g.add_node(&tick_ui, w.game_state, w.ui);
+    auto ui = g.add_node(
+        [rec = w.draw_staged.recorder()](const Quests& quests, Ui& u) mutable
+        {
+            tick_ui(quests, u, rec);
+        }, w.quests, w.ui);
+
+    auto submit = g.add_node([&w](const Transforms& xf, Draw_lists& dl)
+    {
+        tick_submit(w.draw_staged, xf, dl);
+    }, w.transforms.state(), w.draw_lists);
+    submit.after(culling).after(particles).after(ui);
+
     // Debug overlay -- a bare generic lambda: `const auto&` classifies as a
     // read via the rvalue probe, same "const = read" rule as everywhere else.
-    g.add_node([](const auto& game_state, const auto& xf)                         // 0.2
+    g.add_node([](const auto& economy, const auto& xf)                            // 0.2
     {
-        read_all(game_state);
+        read_all(economy);
         read_all(xf);
         spin(0.2);
-    }, w.game_state, w.transforms.state());
+    }, w.economy, w.transforms.state());
 
     g.compile();
     return g;
@@ -565,6 +685,8 @@ void run_game_frame_sample(int frames, float scale)
         nav_peak.load(), nav_early.load());
     std::printf("  streamed %d assets via then, %d batches via when_all\n",
         streamed.load(), batches.load());
+    std::printf("  %lld draw commands staged by 3 producers, applied by submit via Deferred\n",
+        drawn.load());
 }
 
 } // namespace sample
