@@ -539,7 +539,7 @@ ts::parallel_for(n, [&](int i) { out[i] = f(in[i]); });
 ts::Task<void> done = ts::async_parallel_for(n, body);   // non-blocking variant
 ```
 
-Options — `ts::Parallel_options{ .concurrency, .balance }`:
+Options — `ts::Parallel_options{ .concurrency, .balance, .priority }`:
 
 - `concurrency`: number of parallel executors (0 = scheduler width).
 - `balance`:
@@ -549,6 +549,12 @@ Options — `ts::Parallel_options{ .concurrency, .balance }`:
     uniform item cost.
   - `unbalanced` — every item claimed individually; maximum balancing,
     maximum overhead.
+- `priority`: queue priority for the helper tasks. Unset (the default)
+  inherits the calling task's priority — a `parallel_for` inside a
+  high-priority task or graph node dispatches its helpers at `high`; outside
+  a running task it is `normal`. Set it (`{.priority = ts::Priority::low}`)
+  to override. The calling thread's own share is unaffected either way — it
+  runs inline, not through the queue.
 
 The calling thread participates in the loop (it does not just wait), which is
 what makes *nested* `parallel_for` — a parallel loop inside a parallel loop's

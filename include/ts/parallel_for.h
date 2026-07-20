@@ -27,10 +27,27 @@ struct Parallel_options
 {
     int     concurrency = 0;                 // # of parallel executors; 0 -> scheduler width
     Balance balance     = Balance::guided;
+    // Queue priority for the helper submissions. Unset (default) = inherit: helpers dispatch
+    // at the calling task's priority (`Priority::normal` outside a task), so a high-priority
+    // node's slices don't sink to `normal`. Set (`{.priority = Priority::low}`) to override.
+    // The participating caller is unaffected either way -- it runs inline.
+    std::optional<Priority> priority{};
 };
 
 namespace detail
 {
+
+// Resolve the effective helper priority, on the calling thread (where the `current_task`
+// TLS is meaningful): an explicit option wins; otherwise inherit the calling task's queue
+// priority; outside a running task, `Priority::normal`.
+inline Priority resolved_priority(std::optional<Priority> requested)
+{
+    if (requested)
+        return *requested;
+    if (const Task_control_block* c = current_task.get())
+        return c->flags.priority;
+    return Priority::normal;
+}
 
 // The shared, refcounted state for one parallel_for. ONE heap allocation per call; `core`
 // (first member) is the completion block the async handle aliases, and its refcount also
@@ -150,9 +167,10 @@ void parallel_for(int n, Body&& body, Parallel_options opts = {})
     detail::Task_ptr handle(&st->core);   // the caller's ref (refcount 1)
     st->core.refcount.fetch_add(conc - 1, std::memory_order_relaxed);   // one ref per submitted helper
 
+    Priority prio = detail::resolved_priority(opts.priority);   // resolved once, on the calling thread
     Scheduler& sched = default_scheduler();
     for (int t = 0; t < conc - 1; ++t)
-        sched.submit(&detail::parallel_helper<std::decay_t<Body>>, st);
+        sched.submit(&detail::parallel_helper<std::decay_t<Body>>, st, prio);
 
     detail::parallel_loop(st);   // caller participates (its ref is `handle`, so no dec here)
     st->core.wait();             // block until done == n
@@ -179,9 +197,10 @@ Task<void> async_parallel_for(int n, Body&& body, Parallel_options opts = {})
     Task<void> result(detail::Task_ptr(&st->core));   // the returned handle (refcount 1)
     st->core.refcount.fetch_add(conc, std::memory_order_relaxed);   // one ref per helper
 
+    Priority prio = detail::resolved_priority(opts.priority);   // resolved once, on the calling thread
     Scheduler& sched = default_scheduler();
     for (int t = 0; t < conc; ++t)
-        sched.submit(&detail::parallel_helper<std::decay_t<Body>>, st);
+        sched.submit(&detail::parallel_helper<std::decay_t<Body>>, st, prio);
 
     return result;
 }
