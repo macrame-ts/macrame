@@ -8,10 +8,11 @@
 //     from parameter const-ness (fn-pointer nodes, lambda nodes, and one bare
 //     generic lambda -- `const auto&` deduces a read via the rvalue probe).
 //   - `Versioned<Transforms>` -- the packaged double-buffer. Early systems
-//     (gameplay/nav/AI/audio) read last frame's published transforms all frame; the
-//     propagation node stages this frame's batch grant-free; a publish node
-//     flips; late systems (cloth/culling/particles/render) read the fresh
-//     version.
+//     (gameplay/nav/AI/audio) read last frame's published transforms all
+//     frame; the propagation node stages this frame's batch grant-free; a
+//     publish node flips; late systems (cloth/culling/particles/render) read
+//     the fresh version. Which side of the flip a reader declares is a
+//     scheduling lever (see audio in `build_frame_graph`).
 //   - `Deferred<Draw_lists>` -- the command buffer. Culling, particles, and UI
 //     each stage draw commands grant-free (no contention among producers, none
 //     with the queue's owner); the submit node applies the whole batch as one
@@ -562,6 +563,14 @@ ts::Static_task_graph build_frame_graph(World& w)
 {
     ts::Static_task_graph g;
 
+    // Node priorities are deliberately left at default. A hand optimization
+    // pass (see docs/TODO.md, profiler-guided optimization) tried rank
+    // priorities and prev-transform placements for cloth/particles; no
+    // configuration beat plain greedy dispatch beyond measurement noise, and
+    // two mechanisms argue against naive ranking: `low` is valve-gated
+    // background (a mislabeled dependency stalls its dependents), and `high`
+    // dispatches through the global queues rather than the per-worker deques.
+    // The simplest configuration wins until measured evidence says otherwise.
     g.add_node(&tick_input, w.input);
     g.add_node(&tick_networking, w.input, w.net);
     // Streaming and AI capture the service wrappers (they submit async work);
@@ -574,7 +583,15 @@ ts::Static_task_graph build_frame_graph(World& w)
     g.add_node(&tick_economy, w.transforms.state(), w.input, w.net, w.economy);
     g.add_node(&tick_quests, w.transforms.state(), w.input, w.net, w.quests);
     g.add_node(&tick_navigation, w.nav_mesh, w.transforms.state(), w.paths);
-    g.add_node(&tick_audio, w.transforms.state(), w.audio_out);   // prev transforms: pre-flip reader
+    // Audio reads last frame's transforms (declared before the flip): one frame
+    // of positional latency is inaudible, and the serial mixer runs from t=0
+    // instead of the post-flip tail. Cloth/particles could make the same
+    // staleness trade to fill the frame's idle first half; a hand pass tried it
+    // and found no win beyond measurement noise -- a plausible mechanism being
+    // that filler slices delay the serial spine (a ready node waits for a
+    // worker to finish its current slice; nothing evicts a runner). Notes in
+    // docs/TODO.md under profiler-guided optimization; they stay post-flip.
+    g.add_node(&tick_audio, w.transforms.state(), w.audio_out);
     g.add_node([&w](const Transforms& prev_xf, const Paths& paths, const Combat& combat,
                     const Economy& economy, const Quests& quests, Intents& intents)
     {
@@ -596,45 +613,48 @@ ts::Static_task_graph build_frame_graph(World& w)
             rec.stage([batch = std::move(out)](Transforms& t) { t.apply(batch); });
         },
         w.local_xf, w.bodies);
+    propagation;
 
     auto flip = g.add_node(ts::publish_body(w.transforms), w.transforms.state());
     flip.after(propagation);
 
+    // Post-flip readers of the fresh version. The draw producers' recorders are
+    // minted in declaration order (cloth has none; culling, particles, ui) --
+    // the apply order at commit is recorder-creation order, fixed at build
+    // time, independent of thread timing.
     g.add_node(&tick_cloth, w.transforms.state(), w.cloth);
-    // The three draw producers mint their recorders here, in declaration order
-    // -- the apply order at commit is recorder-creation order, so it is fixed
-    // at build time, independent of thread timing.
     auto culling = g.add_node(
         [rec = w.draw_staged.recorder()](const Transforms& xf, const Renderables& r,
                                          Visibility& v) mutable
         {
             tick_culling(xf, r, v, rec);
         }, w.transforms.state(), w.renderables, w.visibility);
+    culling;
     auto particles = g.add_node(
         [rec = w.draw_staged.recorder()](const Transforms& xf, Particles& p) mutable
         {
             tick_particles(xf, p, rec);
         }, w.transforms.state(), w.particles);
+    particles;
+    g.add_node([](const auto& economy, const auto& xf)   // debug overlay, 0.2;
+    {                                                    // generic lambda: `const auto&`
+        read_all(economy);                               // deduces a read via the probe
+        read_all(xf);
+        spin(0.2);
+    }, w.economy, w.transforms.state());
     auto ui = g.add_node(
         [rec = w.draw_staged.recorder()](const Quests& quests, Ui& u) mutable
         {
             tick_ui(quests, u, rec);
         }, w.quests, w.ui);
+    ui;
 
     auto submit = g.add_node([&w](const Transforms& xf, Draw_lists& dl)
     {
         tick_submit(w.draw_staged, xf, dl);
     }, w.transforms.state(), w.draw_lists);
+    submit;
     submit.after(culling).after(particles).after(ui);
-
-    // Debug overlay -- a bare generic lambda: `const auto&` classifies as a
-    // read via the rvalue probe, same "const = read" rule as everywhere else.
-    g.add_node([](const auto& economy, const auto& xf)                            // 0.2
-    {
-        read_all(economy);
-        read_all(xf);
-        spin(0.2);
-    }, w.economy, w.transforms.state());
 
     g.compile();
     return g;
