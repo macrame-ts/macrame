@@ -241,22 +241,30 @@ void read_all(const Transforms& t)
     (void)sink;
 }
 
-// Heavy systems split their per-entity work across chunks with the core
-// `ts::parallel_for`; chunks run under the calling node's access grant (the
-// node holds exclusive access to `out`, and the chunks are disjoint by
-// construction). The cost spin is divided too, so wall time ~ total / chunks.
-constexpr int parallel_chunks = 8;
+// Heavy systems run their work through `ts::parallel_for`, under the calling
+// node's access grant (the node holds exclusive access to `out`; the slices are
+// disjoint by construction).
+//
+// The manual slicing below is an artifact of MOCKING the cost: the real
+// per-item work (`set`) is trivial, and the simulated cost is a `spin`, which
+// cannot be divided per item (a microsecond-scale spin per element is mostly
+// `steady_clock` reads, distorting the budget). So the spin is cut into a few
+// coarse slices and the item range is partitioned along with it. Real code with
+// real per-item cost would iterate items directly --
+// `ts::parallel_for(entity_count, per_entity_fn)` -- and let the library's
+// balance modes distribute the load.
+constexpr int cost_slices = 8;
 
 void parallel_fill(Float_store& out, float v, double total_ms)
 {
     int n = out.size();
-    ts::parallel_for(parallel_chunks, [&out, v, total_ms, n](int c)
+    ts::parallel_for(cost_slices, [&out, v, total_ms, n](int c)
     {
-        int begin = c * n / parallel_chunks;
-        int end = (c + 1) * n / parallel_chunks;
+        int begin = c * n / cost_slices;
+        int end = (c + 1) * n / cost_slices;
         for (int i = begin; i < end; ++i)
             out.set(i, v);
-        spin(total_ms / parallel_chunks);
+        spin(total_ms / cost_slices);
     });
 }
 
