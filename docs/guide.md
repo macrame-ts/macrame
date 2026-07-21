@@ -527,6 +527,36 @@ accessors — concurrent `async` work on the same objects interleaves safely
 into the gaps (it queues behind the node that currently holds the object
 rather than racing it).
 
+### 6.1 Node names and the structure dump
+
+`add_node` takes an optional leading name — a static string literal, referenced
+rather than copied — and `compile` takes an optional file path that writes the
+compiled structure as a Graphviz DOT file:
+
+```cpp
+auto sim = frame.add_node("physics", [](const Input& in, Physics& p) { p.step(in); },
+                          input, physics);
+frame.add_node({}, [](Anim& a) { a.advance(); }, anim);   // unnamed: labels as file:line
+
+frame.compile("frame.dot");
+```
+
+An unnamed node with a `{}` placeholder labels as the `add_node` call site
+(`file:line`); a fully bare `add_node` labels as `node<N>`. Render the dump with
+Graphviz (`dot -Tsvg frame.dot -o frame.svg`) or paste it into an online viewer
+(e.g. edotor.net). Solid edges are your explicit `after`/`before` orderings;
+dashed green edges were derived from access conflicts — hovering one (in SVG)
+shows which object and modes produced it (`obj3: W->R`). The picture answers
+"why does this edge exist", which is exactly what you need when re-shaping a
+graph: a `W->R` edge is real dataflow, while a `R->W` or `W->W` edge is an
+ordering artifact you may be able to remove by double-buffering (`Versioned`)
+or deferral (`Deferred`).
+
+The dump (and future profiling instrumentation) compiles out with
+`TS_PROFILING=0`; the `compile(dot_path)` parameter remains and becomes a
+no-op. Node names are kept in all builds — they are one pointer per node and
+pay for themselves in debugging.
+
 ---
 
 ## 7. `parallel_for`

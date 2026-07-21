@@ -67,7 +67,7 @@ if(WIN32)
         tests/tests.cpp
         tests/versioned_tests.cpp
     )
-    target_include_directories(task_system PRIVATE include tests benchmarks sample)
+    target_include_directories(task_system PRIVATE include tests benchmarks sample tools)
     target_compile_definitions(task_system PRIVATE _CONSOLE _HAS_EXCEPTIONS=0)
     if(NOT TS_SAFETY_CHECKS)
         target_compile_definitions(task_system PRIVATE TS_SAFETY_CHECKS=0)
@@ -90,7 +90,7 @@ else()
         ${TS_SAMPLE_SOURCES}
         tsan/tsan_main.cpp
     )
-    target_include_directories(ts_tsan PRIVATE include sample)
+    target_include_directories(ts_tsan PRIVATE include sample tools)
     if(NOT TS_SAFETY_CHECKS)
         target_compile_definitions(ts_tsan PRIVATE TS_SAFETY_CHECKS=0)
     endif()

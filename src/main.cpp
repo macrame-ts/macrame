@@ -11,6 +11,7 @@
 namespace sample
 {
 void run_game_frame_sample(int frames = 20, float time_scale = 1.0f);
+void dump_game_frame_dot(const char* path);
 void run_physics_sample(int frames = 60);
 void run_blackboard_sample();
 }
@@ -37,6 +38,8 @@ int main(int argc, char** argv)
             "  --tests        run the test suite only; exit code = failure count\n"
             "  --bench        run the benchmarks only\n"
             "  --stress       run the sample many frames at a fast scale (for sanitizers)\n"
+            "  --dot [path]   write the game_frame graph structure as Graphviz DOT\n"
+            "                 (default game_frame.dot; render with `dot -Tsvg`)\n"
             "  --memprofile   run the allocation profiler (needs a TS_MEM_PROFILE build)\n"
             "  --version, -v  print the version\n"
             "  --help, -h     show this message\n",
@@ -50,6 +53,15 @@ int main(int argc, char** argv)
         ts::test::prepare_death_child();
         run_death_scenario(argv[2]);
         return 0;   // reaching here means the scenario failed to abort
+    }
+
+    // Structure dump: compile the sample's frame graph, write the DOT file, exit.
+    if (argc >= 2 && std::strcmp(argv[1], "--dot") == 0)
+    {
+        const char* path = argc >= 3 ? argv[2] : "game_frame.dot";
+        sample::dump_game_frame_dot(path);
+        std::printf("wrote %s\n", path);
+        return 0;
     }
 
     // Stress entry: just the sample, many frames, fast scale (for sanitizers).

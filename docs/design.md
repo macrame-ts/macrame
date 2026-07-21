@@ -93,6 +93,27 @@ suspension) carries the parent's grant set by value. That one rule lets a
 graph node fan out dynamic work over its declared data without new
 declarations, and it is what coroutine support reuses wholesale (§5).
 
+### 2.3 Introspection: the graph knows its own structure
+
+A derived schedule the user never wrote down needs a way to be read back —
+tuning a graph means seeing which edges exist and why. `compile(dot_path)`
+dumps the DAG as Graphviz DOT with per-edge provenance: explicit orderings
+solid, conflict-derived edges dashed with the object and modes on hover. The
+distinction is actionable: a `W->R` edge is dataflow, while `R->W`/`W->W`
+edges are ordering artifacts that versioning or deferral can delete — the
+same lever that moved the sample's audio off the post-flip tail.
+
+Node names follow the UE convention (a debug name at creation, kept in all
+builds), with one modernization: `std::source_location` in the `Node_name`
+descriptor's defaulted constructor argument makes a placeholder `{}` label
+the node with the user's `add_node` call site — no macro. A trailing
+defaulted parameter after the object pack is not expressible in C++, hence
+the leading-parameter position (also UE's argument order).
+
+Everything downstream of the name (the dump today, runtime capture later) is
+gated by `TS_PROFILING` (default on; define it to 0 for shipping); the
+formatter itself lives outside the library proper, in `tools/`.
+
 ---
 
 ## 3. Scheduler

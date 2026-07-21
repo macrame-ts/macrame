@@ -64,6 +64,7 @@
     <ClInclude Include="include\ts\detail\ref_count.h" />
     <ClInclude Include="include\ts\scheduler.h" />
     <ClInclude Include="include\ts\static_task_graph.h" />
+    <ClInclude Include="tools\dot_writer.h" />
     <ClInclude Include="include\ts\task.h" />
     <ClInclude Include="include\ts\ts.h" />
     <ClInclude Include="include\ts\version.h" />
@@ -202,7 +203,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ExceptionHandling>false</ExceptionHandling>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;$(ProjectDir)tools;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -222,7 +223,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ExceptionHandling>false</ExceptionHandling>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;$(ProjectDir)tools;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -261,7 +262,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <ExceptionHandling>false</ExceptionHandling>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)tests;$(ProjectDir)benchmarks;$(ProjectDir)sample;$(ProjectDir)tools;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>

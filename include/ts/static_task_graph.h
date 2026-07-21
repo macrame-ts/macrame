@@ -6,10 +6,18 @@
 
 #include <cstdint>
 #include <memory>
+#include <source_location>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+// Profiling / introspection instrumentation (the DOT structure dump today; runtime capture
+// is future work). On by default; define TS_PROFILING=0 in shipping builds to compile it
+// out (the `compile(dot_path)` parameter stays in the signature and becomes a no-op).
+#ifndef TS_PROFILING
+#define TS_PROFILING 1
+#endif
 
 namespace ts
 {
@@ -18,6 +26,25 @@ namespace ts
 // lives in `guarded.h` -- shared with multi-object `ts::async`.
 
 class Static_task_graph;
+
+// A node's debug name: an optional static-storage string plus the `add_node` call site.
+// Implicit from a literal -- `g.add_node("propagation", fn, objs...)` -- and
+// default-constructible: `g.add_node({}, fn, objs...)` captures the call site alone, so
+// the node still labels usefully (`file:line`). The string is referenced, not copied --
+// pass a literal (or anything outliving the graph).
+struct Node_name
+{
+    Node_name(std::source_location site = std::source_location::current()) noexcept
+        : site(site)
+    {}
+    Node_name(const char* name, std::source_location site = std::source_location::current()) noexcept
+        : literal(name)
+        , site(site)
+    {}
+
+    const char* literal = nullptr;
+    std::source_location site;
+};
 
 // Handle to a node in a `Static_task_graph`, returned by `add_node`. Identifies
 // the node for explicit ordering edges (`after`/`before`). It is build-time
@@ -118,8 +145,24 @@ public:
         return Graph_node(this, index);
     }
 
-    // Resolve access conflicts + explicit edges into a DAG; detect cycles.
-    void compile();
+    // Named form: the leading `Node_name` (implicit from a string literal, or `{}` for the
+    // call site alone) labels the node in the DOT dump; unnamed nodes label as `node<N>`.
+    template<typename Fn, typename... Objs>
+        requires (detail::Object_arg<Objs> && ...)
+    Graph_node add_node(Node_name name, Fn&& fn, Objs&&... objs)
+    {
+        Graph_node handle = add_node(std::forward<Fn>(fn), std::forward<Objs>(objs)...);
+        Node& node = nodes_[static_cast<std::size_t>(handle.index())];
+        node.name = name.literal;
+        node.name_site = name.site;
+        node.has_name_site = true;
+        return handle;
+    }
+
+    // Resolve access conflicts + explicit edges into a DAG; detect cycles. A non-null
+    // `dot_path` also writes the compiled structure as a Graphviz DOT file (see
+    // `tools/dot_writer.h` for the style scheme); no-op when `TS_PROFILING` is 0.
+    void compile(const char* dot_path = nullptr);
 
     // Run the compiled graph; returns a completion handle. Re-runnable. If `token` is
     // cancelled, not-yet-started nodes are skipped and the completion is cancelled
@@ -139,6 +182,9 @@ private:
         std::vector<int> successors;
         std::vector<int> ready_buf;             // scratch: successors made ready by this node's completion (reused; single completion/run)
         int indegree = 0;
+        const char* name = nullptr;             // static literal from `Node_name`, or null
+        std::source_location name_site{};       // the named add_node's call site
+        bool has_name_site = false;             // set only by the named overload
         Priority priority = Priority::normal;   // applied to `block` at compile()
         bool inline_dispatch = false;           // run on the settling thread if its acquires all succeed synchronously
         // The node's reusable task block (a `Graph_node_block`, allocated once in
@@ -212,6 +258,9 @@ private:
     void add_edge(int prerequisite, int successor);
     static bool conflicts(const Node& a, const Node& b);
     void detect_cycles() const;
+#if TS_PROFILING
+    void dump_dot(const char* path) const;   // structure dump; called from compile()
+#endif
 
     // Per-node acquire: when a node becomes data-ready it acquires the objects it touches,
     // one at a time in canonical (ascending pipe-index) order, holding each -- mode-aware

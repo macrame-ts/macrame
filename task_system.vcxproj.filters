@@ -19,6 +19,9 @@
     <Filter Include="include\ts">
       <UniqueIdentifier>{f6666666-6666-6666-6666-666666666666}</UniqueIdentifier>
     </Filter>
+    <Filter Include="tools">
+      <UniqueIdentifier>{b7c1a9e4-5d2f-4c8a-9e6b-3f0d7a821c54}</UniqueIdentifier>
+    </Filter>
     <Filter Include="include\ts\detail">
       <UniqueIdentifier>{07777777-7777-7777-7777-777777777777}</UniqueIdentifier>
     </Filter>
@@ -124,6 +127,9 @@
     </ClInclude>
     <ClInclude Include="include\ts\static_task_graph.h">
       <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="tools\dot_writer.h">
+      <Filter>tools</Filter>
     </ClInclude>
     <ClInclude Include="include\ts\task.h">
       <Filter>include\ts</Filter>

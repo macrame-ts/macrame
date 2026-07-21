@@ -27,7 +27,7 @@ pkill -9 -f "$OUT" 2>/dev/null || true
 rm -f "$OUT"
 
 "$CXX" -std=c++23 -fsanitize=thread -fno-exceptions -O1 -g -pthread \
-    -Iinclude -Isample $SRC -o "$OUT"
+    -Iinclude -Isample -Itools $SRC -o "$OUT"
 
 # Symbolize reports (file:line) if llvm-symbolizer is available -- `sudo apt
 # install -y llvm`. Without it, reports still fire but show addresses only.

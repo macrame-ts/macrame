@@ -1,6 +1,10 @@
 #include "ts/static_task_graph.h"
 #include "ts/fatal.h"
 
+#if TS_PROFILING
+#include "dot_writer.h"
+#endif
+
 #include <atomic>
 #include <deque>
 #include <map>
@@ -94,7 +98,7 @@ bool Static_task_graph::conflicts(const Node& a, const Node& b)
     return false;
 }
 
-void Static_task_graph::compile()
+void Static_task_graph::compile(const char* dot_path)
 {
     for (Node& node : nodes_)
     {
@@ -179,7 +183,97 @@ void Static_task_graph::compile()
     run_->graph = this;
 
     compiled_ = true;
+
+#if TS_PROFILING
+    if (dot_path)
+        dump_dot(dot_path);
+#else
+    (void)dot_path;
+#endif
 }
+
+#if TS_PROFILING
+
+namespace
+{
+
+// A node's DOT label: its `Node_name` literal, else the named add_node's call site
+// (`file:line`, basename only), else `node<N>`.
+std::string dot_label(const char* name, const std::source_location& site, bool has_site, int index)
+{
+    if (name)
+        return name;
+    if (has_site)
+    {
+        std::string_view file = site.file_name();
+        if (auto pos = file.find_last_of("/\\"); pos != std::string_view::npos)
+            file.remove_prefix(pos + 1);
+        return std::string(file) + ":" + std::to_string(site.line());
+    }
+    return "node" + std::to_string(index);
+}
+
+} // namespace
+
+// Structure dump, called from compile() when a path is given. Re-derives the conflict
+// edges with detail (which object, which modes) -- an extra O(nodes^2) scan, paid only
+// when dumping; the compile path proper stays untouched.
+void Static_task_graph::dump_dot(const char* path) const
+{
+    tools::Dot_writer dot;
+
+    for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
+        dot.add_node(i, dot_label(nodes_[i].name, nodes_[i].name_site, nodes_[i].has_name_site, i));
+
+    // Object ordinals in first-declaration order, for tooltips (objects have no names yet).
+    std::map<const void*, int> object_id;
+    for (const Node& node : nodes_)
+        for (const auto& [instance, mode] : node.access)
+            object_id.try_emplace(instance, static_cast<int>(object_id.size()));
+
+    // The conflict detail between nodes i < j: one "objN: X->Y" entry per shared instance
+    // with at least one writer (empty = no conflict).
+    auto conflict_detail = [&](const Node& a, const Node& b)
+    {
+        std::string detail;
+        for (const auto& [instance_a, mode_a] : a.access)
+            for (const auto& [instance_b, mode_b] : b.access)
+                if (instance_a == instance_b
+                    && (mode_a == Access::read_write || mode_b == Access::read_write))
+                {
+                    if (!detail.empty())
+                        detail += "; ";
+                    detail += "obj" + std::to_string(object_id[instance_a]) + ": ";
+                    detail += (mode_a == Access::read_write) ? 'W' : 'R';
+                    detail += "->";
+                    detail += (mode_b == Access::read_write) ? 'W' : 'R';
+                }
+        return detail;
+    };
+
+    // Explicit edges first (deduped; an edge that is also conflict-derived renders
+    // explicit -- solid -- and keeps the conflict detail as its tooltip).
+    std::set<std::pair<int, int>> explicit_set(explicit_edges_.begin(), explicit_edges_.end());
+    for (const auto& [from, to] : explicit_set)
+        dot.add_edge(from, to, tools::Dot_writer::Edge_kind::explicit_ordering,
+            conflict_detail(nodes_[from], nodes_[to]));
+
+    // Derived edges (declaration-index order, matching compile()'s tiebreak), minus any
+    // already emitted as explicit.
+    for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
+        for (int j = i + 1; j < static_cast<int>(nodes_.size()); ++j)
+        {
+            if (explicit_set.contains({ i, j }))
+                continue;
+            std::string detail = conflict_detail(nodes_[i], nodes_[j]);
+            if (!detail.empty())
+                dot.add_edge(i, j, tools::Dot_writer::Edge_kind::derived, detail);
+        }
+
+    dot.dump(path);
+}
+
+#endif // TS_PROFILING
 
 void Static_task_graph::detect_cycles() const
 {

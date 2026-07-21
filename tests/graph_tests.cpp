@@ -8,6 +8,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <fstream>
+#include <string>
 #include <thread>
 
 using namespace std::chrono_literals;
@@ -406,6 +408,44 @@ void test_graph_inline_rerun()
     TS_CHECK(read_value(x) == 5);
 }
 
+// The DOT structure dump (`compile(dot_path)`): named / unnamed labels, derived edges
+// dashed with a conflict tooltip, an explicit edge solid (its coinciding conflict kept
+// as the tooltip).
+void test_dot_dump()
+{
+    ts::Guarded<int> x{ 0 }, y{ 0 };
+
+    ts::Static_task_graph g;
+    g.add_node("writer_a", [](int& v) { v = 1; }, x);
+    ts::Graph_node b = g.add_node("reader_b", [](const int& v, int& w) { w = v; }, x, y);
+    ts::Graph_node c = g.add_node([](const int& w) { (void)w; }, y);   // unnamed -> "node2"
+    c.after(b);   // explicit, on top of the derived y-conflict (dedups to one solid edge)
+
+    const char* path = "graph_dump_test.dot";
+    g.compile(path);
+
+    std::string dot;
+    {
+        std::ifstream f(path, std::ios::binary);
+        dot.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    std::remove(path);
+
+    TS_CHECK(dot.find("digraph task_graph") != std::string::npos);
+    TS_CHECK(dot.find("writer_a") != std::string::npos);
+    TS_CHECK(dot.find("reader_b") != std::string::npos);
+    TS_CHECK(dot.find("node2") != std::string::npos);
+    // a->b: derived from the x conflict (W->R), dashed + tooltip
+    TS_CHECK(dot.find("n0 -> n1 [style=dashed, color=green4, tooltip=\"obj0: W->R\"") != std::string::npos);
+    // b->c: explicit (solid -- no dashed attrs), tooltip still carries the y conflict
+    TS_CHECK(dot.find("n1 -> n2 [tooltip=\"obj1: W->R\"") != std::string::npos);
+
+    // The graph still runs after a dumping compile.
+    g.execute().sync();
+    TS_CHECK(read_value(x) == 1);
+    TS_CHECK(read_value(y) == 1);
+}
+
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
@@ -437,6 +477,7 @@ void run_graph_tests()
     run("graph node inline on caller", test_graph_node_inline_on_caller);
     run("graph inline chain on caller", test_graph_inline_chain_on_caller);
     run("graph inline rerun", test_graph_inline_rerun);
+    run("dot dump", test_dot_dump);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);

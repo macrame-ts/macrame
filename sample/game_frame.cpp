@@ -559,7 +559,7 @@ double serial_budget_ms()
 // `submit.after(<the three draw producers>)` -- staging holds no grant on its
 // target, so there is no conflict edge to derive; the ordering is intent, and
 // is declared as such.
-ts::Static_task_graph build_frame_graph(World& w)
+ts::Static_task_graph build_frame_graph(World& w, const char* dot_path = nullptr)
 {
     ts::Static_task_graph g;
 
@@ -571,18 +571,18 @@ ts::Static_task_graph build_frame_graph(World& w)
     // background (a mislabeled dependency stalls its dependents), and `high`
     // dispatches through the global queues rather than the per-worker deques.
     // The simplest configuration wins until measured evidence says otherwise.
-    g.add_node(&tick_input, w.input);
-    g.add_node(&tick_networking, w.input, w.net);
+    g.add_node("input", &tick_input, w.input);
+    g.add_node("networking", &tick_networking, w.input, w.net);
     // Streaming and AI capture the service wrappers (they submit async work);
     // their graph access is still just the declared stores.
-    g.add_node([&w](const Input& input, Assets& assets)
+    g.add_node("streaming", [&w](const Input& input, Assets& assets)
     {
         tick_streaming(w.asset_source, input, assets);
     }, w.input, w.assets);
-    g.add_node(&tick_combat, w.transforms.state(), w.input, w.net, w.combat);
-    g.add_node(&tick_economy, w.transforms.state(), w.input, w.net, w.economy);
-    g.add_node(&tick_quests, w.transforms.state(), w.input, w.net, w.quests);
-    g.add_node(&tick_navigation, w.nav_mesh, w.transforms.state(), w.paths);
+    g.add_node("combat", &tick_combat, w.transforms.state(), w.input, w.net, w.combat);
+    g.add_node("economy", &tick_economy, w.transforms.state(), w.input, w.net, w.economy);
+    g.add_node("quests", &tick_quests, w.transforms.state(), w.input, w.net, w.quests);
+    g.add_node("navigation", &tick_navigation, w.nav_mesh, w.transforms.state(), w.paths);
     // Audio reads last frame's transforms (declared before the flip): one frame
     // of positional latency is inaudible, and the serial mixer runs from t=0
     // instead of the post-flip tail. Cloth/particles could make the same
@@ -591,19 +591,19 @@ ts::Static_task_graph build_frame_graph(World& w)
     // that filler slices delay the serial spine (a ready node waits for a
     // worker to finish its current slice; nothing evicts a runner). Notes in
     // docs/TODO.md under profiler-guided optimization; they stay post-flip.
-    g.add_node(&tick_audio, w.transforms.state(), w.audio_out);
-    g.add_node([&w](const Transforms& prev_xf, const Paths& paths, const Combat& combat,
-                    const Economy& economy, const Quests& quests, Intents& intents)
+    g.add_node("audio", &tick_audio, w.transforms.state(), w.audio_out);
+    g.add_node("ai", [&w](const Transforms& prev_xf, const Paths& paths, const Combat& combat,
+                          const Economy& economy, const Quests& quests, Intents& intents)
     {
         tick_ai(w.nav_mesh, prev_xf, paths, combat, economy, quests, intents);
     }, w.transforms.state(), w.paths, w.combat, w.economy, w.quests, w.intents);
-    g.add_node(&tick_animation, w.skeletons, w.intents, w.local_xf);
-    g.add_node(&tick_physics, w.velocities, w.combat, w.bodies);
+    g.add_node("animation", &tick_animation, w.skeletons, w.intents, w.local_xf);
+    g.add_node("physics", &tick_physics, w.velocities, w.combat, w.bodies);
 
     // Propagation: computes this frame's transforms from animation + physics
     // output and stages the batch -- one command, cheap to replay. No grant on
     // the transforms; it never contends with their readers.
-    auto propagation = g.add_node(
+    auto propagation = g.add_node("propagation",
         [rec = w.transforms.recorder()](const Local_xf& local_xf, const Bodies& bodies) mutable
         {
             std::vector<float> out(static_cast<std::size_t>(local_xf.size()));
@@ -615,48 +615,48 @@ ts::Static_task_graph build_frame_graph(World& w)
         w.local_xf, w.bodies);
     propagation;
 
-    auto flip = g.add_node(ts::publish_body(w.transforms), w.transforms.state());
+    auto flip = g.add_node("flip", ts::publish_body(w.transforms), w.transforms.state());
     flip.after(propagation);
 
     // Post-flip readers of the fresh version. The draw producers' recorders are
     // minted in declaration order (cloth has none; culling, particles, ui) --
     // the apply order at commit is recorder-creation order, fixed at build
     // time, independent of thread timing.
-    g.add_node(&tick_cloth, w.transforms.state(), w.cloth);
-    auto culling = g.add_node(
+    g.add_node("cloth", &tick_cloth, w.transforms.state(), w.cloth);
+    auto culling = g.add_node("culling",
         [rec = w.draw_staged.recorder()](const Transforms& xf, const Renderables& r,
                                          Visibility& v) mutable
         {
             tick_culling(xf, r, v, rec);
         }, w.transforms.state(), w.renderables, w.visibility);
     culling;
-    auto particles = g.add_node(
+    auto particles = g.add_node("particles",
         [rec = w.draw_staged.recorder()](const Transforms& xf, Particles& p) mutable
         {
             tick_particles(xf, p, rec);
         }, w.transforms.state(), w.particles);
     particles;
-    g.add_node([](const auto& economy, const auto& xf)   // debug overlay, 0.2;
+    g.add_node("debug_overlay", [](const auto& economy, const auto& xf)   // 0.2;
     {                                                    // generic lambda: `const auto&`
         read_all(economy);                               // deduces a read via the probe
         read_all(xf);
         spin(0.2);
     }, w.economy, w.transforms.state());
-    auto ui = g.add_node(
+    auto ui = g.add_node("ui",
         [rec = w.draw_staged.recorder()](const Quests& quests, Ui& u) mutable
         {
             tick_ui(quests, u, rec);
         }, w.quests, w.ui);
     ui;
 
-    auto submit = g.add_node([&w](const Transforms& xf, Draw_lists& dl)
+    auto submit = g.add_node("submit", [&w](const Transforms& xf, Draw_lists& dl)
     {
         tick_submit(w.draw_staged, xf, dl);
     }, w.transforms.state(), w.draw_lists);
     submit;
     submit.after(culling).after(particles).after(ui);
 
-    g.compile();
+    g.compile(dot_path);
     return g;
 }
 
@@ -691,6 +691,14 @@ void game_frame_stats(int frames, float scale,
     {
         return t.size() > 0 ? t.get(0) : 0.0f;
     }).sync();
+}
+
+// Compile the frame graph and write its structure as Graphviz DOT (no frames run; the
+// structure does not depend on entity count).
+void dump_game_frame_dot(const char* path)
+{
+    World world{ 8 };
+    build_frame_graph(world, path);
 }
 
 void run_game_frame_sample(int frames, float scale)
