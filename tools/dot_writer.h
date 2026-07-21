@@ -40,16 +40,14 @@ public:
     bool dump(const char* path) const
     {
         std::string out;
-        out += "digraph task_graph\n{\n";
+        // Anonymous digraph: a named one becomes the SVG root's <title>, which browsers
+        // then show as a hover tooltip anywhere the cursor misses an edge or node --
+        // confusing next to the real per-edge tooltips.
+        out += "digraph\n{\n";
         out += "    rankdir=LR;\n";
         out += "    bgcolor=\"#272822\";\n";
         out += "    node [shape=box, style=\"rounded,filled\", fillcolor=\"#3e3d32\", "
                "color=\"#66d9ef\", fontcolor=\"#f8f8f2\"];\n";
-        out += "    label=\"solid pink = explicit ordering (after/before)"
-               "\\ldashed green = derived from a declared-access conflict (hover for detail)\\l\";\n";
-        out += "    labelloc=b;\n";
-        out += "    fontsize=10;\n";
-        out += "    fontcolor=\"#cfcfc2\";\n";
 
         for (const Node_entry& n : nodes_)
         {
@@ -73,6 +71,22 @@ public:
             }
             out += " [" + attrs + "];\n";
         }
+
+        // Legend: real styled edges between invisible endpoints, so the key shows the
+        // arrows themselves instead of describing them.
+        out += "    subgraph cluster_legend\n    {\n";
+        out += "        label=\"legend\";\n";
+        out += "        tooltip=\" \";\n";   // suppress the browser showing "cluster_legend" on hover
+        out += "        fontsize=10;\n";
+        out += "        fontcolor=\"#cfcfc2\";\n";
+        out += "        color=\"#3e3d32\";\n";
+        out += "        node [shape=none, style=\"\", label=\"\", width=0.01, height=0.01];\n";
+        out += "        edge [fontsize=10, fontcolor=\"#cfcfc2\"];\n";
+        out += "        l0 -> l1 [color=\"#f92672\", penwidth=2.6, "
+               "label=\"explicit ordering (after/before)\", tooltip=\"explicit ordering\"];\n";
+        out += "        l2 -> l3 [style=dashed, color=\"#a6e22e\", penwidth=1.8, "
+               "label=\"derived from access conflict (hover for detail)\", tooltip=\"derived edge\"];\n";
+        out += "    }\n";
 
         out += "}\n";
 

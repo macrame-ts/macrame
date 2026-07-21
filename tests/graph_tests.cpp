@@ -432,7 +432,8 @@ void test_dot_dump()
     }
     std::remove(path);
 
-    TS_CHECK(dot.find("digraph task_graph") != std::string::npos);
+    TS_CHECK(dot.rfind("digraph\n", 0) == 0);   // anonymous: a graph name would become a hover tooltip on every miss
+    TS_CHECK(dot.find("subgraph cluster_legend") != std::string::npos);
     TS_CHECK(dot.find("writer_a") != std::string::npos);
     TS_CHECK(dot.find("reader_b") != std::string::npos);
     TS_CHECK(dot.find("node2") != std::string::npos);
