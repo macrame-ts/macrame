@@ -12,7 +12,7 @@ namespace ts::tools
 // Minimal Graphviz DOT emitter for the graph structure dump
 // (`Static_task_graph::compile(dot_path)`). Collects nodes and edges, then writes a
 // `digraph` with a fixed dark style scheme (monokai-derived): solid pink = explicit
-// ordering (`after`/`before`), dashed green = derived from a declared-access conflict;
+// ordering (`after`/`before`), dashed green = derived from declared access;
 // a graph label carries the legend. Render with Graphviz (`dot -Tsvg file.dot -o
 // file.svg`, or `show_graph.bat`) or any online viewer.
 class Dot_writer
@@ -92,7 +92,7 @@ public:
         // Both text nodes share one fixed width with left-justified labels (`\l`), so
         // their left edges -- and therefore the sample arrows -- are the same length.
         out += "        l1 [label=\"explicit ordering (after/before)\\l\", width=3];\n";
-        out += "        l3 [label=\"derived from access conflict (hover for detail)\\l\", width=3];\n";
+        out += "        l3 [label=\"derived from declared access (hover for detail)\\l\", width=3];\n";
         out += "        l0 -> l1 [color=\"#f92672\", penwidth=2.6, tooltip=\"explicit ordering\"];\n";
         out += "        l2 -> l3 [style=dashed, color=\"#a6e22e\", penwidth=1.8, tooltip=\"derived edge\"];\n";
         out += "    }\n";

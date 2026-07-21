@@ -555,7 +555,7 @@ ts::Versioned<Poses>  poses{ ts::Named{"poses"} };
 Render the dump with Graphviz (`dot -Tsvg frame.dot -o frame.svg`, or the
 repo's `show_graph.bat`) or paste it into an online viewer (e.g. edotor.net).
 The output is dark-themed; solid pink edges are your explicit `after`/`before`
-orderings, dashed green edges were derived from access conflicts — hovering
+orderings, dashed green edges were derived from declared access — hovering
 one (in SVG) shows which object and modes produced it (`physics: W->R`;
 unnamed objects fall back to an `objN` ordinal). The picture answers
 "why does this edge exist", which is exactly what you need when re-shaping a
