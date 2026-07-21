@@ -84,8 +84,10 @@ public:
         // and its explanation sit on one line (an edge LABEL would stretch the arrow).
         out += "        node [shape=none, style=\"\", label=\"\", width=0.01, height=0.01, "
                "fontsize=10, fontcolor=\"#cfcfc2\"];\n";
-        out += "        l1 [label=\"explicit ordering (after/before)\"];\n";
-        out += "        l3 [label=\"derived from access conflict (hover for detail)\"];\n";
+        // Both text nodes share one fixed width with left-justified labels (`\l`), so
+        // their left edges -- and therefore the sample arrows -- are the same length.
+        out += "        l1 [label=\"explicit ordering (after/before)\\l\", width=3];\n";
+        out += "        l3 [label=\"derived from access conflict (hover for detail)\\l\", width=3];\n";
         out += "        l0 -> l1 [color=\"#f92672\", penwidth=2.6, tooltip=\"explicit ordering\"];\n";
         out += "        l2 -> l3 [style=dashed, color=\"#a6e22e\", penwidth=1.8, tooltip=\"derived edge\"];\n";
         out += "    }\n";
