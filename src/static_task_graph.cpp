@@ -258,11 +258,18 @@ void Static_task_graph::dump_dot(const char* path) const
     };
 
     // Explicit edges first (deduped; an edge that is also conflict-derived renders
-    // explicit -- solid -- and keeps the conflict detail as its tooltip).
+    // explicit -- solid -- and appends the conflict detail to its tooltip). Every edge
+    // gets a tooltip: without one, browsers fall back to the SVG <title> element, which
+    // is the internal edge id (`n11->n12`).
     std::set<std::pair<int, int>> explicit_set(explicit_edges_.begin(), explicit_edges_.end());
     for (const auto& [from, to] : explicit_set)
-        dot.add_edge(from, to, tools::Dot_writer::Edge_kind::explicit_ordering,
-            conflict_detail(nodes_[from], nodes_[to]));
+    {
+        std::string detail = conflict_detail(nodes_[from], nodes_[to]);
+        std::string tooltip = "explicit ordering";
+        if (!detail.empty())
+            tooltip += "; " + detail;
+        dot.add_edge(from, to, tools::Dot_writer::Edge_kind::explicit_ordering, tooltip);
+    }
 
     // Derived edges (declaration-index order, matching compile()'s tiebreak), minus any
     // already emitted as explicit.

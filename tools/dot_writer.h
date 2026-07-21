@@ -54,6 +54,10 @@ public:
         {
             out += "    n" + std::to_string(n.id) + " [label=\"";
             append_escaped(out, n.label);
+            // The tooltip repeats the label: without one, browsers fall back to the SVG
+            // <title> element, which is the internal node id (`n7`).
+            out += "\", tooltip=\"";
+            append_escaped(out, n.label);
             out += "\"];\n";
         }
 

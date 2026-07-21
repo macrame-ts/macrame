@@ -440,7 +440,7 @@ void test_dot_dump()
     // a->b: derived from the x conflict (W->R), dashed + tooltip with x's `ts::Named` name
     TS_CHECK(dot.find("n0 -> n1 [style=dashed, color=\"#a6e22e\", penwidth=1.8, tooltip=\"counter: W->R\"") != std::string::npos);
     // b->c: explicit (solid, no dash), tooltip still carries the y conflict
-    TS_CHECK(dot.find("n1 -> n2 [color=\"#f92672\", penwidth=2.6, tooltip=\"obj1: W->R\"") != std::string::npos);
+    TS_CHECK(dot.find("n1 -> n2 [color=\"#f92672\", penwidth=2.6, tooltip=\"explicit ordering; obj1: W->R\"") != std::string::npos);
 
     // The graph still runs after a dumping compile.
     g.execute().sync();
