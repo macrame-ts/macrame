@@ -110,6 +110,14 @@ the node with the user's `add_node` call site — no macro. A trailing
 defaulted parameter after the object pack is not expressible in C++, hence
 the leading-parameter position (also UE's argument order).
 
+Objects are named the same way — `ts::Named` as an optional leading
+constructor argument on `Guarded`/`Versioned`. It is a distinct wrapper type
+rather than a bare `const char*` because the constructor forwards to `T`
+in place: a bare leading string would be indistinguishable from `T`'s own
+first constructor argument. The name is stored on the pipe — the shared
+per-object structure every layer already reaches — so the dump (and future
+tooling) resolves it without new plumbing.
+
 Everything downstream of the name (the dump today, runtime capture later) is
 gated by `TS_PROFILING` (default on; define it to 0 for shipping); the
 formatter itself lives outside the library proper, in `tools/`.

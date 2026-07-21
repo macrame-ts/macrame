@@ -90,6 +90,13 @@ public:
         chain_ = ready;   // the "previous publish" of the first publish
     }
 
+    // Named form (`ts::Named`): names the front instance for the graph's DOT dump.
+    explicit Versioned(Named name, Resync policy = Resync::replay)
+        : Versioned(policy)
+    {
+        detail::Guarded_access::pipe(front_).debug_name = name.literal;
+    }
+
     // Same lost-writes policy as `Deferred`: staged-but-unpublished commands at
     // destruction are fatal under TS_SAFETY_CHECKS; `discard()` is the escape.
     ~Versioned()

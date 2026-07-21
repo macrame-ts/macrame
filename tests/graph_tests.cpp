@@ -413,7 +413,8 @@ void test_graph_inline_rerun()
 // as the tooltip).
 void test_dot_dump()
 {
-    ts::Guarded<int> x{ 0 }, y{ 0 };
+    ts::Guarded<int> x{ ts::Named{"counter"}, 0 };   // named -> tooltip uses the name
+    ts::Guarded<int> y{ 0 };                         // unnamed -> ordinal fallback
 
     ts::Static_task_graph g;
     g.add_node("writer_a", [](int& v) { v = 1; }, x);
@@ -435,8 +436,8 @@ void test_dot_dump()
     TS_CHECK(dot.find("writer_a") != std::string::npos);
     TS_CHECK(dot.find("reader_b") != std::string::npos);
     TS_CHECK(dot.find("node2") != std::string::npos);
-    // a->b: derived from the x conflict (W->R), dashed + tooltip
-    TS_CHECK(dot.find("n0 -> n1 [style=dashed, color=green4, tooltip=\"obj0: W->R\"") != std::string::npos);
+    // a->b: derived from the x conflict (W->R), dashed + tooltip with x's `ts::Named` name
+    TS_CHECK(dot.find("n0 -> n1 [style=dashed, color=green4, tooltip=\"counter: W->R\"") != std::string::npos);
     // b->c: explicit (solid -- no dashed attrs), tooltip still carries the y conflict
     TS_CHECK(dot.find("n1 -> n2 [tooltip=\"obj1: W->R\"") != std::string::npos);
 

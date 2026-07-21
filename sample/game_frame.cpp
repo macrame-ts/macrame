@@ -224,10 +224,17 @@ using Ui = Float_store;
 struct World
 {
     explicit World(int n)
-        : skeletons{ n }, nav_mesh{ n }, renderables{ n }, velocities{ n }, asset_source{ n }
-        , input{ n }, net{ n }, assets{ n }, combat{ n }, economy{ n }, quests{ n }
-        , paths{ n }, intents{ n }, local_xf{ n }, bodies{ n }
-        , cloth{ n }, visibility{ n }, particles{ n }, audio_out{ n }, ui{ n }
+        : skeletons{ ts::Named{"skeletons"}, n }, nav_mesh{ ts::Named{"nav_mesh"}, n }
+        , renderables{ ts::Named{"renderables"}, n }, velocities{ ts::Named{"velocities"}, n }
+        , asset_source{ ts::Named{"asset_source"}, n }
+        , input{ ts::Named{"input"}, n }, net{ ts::Named{"net"}, n }
+        , assets{ ts::Named{"assets"}, n }, combat{ ts::Named{"combat"}, n }
+        , economy{ ts::Named{"economy"}, n }, quests{ ts::Named{"quests"}, n }
+        , paths{ ts::Named{"paths"}, n }, intents{ ts::Named{"intents"}, n }
+        , local_xf{ ts::Named{"local_xf"}, n }, bodies{ ts::Named{"bodies"}, n }
+        , cloth{ ts::Named{"cloth"}, n }, visibility{ ts::Named{"visibility"}, n }
+        , particles{ ts::Named{"particles"}, n }, audio_out{ ts::Named{"audio_out"}, n }
+        , ui{ ts::Named{"ui"}, n }
     {}
 
     // read-only static inputs (no system writes them this frame)
@@ -250,7 +257,7 @@ struct World
     ts::Guarded<Bodies> bodies;
 
     // the published transforms: staged by propagation, flipped by the publish node
-    ts::Versioned<Transforms> transforms;
+    ts::Versioned<Transforms> transforms{ ts::Named{"transforms"} };
 
     ts::Guarded<Cloth> cloth;
     ts::Guarded<Visibility> visibility;
@@ -259,7 +266,7 @@ struct World
     ts::Guarded<Ui> ui;
 
     // the render queue: culling/particles/UI stage into it, submit applies
-    ts::Guarded<Draw_lists> draw_lists;
+    ts::Guarded<Draw_lists> draw_lists{ ts::Named{"draw_lists"} };
     ts::Deferred<Draw_lists> draw_staged{ draw_lists };
 };
 

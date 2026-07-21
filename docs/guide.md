@@ -542,11 +542,21 @@ frame.compile("frame.dot");
 ```
 
 An unnamed node with a `{}` placeholder labels as the `add_node` call site
-(`file:line`); a fully bare `add_node` labels as `node<N>`. Render the dump with
-Graphviz (`dot -Tsvg frame.dot -o frame.svg`) or paste it into an online viewer
-(e.g. edotor.net). Solid edges are your explicit `after`/`before` orderings;
-dashed green edges were derived from access conflicts — hovering one (in SVG)
-shows which object and modes produced it (`obj3: W->R`). The picture answers
+(`file:line`); a fully bare `add_node` labels as `node<N>`. Objects are named
+too — an optional leading `ts::Named` on the `Guarded` (or `Versioned`)
+constructor, a distinct wrapper so it can never be mistaken for `T`'s own
+first constructor argument:
+
+```cpp
+ts::Guarded<Physics> physics{ ts::Named{"physics"}, world_size };
+ts::Versioned<Poses>  poses{ ts::Named{"poses"} };
+```
+
+Render the dump with Graphviz (`dot -Tsvg frame.dot -o frame.svg`) or paste it
+into an online viewer (e.g. edotor.net). Solid edges are your explicit
+`after`/`before` orderings; dashed green edges were derived from access
+conflicts — hovering one (in SVG) shows which object and modes produced it
+(`physics: W->R`; unnamed objects fall back to an `objN` ordinal). The picture answers
 "why does this edge exist", which is exactly what you need when re-shaping a
 graph: a `W->R` edge is real dataflow, while a `R->W` or `W->W` edge is an
 ordering artifact you may be able to remove by double-buffering (`Versioned`)

@@ -225,11 +225,17 @@ void Static_task_graph::dump_dot(const char* path) const
     for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
         dot.add_node(i, dot_label(nodes_[i].name, nodes_[i].name_site, nodes_[i].has_name_site, i));
 
-    // Object ordinals in first-declaration order, for tooltips (objects have no names yet).
-    std::map<const void*, int> object_id;
+    // Object labels for tooltips: the owning pipe's `debug_name` (`ts::Named`) when set,
+    // else an `objN` ordinal in first-declaration order. `access` and `pipes` are parallel
+    // arrays (same argument order), so the instance's pipe is at the same position.
+    std::map<const void*, std::string> object_label;
     for (const Node& node : nodes_)
-        for (const auto& [instance, mode] : node.access)
-            object_id.try_emplace(instance, static_cast<int>(object_id.size()));
+        for (size_t k = 0; k < node.access.size(); ++k)
+        {
+            const char* name = node.pipes[k]->debug_name;
+            object_label.try_emplace(node.access[k].first,
+                name ? std::string(name) : "obj" + std::to_string(object_label.size()));
+        }
 
     // The conflict detail between nodes i < j: one "objN: X->Y" entry per shared instance
     // with at least one writer (empty = no conflict).
@@ -243,7 +249,7 @@ void Static_task_graph::dump_dot(const char* path) const
                 {
                     if (!detail.empty())
                         detail += "; ";
-                    detail += "obj" + std::to_string(object_id[instance_a]) + ": ";
+                    detail += object_label[instance_a] + ": ";
                     detail += (mode_a == Access::read_write) ? 'W' : 'R';
                     detail += "->";
                     detail += (mode_b == Access::read_write) ? 'W' : 'R';

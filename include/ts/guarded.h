@@ -54,6 +54,10 @@ struct Pipe
     std::deque<Job> jobs;
     int active_readers = 0;
     bool writer_active = false;
+    // Debug name of the owning `Guarded`/`Versioned` (`ts::Named`): a static literal,
+    // referenced not copied. Consumed by the graph's DOT dump (edge tooltips) and future
+    // profiling; kept in all builds (one pointer).
+    const char* debug_name = nullptr;
 
     // Blocks until the pipe is fully drained and nothing is in flight.
     void wait_until_idle()
@@ -277,6 +281,21 @@ namespace detail
 struct Guarded_access;
 }
 
+// A debug name for a `Guarded`/`Versioned` instance: a static-storage literal, referenced
+// not copied. A distinct wrapper type (not a bare leading `const char*`) so it can never be
+// mistaken for `T`'s own first constructor argument:
+//   ts::Guarded<Transforms> transforms{ ts::Named{"transforms"}, entity_count };
+// Names label the object in the graph's DOT dump (edge tooltips: `transforms: W->R`
+// instead of `obj3: W->R`); unnamed objects fall back to an `objN` ordinal.
+struct Named
+{
+    explicit Named(const char* name) noexcept
+        : literal(name)
+    {}
+
+    const char* literal;
+};
+
 template<typename T>
 class Guarded
 {
@@ -297,6 +316,15 @@ public:
     explicit Guarded(Args&&... args)
         : instance_(std::forward<Args>(args)...)
     {}
+
+    // Named form: leading `ts::Named`, then `T`'s constructor arguments as usual.
+    template<typename... Args>
+        requires std::constructible_from<T, Args...>
+    explicit Guarded(Named name, Args&&... args)
+        : instance_(std::forward<Args>(args)...)
+    {
+        pipe_.debug_name = name.literal;
+    }
 
     // Identity matters (it is the access key); waits out pending jobs so the
     // pipe outlives its last task.
