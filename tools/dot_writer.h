@@ -11,9 +11,10 @@ namespace ts::tools
 
 // Minimal Graphviz DOT emitter for the graph structure dump
 // (`Static_task_graph::compile(dot_path)`). Collects nodes and edges, then writes a
-// `digraph` with a fixed style scheme: solid black = explicit ordering (`after`/`before`),
-// dashed green = derived from a declared-access conflict; a graph label carries the
-// legend. Render with Graphviz (`dot -Tsvg file.dot -o file.svg`) or any online viewer.
+// `digraph` with a fixed dark style scheme (monokai-derived): solid pink = explicit
+// ordering (`after`/`before`), dashed green = derived from a declared-access conflict;
+// a graph label carries the legend. Render with Graphviz (`dot -Tsvg file.dot -o
+// file.svg`, or `show_graph.bat`) or any online viewer.
 class Dot_writer
 {
 public:
@@ -41,11 +42,14 @@ public:
         std::string out;
         out += "digraph task_graph\n{\n";
         out += "    rankdir=LR;\n";
-        out += "    node [shape=box, style=rounded];\n";
-        out += "    label=\"solid = explicit ordering (after/before)"
+        out += "    bgcolor=\"#272822\";\n";
+        out += "    node [shape=box, style=\"rounded,filled\", fillcolor=\"#3e3d32\", "
+               "color=\"#66d9ef\", fontcolor=\"#f8f8f2\"];\n";
+        out += "    label=\"solid pink = explicit ordering (after/before)"
                "\\ldashed green = derived from a declared-access conflict (hover for detail)\\l\";\n";
         out += "    labelloc=b;\n";
         out += "    fontsize=10;\n";
+        out += "    fontcolor=\"#cfcfc2\";\n";
 
         for (const Node_entry& n : nodes_)
         {
@@ -57,21 +61,17 @@ public:
         for (const Edge_entry& e : edges_)
         {
             out += "    n" + std::to_string(e.from) + " -> n" + std::to_string(e.to);
-            std::string attrs;
-            if (e.kind == Edge_kind::derived)
-                attrs += "style=dashed, color=green4";
+            std::string attrs = (e.kind == Edge_kind::derived)
+                ? "style=dashed, color=\"#a6e22e\", penwidth=1.8"
+                : "color=\"#f92672\", penwidth=2.6";
             if (!e.tooltip.empty())
             {
-                if (!attrs.empty())
-                    attrs += ", ";
                 // `href` is required for Graphviz to emit the tooltip into SVG output.
-                attrs += "tooltip=\"";
+                attrs += ", tooltip=\"";
                 append_escaped(attrs, e.tooltip);
                 attrs += "\", href=\"#\"";
             }
-            if (!attrs.empty())
-                out += " [" + attrs + "]";
-            out += ";\n";
+            out += " [" + attrs + "];\n";
         }
 
         out += "}\n";
