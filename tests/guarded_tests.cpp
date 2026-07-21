@@ -338,6 +338,10 @@ void test_access_falls_back_when_busy()
 }
 
 // `async` always enqueues -- even on a free pipe it does NOT run on the calling thread.
+// Asserted via the executing thread id: an inline regression would run the body on the
+// caller (synchronously, before `async` returns), failing the id check deterministically.
+// A `!t.is_done()` probe after `async` returns is NOT sound -- a fast worker can complete
+// the body before the check runs (it cost a CI flake on a slow runner).
 void test_async_always_schedules()
 {
     ts::Guarded<int> d{ 0 };
@@ -348,9 +352,8 @@ void test_async_always_schedules()
         body_thread.store(std::this_thread::get_id());
         return ++v;
     });
-    TS_CHECK(!t.is_done());                    // not run inline on the free pipe
     TS_CHECK(t.sync() == 1);
-    TS_CHECK(body_thread.load() != caller);    // ran on a worker
+    TS_CHECK(body_thread.load() != caller);    // on a worker, never inline on the caller
     TS_CHECK(read_value(d) == 1);
 }
 
