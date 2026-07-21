@@ -80,12 +80,14 @@ public:
         out += "        fontsize=10;\n";
         out += "        fontcolor=\"#cfcfc2\";\n";
         out += "        color=\"#3e3d32\";\n";
-        out += "        node [shape=none, style=\"\", label=\"\", width=0.01, height=0.01];\n";
-        out += "        edge [fontsize=10, fontcolor=\"#cfcfc2\"];\n";
-        out += "        l0 -> l1 [color=\"#f92672\", penwidth=2.6, "
-               "label=\"explicit ordering (after/before)\", tooltip=\"explicit ordering\"];\n";
-        out += "        l2 -> l3 [style=dashed, color=\"#a6e22e\", penwidth=1.8, "
-               "label=\"derived from access conflict (hover for detail)\", tooltip=\"derived edge\"];\n";
+        // Each row is a short unlabeled arrow into a text-only node, so the sample arrow
+        // and its explanation sit on one line (an edge LABEL would stretch the arrow).
+        out += "        node [shape=none, style=\"\", label=\"\", width=0.01, height=0.01, "
+               "fontsize=10, fontcolor=\"#cfcfc2\"];\n";
+        out += "        l1 [label=\"explicit ordering (after/before)\"];\n";
+        out += "        l3 [label=\"derived from access conflict (hover for detail)\"];\n";
+        out += "        l0 -> l1 [color=\"#f92672\", penwidth=2.6, tooltip=\"explicit ordering\"];\n";
+        out += "        l2 -> l3 [style=dashed, color=\"#a6e22e\", penwidth=1.8, tooltip=\"derived edge\"];\n";
         out += "    }\n";
 
         out += "}\n";
