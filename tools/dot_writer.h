@@ -45,6 +45,7 @@ public:
         // confusing next to the real per-edge tooltips.
         out += "digraph\n{\n";
         out += "    rankdir=LR;\n";
+        out += "    ranksep=0.25;\n";   // rank gap: sets edge length (incl. the legend sample arrows)
         out += "    bgcolor=\"#272822\";\n";
         out += "    node [shape=box, style=\"rounded,filled\", fillcolor=\"#3e3d32\", "
                "color=\"#66d9ef\", fontcolor=\"#f8f8f2\"];\n";
