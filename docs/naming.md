@@ -98,6 +98,14 @@ registrable-mark risk, but common words are also hard to *protect*).
   threads; **Shuttle** = AWS concurrency tester; **Tapestry**, **Warp**,
   **Arachne**, **Jacquard** all taken/in-domain). The metaphor is also generic —
   every DAG scheduler "weaves tasks".
+- **Interwoven** (proposed 2026-07) — fatal: Interwoven, Inc. was a major
+  NASDAQ-listed software company (TeamSite CMS; Autonomy 2009 → HP 2011 →
+  OpenText 2016), and the trademarks LIVE ON under OpenText — a held
+  software-class mark plus two decades of search residue. Also the colonized
+  textile shelf (adjacent to Weave), and a past-participle adjective reads
+  awkwardly as a product noun. Merit acknowledged: names the *result* (strands
+  made into one safe fabric) better than "Weaver" — that aspect's cleared
+  survivor is Heddle.
 - **Arbiter** — *the* hardware term (a bus arbiter grants memory access = this
   library) but taken: a Rust multi-agent framework + crates.io + several others.
 - **Cardea** — Roman goddess of the door-hinge ("opens the shut, shuts the open"
