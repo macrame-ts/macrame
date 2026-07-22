@@ -106,6 +106,20 @@ registrable-mark risk, but common words are also hard to *protect*).
   awkwardly as a product noun. Merit acknowledged: names the *result* (strands
   made into one safe fabric) better than "Weaver" — that aspect's cleared
   survivor is Heddle.
+- **Interwoven-ts** (proposed 2026-07) — fatal twice: a suffix does not defeat
+  same-class mark similarity, and Interwoven's flagship WAS "Interwoven
+  TeamSite" = "Interwoven TS" (`iw`/`iwts`-prefixed tooling) — the suffix walks
+  into the historical product's own nickname. Independently, `-ts` on GitHub
+  reads as "TypeScript port of" — wrong signal for a C++ library. CAVEAT
+  recorded: the defensively reserved `-ts` orgs (roundabout-ts etc.) are fine as
+  parking, but a finalist's real org should be `-cpp` or the full form, not `-ts`.
+- **Macramé** (proposed 2026-07) — rejected on meaning, not clearance
+  (co-tenants exist — Scala macro libs, a PHP CLI toolkit, macramejs, the bare
+  GitHub handle — none in-domain, survivable): macramé is deliberate KNOTTING of
+  threads, and to a concurrency-literate reader knotted threads = tangles and
+  deadlocks, the exact failure mode the library prevents. A name that needs
+  defending on first contact fails the job. Plus the `é` spelling/pronunciation
+  friction. Mirror image of Weave: passable collisions, wrong meaning.
 - **Arbiter** — *the* hardware term (a bus arbiter grants memory access = this
   library) but taken: a Rust multi-agent framework + crates.io + several others.
 - **Cardea** — Roman goddess of the door-hinge ("opens the shut, shuts the open"
