@@ -16,7 +16,21 @@ ecosystems (relevant only if we ship bindings, or for cross-ecosystem search
 confusion). GitHub usernames and org names share ONE global namespace, so a
 taken username blocks the matching org.
 
-## Active shortlist (priority order, clearance-informed)
+## Active shortlist (priority order, clearance-informed; sound weighted per author, 2026-07)
+
+0. **Macramé** ("macrame" everywhere functional) — *the craft of DELIBERATE
+   knotting: cords knotted into patterned, load-bearing structure.* The reclaim
+   is the pitch: a tangle is what threads do without discipline; macramé is
+   knots on purpose — races vs orchestrated access, in one craft word. Tagline
+   candidate: "Threads, knotted on purpose." The TooManyCooks move (own the
+   negative idiom as wit). **Best-sounding name on the board** (MAC-ruh-may,
+   open-vowel ending, clean ASCII spelling). Clearance (full, 2026-07): GitHub
+   bare `@macrame` taken (dormant user) → org variant needed (`macrame-cpp` or
+   similar); crates.io taken by a dead 0.0.1 (irrelevant domain); **npm free**;
+   PyPI taken by a dead 0.0.1 C/C++ build utility; co-tenant repos (Scala macro
+   libs, PHP CLI kit, macramejs) none in-domain; no trademark (generic craft
+   word). Caveats: first-contact knot reading must be answered by the tagline
+   (README leads with it); `é` is branding-only.
 
 1. **Entente** — *a friendly understanding / informal alliance between parties,
    and the parties collectively* (Fr. "understanding"; the Entente Cordiale).
@@ -113,13 +127,9 @@ registrable-mark risk, but common words are also hard to *protect*).
   reads as "TypeScript port of" — wrong signal for a C++ library. CAVEAT
   recorded: the defensively reserved `-ts` orgs (roundabout-ts etc.) are fine as
   parking, but a finalist's real org should be `-cpp` or the full form, not `-ts`.
-- **Macramé** (proposed 2026-07) — rejected on meaning, not clearance
-  (co-tenants exist — Scala macro libs, a PHP CLI toolkit, macramejs, the bare
-  GitHub handle — none in-domain, survivable): macramé is deliberate KNOTTING of
-  threads, and to a concurrency-literate reader knotted threads = tangles and
-  deadlocks, the exact failure mode the library prevents. A name that needs
-  defending on first contact fails the job. Plus the `é` spelling/pronunciation
-  friction. Mirror image of Weave: passable collisions, wrong meaning.
+- ~~Macramé — initially rejected on the knot metaphor~~ **REVERSED, promoted to
+  the shortlist** (author pushback, 2026-07: sound is a first-class criterion).
+  See the shortlist entry.
 - **Arbiter** — *the* hardware term (a bus arbiter grants memory access = this
   library) but taken: a Rust multi-agent framework + crates.io + several others.
 - **Cardea** — Roman goddess of the door-hinge ("opens the shut, shuts the open"
