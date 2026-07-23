@@ -596,6 +596,46 @@ void test_graph_trace_priority()
     g.set_trace(nullptr);
 }
 
+// Handoff weld + dead-time reporting: a two-node chain on a one-worker scheduler with an
+// inline successor runs back to back on the same lane, so the edge renders as a weld dot
+// (r=4.5; the legend swatch is r=5) with the handoff tooltip line; the stats panel
+// carries the critical dead-time figure.
+void test_graph_trace_weld_dead_time()
+{
+    ts::Guarded<int> x{ 0 };
+    auto busy = [](int us)
+    {
+        auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
+        while (std::chrono::steady_clock::now() < until) {}
+    };
+
+    ts::Static_task_graph g;
+    g.add_node("weld_a", [busy](int& v) { busy(300); ++v; }, x);
+    g.add_node("weld_b", [busy](int& v) { busy(100); ++v; }, x).set_inline();
+    g.compile();
+
+    ts::tools::Graph_trace trace;
+    g.set_trace(&trace);
+    ts::Scheduler one{ { .num_threads = 1 } };
+    for (int i = 0; i < 8; ++i)
+        g.execute(one).sync();
+
+    const char* path = "graph_trace_weld_test.svg";
+    TS_CHECK(trace.write_SVG(path));
+    std::string svg;
+    {
+        std::ifstream f(path, std::ios::binary);
+        svg.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    std::remove(path);
+
+    TS_CHECK(svg.find("r=\"4.5\"") != std::string::npos);                  // the weld dot
+    TS_CHECK(svg.find("Handoff: back-to-back") != std::string::npos);      // its tooltip line
+    TS_CHECK(svg.find("handoff weld") != std::string::npos);               // legend row
+    TS_CHECK(svg.find("critical dead time") != std::string::npos);         // stats + legend
+    g.set_trace(nullptr);
+}
+
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
@@ -632,6 +672,7 @@ void run_graph_tests()
     run("graph trace cancelled run", test_graph_trace_cancelled);
     run("graph trace critical path", test_graph_trace_critical);
     run("graph trace priority", test_graph_trace_priority);
+    run("graph trace weld + dead time", test_graph_trace_weld_dead_time);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);

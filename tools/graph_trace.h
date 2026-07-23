@@ -62,7 +62,7 @@ public:
 
     void add_edge(int from, int to, bool explicit_ordering, std::string conflict)
     {
-        edges_.push_back({ from, to, explicit_ordering, std::move(conflict), {}, 0 });
+        edges_.push_back({ from, to, explicit_ordering, std::move(conflict), {}, {}, 0 });
         in_edges_dirty_ = true;
     }
 
@@ -151,6 +151,7 @@ public:
         for (Edge_agg& e : edges_)
         {
             e.meet = {};
+            e.binding_gap = {};
             e.critical_runs = 0;
         }
         critical_work_ = {};
@@ -328,6 +329,7 @@ private:
         bool explicit_ordering = false;
         std::string conflict;      // "obj: W->R; ..." or empty
         Welford meet;              // mean of (end_from + start_to)/2, µs from run begin
+        Welford binding_gap;       // start_to - end_from on runs where this edge bound the chain, µs
         long long critical_runs = 0;   // runs where this edge was on the binding chain
     };
 
@@ -373,8 +375,13 @@ private:
                     binding_edge = e;
             if (binding_edge < 0)
                 break;   // a root: the chain is complete
-            ++edges_[static_cast<size_t>(binding_edge)].critical_runs;
-            cur = edges_[static_cast<size_t>(binding_edge)].from;
+            Edge_agg& be = edges_[static_cast<size_t>(binding_edge)];
+            ++be.critical_runs;
+            // The chain's dead time at this step: the successor sat ready-but-waiting
+            // (queue / acquire) after its binding predecessor finished.
+            be.binding_gap.add(std::max(0.0,
+                static_cast<double>(starts[cur] - ends[be.from]) * ticks_to_us));
+            cur = be.from;
         }
         critical_work_.add(work);
     }
@@ -600,7 +607,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
     for (int i = 0; i < count; ++i)
         span_us = std::max(span_us, bar_end[static_cast<size_t>(i)]);
     const double pad_l = 64.0, pad_r = 28.0, plot_w = 1150.0;
-    const double header_h = 150.0, axis_h = 30.0;
+    const double header_h = 188.0, axis_h = 30.0;
     const double row_h = 30.0, bar_h = 20.0, lane_pad = 6.0;
     const double px_per_us = plot_w / span_us;
 
@@ -655,16 +662,26 @@ inline bool Graph_trace::write_SVG(const char* path) const
          "viewBox=\"0 0 %.0f %.0f\" font-family=\"'Segoe UI', sans-serif\">\n",
          total_w, total_h, total_w, total_h);
     line("<rect width=\"%.0f\" height=\"%.0f\" fill=\"#272822\"/>\n", total_w, total_h);
+    // Hatch for the critical dead-time underlays (and its legend swatch).
+    out += "<defs><pattern id=\"dead\" width=\"6\" height=\"6\" patternUnits=\"userSpaceOnUse\">"
+           "<path d=\"M0 6 L6 0\" stroke=\"#f92672\" stroke-width=\"1.2\" opacity=\"0.5\"/>"
+           "</pattern></defs>\n";
 
     // Header: title, global stats, legend (inline arrows).
     out += "<text x=\"16\" y=\"26\" font-size=\"15\" font-weight=\"600\" fill=\"#f8f8f2\">";
     append_escaped(out, title_.empty() ? "average run" : title_ + ": average run");
     out += "</text>\n";
     {
+        // Critical dead time = makespan minus the work on the binding chain: the frame
+        // time spent with the chain's next node ready but not running. Near zero =
+        // dependency-bound; large = scheduling-bound.
+        double dead_us = std::max(0.0, makespan_.mean - critical_work_.mean);
+        double dead_pct = makespan_.mean > 0.0 ? 100.0 * dead_us / makespan_.mean : 0.0;
         std::string stats = "runs: " + std::to_string(runs_)
             + "  |  makespan mean " + fmt_us(makespan_.mean) + " \xC2\xB5s (min " + fmt_us(makespan_min_)
             + ", max " + fmt_us(makespan_max_) + ")  |  critical work mean "
-            + fmt_us(critical_work_.mean) + " \xC2\xB5s  |  structural CP " + fmt_us(cpm_us)
+            + fmt_us(critical_work_.mean) + " \xC2\xB5s  |  critical dead time " + fmt_us(dead_us)
+            + " \xC2\xB5s (" + fmt_us(dead_pct) + "% of makespan)  |  structural CP " + fmt_us(cpm_us)
             + " \xC2\xB5s  |  workers: " + std::to_string(worker_lanes);
         out += "<text x=\"16\" y=\"46\" font-size=\"11\" fill=\"#cfcfc2\">";
         append_escaped(out, stats);
@@ -692,12 +709,21 @@ inline bool Graph_trace::write_SVG(const char* path) const
              "stroke=\"#fd971f\" stroke-width=\"2\"/>\n", ax0, ly4 - 5.0, ax1 - ax0);
         line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical node (orange = share of runs)</text>\n",
              ax1 + 14.0, ly4 + 4.0);
+        const double ly5 = 136.0;
+        line("<circle cx=\"%.0f\" cy=\"%.0f\" r=\"5\" fill=\"#a6e22e\"/>\n", (ax0 + ax1) * 0.5, ly5);
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">handoff weld: connected nodes back to back on one worker</text>\n",
+             ax1 + 14.0, ly5 + 4.0);
+        const double ly6 = 154.0;
+        line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"url(#dead)\"/>\n",
+             ax0, ly6 - 5.0, ax1 - ax0);
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical dead time (successor ready but waiting)</text>\n",
+             ax1 + 14.0, ly6 + 4.0);
         line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\">"
              "<tspan font-weight=\"700\" fill=\"%s\">H</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
              "<tspan font-weight=\"700\" fill=\"%s\">N</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
              "<tspan font-weight=\"700\" fill=\"%s\">L</tspan>"
              "<tspan fill=\"#cfcfc2\"> = node priority (high / normal / low)</tspan></text>\n",
-             ax0, 140.0,
+             ax0, 176.0,
              priority_color(Priority::high), priority_color(Priority::normal), priority_color(Priority::low));
     }
 
@@ -749,6 +775,22 @@ inline bool Graph_trace::write_SVG(const char* path) const
             append_escaped(out, lines_v[k]);
         }
     };
+
+    // Critical dead-time underlays, under the bars: for an edge that binds >= 10% of
+    // runs, its mean ready-but-waiting gap drawn as a hatched strip ending at the
+    // successor's bar start -- the frame time lost to scheduling at that spot, visible
+    // without hovering (the number is also on the edge tooltip).
+    for (const Edge_agg& e : edges_)
+    {
+        double share = runs_ > 0
+            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
+        double wpx = e.binding_gap.mean * px_per_us;
+        if (share < 0.10 || wpx < 2.0)
+            continue;
+        double x_end = X(bar_start[static_cast<size_t>(e.to)]);
+        line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.0f\" rx=\"2\" fill=\"url(#dead)\"/>\n",
+             x_end - wpx, bar_top(e.to), wpx, bar_h);
+    }
 
     // Bars (tooltip data on the group; the overlay script renders it), then edges on top.
     for (int i = 0; i < count; ++i)
@@ -848,34 +890,55 @@ inline bool Graph_trace::write_SVG(const char* path) const
         // meet-point-clamped edge (near-zero horizontal gap) still leaves and arrives
         // flat, capped so short edges don't balloon.
         double tangent = std::clamp(0.45 * std::abs(x2 - x1) + 0.15 * std::abs(y2 - y1), 18.0, 64.0);
+        double share = runs_ > 0
+            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
         std::vector<std::string> tip;
         tip.push_back(e.explicit_ordering ? "explicit ordering" : "derived from declared access");
         if (!e.conflict.empty())
             tip.push_back(e.conflict);
-        tip.push_back("Critical: in " + fmt_us(runs_ > 0
-            ? 100.0 * static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0) + "% of runs");
+        tip.push_back("Critical: in " + fmt_us(100.0 * share) + "% of runs");
+        if (share >= 0.10 && e.binding_gap.mean > 0.5)
+            tip.push_back("Critical wait: " + fmt_us(e.binding_gap.mean) + " \xC2\xB5s mean");
         // Dash carries provenance (solid = explicit, dashed = derived); colour carries
         // criticality, green -> pink by the edge's share of binding chains. Width is
         // uniform per kind.
-        double crit = crit_ramp(runs_ > 0
-            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0);
+        double crit = crit_ramp(share);
         std::string stroke = blend_hex(0xa6, 0xe2, 0x2e, 0xf9, 0x26, 0x72, crit);
         const char* extra = e.explicit_ordering ? "" : " stroke-dasharray=\"5,3\"";
         double width = e.explicit_ordering ? 2.0 : 1.5;
 
+        // Handoff weld: connected bars back to back on one row (the object-handoff
+        // elision often runs a successor immediately on the settling worker) collapse
+        // the curve to nothing -- draw a dot straddling the junction instead. Provenance
+        // (solid vs dashed) is tooltip-only for welds; the dot keeps the criticality
+        // colour, and marks exactly where the handoff fired.
+        bool weld = std::abs(y2 - y1) < 0.5 && x2 - x1 < 5.0;
+        if (weld)
+            tip.push_back("Handoff: back-to-back on one worker");
+
         out += "<g class=\"hv\" data-hl=\"" + stroke + "\" data-tip=\"";
         append_tip_attr(tip);
         out += "\">\n";
-        // Invisible fat twin of the curve: a comfortable hover target for a 2px stroke.
-        line("<path d=\"M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f\" fill=\"none\" "
-             "stroke=\"transparent\" stroke-width=\"9\"/>\n",
-             x1, y1, x1 + tangent, y1, x2 - tangent, y2, x2, y2);
-        line("<path d=\"M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f\" fill=\"none\" "
-             "stroke=\"%s\" stroke-width=\"%.1f\"%s/>\n",
-             x1, y1, x1 + tangent, y1, x2 - tangent, y2, x2, y2, stroke.c_str(), width, extra);
-        // Arrowhead at the entry, horizontal (consistent with the flat arrival).
-        line("<polygon points=\"%.1f,%.1f %.1f,%.1f %.1f,%.1f\" fill=\"%s\"/>\n",
-             x2 - 7.0, y2 - 3.5, x2 - 7.0, y2 + 3.5, x2 - 0.5, y2, stroke.c_str());
+        if (weld)
+        {
+            double cx = (x1 + x2) * 0.5;
+            // Invisible fat twin first (hover target), then the visible dot.
+            line("<circle cx=\"%.1f\" cy=\"%.1f\" r=\"9\" fill=\"transparent\"/>\n", cx, y1);
+            line("<circle cx=\"%.1f\" cy=\"%.1f\" r=\"4.5\" fill=\"%s\"/>\n", cx, y1, stroke.c_str());
+        }
+        else
+        {
+            // Invisible fat twin of the curve: a comfortable hover target for a 2px stroke.
+            line("<path d=\"M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f\" fill=\"none\" "
+                 "stroke=\"transparent\" stroke-width=\"9\"/>\n",
+                 x1, y1, x1 + tangent, y1, x2 - tangent, y2, x2, y2);
+            line("<path d=\"M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f\" fill=\"none\" "
+                 "stroke=\"%s\" stroke-width=\"%.1f\"%s/>\n",
+                 x1, y1, x1 + tangent, y1, x2 - tangent, y2, x2, y2, stroke.c_str(), width, extra);
+            // Arrowhead at the entry, horizontal (consistent with the flat arrival).
+            line("<polygon points=\"%.1f,%.1f %.1f,%.1f %.1f,%.1f\" fill=\"%s\"/>\n",
+                 x2 - 7.0, y2 - 3.5, x2 - 7.0, y2 + 3.5, x2 - 0.5, y2, stroke.c_str());
+        }
         out += "</g>\n";
     }
 
