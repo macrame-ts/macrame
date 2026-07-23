@@ -1,5 +1,17 @@
 #pragma once
 
+// The single tools include for `static_task_graph.cpp`: the capture class
+// (`Trace_stamps`, both configurations) plus the structure consumers below. All
+// `TS_PROFILING` gating happens in here -- the graph calls the consumers
+// unconditionally, and under `TS_PROFILING=0` they are empty stubs.
+
+#include "trace_stamps.h"
+
+#include <utility>
+#include <vector>
+
+#if TS_PROFILING
+
 #include "dot_writer.h"
 #include "graph_trace.h"
 
@@ -10,8 +22,6 @@
 #include <set>
 #include <source_location>
 #include <string>
-#include <utility>
-#include <vector>
 
 namespace ts::tools
 {
@@ -81,11 +91,11 @@ std::string conflict_detail(const Node& a, const Node& b, std::map<const void*, 
 
 // The one derivation walk. Visits every node -- `node_fn(index, label, accesses,
 // priority)` where `accesses` is (object label, is_write) pairs -- then every deduped
-// edge in compile()'s order -- `edge_fn(from, to, explicit_ordering, conflict_detail)`: explicit edges first
-// (with the conflict detail of a coinciding conflict, possibly empty), then the remaining
-// conflict-derived pairs (declaration-index order, detail always non-empty). Re-derives
-// conflicts with detail -- an O(nodes^2) scan, paid only when a consumer runs; the compile
-// path proper is untouched.
+// edge in compile()'s order -- `edge_fn(from, to, explicit_ordering, conflict_detail)`:
+// explicit edges first (with the conflict detail of a coinciding conflict, possibly
+// empty), then the remaining conflict-derived pairs (declaration-index order, detail
+// always non-empty). Re-derives conflicts with detail -- an O(nodes^2) scan, paid only
+// when a consumer runs; the compile path proper is untouched.
 template<typename Nodes, typename NodeFn, typename EdgeFn>
 void visit_structure(const Nodes& nodes, const std::vector<std::pair<int, int>>& explicit_edges,
                      NodeFn&& node_fn, EdgeFn&& edge_fn)
@@ -115,11 +125,13 @@ void visit_structure(const Nodes& nodes, const std::vector<std::pair<int, int>>&
         }
 }
 
-// Consumer: the Graphviz DOT structure dump (`compile(dot_path)`).
+// Consumer: the Graphviz DOT structure dump (`compile(dot_path)`). No-op on a null path.
 template<typename Nodes>
 void write_structure_dot(const Nodes& nodes, const std::vector<std::pair<int, int>>& explicit_edges,
                          const char* path)
 {
+    if (!path)
+        return;
     Dot_writer dot;
     visit_structure(nodes, explicit_edges,
         [&dot](int i, const std::string& label, const auto&, Priority)
@@ -143,26 +155,48 @@ void write_structure_dot(const Nodes& nodes, const std::vector<std::pair<int, in
     dot.dump(path);
 }
 
-// Consumer: the attached trace's structure (labels, declared accesses, edges with
-// provenance). Resets the trace's aggregates (`begin_structure`).
+// Consumer: the attached trace's structure (labels, priorities, declared accesses, edges
+// with provenance). No-op on a null trace; resets the trace's aggregates
+// (`begin_structure`).
 template<typename Nodes>
-void push_structure(Graph_trace& trace, const Nodes& nodes,
+void push_structure(Graph_trace* trace, const Nodes& nodes,
                     const std::vector<std::pair<int, int>>& explicit_edges)
 {
-    trace.begin_structure(static_cast<int>(nodes.size()));
+    if (!trace)
+        return;
+    trace->begin_structure(static_cast<int>(nodes.size()));
     visit_structure(nodes, explicit_edges,
-        [&trace](int i, const std::string& label, const std::vector<std::pair<std::string, bool>>& accesses,
-                 Priority priority)
+        [trace](int i, const std::string& label, const std::vector<std::pair<std::string, bool>>& accesses,
+                Priority priority)
         {
-            trace.set_node_label(i, label);
-            trace.set_node_priority(i, priority);
+            trace->set_node_label(i, label);
+            trace->set_node_priority(i, priority);
             for (const auto& [object, write] : accesses)
-                trace.add_node_access(i, object, write);
+                trace->add_node_access(i, object, write);
         },
-        [&trace](int from, int to, bool explicit_ordering, const std::string& detail)
+        [trace](int from, int to, bool explicit_ordering, const std::string& detail)
         {
-            trace.add_edge(from, to, explicit_ordering, detail);
+            trace->add_edge(from, to, explicit_ordering, detail);
         });
 }
 
 } // namespace ts::tools
+
+#else // TS_PROFILING == 0: the graph still calls the consumers; they compile to nothing.
+
+namespace ts::tools
+{
+
+template<typename Nodes>
+void write_structure_dot(const Nodes&, const std::vector<std::pair<int, int>>&, const char*)
+{
+}
+
+template<typename Nodes>
+void push_structure(Graph_trace*, const Nodes&, const std::vector<std::pair<int, int>>&)
+{
+}
+
+} // namespace ts::tools
+
+#endif // TS_PROFILING

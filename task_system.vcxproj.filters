@@ -167,8 +167,11 @@
     <ClInclude Include="include\ts\detail\worker_thread.h">
       <Filter>include\ts\detail</Filter>
     </ClInclude>
-    <ClInclude Include="src\mem_profile.h">
-      <Filter>src</Filter>
+    <ClInclude Include="tools\mem_profile.h">
+      <Filter>tools</Filter>
+    </ClInclude>
+    <ClInclude Include="tools\trace_stamps.h">
+      <Filter>tools</Filter>
     </ClInclude>
     <ClInclude Include="benchmarks\benchmarks.h">
       <Filter>benchmarks</Filter>

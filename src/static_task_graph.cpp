@@ -1,11 +1,8 @@
 #include "ts/static_task_graph.h"
 #include "ts/fatal.h"
-
-#if TS_PROFILING
+// The tools seam, one include: `Trace_stamps` + the structure consumers. All
+// `TS_PROFILING` gating happens inside it.
 #include "graph_introspect.h"
-#include "graph_trace.h"
-#include <chrono>
-#endif
 
 #include <atomic>
 #include <deque>
@@ -14,90 +11,6 @@
 
 namespace ts
 {
-
-namespace
-{
-
-// Per-run trace stamps: raw `steady_clock` ticks + executing worker per node, written
-// only while a trace is attached (each node writes its own slot; the settle's acq_rel
-// chain publishes them to the folding thread; sized once, no per-run allocation).
-// `mark_ready` is the data-ready instant (dependency counter hit zero); the gap to
-// `mark_start` is acquire + queue latency, attributed per node by the trace. Every method
-// compiles to a no-op without `TS_PROFILING`, so the run logic below carries no `#if`s.
-class Trace_stamps
-{
-#if TS_PROFILING
-public:
-    explicit Trace_stamps(size_t node_count)
-        : ready_(node_count)
-        , start_(node_count)
-        , end_(node_count)
-        , worker_(node_count)
-    {}
-
-    // Arms (or disarms) stamping for the run starting now.
-    void begin_run(const tools::Graph_trace* trace)
-    {
-        tracing_ = trace != nullptr;
-        if (tracing_)
-            run_begin_ = now();
-    }
-
-    void mark_ready(int index)
-    {
-        if (tracing_)
-            ready_[static_cast<size_t>(index)] = now();
-    }
-
-    void mark_start(int index)
-    {
-        if (tracing_)
-        {
-            start_[static_cast<size_t>(index)] = now();
-            worker_[static_cast<size_t>(index)] = current_worker_index;
-        }
-    }
-
-    void mark_end(int index)
-    {
-        if (tracing_)
-            end_[static_cast<size_t>(index)] = now();   // body + nested tasks have settled
-    }
-
-    // The one containment call: fold the run's stamps into the trace, on the settling
-    // thread. Skipped for cancelled runs (their stamps are partial).
-    void fold(tools::Graph_trace* trace, bool cancelled) const
-    {
-        if (!tracing_ || !trace || cancelled)
-            return;
-        trace->on_run_complete(ready_.data(), start_.data(), end_.data(), worker_.data(),
-            static_cast<int>(start_.size()), run_begin_, now());
-    }
-
-private:
-    static long long now()
-    {
-        return std::chrono::steady_clock::now().time_since_epoch().count();
-    }
-
-    std::vector<long long> ready_;
-    std::vector<long long> start_;
-    std::vector<long long> end_;
-    std::vector<int> worker_;
-    long long run_begin_ = 0;
-    bool tracing_ = false;
-#else
-public:
-    explicit Trace_stamps(size_t) {}
-    void begin_run(const tools::Graph_trace*) {}
-    void mark_ready(int) {}
-    void mark_start(int) {}
-    void mark_end(int) {}
-    void fold(tools::Graph_trace*, bool) const {}
-#endif
-};
-
-} // namespace
 
 struct Static_task_graph::Run_state
 {
@@ -114,7 +27,7 @@ struct Static_task_graph::Run_state
     std::vector<std::atomic<std::uint64_t>> preheld;     // per node: bitmask of pipe_indices positions handed from a predecessor (skip acquire)
     std::atomic<int> remaining_nodes{ 0 };
     detail::Task_ptr done;
-    Trace_stamps stamps;
+    tools::Trace_stamps stamps;
 };
 
 namespace
@@ -272,16 +185,12 @@ void Static_task_graph::compile(const char* dot_path)
 
     compiled_ = true;
 
-#if TS_PROFILING
-    // Structure consumers live in tools/graph_introspect.h -- the graph only hands over
-    // its nodes and explicit edges.
-    if (dot_path)
-        tools::write_structure_dot(nodes_, explicit_edges_, dot_path);
-    if (trace_)
-        tools::push_structure(*trace_, nodes_, explicit_edges_);   // re-push on recompile (resets the trace's aggregates)
-#else
-    (void)dot_path;
-#endif
+    // Structure consumers (tools/graph_introspect.h): the graph only hands over its
+    // nodes and explicit edges. Both no-op on a null argument and compile to nothing
+    // under TS_PROFILING=0. The push re-arms an attached trace on recompile (resetting
+    // its aggregates).
+    tools::write_structure_dot(nodes_, explicit_edges_, dot_path);
+    tools::push_structure(trace_, nodes_, explicit_edges_);
 }
 
 void Static_task_graph::set_trace(tools::Graph_trace* trace)
@@ -289,10 +198,7 @@ void Static_task_graph::set_trace(tools::Graph_trace* trace)
     if (trace && !compiled_)
         ts::fatal("Static_task_graph::set_trace requires a compiled graph (call compile() first)");
     trace_ = trace;
-#if TS_PROFILING
-    if (trace_)
-        tools::push_structure(*trace_, nodes_, explicit_edges_);
-#endif
+    tools::push_structure(trace_, nodes_, explicit_edges_);
 }
 
 void Static_task_graph::detect_cycles() const

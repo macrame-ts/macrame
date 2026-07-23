@@ -58,7 +58,7 @@
     <ClInclude Include="include\ts\detail\event_count.h" />
     <ClInclude Include="include\ts\fatal.h" />
     <ClInclude Include="include\ts\detail\mpmc_queue.h" />
-    <ClInclude Include="src\mem_profile.h" />
+    <ClInclude Include="tools\mem_profile.h" />
     <ClInclude Include="include\ts\parallel_for.h" />
     <ClInclude Include="include\ts\priority.h" />
     <ClInclude Include="include\ts\detail\ref_count.h" />
@@ -67,6 +67,7 @@
     <ClInclude Include="tools\dot_writer.h" />
     <ClInclude Include="tools\graph_introspect.h" />
     <ClInclude Include="tools\graph_trace.h" />
+    <ClInclude Include="tools\trace_stamps.h" />
     <ClInclude Include="include\ts\task.h" />
     <ClInclude Include="include\ts\ts.h" />
     <ClInclude Include="include\ts\version.h" />
