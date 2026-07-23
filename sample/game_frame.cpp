@@ -51,6 +51,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <string>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -750,9 +751,62 @@ void dump_game_frame_dot(const char* path)
     build_frame_graph(world, path);
 }
 
-// Run `frames` frames with an aggregating `Graph_trace` attached; writes the average-run
-// timeline SVG plus the structure DOT (so the pair stays in sync). With `TS_PROFILING`
-// 0 the frames still run but nothing is traced.
+namespace
+{
+
+// The SVG path for a described run: the description, spaces stripped, becomes a suffix
+// before the extension ("4 workers" -> "sample_game_frame_avg_4workers.svg"; an empty
+// description keeps the base path).
+std::string described_SVG_path(const char* base, const char* description)
+{
+    std::string path = base;
+    std::string suffix;
+    for (const char* p = description; *p; ++p)
+        if (*p != ' ')
+            suffix += *p;
+    if (!suffix.empty())
+    {
+        size_t dot = path.rfind('.');
+        path.insert(dot == std::string::npos ? path.size() : dot, "_" + suffix);
+    }
+    return path;
+}
+
+// One traced run set on `scheduler`: a fresh trace (aggregates never mix between runs),
+// the description in the title and the filename.
+void trace_frames(ts::Static_task_graph& graph, ts::Scheduler& scheduler, int frames,
+                  const char* base_SVG_path, const char* description)
+{
+#if TS_PROFILING
+    ts::tools::Graph_trace trace;
+    std::string title = "Sample \"game_frame\"";
+    if (*description)
+        title += std::string(" (") + description + ")";
+    trace.set_title(std::move(title));
+    graph.set_trace(&trace);
+    for (int f = 0; f < frames; ++f)
+        graph.execute(scheduler).sync();
+    graph.set_trace(nullptr);   // the trace is function-scoped; detach before it dies
+    std::string path = described_SVG_path(base_SVG_path, description);
+    trace.write_SVG(path.c_str());
+    std::printf("[game_frame] traced %lld runs -> %s\n", trace.run_count(), path.c_str());
+#else
+    for (int f = 0; f < frames; ++f)
+        graph.execute(scheduler).sync();
+    (void)base_SVG_path;
+    (void)description;
+    std::printf("[game_frame] TS_PROFILING is 0: ran %d frames, no trace written\n", frames);
+#endif
+}
+
+} // namespace
+
+// Run `frames` frames with an aggregating `Graph_trace` attached, twice: on the default
+// scheduler, and on a dedicated 4-worker one -- the starved schedule packs 19 nodes onto
+// 4 lanes, exercising same-lane stacking, handoff welds, and the dead-time signals the
+// wide run rarely shows. Writes one average-run SVG per run plus the structure DOT (the
+// same compiled graph serves both). With `TS_PROFILING` 0 the frames still run but
+// nothing is traced.
 void trace_game_frame(int frames, const char* DOT_path, const char* SVG_path)
 {
     constexpr int entities = 1000;
@@ -761,22 +815,10 @@ void trace_game_frame(int frames, const char* DOT_path, const char* SVG_path)
 
     World world{ entities };
     ts::Static_task_graph graph = build_frame_graph(world, DOT_path);
-#if TS_PROFILING
-    ts::tools::Graph_trace trace;
-    trace.set_title("Sample \"game_frame\"");
-    graph.set_trace(&trace);
-    for (int f = 0; f < frames; ++f)
-        graph.execute().sync();
-    graph.set_trace(nullptr);   // the trace is scoped inside this function; detach before it dies
-    trace.write_SVG(SVG_path);
-    std::printf("[game_frame] traced %lld runs -> %s (structure: %s)\n",
-        trace.run_count(), SVG_path, DOT_path);
-#else
-    for (int f = 0; f < frames; ++f)
-        graph.execute().sync();
-    (void)SVG_path;
-    std::printf("[game_frame] TS_PROFILING is 0: ran %d frames, no trace written\n", frames);
-#endif
+
+    trace_frames(graph, ts::default_scheduler(), frames, SVG_path, "");
+    ts::Scheduler workers4{ { .num_threads = 4 } };
+    trace_frames(graph, workers4, frames, SVG_path, "4 workers");
 }
 
 void run_game_frame_sample(int frames, float scale)

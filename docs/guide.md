@@ -625,9 +625,13 @@ Tracing costs two clock reads per node per run when attached, one branch when
 not, and nothing at all with `TS_PROFILING=0`. Cancelled runs are not folded;
 a recompile re-pushes the structure and resets the aggregates.
 
-The sample wires this up as `task_system --trace [frames]`, writing
-`sample_game_frame_avg.svg` plus `sample_game_frame.dot`; a no-argument
-`show_graph.bat` renders the structure dump and opens both.
+The sample wires this up as `task_system --trace [frames]`, tracing the frame
+twice — on the default scheduler and on a dedicated 4-worker one (the starved
+schedule packs the same graph onto fewer lanes, exercising same-lane
+stacking, handoff welds, and the dead-time signals a wide run rarely shows)
+— writing `sample_game_frame_avg.svg` and `sample_game_frame_avg_4workers.svg`
+plus `sample_game_frame.dot`; a no-argument `show_graph.bat` renders the
+structure dump and opens all of them.
 
 ---
 

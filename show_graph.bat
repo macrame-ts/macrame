@@ -30,6 +30,7 @@ echo wrote %SVGFILE%
 start "" "%SVGFILE%"
 if not "%~1"=="" exit /b 0
 if exist "sample_game_frame_avg.svg" start "" "sample_game_frame_avg.svg"
+if exist "sample_game_frame_avg_4workers.svg" start "" "sample_game_frame_avg_4workers.svg"
 exit /b 0
 
 :install_graphviz
