@@ -835,11 +835,19 @@ inline bool Graph_trace::write_SVG(const char* path) const
 
     for (const Edge_agg& e : edges_)
     {
-        double x1 = X(bar_end[static_cast<size_t>(e.from)]);
-        double y1 = bar_top(e.from);
+        // Gantt-style anchors: exit at the source bar's right-edge MIDPOINT, enter at the
+        // target's left-edge midpoint. The exit uses the drawn right edge (bars have a
+        // 3px width floor), so an arrow never starts inside a collapsed bar.
+        double x1 = X(bar_start[static_cast<size_t>(e.from)])
+            + std::max(3.0, (bar_end[static_cast<size_t>(e.from)]
+                             - bar_start[static_cast<size_t>(e.from)]) * px_per_us);
+        double y1 = bar_top(e.from) + bar_h * 0.5;
         double x2 = X(bar_start[static_cast<size_t>(e.to)]);
-        double y2 = bar_top(e.to);
-        double lift = std::min(48.0, 14.0 + std::abs(x2 - x1) * 0.05 + std::abs(y2 - y1) * 0.12);
+        double y2 = bar_top(e.to) + bar_h * 0.5;
+        // Horizontal tangent length: proportional to the travel, floored at 18px so a
+        // meet-point-clamped edge (near-zero horizontal gap) still leaves and arrives
+        // flat, capped so short edges don't balloon.
+        double tangent = std::clamp(0.45 * std::abs(x2 - x1) + 0.15 * std::abs(y2 - y1), 18.0, 64.0);
         std::vector<std::string> tip;
         tip.push_back(e.explicit_ordering ? "explicit ordering" : "derived from declared access");
         if (!e.conflict.empty())
@@ -858,15 +866,16 @@ inline bool Graph_trace::write_SVG(const char* path) const
         out += "<g class=\"hv\" data-hl=\"" + stroke + "\" data-tip=\"";
         append_tip_attr(tip);
         out += "\">\n";
-        // Invisible fat twin of the arc: a comfortable hover target for a 2px stroke.
+        // Invisible fat twin of the curve: a comfortable hover target for a 2px stroke.
         line("<path d=\"M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f\" fill=\"none\" "
              "stroke=\"transparent\" stroke-width=\"9\"/>\n",
-             x1, y1, x1, y1 - lift, x2, y2 - lift, x2, y2);
+             x1, y1, x1 + tangent, y1, x2 - tangent, y2, x2, y2);
         line("<path d=\"M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f\" fill=\"none\" "
              "stroke=\"%s\" stroke-width=\"%.1f\"%s/>\n",
-             x1, y1, x1, y1 - lift, x2, y2 - lift, x2, y2, stroke.c_str(), width, extra);
+             x1, y1, x1 + tangent, y1, x2 - tangent, y2, x2, y2, stroke.c_str(), width, extra);
+        // Arrowhead at the entry, horizontal (consistent with the flat arrival).
         line("<polygon points=\"%.1f,%.1f %.1f,%.1f %.1f,%.1f\" fill=\"%s\"/>\n",
-             x2 - 3.5, y2 - 7.0, x2 + 3.5, y2 - 7.0, x2, y2 - 0.5, stroke.c_str());
+             x2 - 7.0, y2 - 3.5, x2 - 7.0, y2 + 3.5, x2 - 0.5, y2, stroke.c_str());
         out += "</g>\n";
     }
 
