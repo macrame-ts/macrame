@@ -11,6 +11,18 @@
 #include <memory>
 #include <vector>
 
+// Profiling instrumentation (canonical default; `static_task_graph.h` repeats the same
+// idempotent block). With it on, each worker accumulates per-task busy time (two clock
+// reads per task) feeding `Scheduler::busy_ticks`; define TS_PROFILING=0 in shipping
+// builds to compile the counters out.
+#ifndef TS_PROFILING
+#define TS_PROFILING 1
+#endif
+
+#if TS_PROFILING
+#include <chrono>
+#endif
+
 namespace ts
 {
 
@@ -93,6 +105,40 @@ public:
     // Defined in the .cpp -- `Worker_thread` is incomplete here.
     int worker_count() const noexcept;
 
+#if TS_PROFILING
+    // Total wall time (raw `steady_clock` ticks) this scheduler's workers have spent
+    // executing tasks -- every task kind (graph nodes, `parallel_for` slices, async pipe
+    // jobs, continuations). Feeds the trace's core-utilization metric: the busy delta over
+    // a run window, divided by `workers * window`. Work run inline on non-worker threads
+    // (retraction, inline roots on the caller) is not counted. Relaxed sum over per-worker
+    // counters -- a snapshot, exact only at quiescent points.
+    long long busy_ticks() const noexcept
+    {
+        // Completed spans plus the elapsed part of each in-flight task: the reader is
+        // often ITSELF inside a task (a graph run's fold happens on the settling worker),
+        // so counting only completed spans would miss the whole current task -- on a
+        // one-worker scheduler that is the entire window. Relaxed snapshot; a reader
+        // interleaving a task's completion can transiently double-count that one span
+        // (advisory metric, not an invariant).
+        long long now = std::chrono::steady_clock::now().time_since_epoch().count();
+        long long sum = 0;
+        for (const Busy_slot& slot : busy_)
+        {
+            sum += slot.ticks.load(std::memory_order_relaxed);
+            long long started = slot.started.load(std::memory_order_relaxed);
+            if (started != 0 && now > started)
+                sum += now - started;
+        }
+        return sum;
+    }
+
+    // Arm/disarm busy tracking (counted -- concurrent consumers nest). Armed by a traced
+    // graph run for its window; work already in flight when arming is not back-stamped
+    // (an under-count of at most one task span at the window edge; advisory metric).
+    void arm_busy_tracking() noexcept { busy_tracking_.fetch_add(1, std::memory_order_relaxed); }
+    void disarm_busy_tracking() noexcept { busy_tracking_.fetch_sub(1, std::memory_order_relaxed); }
+#endif
+
 private:
     // Find one task for worker `worker_index`, scanning: global high -> its own local deque
     // (LIFO, cache-hot) -> global normal -> global low -> steal `normal` from a random victim.
@@ -117,6 +163,31 @@ private:
     // The `handoff` spinner protocol (become a spinner, hand off on find, else park).
     bool handoff_wait(int worker_index, detail::Task_entry& out);
 
+    // Execute one task on worker `worker_index`, accumulating its wall time into the
+    // worker's busy counter (single writer per slot, cacheline-padded -- no contention;
+    // relaxed, read by `busy_ticks` cross-thread). A plain call without TS_PROFILING.
+    void run_task(int worker_index, const detail::Task_entry& task)
+    {
+#if TS_PROFILING
+        // Timed only while a consumer is armed (a traced graph run in flight): the two
+        // clock reads cost ~tens of ns, visible on empty-task throughput, so idle
+        // tracking must not tax untraced work. Disarmed cost: one relaxed load + branch.
+        if (busy_tracking_.load(std::memory_order_relaxed) != 0)
+        {
+            Busy_slot& slot = busy_[static_cast<size_t>(worker_index)];
+            long long t0 = std::chrono::steady_clock::now().time_since_epoch().count();
+            slot.started.store(t0, std::memory_order_relaxed);   // in-flight, for busy_ticks
+            task.func_(task.data_);
+            long long t1 = std::chrono::steady_clock::now().time_since_epoch().count();
+            slot.ticks.store(slot.ticks.load(std::memory_order_relaxed) + (t1 - t0),
+                             std::memory_order_relaxed);
+            slot.started.store(0, std::memory_order_relaxed);
+            return;
+        }
+#endif
+        task.func_(task.data_);
+    }
+
     // One lock-free MPMC queue per priority (index = the `Priority` enum value). `high`/`low`
     // are global-only; `normal` also has per-worker deques (below), with this as overflow +
     // the injector for external (non-worker) submits.
@@ -133,6 +204,19 @@ private:
     const Idle_policy idle_policy_;
     const std::uint32_t spin_cycles_;
     std::vector<detail::Worker_thread> workers_;
+#if TS_PROFILING
+    // Per-worker busy-time counters, one padded slot each (single writer: the owning
+    // worker in `run_task`; `busy_ticks` reads them relaxed). `ticks` = completed task
+    // spans; `started` = the in-flight task's start tick (0 = idle). Sized in the ctor
+    // BEFORE the workers start. Declared last: the hot members above keep their layout.
+    struct alignas(64) Busy_slot
+    {
+        std::atomic<long long> ticks{ 0 };
+        std::atomic<long long> started{ 0 };
+    };
+    std::vector<Busy_slot> busy_;
+    std::atomic<int> busy_tracking_{ 0 };   // armed-consumer count; 0 = untimed fast path
+#endif
 };
 
 } // namespace ts

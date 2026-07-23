@@ -595,8 +595,14 @@ not a property.) Each bar's right end carries the node's queue priority as a
 letter — red **H** (high), green **N** (normal), grey **L** (low); a narrow
 bar shows the letter next to its outside label. The tooltips are scripted into the SVG itself
 (they work with the file open in a browser; not when embedded via `<img>`).
-A panel at the top shows the global numbers: run count, makespan mean/min/max,
-critical work, structural CP, worker count.
+A coloured headline carries the two frame classifiers: **core utilization** —
+the share of the run window the scheduler's workers spent executing tasks
+(green ≥ 75%, red < 50%; work run inline on non-worker threads is not
+counted) — and **critical dead time** (green < 5% of makespan, red > 10%).
+Utilization says how much of the machine the frame used; dead time says
+whether the critical chain itself had to wait. A panel below shows the global
+numbers: run count, makespan mean/min/max, critical work, structural CP,
+worker count.
 
 The **critical path** is picked out by colour: each run, the trace walks back
 from the last-finishing node through the predecessor whose completion released

@@ -53,6 +53,10 @@ Scheduler::Scheduler(Scheduler_config config)
     for (uint32_t i = 0; i < num_threads; ++i)
         local_normal_.push_back(std::make_unique<detail::Work_stealing_deque<detail::Task_entry>>());
 
+#if TS_PROFILING
+    busy_ = std::vector<Busy_slot>(num_threads);   // before any worker starts (run_task writes)
+#endif
+
     workers_.reserve(num_threads);
     for (uint32_t i = 0; i < num_threads; ++i)
         workers_.emplace_back(*this, static_cast<int>(i));

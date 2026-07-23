@@ -18,7 +18,7 @@ void Worker_thread::main(Scheduler& scheduler, int index)
         detail::Task_entry task;
         if (scheduler.find_work(index, task))   // local + globals + steal
         {
-            task.func_(task.data_);
+            scheduler.run_task(index, task);
             continue;
         }
 
@@ -29,7 +29,7 @@ void Worker_thread::main(Scheduler& scheduler, int index)
         // Idle wait for the configured policy (park / spin-then-park / handoff / spin). Returns
         // true with a task to run; false means re-scan and re-check quit at the top.
         if (scheduler.wait_for_work(index, task))
-            task.func_(task.data_);
+            scheduler.run_task(index, task);
     }
 
     current_worker_index = -1;

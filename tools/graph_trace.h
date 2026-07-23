@@ -25,6 +25,19 @@ namespace ts::tools
 inline constexpr double dead_time_ok_share = 0.05;    // below: green (dependency-bound)
 inline constexpr double dead_time_bad_share = 0.10;   // above: red (scheduling-bound)
 
+// Core utilization -- the share of the run window the scheduler's workers spent executing
+// tasks (busy delta / (workers x window); every task kind on the run's scheduler counts,
+// work run inline on non-worker threads does not). What "good" means is bounded by the
+// frame's critical path -- max(serial/workers, chain) caps the achievable share -- so the
+// bands are deliberately forgiving: a frame using at least three quarters of its cores is
+// green; under half, most core time is idle and the frame likely has parallelism (or
+// worker-count) headroom -- red; between is the caution band (yellow). Colours the
+// headline utilization figure in `write_SVG`, next to dead time: utilization says how
+// much of the machine the frame used, dead time says whether the critical chain itself
+// had to wait.
+inline constexpr double core_util_good_share = 0.75;   // at/above: green
+inline constexpr double core_util_ok_share = 0.50;     // at/above: yellow; below: red
+
 // Aggregated runtime trace for a `Static_task_graph`: attach with
 // `graph.set_trace(&trace)` (after `compile()`), run any number of times, then
 // `write_SVG(path)` renders the AVERAGE run -- node bars on worker lanes, dependency
@@ -82,14 +95,24 @@ public:
     // Fold one completed run: raw `steady_clock` ticks per node (parallel arrays, one slot
     // per node) plus the run's begin/end ticks. `readys` is the data-ready instant (the
     // dependency counter's zero transition); ready-to-start is acquire + queue latency.
-    // Called by the graph once per run, single-threaded; every duration/offset converts to
-    // microseconds here.
+    // `busy_ticks` is the scheduler's executed-task wall time inside the window and
+    // `worker_count` its pool size -- together the run's core utilization. Called by the
+    // graph once per run, single-threaded; every duration/offset converts to microseconds
+    // here.
     void on_run_complete(const long long* readys, const long long* starts,
                          const long long* ends, const int* workers,
-                         int node_count, long long run_begin, long long run_end)
+                         int node_count, long long run_begin, long long run_end,
+                         long long busy_ticks, int worker_count)
     {
         if (node_count != static_cast<int>(nodes_.size()))
             return;   // structure not pushed (or a stale attach) -- drop the sample
+
+        long long window = run_end - run_begin;
+        if (worker_count > 0 && window > 0)
+            core_util_.add(std::clamp(
+                static_cast<double>(busy_ticks)
+                    / (static_cast<double>(worker_count) * static_cast<double>(window)),
+                0.0, 1.0));
 
         for (int i = 0; i < node_count; ++i)
         {
@@ -169,11 +192,15 @@ public:
         makespan_ = {};
         makespan_min_ = 0.0;
         makespan_max_ = 0.0;
+        core_util_ = {};
         runs_ = 0;
     }
 
     long long run_count() const { return runs_; }
     int structure_node_count() const { return static_cast<int>(nodes_.size()); }
+
+    // Mean core utilization over the folded runs, [0,1] (see the band constants above).
+    double core_utilization() const { return core_util_.mean; }
 
     // Per-node aggregates (microseconds), for reports and tests.
     struct Node_stats
@@ -472,6 +499,7 @@ private:
     Welford makespan_;
     double makespan_min_ = 0.0;
     double makespan_max_ = 0.0;
+    Welford core_util_;   // per-run busy / (workers x window), [0,1]
     long long runs_ = 0;
     std::string title_;   // survives reset()/begin_structure(); set once by the owner
 };
@@ -681,20 +709,25 @@ inline bool Graph_trace::write_SVG(const char* path) const
     append_escaped(out, title_.empty() ? "average run" : title_ + ": average run");
     out += "</text>\n";
     {
-        // Critical dead time = makespan minus the work on the binding chain: the frame
-        // time spent with the chain's next node ready but not running. Its own coloured
-        // line -- it is the one number that classifies the frame (see the
-        // `dead_time_*_share` bands at the top of this header).
+        // The two frame classifiers on one coloured headline (band constants at the top of
+        // this header): core utilization -- how much of the machine the frame used -- then
+        // critical dead time (makespan minus the binding chain's work) -- whether the
+        // chain itself had to wait.
+        double util = core_util_.mean;
+        const char* util_color = util >= core_util_good_share ? "#a6e22e"
+                               : util >= core_util_ok_share ? "#e6db74" : "#ff5f45";
         double dead_us = std::max(0.0, makespan_.mean - critical_work_.mean);
         double dead_share = makespan_.mean > 0.0 ? dead_us / makespan_.mean : 0.0;
         const char* dead_color = dead_share < dead_time_ok_share ? "#a6e22e"
                                : dead_share <= dead_time_bad_share ? "#e6db74" : "#ff5f45";
-        std::string headline = "critical dead time: " + fmt_us(dead_us) + " \xC2\xB5s ("
-            + fmt_us(100.0 * dead_share) + "% of makespan)";
-        out += "<text x=\"16\" y=\"48\" font-size=\"12\" font-weight=\"600\" fill=\""
-             + std::string(dead_color) + "\">";
-        append_escaped(out, headline);
-        out += "</text>\n";
+        out += "<text x=\"16\" y=\"48\" font-size=\"12\" font-weight=\"600\">";
+        out += "<tspan fill=\"" + std::string(util_color) + "\">";
+        append_escaped(out, "core utilization: " + fmt_us(100.0 * util) + "%");
+        out += "</tspan><tspan fill=\"#cfcfc2\"> | </tspan>";
+        out += "<tspan fill=\"" + std::string(dead_color) + "\">";
+        append_escaped(out, "critical dead time: " + fmt_us(dead_us) + " \xC2\xB5s ("
+            + fmt_us(100.0 * dead_share) + "% of makespan)");
+        out += "</tspan></text>\n";
 
         std::string stats = "runs: " + std::to_string(runs_)
             + "  |  makespan mean " + fmt_us(makespan_.mean) + " \xC2\xB5s (min " + fmt_us(makespan_min_)

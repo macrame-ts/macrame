@@ -605,32 +605,38 @@ void test_graph_trace_priority()
     g.set_trace(nullptr);
 }
 
-// Handoff weld + dead-time reporting: a two-node chain on a one-worker scheduler with an
-// inline successor runs back to back on the same lane, so the edge renders as a weld dot
-// (r=4.5; the legend swatch is r=5) with the handoff tooltip line; the stats panel
-// carries the critical dead-time figure.
+// Handoff weld + dead-time + utilization rendering, on SYNTHETIC folds: `on_run_complete`
+// is the trace's public fold entry, so the test drives it with fabricated tick arrays --
+// the weld geometry (back-to-back on one lane) and the utilization arithmetic become
+// deterministic instead of riding real inline-dispatch timing, which flaked three times
+// at ever-larger budgets (the median gap's Debug jitter tracks ambient machine state).
+// The real stamp/fold plumbing is covered end-to-end by test_graph_trace_end_to_end.
 void test_graph_trace_weld_dead_time()
 {
-    ts::Guarded<int> x{ 0 };
-    auto busy = [](int us)
+    auto ticks = [](double us)
     {
-        auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
-        while (std::chrono::steady_clock::now() < until) {}
+        return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double, std::micro>(us)).count();
     };
 
-    ts::Static_task_graph g;
-    // Body lengths set the time scale: the weld threshold is ~5px, so a ~1.2ms span
-    // budgets ~5 us of inline-dispatch gap -- headroom against Debug jitter (at 400 us
-    // total the budget was ~1.7 us and the check flaked on a loaded machine).
-    g.add_node("weld_a", [busy](int& v) { busy(900); ++v; }, x);
-    g.add_node("weld_b", [busy](int& v) { busy(300); ++v; }, x).set_inline();
-    g.compile();
-
     ts::tools::Graph_trace trace;
-    g.set_trace(&trace);
-    ts::Scheduler one{ { .num_threads = 1 } };
+    trace.begin_structure(2);
+    trace.set_node_label(0, "weld_a");
+    trace.set_node_label(1, "weld_b");
+    trace.add_node_access(0, "x", true);
+    trace.add_node_access(1, "x", true);
+    trace.add_edge(0, 1, false, "x: W->W");
+
+    // a: [100, 1000) us on worker 0; b back to back at [1001, 1300) on the same worker
+    // (1 us gap << the ~5px weld threshold); window [0, 1400) with 770 us of busy time
+    // on the one worker -> utilization exactly 0.55.
+    long long readys[2] = { ticks(100), ticks(1000) };
+    long long starts[2] = { ticks(100), ticks(1001) };
+    long long ends[2] = { ticks(1000), ticks(1300) };
+    int workers[2] = { 0, 0 };
     for (int i = 0; i < 8; ++i)
-        g.execute(one).sync();
+        trace.on_run_complete(readys, starts, ends, workers, 2, 0, ticks(1400), ticks(770), 1);
+    TS_CHECK(trace.run_count() == 8);
 
     const char* path = "graph_trace_weld_test.svg";
     TS_CHECK(trace.write_SVG(path));
@@ -645,8 +651,41 @@ void test_graph_trace_weld_dead_time()
     TS_CHECK(svg.find("Handoff: back-to-back") != std::string::npos);      // its tooltip line
     TS_CHECK(svg.find("handoff weld") != std::string::npos);               // legend row
     TS_CHECK(svg.find("critical dead time:") != std::string::npos);        // the headline line
+    TS_CHECK(svg.find("core utilization:") != std::string::npos);
+    TS_CHECK(std::abs(trace.core_utilization() - 770.0 / 1400.0) < 1e-9);  // exact arithmetic
     TS_CHECK(ts::tools::dead_time_ok_share < ts::tools::dead_time_bad_share);   // band order
+    TS_CHECK(ts::tools::core_util_ok_share < ts::tools::core_util_good_share);  // band order
+}
+
+// End-to-end plumbing for the busy counters: a real graph on a one-worker scheduler must
+// fold a nonzero utilization (the loose floor guards the arm/stamp/fold chain -- exact
+// figures are the synthetic test's job). Includes the in-flight case: the fold runs
+// INSIDE the settling worker's task, so only in-flight-aware busy accounting sees the
+// window's work at all.
+void test_graph_trace_end_to_end_utilization()
+{
+    ts::Guarded<int> x{ 0 };
+    auto busy = [](int us)
+    {
+        auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
+        while (std::chrono::steady_clock::now() < until) {}
+    };
+
+    ts::Static_task_graph g;
+    g.add_node("util_a", [busy](int& v) { busy(400); ++v; }, x);
+    g.add_node("util_b", [busy](int& v) { busy(200); ++v; }, x);
+    g.compile();
+
+    ts::tools::Graph_trace trace;
+    g.set_trace(&trace);
+    ts::Scheduler one{ { .num_threads = 1 } };
+    for (int i = 0; i < 8; ++i)
+        g.execute(one).sync();
     g.set_trace(nullptr);
+
+    TS_CHECK(trace.run_count() == 8);
+    TS_CHECK(trace.core_utilization() > 0.3);
+    TS_CHECK(trace.core_utilization() <= 1.0);
 }
 
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
@@ -686,6 +725,7 @@ void run_graph_tests()
     run("graph trace critical path", test_graph_trace_critical);
     run("graph trace priority", test_graph_trace_priority);
     run("graph trace weld + dead time", test_graph_trace_weld_dead_time);
+    run("graph trace end-to-end utilization", test_graph_trace_end_to_end_utilization);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);

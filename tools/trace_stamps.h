@@ -31,12 +31,19 @@ public:
         , worker_(node_count)
     {}
 
-    // Arms (or disarms) stamping for the run starting now.
-    void begin_run(const Graph_trace* trace)
+    // Arms (or disarms) stamping for the run starting now. Arms the scheduler's busy
+    // tracking and snapshots its counter so the fold can attribute the run window's
+    // executed work (core utilization); `fold` disarms.
+    void begin_run(const Graph_trace* trace, Scheduler& scheduler)
     {
         tracing_ = trace != nullptr;
         if (tracing_)
+        {
+            scheduler_ = &scheduler;
+            scheduler.arm_busy_tracking();
+            busy_begin_ = scheduler.busy_ticks();
             run_begin_ = now();
+        }
     }
 
     void mark_ready(int index)
@@ -61,13 +68,21 @@ public:
     }
 
     // The one containment call: fold the run's stamps into the trace, on the settling
-    // thread. Skipped for cancelled runs (their stamps are partial).
+    // thread. Skipped for cancelled runs (their stamps are partial). The busy delta is
+    // every task the run's scheduler executed inside the window -- graph nodes, their
+    // `parallel_for` slices, async pipe jobs, continuations -- which is the point of the
+    // utilization metric; work run inline on non-worker threads is not counted.
     void fold(Graph_trace* trace, bool cancelled) const
     {
-        if (!tracing_ || !trace || cancelled)
+        if (!tracing_)
+            return;
+        long long busy_delta = scheduler_->busy_ticks() - busy_begin_;
+        scheduler_->disarm_busy_tracking();   // paired with begin_run's arm, cancelled or not
+        if (!trace || cancelled)
             return;
         trace->on_run_complete(ready_.data(), start_.data(), end_.data(), worker_.data(),
-            static_cast<int>(start_.size()), run_begin_, now());
+            static_cast<int>(start_.size()), run_begin_, now(), busy_delta,
+            scheduler_->worker_count());
     }
 
 private:
@@ -81,11 +96,13 @@ private:
     std::vector<long long> end_;
     std::vector<int> worker_;
     long long run_begin_ = 0;
+    long long busy_begin_ = 0;
+    Scheduler* scheduler_ = nullptr;   // non-const: fold disarms the busy tracking
     bool tracing_ = false;
 #else
 public:
     explicit Trace_stamps(size_t) {}
-    void begin_run(const Graph_trace*) {}
+    void begin_run(const Graph_trace*, Scheduler&) {}
     void mark_ready(int) {}
     void mark_start(int) {}
     void mark_end(int) {}

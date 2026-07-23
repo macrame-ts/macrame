@@ -447,7 +447,7 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token t
     run.scheduler = &scheduler;
     run.token = token;
     run.done = detail::make_bare_block();
-    run.stamps.begin_run(trace_);
+    run.stamps.begin_run(trace_, scheduler);
 
     for (size_t i = 0; i < nodes_.size(); ++i)
     {
