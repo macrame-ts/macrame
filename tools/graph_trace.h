@@ -40,8 +40,10 @@ inline constexpr double core_util_ok_share = 0.50;     // at/above: yellow; belo
 
 // Aggregated runtime trace for a `Static_task_graph`: attach with
 // `graph.set_trace(&trace)` (after `compile()`), run any number of times, then
-// `write_SVG(path)` renders the AVERAGE run -- node bars on worker lanes, dependency
-// edges as arcs above them, per-node stats in hover tooltips.
+// `write_SVG(path)` renders the AVERAGE run -- node bars packed into anonymous
+// concurrency rows (row occupancy over time = the average frame's concurrency; workers
+// are interchangeable, so rows carry no worker identity), dependency edges between them,
+// per-node stats in hover tooltips.
 //
 // No samples are retained: every statistic is streamed (Welford mean/variance, P^2
 // quantile markers for P50/P95, min/max, a per-worker run histogram), so state is
@@ -52,9 +54,8 @@ inline constexpr double core_util_ok_share = 0.50;     // at/above: yellow; belo
 // The drawn bars are median-based ([P50 start, P50 start + P50 duration]); medians are
 // not linear, so an edge's bars can cross in the aggregate even though no real run had
 // them overlap -- such an edge is resolved by clamping both bars to the streamed mean
-// MEET POINT of the edge (the average of predecessor-end and successor-start). Bars of
-// unrelated nodes sharing a lane may genuinely overlap across runs; they stack into
-// sub-rows instead (that overlap is information, not an artifact).
+// MEET POINT of the edge (the average of predecessor-end and successor-start). Bars that
+// overlap in time land on different rows by construction (greedy interval packing).
 class Graph_trace
 {
 public:
@@ -210,7 +211,7 @@ public:
         double min_us = 0.0, max_us = 0.0;
         double start_p50_us = 0.0;
         int modal_worker = -1;          // -1 = external (non-worker) threads
-        double off_modal = 0.0;         // share of runs NOT on the modal lane
+        double off_modal = 0.0;         // share of runs NOT on the modal worker
         double critical_share = 0.0;    // share of runs on the measured binding chain
         double dispatch_wait_us = 0.0;  // mean ready-to-start latency (acquire + queue)
     };
@@ -424,7 +425,7 @@ private:
         critical_work_.add(work);
     }
 
-    // Modal lane: the worker that ran this node most often (or -1 = external). Returns
+    // Modal worker: the one that ran this node most often (or -1 = external). Returns
     // the modal count.
     static long long modal(const Node_agg& a, int& worker)
     {
@@ -587,56 +588,40 @@ inline bool Graph_trace::write_SVG(const char* path) const
             }
         }
 
-    // Lanes: workers 0..W-1 (W = highest worker observed), plus one external lane only
-    // if some node's MODAL lane is external.
-    int worker_lanes = 0;
-    bool external_lane = false;
-    std::vector<int> lane_of(static_cast<size_t>(count), 0);
+    // Concurrency rows: workers are interchangeable and the node->worker assignment
+    // reshuffles every run, so per-worker lanes misrepresent the aggregate -- a lane can
+    // look idle while every real run had that worker busy, with its nodes drawn on their
+    // OWN modal lanes. Instead all bars pack greedily into anonymous rows by interval
+    // overlap (bar-start order; first row whose last bar has ended, else a new row). Row
+    // occupancy over time IS the average frame's concurrency: free vertical space means
+    // genuinely unused capacity in the average, not a projection artifact. The per-worker
+    // histogram survives for stats (off-modal share, external runs); it no longer drives
+    // layout.
+    int workers_seen = 0;
     for (int i = 0; i < count; ++i)
-    {
-        const Node_agg& a = nodes_[static_cast<size_t>(i)];
-        worker_lanes = std::max(worker_lanes, static_cast<int>(a.worker_runs.size()));
-        int w = -1;
-        modal(a, w);
-        lane_of[static_cast<size_t>(i)] = w;
-        if (w < 0)
-            external_lane = true;
-    }
-    int lane_count = worker_lanes + (external_lane ? 1 : 0);
-    if (lane_count == 0)
-        lane_count = 1;
-    auto lane_index = [&](int node) {
-        int w = lane_of[static_cast<size_t>(node)];
-        return w >= 0 ? w : worker_lanes;   // external lane last
-    };
+        workers_seen = std::max(workers_seen,
+            static_cast<int>(nodes_[static_cast<size_t>(i)].worker_runs.size()));
 
-    // Sub-rows: nodes on one lane whose drawn bars overlap stack into rows (greedy
-    // interval packing by start).
-    std::vector<std::vector<int>> lane_nodes(static_cast<size_t>(lane_count));
+    std::vector<int> pack_order(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i)
-        lane_nodes[static_cast<size_t>(lane_index(i))].push_back(i);
-    std::vector<int> subrow(static_cast<size_t>(count), 0);
-    std::vector<int> lane_rows(static_cast<size_t>(lane_count), 1);
-    for (size_t l = 0; l < lane_nodes.size(); ++l)
+        pack_order[static_cast<size_t>(i)] = i;
+    std::sort(pack_order.begin(), pack_order.end(), [&](int a, int b)
     {
-        std::vector<int>& ns = lane_nodes[l];
-        std::sort(ns.begin(), ns.end(), [&](int a, int b)
-        {
-            return bar_start[static_cast<size_t>(a)] < bar_start[static_cast<size_t>(b)];
-        });
-        std::vector<double> row_end;
-        for (int nidx : ns)
-        {
-            size_t r = 0;
-            while (r < row_end.size() && bar_start[static_cast<size_t>(nidx)] < row_end[r] - 1e-9)
-                ++r;
-            if (r == row_end.size())
-                row_end.push_back(0.0);
-            row_end[r] = bar_end[static_cast<size_t>(nidx)];
-            subrow[static_cast<size_t>(nidx)] = static_cast<int>(r);
-        }
-        lane_rows[l] = std::max<int>(1, static_cast<int>(row_end.size()));
+        return bar_start[static_cast<size_t>(a)] < bar_start[static_cast<size_t>(b)];
+    });
+    std::vector<int> row_of(static_cast<size_t>(count), 0);
+    std::vector<double> row_last_end;
+    for (int nidx : pack_order)
+    {
+        size_t r = 0;
+        while (r < row_last_end.size() && bar_start[static_cast<size_t>(nidx)] < row_last_end[r] - 1e-9)
+            ++r;
+        if (r == row_last_end.size())
+            row_last_end.push_back(0.0);
+        row_last_end[r] = bar_end[static_cast<size_t>(nidx)];
+        row_of[static_cast<size_t>(nidx)] = static_cast<int>(r);
     }
+    const int row_count = std::max<int>(1, static_cast<int>(row_last_end.size()));
 
     // Geometry.
     double span_us = 1.0;
@@ -644,46 +629,18 @@ inline bool Graph_trace::write_SVG(const char* path) const
         span_us = std::max(span_us, bar_end[static_cast<size_t>(i)]);
     const double pad_l = 64.0, pad_r = 28.0, plot_w = 1150.0;
     const double header_h = 84.0, axis_h = 30.0, legend_h = 148.0;
-    const double row_h = 30.0, bar_h = 20.0, lane_pad = 6.0;
+    const double row_h = 30.0, bar_h = 20.0;
     const double px_per_us = plot_w / span_us;
 
-    // Rows are laid out busiest-lane-first: workers are interchangeable, so the vertical
-    // order is free, and sorting by drawn work packs the dense lanes together at the top
-    // (idle lanes sink to the bottom; the external lane, if any, stays last). Labels keep
-    // the worker id, so a row is still traceable to its histogram.
-    std::vector<double> lane_busy(static_cast<size_t>(lane_count), 0.0);
-    for (int i = 0; i < count; ++i)
-        lane_busy[static_cast<size_t>(lane_index(i))]
-            += bar_end[static_cast<size_t>(i)] - bar_start[static_cast<size_t>(i)];
-    std::vector<int> lane_order;
-    for (int l = 0; l < worker_lanes; ++l)
-        lane_order.push_back(l);
-    std::sort(lane_order.begin(), lane_order.end(), [&](int a, int b)
-    {
-        double ba = lane_busy[static_cast<size_t>(a)], bb = lane_busy[static_cast<size_t>(b)];
-        return ba != bb ? ba > bb : a < b;
-    });
-    if (external_lane)
-        lane_order.push_back(worker_lanes);
-    if (lane_order.empty())
-        lane_order.push_back(0);
-
-    std::vector<double> lane_top(static_cast<size_t>(lane_count));
-    double y = header_h;
-    for (int l : lane_order)
-    {
-        lane_top[static_cast<size_t>(l)] = y;
-        y += lane_rows[static_cast<size_t>(l)] * row_h + lane_pad;
-    }
-    const double lanes_bottom = y;
+    const double rows_top = header_h;
+    const double rows_bottom = rows_top + row_count * row_h;
     const double total_w = pad_l + plot_w + pad_r;
-    const double total_h = lanes_bottom + axis_h + legend_h;
+    const double total_h = rows_bottom + axis_h + legend_h;
 
     auto X = [&](double us) { return pad_l + us * px_per_us; };
     auto bar_top = [&](int i)
     {
-        return lane_top[static_cast<size_t>(lane_index(i))]
-             + subrow[static_cast<size_t>(i)] * row_h + (row_h - bar_h) * 0.5;
+        return rows_top + row_of[static_cast<size_t>(i)] * row_h + (row_h - bar_h) * 0.5;
     };
 
     std::string out;
@@ -698,9 +655,13 @@ inline bool Graph_trace::write_SVG(const char* path) const
          "viewBox=\"0 0 %.0f %.0f\" font-family=\"'Segoe UI', sans-serif\">\n",
          total_w, total_h, total_w, total_h);
     line("<rect width=\"%.0f\" height=\"%.0f\" fill=\"#272822\"/>\n", total_w, total_h);
-    // Hatch for the critical dead-time underlays (and its legend swatch).
+    // Hatch for the critical dead-time bands (and the legend swatch). The tile carries a
+    // faint solid tint UNDER the diagonal stroke: a full-height band must read as "the
+    // frame is losing time in this vertical slice" at a glance on #272822 -- hatch lines
+    // alone wash out behind the bars crossing the band.
     out += "<defs><pattern id=\"dead\" width=\"6\" height=\"6\" patternUnits=\"userSpaceOnUse\">"
-           "<path d=\"M0 6 L6 0\" stroke=\"#f92672\" stroke-width=\"1.4\" opacity=\"0.6\"/>"
+           "<rect width=\"6\" height=\"6\" fill=\"#f92672\" opacity=\"0.10\"/>"
+           "<path d=\"M0 6 L6 0\" stroke=\"#f92672\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
            "</pattern></defs>\n";
 
     // Header: title, the dead-time headline, global stats. (The legend sits at the
@@ -733,7 +694,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
             + "  |  makespan mean " + fmt_us(makespan_.mean) + " \xC2\xB5s (min " + fmt_us(makespan_min_)
             + ", max " + fmt_us(makespan_max_) + ")  |  critical work mean "
             + fmt_us(critical_work_.mean) + " \xC2\xB5s  |  structural CP " + fmt_us(cpm_us)
-            + " \xC2\xB5s  |  workers: " + std::to_string(worker_lanes);
+            + " \xC2\xB5s  |  workers: " + std::to_string(workers_seen);
         out += "<text x=\"16\" y=\"68\" font-size=\"11\" fill=\"#cfcfc2\">";
         append_escaped(out, stats);
         out += "</text>\n";
@@ -751,9 +712,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
         for (double t = 0.0; t <= span_us + 1e-9; t += step)
         {
             line("<line x1=\"%.1f\" y1=\"%.0f\" x2=\"%.1f\" y2=\"%.0f\" stroke=\"#3e3d32\" stroke-width=\"1\"/>\n",
-                 X(t), header_h - 4.0, X(t), lanes_bottom);
+                 X(t), header_h - 4.0, X(t), rows_bottom);
             std::string lbl = fmt_us(t) + " \xC2\xB5s";
-            out += "<text x=\"" + std::to_string(X(t)) + "\" y=\"" + std::to_string(lanes_bottom + 18.0)
+            out += "<text x=\"" + std::to_string(X(t)) + "\" y=\"" + std::to_string(rows_bottom + 18.0)
                  + "\" font-size=\"10\" fill=\"#cfcfc2\" text-anchor=\"middle\">";
             append_escaped(out, lbl);
             out += "</text>\n";
@@ -766,7 +727,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
         // derived); colour carries criticality (green -> pink by share of binding
         // chains).
         const double ax0 = 16.0, ax1 = 56.0;
-        const double base = lanes_bottom + axis_h;
+        const double base = rows_bottom + axis_h;
         auto legend_arrow = [&](double ly, const char* stroke, const char* dash, const char* text)
         {
             line("<line x1=\"%.0f\" y1=\"%.0f\" x2=\"%.0f\" y2=\"%.0f\" stroke=\"%s\" stroke-width=\"1.8\"%s/>\n",
@@ -786,7 +747,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
              ax1 + 14.0, ly4 + 4.0);
         const double ly5 = base + 86.0;
         line("<circle cx=\"%.0f\" cy=\"%.0f\" r=\"5\" fill=\"#a6e22e\"/>\n", (ax0 + ax1) * 0.5, ly5);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">handoff weld: connected nodes back to back on one worker</text>\n",
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">handoff weld: connected nodes back to back</text>\n",
              ax1 + 14.0, ly5 + 4.0);
         const double ly6 = base + 104.0;
         line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"url(#dead)\"/>\n",
@@ -802,26 +763,8 @@ inline bool Graph_trace::write_SVG(const char* path) const
              priority_color(Priority::high), priority_color(Priority::normal), priority_color(Priority::low));
     }
 
-    // Lane separators + labels. Lanes are numbered by DISPLAY position (W0 = the busiest,
-    // top row), not by physical worker id: workers are interchangeable, and after the
-    // busiest-first sort real ids would read as shuffled noise. The external lane keeps
-    // its qualitative label.
-    std::vector<int> display_pos(static_cast<size_t>(lane_count), 0);
-    for (size_t d = 0; d < lane_order.size(); ++d)
-        display_pos[static_cast<size_t>(lane_order[d])] = static_cast<int>(d);
-    for (int l = 0; l < lane_count; ++l)
-    {
-        double top = lane_top[static_cast<size_t>(l)];
-        double h = lane_rows[static_cast<size_t>(l)] * row_h;
-        line("<line x1=\"%.0f\" y1=\"%.1f\" x2=\"%.0f\" y2=\"%.1f\" stroke=\"#3e3d32\" stroke-width=\"1\"/>\n",
-             pad_l, top + h + lane_pad * 0.5, pad_l + plot_w, top + h + lane_pad * 0.5);
-        bool ext = external_lane && l == worker_lanes;
-        std::string lbl = ext ? std::string("ext") : "W" + std::to_string(display_pos[static_cast<size_t>(l)]);
-        out += "<text x=\"" + std::to_string(pad_l - 10.0) + "\" y=\"" + std::to_string(top + h * 0.5 + 4.0)
-             + "\" font-size=\"11\" fill=\"#cfcfc2\" text-anchor=\"end\">";
-        append_escaped(out, lbl);
-        out += "</text>\n";
-    }
+    // No row separators or labels: rows are anonymous concurrency slots, not workers --
+    // there is nothing true to label them with.
 
     // Multi-line tooltip data: each line escaped, joined with a literal `&#10;` character
     // reference -- a raw newline in an attribute value would be normalized to a space by
@@ -836,14 +779,12 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
     };
 
-    // Critical dead-time zones, in the BACKGROUND: for an edge that binds >= 10% of runs,
-    // its mean ready-but-waiting gap drawn as a hatched box ending at the successor's bar
-    // start -- the frame time lost to scheduling at that spot. The box is slightly TALLER
-    // than a bar, so where sub-row packing has placed another node's bar over the span
-    // (the usual case on a starved budget) the zone still shows as a protruding frame
-    // around it -- and being behind the bars, it never intercepts their hover tooltips
-    // (`pointer-events: none` as well, so the protruding margins are inert too; the
-    // number lives on the edge tooltip).
+    // Critical dead-time bands, in the BACKGROUND and FULL HEIGHT: the wait is a property
+    // of the chain, not of any row or worker, so for an edge that binds >= 10% of runs its
+    // mean ready-but-waiting gap spans all rows, ending at the critical successor's bar
+    // start. Behind the bars with `pointer-events: none`, so hover is never intercepted
+    // (the number lives on the edge tooltip). Bands of different edges may overlap and
+    // visually stack -- acceptable; each still ends at its own successor.
     for (const Edge_agg& e : edges_)
     {
         double share = runs_ > 0
@@ -853,9 +794,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
             continue;
         double x_end = X(bar_start[static_cast<size_t>(e.to)]);
         double x0 = std::max(pad_l, x_end - wpx);
-        line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.0f\" rx=\"4\" "
+        line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" "
              "fill=\"url(#dead)\" pointer-events=\"none\"/>\n",
-             x0, bar_top(e.to) - 4.0, x_end - x0, bar_h + 8.0);
+             x0, rows_top, x_end - x0, rows_bottom - rows_top);
     }
 
     // Bars (tooltip data on the group; the overlay script renders it), then edges on top.
@@ -875,8 +816,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
              + " | \xCF\x83 " + fmt_us(s.stddev_us)
              + " (CV " + fmt_us(s.mean_us > 0.0 ? 100.0 * s.stddev_us / s.mean_us : 0.0) + "%)"
              + " | min " + fmt_us(s.min_us) + " | max " + fmt_us(s.max_us) + " \xC2\xB5s");
-        // No worker line: workers are interchangeable, so the modal assignment is a lane
-        // choice, not a property of the node.
+        // No worker line: workers are interchangeable, and rows carry no worker identity.
         tip.push_back("Critical: in " + fmt_us(100.0 * s.critical_share) + "% of runs");
         if (slack[static_cast<size_t>(i)] > 0.5)
             tip.push_back("Slack: " + fmt_us(slack[static_cast<size_t>(i)]) + " \xC2\xB5s");
@@ -967,7 +907,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
         // colour, and marks exactly where the handoff fired.
         bool weld = std::abs(y2 - y1) < 0.5 && x2 - x1 < 5.0;
         if (weld)
-            tip.push_back("Handoff: back-to-back on one worker");
+            tip.push_back("Handoff: back-to-back with the predecessor");
 
         out += "<g class=\"hv\" data-hl=\"" + stroke + "\" data-tip=\"";
         append_tip_attr(tip);

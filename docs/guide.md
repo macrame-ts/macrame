@@ -583,26 +583,30 @@ for (int f = 0; f < 1000; ++f)
 trace.write_SVG("my_frame_avg.svg");
 ```
 
-The SVG is an **average run**: one bar per node on worker lanes (each node on
-the worker that ran it most often; a lane for non-worker threads appears only
-if used), bars at the median start with median duration, dependency edges as
-arcs above them in the structure dump's styling (solid = explicit, dashed =
-derived). Hovering a bar raises a formatted tooltip — the node name in the
-bar's own colour, then the stats: mean / P95 / σ / CV / min–max execution
-time — plus its priority and declared accesses (`transforms: R`). (No worker
-stat: workers are interchangeable, so a node's lane is a presentation choice,
-not a property.) Each bar's right end carries the node's queue priority as a
-letter — red **H** (high), green **N** (normal), grey **L** (low); a narrow
-bar shows the letter next to its outside label. The tooltips are scripted into the SVG itself
+The SVG is an **average run**: bars at the median start with median duration,
+packed into anonymous **concurrency rows** — workers are interchangeable and
+the node→worker assignment reshuffles every run, so rows carry no worker
+identity; time-overlapping bars simply occupy different rows, and row
+occupancy over time reads directly as the average frame's concurrency (free
+vertical space at some time = capacity genuinely unused there). Dependency
+edges connect the bars in the structure dump's styling (solid = explicit,
+dashed = derived). Hovering a bar raises a formatted tooltip — the node name
+coloured by its queue priority (red = high, green = normal, grey = low; the
+same colouring as the name on the bar), then the stats: mean / P95 / σ / CV /
+min–max execution time — plus its priority and declared accesses
+(`transforms: R`). The tooltips are scripted into the SVG itself
 (they work with the file open in a browser; not when embedded via `<img>`).
 A coloured headline carries the two frame classifiers: **core utilization** —
 the share of the run window the scheduler's workers spent executing tasks
 (green ≥ 75%, red < 50%; work run inline on non-worker threads is not
 counted) — and **critical dead time** (green < 5% of makespan, red > 10%).
 Utilization says how much of the machine the frame used; dead time says
-whether the critical chain itself had to wait. A panel below shows the global
-numbers: run count, makespan mean/min/max, critical work, structural CP,
-worker count.
+whether the critical chain itself had to wait. Each significant chain wait is
+also drawn in place: a hatched pink band spanning the picture's full height,
+ending where the waiting critical node finally starts — the wait belongs to
+the chain, not to any row, and the band reads as "the frame is losing time in
+this vertical slice". A panel below shows the global numbers: run count,
+makespan mean/min/max, critical work, structural CP, worker count.
 
 The **critical path** is picked out by colour: each run, the trace walks back
 from the last-finishing node through the predecessor whose completion released
@@ -623,9 +627,8 @@ P50/P95 quantile markers, min/max, a per-worker histogram), so a million runs
 cost the same memory as ten. Two consequences of drawing medians are handled
 for you: an edge's bars can overlap in the aggregate even though no real run
 overlapped them (medians aren't additive) — such bars are clamped to the
-edge's average hand-off point; and unrelated nodes that used the same lane in
-different runs may genuinely overlap — those stack into sub-rows instead,
-because that overlap is information.
+edge's average hand-off point; and any two bars that overlap in time land on
+different rows by construction of the packing.
 
 Tracing costs two clock reads per node per run when attached, one branch when
 not, and nothing at all with `TS_PROFILING=0`. Cancelled runs are not folded;

@@ -655,6 +655,50 @@ void test_graph_trace_weld_dead_time()
     TS_CHECK(std::abs(trace.core_utilization() - 770.0 / 1400.0) < 1e-9);  // exact arithmetic
     TS_CHECK(ts::tools::dead_time_ok_share < ts::tools::dead_time_bad_share);   // band order
     TS_CHECK(ts::tools::core_util_ok_share < ts::tools::core_util_good_share);  // band order
+    TS_CHECK(svg.find(">W0<") == std::string::npos);   // rows are anonymous -- no worker labels
+}
+
+// Interval packing: two time-overlapping nodes land on different rows regardless of
+// worker assignment (rows are concurrency slots, not lanes). Bar rects are the rx="3"
+// ones; their y attributes must differ.
+void test_graph_trace_row_packing()
+{
+    auto ticks = [](double us)
+    {
+        return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double, std::micro>(us)).count();
+    };
+
+    ts::tools::Graph_trace trace;
+    trace.begin_structure(2);
+    trace.set_node_label(0, "pack_a");
+    trace.set_node_label(1, "pack_b");
+
+    long long readys[2] = { ticks(0), ticks(100) };
+    long long starts[2] = { ticks(0), ticks(100) };
+    long long ends[2] = { ticks(500), ticks(600) };
+    int workers[2] = { 0, 0 };   // same worker; overlap in time must still split rows
+    trace.on_run_complete(readys, starts, ends, workers, 2, 0, ticks(700), ticks(700), 1);
+
+    const char* path = "graph_trace_pack_test.svg";
+    TS_CHECK(trace.write_SVG(path));
+    std::string svg;
+    {
+        std::ifstream f(path, std::ios::binary);
+        svg.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    std::remove(path);
+
+    // Collect the y= attribute of each bar rect (rx="3" marks node bars).
+    std::vector<std::string> bar_y;
+    for (size_t pos = svg.find("rx=\"3\""); pos != std::string::npos; pos = svg.find("rx=\"3\"", pos + 1))
+    {
+        size_t rect = svg.rfind("<rect", pos);
+        size_t y = svg.find("y=\"", rect);
+        bar_y.push_back(svg.substr(y + 3, svg.find('"', y + 3) - y - 3));
+    }
+    TS_CHECK(bar_y.size() == 2);
+    TS_CHECK(bar_y.size() == 2 && bar_y[0] != bar_y[1]);   // two rows
 }
 
 // End-to-end plumbing for the busy counters: a real graph on a one-worker scheduler must
@@ -725,6 +769,7 @@ void run_graph_tests()
     run("graph trace critical path", test_graph_trace_critical);
     run("graph trace priority", test_graph_trace_priority);
     run("graph trace weld + dead time", test_graph_trace_weld_dead_time);
+    run("graph trace row packing", test_graph_trace_row_packing);
     run("graph trace end-to-end utilization", test_graph_trace_end_to_end_utilization);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
