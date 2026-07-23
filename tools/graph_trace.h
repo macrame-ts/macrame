@@ -14,6 +14,17 @@
 namespace ts::tools
 {
 
+// Critical dead time -- makespan minus the work on the measured binding chain -- as a
+// share of makespan classifies the frame. Below `dead_time_ok_share` the chain's next
+// node almost never waits: the frame is dependency-bound, and only restructuring edges
+// or shrinking critical nodes makes it faster (green). Above `dead_time_bad_share` the
+// chain spends a significant share of the frame ready-but-not-running: scheduling-bound,
+// where worker count, priorities, or ordering are the lever (red). Between the two is
+// the caution band (yellow). The bands colour the headline dead-time line in
+// `write_SVG`.
+inline constexpr double dead_time_ok_share = 0.05;    // below: green (dependency-bound)
+inline constexpr double dead_time_bad_share = 0.10;   // above: red (scheduling-bound)
+
 // Aggregated runtime trace for a `Static_task_graph`: attach with
 // `graph.set_trace(&trace)` (after `compile()`), run any number of times, then
 // `write_SVG(path)` renders the AVERAGE run -- node bars on worker lanes, dependency
@@ -607,7 +618,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
     for (int i = 0; i < count; ++i)
         span_us = std::max(span_us, bar_end[static_cast<size_t>(i)]);
     const double pad_l = 64.0, pad_r = 28.0, plot_w = 1150.0;
-    const double header_h = 188.0, axis_h = 30.0;
+    const double header_h = 84.0, axis_h = 30.0, legend_h = 148.0;
     const double row_h = 30.0, bar_h = 20.0, lane_pad = 6.0;
     const double px_per_us = plot_w / span_us;
 
@@ -641,7 +652,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
     }
     const double lanes_bottom = y;
     const double total_w = pad_l + plot_w + pad_r;
-    const double total_h = lanes_bottom + axis_h;
+    const double total_h = lanes_bottom + axis_h + legend_h;
 
     auto X = [&](double us) { return pad_l + us * px_per_us; };
     auto bar_top = [&](int i)
@@ -664,67 +675,38 @@ inline bool Graph_trace::write_SVG(const char* path) const
     line("<rect width=\"%.0f\" height=\"%.0f\" fill=\"#272822\"/>\n", total_w, total_h);
     // Hatch for the critical dead-time underlays (and its legend swatch).
     out += "<defs><pattern id=\"dead\" width=\"6\" height=\"6\" patternUnits=\"userSpaceOnUse\">"
-           "<path d=\"M0 6 L6 0\" stroke=\"#f92672\" stroke-width=\"1.2\" opacity=\"0.5\"/>"
+           "<path d=\"M0 6 L6 0\" stroke=\"#f92672\" stroke-width=\"1.4\" opacity=\"0.6\"/>"
            "</pattern></defs>\n";
 
-    // Header: title, global stats, legend (inline arrows).
+    // Header: title, the dead-time headline, global stats. (The legend sits at the
+    // bottom of the picture.)
     out += "<text x=\"16\" y=\"26\" font-size=\"15\" font-weight=\"600\" fill=\"#f8f8f2\">";
     append_escaped(out, title_.empty() ? "average run" : title_ + ": average run");
     out += "</text>\n";
     {
         // Critical dead time = makespan minus the work on the binding chain: the frame
-        // time spent with the chain's next node ready but not running. Near zero =
-        // dependency-bound; large = scheduling-bound.
+        // time spent with the chain's next node ready but not running. Its own coloured
+        // line -- it is the one number that classifies the frame (see the
+        // `dead_time_*_share` bands at the top of this header).
         double dead_us = std::max(0.0, makespan_.mean - critical_work_.mean);
-        double dead_pct = makespan_.mean > 0.0 ? 100.0 * dead_us / makespan_.mean : 0.0;
+        double dead_share = makespan_.mean > 0.0 ? dead_us / makespan_.mean : 0.0;
+        const char* dead_color = dead_share < dead_time_ok_share ? "#a6e22e"
+                               : dead_share <= dead_time_bad_share ? "#e6db74" : "#ff5f45";
+        std::string headline = "critical dead time: " + fmt_us(dead_us) + " \xC2\xB5s ("
+            + fmt_us(100.0 * dead_share) + "% of makespan)";
+        out += "<text x=\"16\" y=\"48\" font-size=\"12\" font-weight=\"600\" fill=\""
+             + std::string(dead_color) + "\">";
+        append_escaped(out, headline);
+        out += "</text>\n";
+
         std::string stats = "runs: " + std::to_string(runs_)
             + "  |  makespan mean " + fmt_us(makespan_.mean) + " \xC2\xB5s (min " + fmt_us(makespan_min_)
             + ", max " + fmt_us(makespan_max_) + ")  |  critical work mean "
-            + fmt_us(critical_work_.mean) + " \xC2\xB5s  |  critical dead time " + fmt_us(dead_us)
-            + " \xC2\xB5s (" + fmt_us(dead_pct) + "% of makespan)  |  structural CP " + fmt_us(cpm_us)
+            + fmt_us(critical_work_.mean) + " \xC2\xB5s  |  structural CP " + fmt_us(cpm_us)
             + " \xC2\xB5s  |  workers: " + std::to_string(worker_lanes);
-        out += "<text x=\"16\" y=\"46\" font-size=\"11\" fill=\"#cfcfc2\">";
+        out += "<text x=\"16\" y=\"68\" font-size=\"11\" fill=\"#cfcfc2\">";
         append_escaped(out, stats);
         out += "</text>\n";
-    }
-    {
-        // Legend rows: a short sample arrow, then its explanation, inline. Line STYLE
-        // carries provenance (solid = explicit, dashed = derived); colour carries
-        // criticality (green -> pink by share of binding chains).
-        const double ax0 = 16.0, ax1 = 56.0;
-        auto legend_arrow = [&](double ly, const char* stroke, const char* dash, const char* text)
-        {
-            line("<line x1=\"%.0f\" y1=\"%.0f\" x2=\"%.0f\" y2=\"%.0f\" stroke=\"%s\" stroke-width=\"1.8\"%s/>\n",
-                 ax0, ly, ax1, ly, stroke, dash);
-            line("<polygon points=\"%.0f,%.0f %.0f,%.0f %.0f,%.0f\" fill=\"%s\"/>\n",
-                 ax1, ly - 4.0, ax1, ly + 4.0, ax1 + 7.0, ly, stroke);
-            line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">%s</text>\n",
-                 ax1 + 14.0, ly + 4.0, text);
-        };
-        legend_arrow(64.0, "#a6e22e", "", "explicit ordering (after/before)");
-        legend_arrow(82.0, "#a6e22e", " stroke-dasharray=\"5,3\"", "derived from declared access (hover for detail)");
-        legend_arrow(100.0, "#f92672", "", "critical-path edge (pink = share of runs)");
-        const double ly4 = 118.0;
-        line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"#3e3d32\" "
-             "stroke=\"#fd971f\" stroke-width=\"2\"/>\n", ax0, ly4 - 5.0, ax1 - ax0);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical node (orange = share of runs)</text>\n",
-             ax1 + 14.0, ly4 + 4.0);
-        const double ly5 = 136.0;
-        line("<circle cx=\"%.0f\" cy=\"%.0f\" r=\"5\" fill=\"#a6e22e\"/>\n", (ax0 + ax1) * 0.5, ly5);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">handoff weld: connected nodes back to back on one worker</text>\n",
-             ax1 + 14.0, ly5 + 4.0);
-        const double ly6 = 154.0;
-        line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"url(#dead)\"/>\n",
-             ax0, ly6 - 5.0, ax1 - ax0);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical dead time (successor ready but waiting)</text>\n",
-             ax1 + 14.0, ly6 + 4.0);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\">"
-             "<tspan font-weight=\"700\" fill=\"%s\">H</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
-             "<tspan font-weight=\"700\" fill=\"%s\">N</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
-             "<tspan font-weight=\"700\" fill=\"%s\">L</tspan>"
-             "<tspan fill=\"#cfcfc2\"> = node priority (high / normal / low)</tspan></text>\n",
-             ax0, 176.0,
-             priority_color(Priority::high), priority_color(Priority::normal), priority_color(Priority::low));
     }
 
     // Time grid + axis labels: a 1/2/5-series step giving at most ~8 ticks.
@@ -746,6 +728,48 @@ inline bool Graph_trace::write_SVG(const char* path) const
             append_escaped(out, lbl);
             out += "</text>\n";
         }
+    }
+
+    {
+        // Legend, at the bottom (below the time axis): a short sample glyph, then its
+        // explanation, inline. Line STYLE carries provenance (solid = explicit, dashed =
+        // derived); colour carries criticality (green -> pink by share of binding
+        // chains).
+        const double ax0 = 16.0, ax1 = 56.0;
+        const double base = lanes_bottom + axis_h;
+        auto legend_arrow = [&](double ly, const char* stroke, const char* dash, const char* text)
+        {
+            line("<line x1=\"%.0f\" y1=\"%.0f\" x2=\"%.0f\" y2=\"%.0f\" stroke=\"%s\" stroke-width=\"1.8\"%s/>\n",
+                 ax0, ly, ax1, ly, stroke, dash);
+            line("<polygon points=\"%.0f,%.0f %.0f,%.0f %.0f,%.0f\" fill=\"%s\"/>\n",
+                 ax1, ly - 4.0, ax1, ly + 4.0, ax1 + 7.0, ly, stroke);
+            line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">%s</text>\n",
+                 ax1 + 14.0, ly + 4.0, text);
+        };
+        legend_arrow(base + 14.0, "#a6e22e", "", "explicit ordering (after/before)");
+        legend_arrow(base + 32.0, "#a6e22e", " stroke-dasharray=\"5,3\"", "derived from declared access (hover for detail)");
+        legend_arrow(base + 50.0, "#f92672", "", "critical-path edge (pink = share of runs)");
+        const double ly4 = base + 68.0;
+        line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"#3e3d32\" "
+             "stroke=\"#fd971f\" stroke-width=\"2\"/>\n", ax0, ly4 - 5.0, ax1 - ax0);
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical node (orange = share of runs)</text>\n",
+             ax1 + 14.0, ly4 + 4.0);
+        const double ly5 = base + 86.0;
+        line("<circle cx=\"%.0f\" cy=\"%.0f\" r=\"5\" fill=\"#a6e22e\"/>\n", (ax0 + ax1) * 0.5, ly5);
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">handoff weld: connected nodes back to back on one worker</text>\n",
+             ax1 + 14.0, ly5 + 4.0);
+        const double ly6 = base + 104.0;
+        line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"url(#dead)\"/>\n",
+             ax0, ly6 - 5.0, ax1 - ax0);
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical dead time (successor ready but waiting)</text>\n",
+             ax1 + 14.0, ly6 + 4.0);
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\">"
+             "<tspan font-weight=\"700\" fill=\"%s\">H</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
+             "<tspan font-weight=\"700\" fill=\"%s\">N</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
+             "<tspan font-weight=\"700\" fill=\"%s\">L</tspan>"
+             "<tspan fill=\"#cfcfc2\"> = node priority (high / normal / low)</tspan></text>\n",
+             ax0, base + 126.0,
+             priority_color(Priority::high), priority_color(Priority::normal), priority_color(Priority::low));
     }
 
     // Lane separators + labels.
@@ -775,22 +799,6 @@ inline bool Graph_trace::write_SVG(const char* path) const
             append_escaped(out, lines_v[k]);
         }
     };
-
-    // Critical dead-time underlays, under the bars: for an edge that binds >= 10% of
-    // runs, its mean ready-but-waiting gap drawn as a hatched strip ending at the
-    // successor's bar start -- the frame time lost to scheduling at that spot, visible
-    // without hovering (the number is also on the edge tooltip).
-    for (const Edge_agg& e : edges_)
-    {
-        double share = runs_ > 0
-            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
-        double wpx = e.binding_gap.mean * px_per_us;
-        if (share < 0.10 || wpx < 2.0)
-            continue;
-        double x_end = X(bar_start[static_cast<size_t>(e.to)]);
-        line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.0f\" rx=\"2\" fill=\"url(#dead)\"/>\n",
-             x_end - wpx, bar_top(e.to), wpx, bar_h);
-    }
 
     // Bars (tooltip data on the group; the overlay script renders it), then edges on top.
     for (int i = 0; i < count; ++i)
@@ -873,6 +881,27 @@ inline bool Graph_trace::write_SVG(const char* path) const
             out += "</text>\n";
         }
         out += "</g>\n";
+    }
+
+    // Critical dead-time overlays, ON TOP of the bars: for an edge that binds >= 10% of
+    // runs, its mean ready-but-waiting gap drawn as a hatched strip ending at the
+    // successor's bar start -- the frame time lost to scheduling at that spot, visible
+    // without hovering (the number is also on the edge tooltip). Drawn after the bars
+    // deliberately: on a starved worker budget the pre-successor span is usually occupied
+    // by another node's bar (sub-row packing fills gaps), and the semi-transparent hatch
+    // striping that bar says exactly what the successor was waiting behind; under the
+    // bars it would be fully hidden by their opaque fill.
+    for (const Edge_agg& e : edges_)
+    {
+        double share = runs_ > 0
+            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
+        double wpx = e.binding_gap.mean * px_per_us;
+        if (share < 0.10 || wpx < 2.0)
+            continue;
+        double x_end = X(bar_start[static_cast<size_t>(e.to)]);
+        double x0 = std::max(pad_l, x_end - wpx);
+        line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.0f\" rx=\"2\" fill=\"url(#dead)\"/>\n",
+             x0, bar_top(e.to), x_end - x0, bar_h);
     }
 
     for (const Edge_agg& e : edges_)

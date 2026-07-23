@@ -632,7 +632,8 @@ void test_graph_trace_weld_dead_time()
     TS_CHECK(svg.find("r=\"4.5\"") != std::string::npos);                  // the weld dot
     TS_CHECK(svg.find("Handoff: back-to-back") != std::string::npos);      // its tooltip line
     TS_CHECK(svg.find("handoff weld") != std::string::npos);               // legend row
-    TS_CHECK(svg.find("critical dead time") != std::string::npos);         // stats + legend
+    TS_CHECK(svg.find("critical dead time:") != std::string::npos);        // the headline line
+    TS_CHECK(ts::tools::dead_time_ok_share < ts::tools::dead_time_bad_share);   // band order
     g.set_trace(nullptr);
 }
 
