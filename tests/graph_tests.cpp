@@ -518,6 +518,49 @@ void test_graph_trace_cancelled()
     g.set_trace(nullptr);
 }
 
+// The measured critical path: on a linear chain (three writers of one object, ordered by
+// the derived edges) every run's binding chain is the whole chain, so criticality is 100%
+// for all three nodes; dispatch-wait stats are finite and non-negative; the SVG carries
+// the criticality tooltip line and the legend row.
+void test_graph_trace_critical()
+{
+    ts::Guarded<int> x{ 0 };
+
+    ts::Static_task_graph g;
+    g.add_node("chain_a", [](int& v) { ++v; }, x);
+    g.add_node("chain_b", [](int& v) { std::this_thread::sleep_for(2ms); ++v; }, x);
+    g.add_node("chain_c", [](int& v) { ++v; }, x);
+    g.compile();
+
+    ts::tools::Graph_trace trace;
+    g.set_trace(&trace);
+
+    constexpr int n = 10;
+    for (int i = 0; i < n; ++i)
+        g.execute().sync();
+
+    TS_CHECK(trace.run_count() == n);
+    for (int i = 0; i < g.node_count(); ++i)
+    {
+        auto s = trace.node_stats(i);
+        TS_CHECK(s.critical_share == 1.0);   // the whole linear chain binds every run
+        TS_CHECK(s.dispatch_wait_us >= 0.0 && s.dispatch_wait_us < 1e9);
+    }
+
+    const char* path = "graph_trace_critical_test.svg";
+    TS_CHECK(trace.write_svg(path));
+    std::string svg;
+    {
+        std::ifstream f(path, std::ios::binary);
+        svg.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    std::remove(path);
+
+    TS_CHECK(svg.find("critical in ") != std::string::npos);          // node tooltip
+    TS_CHECK(svg.find("critical path (brightness") != std::string::npos);   // legend row
+    g.set_trace(nullptr);
+}
+
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
@@ -552,6 +595,7 @@ void run_graph_tests()
     run("dot dump", test_dot_dump);
     run("graph trace", test_graph_trace);
     run("graph trace cancelled run", test_graph_trace_cancelled);
+    run("graph trace critical path", test_graph_trace_critical);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);

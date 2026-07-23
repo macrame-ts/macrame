@@ -39,6 +39,7 @@ public:
     {
         nodes_.assign(static_cast<size_t>(node_count), {});
         edges_.clear();
+        in_edges_dirty_ = true;
         reset();
     }
 
@@ -54,15 +55,19 @@ public:
 
     void add_edge(int from, int to, bool explicit_ordering, std::string conflict)
     {
-        edges_.push_back({ from, to, explicit_ordering, std::move(conflict), {} });
+        edges_.push_back({ from, to, explicit_ordering, std::move(conflict), {}, 0 });
+        in_edges_dirty_ = true;
     }
 
     // --- samples ---
 
     // Fold one completed run: raw `steady_clock` ticks per node (parallel arrays, one slot
-    // per node) plus the run's begin/end ticks. Called by the graph once per run, single-
-    // threaded; every duration/offset converts to microseconds here.
-    void on_run_complete(const long long* starts, const long long* ends, const int* workers,
+    // per node) plus the run's begin/end ticks. `readys` is the data-ready instant (the
+    // dependency counter's zero transition); ready-to-start is acquire + queue latency.
+    // Called by the graph once per run, single-threaded; every duration/offset converts to
+    // microseconds here.
+    void on_run_complete(const long long* readys, const long long* starts,
+                         const long long* ends, const int* workers,
                          int node_count, long long run_begin, long long run_end)
     {
         if (node_count != static_cast<int>(nodes_.size()))
@@ -85,6 +90,8 @@ public:
             a.dur_p50.add(d);
             a.dur_p95.add(d);
             a.start_p50.add(s);
+            a.dispatch_wait.add(std::max(0.0,
+                static_cast<double>(starts[i] - readys[i]) * ticks_to_us));
             int w = workers[i];
             if (w < 0)
                 ++a.external_runs;
@@ -102,6 +109,8 @@ public:
                          + static_cast<double>(starts[e.to] - run_begin)) * 0.5 * ticks_to_us;
             e.meet.add(meet);
         }
+
+        fold_critical_chain(starts, ends, node_count);
 
         double mk = static_cast<double>(run_end - run_begin) * ticks_to_us;
         if (runs_ == 0)
@@ -129,9 +138,15 @@ public:
             a.max_dur = 0.0;
             a.worker_runs.clear();
             a.external_runs = 0;
+            a.dispatch_wait = {};
+            a.critical_runs = 0;
         }
         for (Edge_agg& e : edges_)
+        {
             e.meet = {};
+            e.critical_runs = 0;
+        }
+        critical_work_ = {};
         makespan_ = {};
         makespan_min_ = 0.0;
         makespan_max_ = 0.0;
@@ -148,8 +163,10 @@ public:
         double mean_us = 0.0, p50_us = 0.0, p95_us = 0.0, stddev_us = 0.0;
         double min_us = 0.0, max_us = 0.0;
         double start_p50_us = 0.0;
-        int modal_worker = -1;      // -1 = external (non-worker) threads
-        double off_modal = 0.0;     // share of runs NOT on the modal lane
+        int modal_worker = -1;          // -1 = external (non-worker) threads
+        double off_modal = 0.0;         // share of runs NOT on the modal lane
+        double critical_share = 0.0;    // share of runs on the measured binding chain
+        double dispatch_wait_us = 0.0;  // mean ready-to-start latency (acquire + queue)
     };
 
     Node_stats node_stats(int index) const
@@ -168,6 +185,9 @@ public:
         modal_count = modal(a, s.modal_worker);
         s.off_modal = a.duration.n > 0
             ? 1.0 - static_cast<double>(modal_count) / static_cast<double>(a.duration.n) : 0.0;
+        s.critical_share = runs_ > 0
+            ? static_cast<double>(a.critical_runs) / static_cast<double>(runs_) : 0.0;
+        s.dispatch_wait_us = a.dispatch_wait.mean;
         return s;
     }
 
@@ -282,6 +302,8 @@ private:
         double max_dur = 0.0;
         std::vector<long long> worker_runs;   // runs per worker index
         long long external_runs = 0;          // runs on non-worker threads
+        Welford dispatch_wait;                // ready-to-start latency, µs
+        long long critical_runs = 0;          // runs where this node was on the binding chain
     };
 
     struct Edge_agg
@@ -289,13 +311,58 @@ private:
         int from = -1;
         int to = -1;
         bool explicit_ordering = false;
-        std::string conflict;   // "obj: W->R; ..." or empty
-        Welford meet;           // mean of (end_from + start_to)/2, µs from run begin
+        std::string conflict;      // "obj: W->R; ..." or empty
+        Welford meet;              // mean of (end_from + start_to)/2, µs from run begin
+        long long critical_runs = 0;   // runs where this edge was on the binding chain
     };
 
     static constexpr double ticks_to_us =
         1e6 * static_cast<double>(std::chrono::steady_clock::period::num)
             / static_cast<double>(std::chrono::steady_clock::period::den);
+
+    // The run's measured critical path -- the chain that actually bound the makespan.
+    // Walk backward from the latest-finishing node; at each step the BINDING predecessor
+    // is the incoming-edge node that finished last (its completion released this node).
+    // One counter per node and edge on the chain; a single run has one chain, but across
+    // runs different chains bind, so the aggregate is a FREQUENCY, not a single path.
+    // Distinct from the structural (CPM) path in `write_svg`, which sees only durations
+    // and edges -- the measured chain absorbs queue latency and pipe contention too.
+    void fold_critical_chain(const long long* starts, const long long* ends, int node_count)
+    {
+        if (node_count == 0)
+            return;
+        if (in_edges_dirty_)
+        {
+            in_edges_.assign(nodes_.size(), {});
+            for (size_t e = 0; e < edges_.size(); ++e)
+                in_edges_[static_cast<size_t>(edges_[e].to)].push_back(static_cast<int>(e));
+            in_edges_dirty_ = false;
+        }
+
+        int cur = 0;
+        for (int i = 1; i < node_count; ++i)
+            if (ends[i] > ends[cur])
+                cur = i;
+
+        double work = 0.0;
+        while (cur >= 0)
+        {
+            ++nodes_[static_cast<size_t>(cur)].critical_runs;
+            work += static_cast<double>(ends[cur] - starts[cur]) * ticks_to_us;
+
+            int binding_edge = -1;
+            for (int e : in_edges_[static_cast<size_t>(cur)])
+                if (binding_edge < 0
+                    || ends[edges_[static_cast<size_t>(e)].from]
+                     > ends[edges_[static_cast<size_t>(binding_edge)].from])
+                    binding_edge = e;
+            if (binding_edge < 0)
+                break;   // a root: the chain is complete
+            ++edges_[static_cast<size_t>(binding_edge)].critical_runs;
+            cur = edges_[static_cast<size_t>(binding_edge)].from;
+        }
+        critical_work_.add(work);
+    }
 
     // Modal lane: the worker that ran this node most often (or -1 = external). Returns
     // the modal count.
@@ -336,6 +403,9 @@ private:
 
     std::vector<Node_agg> nodes_;
     std::vector<Edge_agg> edges_;
+    std::vector<std::vector<int>> in_edges_;   // edge indices by target, for the chain walk
+    bool in_edges_dirty_ = true;
+    Welford critical_work_;   // per-run sum of chain node durations, µs
     Welford makespan_;
     double makespan_min_ = 0.0;
     double makespan_max_ = 0.0;
@@ -376,6 +446,39 @@ inline bool Graph_trace::write_svg(const char* path) const
         for (int e : out_edges[static_cast<size_t>(topo[h])])
             if (--indegree[static_cast<size_t>(edges_[static_cast<size_t>(e)].to)] == 0)
                 topo.push_back(edges_[static_cast<size_t>(e)].to);
+
+    // Structural critical path (CPM) over the average frame: forward/backward pass with
+    // the same median durations the bars use, zero edge latency. This is the dependency
+    // lower bound -- unlike the measured binding chain (fold_critical_chain), it cannot
+    // see queue latency or pipe contention; the gap between the two classifies the frame
+    // as dependency-bound or scheduling-bound. `slack` is how far a node can slip in the
+    // average frame before it extends the CPM length.
+    std::vector<double> dur(static_cast<size_t>(count)), est(static_cast<size_t>(count), 0.0);
+    for (int i = 0; i < count; ++i)
+        dur[static_cast<size_t>(i)] = std::max(0.0, nodes_[static_cast<size_t>(i)].dur_p50.value());
+    for (int u : topo)
+        for (int e : out_edges[static_cast<size_t>(u)])
+        {
+            size_t v = static_cast<size_t>(edges_[static_cast<size_t>(e)].to);
+            est[v] = std::max(est[v], est[static_cast<size_t>(u)] + dur[static_cast<size_t>(u)]);
+        }
+    double cpm_us = 0.0;
+    for (int i = 0; i < count; ++i)
+        cpm_us = std::max(cpm_us, est[static_cast<size_t>(i)] + dur[static_cast<size_t>(i)]);
+    std::vector<double> lf(static_cast<size_t>(count), cpm_us);
+    for (size_t h = topo.size(); h-- > 0;)
+    {
+        size_t u = static_cast<size_t>(topo[h]);
+        for (int e : out_edges[u])
+        {
+            size_t v = static_cast<size_t>(edges_[static_cast<size_t>(e)].to);
+            lf[u] = std::min(lf[u], lf[v] - dur[v]);
+        }
+    }
+    std::vector<double> slack(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i)
+        slack[static_cast<size_t>(i)] = std::max(0.0,
+            lf[static_cast<size_t>(i)] - (est[static_cast<size_t>(i)] + dur[static_cast<size_t>(i)]));
 
     for (int u : topo)
         for (int e : out_edges[static_cast<size_t>(u)])
@@ -448,7 +551,7 @@ inline bool Graph_trace::write_svg(const char* path) const
     for (int i = 0; i < count; ++i)
         span_us = std::max(span_us, bar_end[static_cast<size_t>(i)]);
     const double pad_l = 64.0, pad_r = 28.0, plot_w = 1150.0;
-    const double header_h = 96.0, axis_h = 30.0;
+    const double header_h = 114.0, axis_h = 30.0;
     const double row_h = 30.0, bar_h = 20.0, lane_pad = 6.0;
     const double px_per_us = plot_w / span_us;
 
@@ -488,7 +591,9 @@ inline bool Graph_trace::write_svg(const char* path) const
     {
         std::string stats = "runs: " + std::to_string(runs_)
             + "  |  makespan mean " + fmt_us(makespan_.mean) + " \xC2\xB5s (min " + fmt_us(makespan_min_)
-            + ", max " + fmt_us(makespan_max_) + ")  |  workers: " + std::to_string(worker_lanes);
+            + ", max " + fmt_us(makespan_max_) + ")  |  critical work mean "
+            + fmt_us(critical_work_.mean) + " \xC2\xB5s  |  structural CP " + fmt_us(cpm_us)
+            + " \xC2\xB5s  |  workers: " + std::to_string(worker_lanes);
         out += "<text x=\"16\" y=\"46\" font-size=\"11\" fill=\"#cfcfc2\">";
         append_escaped(out, stats);
         out += "</text>\n";
@@ -508,6 +613,11 @@ inline bool Graph_trace::write_svg(const char* path) const
              ax1, ly2 - 4.0, ax1, ly2 + 4.0, ax1 + 7.0, ly2);
         line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">derived from declared access (hover for detail)</text>\n",
              ax1 + 14.0, ly2 + 4.0);
+        const double ly3 = 100.0;
+        line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"#3e3d32\" "
+             "stroke=\"#fd971f\" stroke-width=\"2\"/>\n", ax0, ly3 - 5.0, ax1 - ax0);
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical path (brightness = share of runs)</text>\n",
+             ax1 + 14.0, ly3 + 4.0);
     }
 
     // Time grid + axis labels: a 1/2/5-series step giving at most ~8 ticks.
@@ -563,6 +673,10 @@ inline bool Graph_trace::write_svg(const char* path) const
              + " | min " + fmt_us(s.min_us) + " | max " + fmt_us(s.max_us) + " \xC2\xB5s";
         tip += "\nworker: " + (s.modal_worker >= 0 ? "w" + std::to_string(s.modal_worker) : std::string("ext"))
              + " modal, " + fmt_us(100.0 * s.off_modal) + "% off-modal";
+        tip += "\ncritical in " + fmt_us(100.0 * s.critical_share) + "% of runs";
+        if (slack[static_cast<size_t>(i)] > 0.5)
+            tip += "\nslack: " + fmt_us(slack[static_cast<size_t>(i)]) + " \xC2\xB5s";
+        tip += "\ndispatch wait: mean " + fmt_us(s.dispatch_wait_us) + " \xC2\xB5s";
         if (!a.accesses.empty())
         {
             tip += "\naccess:";
@@ -570,23 +684,34 @@ inline bool Graph_trace::write_svg(const char* path) const
                 tip += "\n  " + obj + ": " + (write ? "W" : "R");
         }
 
+        // Criticality highlight: orange border, thickness/brightness/label weight scaled
+        // by the node's share of binding chains -- full effect at >= 80%, fading below,
+        // none under 10% (no single-path pretense; frequency IS the cross-run answer).
+        double hf = s.critical_share < 0.10
+            ? 0.0 : std::min(1.0, (s.critical_share - 0.10) / 0.70);
+        const char* border = hf > 0.0 ? "#fd971f" : "#66d9ef";
+        double border_w = 1.0 + 1.5 * hf;
+        double border_op = hf > 0.0 ? 0.45 + 0.55 * hf : 1.0;
+        int weight = 400 + static_cast<int>(std::lround(300.0 * hf));
+
         out += "<g><title>";
         append_escaped(out, tip);
         out += "</title>\n";
         line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.0f\" rx=\"3\" "
-             "fill=\"#3e3d32\" stroke=\"#66d9ef\" stroke-width=\"1\"/>\n", x, yb, w, bar_h);
+             "fill=\"#3e3d32\" stroke=\"%s\" stroke-width=\"%.1f\" stroke-opacity=\"%.2f\"/>\n",
+             x, yb, w, bar_h, border, border_w, border_op);
         double text_w = 6.4 * static_cast<double>(a.label.size());
         if (text_w + 8.0 <= w)
         {
-            out += "<text x=\"" + std::to_string(x + w * 0.5) + "\" y=\"" + std::to_string(yb + 14.0)
-                 + "\" font-size=\"11\" fill=\"#f8f8f2\" text-anchor=\"middle\">";
+            line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"11\" font-weight=\"%d\" "
+                 "fill=\"#f8f8f2\" text-anchor=\"middle\">", x + w * 0.5, yb + 14.0, weight);
             append_escaped(out, a.label);
             out += "</text>\n";
         }
         else
         {
-            out += "<text x=\"" + std::to_string(x + w + 5.0) + "\" y=\"" + std::to_string(yb + 14.0)
-                 + "\" font-size=\"10\" fill=\"#cfcfc2\">";
+            line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" font-weight=\"%d\" "
+                 "fill=\"#cfcfc2\">", x + w + 5.0, yb + 14.0, weight);
             append_escaped(out, a.label);
             out += "</text>\n";
         }
@@ -605,7 +730,11 @@ inline bool Graph_trace::write_svg(const char* path) const
             : e.conflict;
         const char* stroke = e.explicit_ordering ? "#f92672" : "#a6e22e";
         const char* extra = e.explicit_ordering ? "" : " stroke-dasharray=\"5,3\"";
-        double width = e.explicit_ordering ? 2.0 : 1.5;
+        // Thickness carries the edge's criticality (share of runs it was on the binding
+        // chain), up to ~2x; color keeps the provenance identity.
+        double crit = runs_ > 0
+            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
+        double width = (e.explicit_ordering ? 2.0 : 1.5) * (1.0 + crit);
 
         out += "<g><title>";
         append_escaped(out, tip);

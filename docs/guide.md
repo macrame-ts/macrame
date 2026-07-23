@@ -589,7 +589,20 @@ arcs above them in the structure dump's styling. Hovering a bar shows the
 node's stats — mean / P95 / σ / CV / min–max execution time, its modal worker
 and how often it ran elsewhere — plus its declared accesses (`transforms: R`).
 A panel at the top shows the global numbers: run count, makespan mean/min/max,
-worker count.
+critical work, structural CP, worker count.
+
+The **critical path** is highlighted in orange: each run, the trace walks back
+from the last-finishing node through the predecessor whose completion released
+each node — the chain that actually bound that run's makespan. Across runs
+this yields a per-node *share* (different chains bind different runs), drawn
+as border brightness/thickness and label weight: a solid orange bar was
+critical in essentially every run, a faint one occasionally, plain cyan never.
+Edge thickness carries the same share. The tooltip adds three numbers:
+"critical in N% of runs" (measured), "slack" (structural — how far the node
+can slip in the average frame before the dependency chain lengthens; omitted
+when ~0), and "dispatch wait" (mean ready-to-start latency: queue + object
+acquisition). Measured and structural disagree exactly where scheduling —
+not dependencies — binds the frame, which is what you tune next.
 
 No samples are stored: statistics stream into fixed-size state (mean/variance,
 P50/P95 quantile markers, min/max, a per-worker histogram), so a million runs

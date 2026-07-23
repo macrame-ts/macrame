@@ -141,6 +141,20 @@ topological order. Unrelated nodes sharing a lane are deliberately *not*
 clamped — their aggregate overlap is real (the lane is only the node's modal
 worker), so they stack into sub-rows instead of being hidden.
 
+Critical-path detection is *measured*, not inferred: each run the trace walks
+backward from the latest-finishing node through the **binding predecessor** —
+the incoming-edge node that finished last, i.e. whose completion released this
+one — and counts chain membership per node and edge. A variable frame has no
+single critical path, so the aggregate is a frequency ("critical in 82% of
+runs"), rendered as highlight intensity rather than a boolean. The structural
+CPM pass (median durations, zero latency) is computed alongside for per-node
+slack; it is the dependency lower bound, blind to queue latency and pipe
+contention, and its divergence from the measured chain is itself the signal
+that a frame is scheduling-bound rather than dependency-bound. A third stamp
+at the dependency counter's zero transition splits that overhead out exactly:
+ready-to-start is acquire + queue latency, attributed per node as "dispatch
+wait".
+
 ---
 
 ## 3. Scheduler

@@ -22,6 +22,7 @@ struct Static_task_graph::Run_state
         , preheld(node_count)
     {
 #if TS_PROFILING
+        node_ready.resize(node_count);
         node_start.resize(node_count);
         node_end.resize(node_count);
         node_worker.resize(node_count);
@@ -39,6 +40,9 @@ struct Static_task_graph::Run_state
     // Trace stamps: raw `steady_clock` ticks + executing worker per node, written only
     // when a trace is attached (each node writes its own slot; the settle's acq_rel
     // chain publishes them to the folding thread). Sized once; no per-run allocation.
+    // `node_ready` is the data-ready instant (dependency counter hit zero); the gap to
+    // `node_start` is acquire + queue latency, attributed per node by the trace.
+    std::vector<long long> node_ready;
     std::vector<long long> node_start;
     std::vector<long long> node_end;
     std::vector<int> node_worker;
@@ -401,6 +405,10 @@ void Static_task_graph::detect_cycles() const
 // single remaining_deps 0-transition, or a root at kickoff), so acquisition starts once.
 void Static_task_graph::on_data_ready(Run_state& run, int index)
 {
+#if TS_PROFILING
+    if (run.graph->trace_)
+        run.node_ready[index] = trace_now();
+#endif
     acquire_next(run, index, 0, /*synchronous*/ true);
 }
 
@@ -608,8 +616,9 @@ void Static_task_graph::node_complete(Run_state& run, int index)
         // trace). Cancelled runs are skipped -- their stamps are partial.
         if (run.graph->trace_ && !run.token.is_cancel_requested())
             run.graph->trace_->on_run_complete(
-                run.node_start.data(), run.node_end.data(), run.node_worker.data(),
-                static_cast<int>(run.node_start.size()), run.run_begin, trace_now());
+                run.node_ready.data(), run.node_start.data(), run.node_end.data(),
+                run.node_worker.data(), static_cast<int>(run.node_start.size()),
+                run.run_begin, trace_now());
 #endif
         if (run.token.is_cancel_requested())
             done->cancel();
