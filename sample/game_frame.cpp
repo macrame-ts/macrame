@@ -214,7 +214,7 @@ using Cloth = Float_store;
 using Visibility = Float_store;
 using Particles = Float_store;
 using Audio_out = Float_store;
-using Ui = Float_store;
+using UI = Float_store;
 
 // --- the world --------------------------------------------------------------------
 
@@ -238,7 +238,7 @@ struct World
         , local_xf{ ts::Named{"local_xf"}, n }, bodies{ ts::Named{"bodies"}, n }
         , cloth{ ts::Named{"cloth"}, n }, visibility{ ts::Named{"visibility"}, n }
         , particles{ ts::Named{"particles"}, n }, audio_out{ ts::Named{"audio_out"}, n }
-        , ui{ ts::Named{"ui"}, n }
+        , UI{ ts::Named{"UI"}, n }
     {}
 
     // read-only static inputs (no system writes them this frame)
@@ -267,7 +267,7 @@ struct World
     ts::Guarded<Visibility> visibility;
     ts::Guarded<Particles> particles;
     ts::Guarded<Audio_out> audio_out;
-    ts::Guarded<Ui> ui;
+    ts::Guarded<UI> UI;
 
     // the render queue: culling/particles/UI stage into it, submit applies
     ts::Guarded<Draw_lists> draw_lists{ ts::Named{"draw_lists"} };
@@ -439,7 +439,7 @@ void tick_navigation(const Nav_mesh& nav_mesh, const Transforms& prev_xf,
 // early-outs (a cooperative return settles the task completed, not cancelled).
 // AI's own evaluation is per-agent and internally parallel, like the other
 // heavy systems.
-void tick_ai(ts::Guarded<Nav_mesh>& nav_service,
+void tick_AI(ts::Guarded<Nav_mesh>& nav_service,
              const Transforms& prev_xf, const Paths& paths, const Combat& combat,
              const Economy& economy, const Quests& quests, Intents& intents)      // 1.5
 {
@@ -529,12 +529,12 @@ void tick_audio(const Transforms& prev_xf, Audio_out& audio_out)                
     spin(1.5);   // deliberately serial: a single-threaded mixer is realistic
 }
 
-void tick_ui(const Quests& quests, Ui& ui, ts::Recorder<Draw_lists>& draws)       // 0.5
+void tick_UI(const Quests& quests, UI& UI, ts::Recorder<Draw_lists>& draws)       // 0.5
 {
     read_all(quests);
-    fill(ui, 1.0f);
+    fill(UI, 1.0f);
     spin(0.5);
-    draws.stage([n = ui.size() / 10](Draw_lists& d) { d.push_batch(n); });
+    draws.stage([n = UI.size() / 10](Draw_lists& d) { d.push_batch(n); });
 }
 
 // Submit: applies the staged draw batches as one write (`commit` under the
@@ -603,10 +603,10 @@ ts::Static_task_graph build_frame_graph(World& w, const char* DOT_path = nullptr
     // worker to finish its current slice; nothing evicts a runner). Notes in
     // docs/TODO.md under profiler-guided optimization; they stay post-flip.
     g.add_node("audio", &tick_audio, w.transforms.state(), w.audio_out);
-    g.add_node("ai", [&w](const Transforms& prev_xf, const Paths& paths, const Combat& combat,
+    g.add_node("AI", [&w](const Transforms& prev_xf, const Paths& paths, const Combat& combat,
                           const Economy& economy, const Quests& quests, Intents& intents)
     {
-        tick_ai(w.nav_mesh, prev_xf, paths, combat, economy, quests, intents);
+        tick_AI(w.nav_mesh, prev_xf, paths, combat, economy, quests, intents);
     }, w.transforms.state(), w.paths, w.combat, w.economy, w.quests, w.intents);
     g.add_node("animation", &tick_animation, w.skeletons, w.intents, w.local_xf);
     g.add_node("physics", &tick_physics, w.velocities, w.combat, w.bodies);
@@ -630,7 +630,7 @@ ts::Static_task_graph build_frame_graph(World& w, const char* DOT_path = nullptr
     flip.after(propagation);
 
     // Post-flip readers of the fresh version. The draw producers' recorders are
-    // minted in declaration order (cloth has none; culling, particles, ui) --
+    // minted in declaration order (cloth has none; culling, particles, UI) --
     // the apply order at commit is recorder-creation order, fixed at build
     // time, independent of thread timing.
     g.add_node("cloth", &tick_cloth, w.transforms.state(), w.cloth);
@@ -653,19 +653,20 @@ ts::Static_task_graph build_frame_graph(World& w, const char* DOT_path = nullptr
         read_all(xf);
         spin(0.2);
     }, w.economy, w.transforms.state());
-    auto ui = g.add_node("ui",
-        [rec = w.draw_staged.recorder()](const Quests& quests, Ui& u) mutable
+    // `UI_node`, not `UI`: the handle would shadow the `UI` type in the lambda parameter.
+    auto UI_node = g.add_node("UI",
+        [rec = w.draw_staged.recorder()](const Quests& quests, UI& u) mutable
         {
-            tick_ui(quests, u, rec);
-        }, w.quests, w.ui);
-    ui;
+            tick_UI(quests, u, rec);
+        }, w.quests, w.UI);
+    UI_node;
 
     auto submit = g.add_node("submit", [&w](const Transforms& xf, Draw_lists& dl)
     {
         tick_submit(w.draw_staged, xf, dl);
     }, w.transforms.state(), w.draw_lists);
     submit;
-    submit.after(culling).after(particles).after(ui);
+    submit.after(culling).after(particles).after(UI_node);
 
     g.compile(DOT_path);
     return g;

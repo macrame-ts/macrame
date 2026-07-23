@@ -281,7 +281,7 @@ private:
     std::vector<Body_id> spawned_;
 };
 
-class Ai_system
+class AI_system
 {
 public:
     void add_hit() { TS_CHECK_ACCESS(); ++hits_; }
@@ -331,7 +331,7 @@ Physics_stats run_physics_frames(int frames)
 
     ts::Guarded<Player> player;
     ts::Guarded<Spawn_queue> spawns;
-    ts::Guarded<Ai_system> ai;
+    ts::Guarded<AI_system> AI;
     ts::Guarded<Camera_state> camera;
 
     poses.set_divergence_check([](const Pose_snapshot& s) { return s.hash(); });
@@ -411,12 +411,12 @@ Physics_stats run_physics_frames(int frames)
     // machine reads for what the extract can't carry -- that serialization a
     // visible graph edge you accept knowingly.
     g.add_node(
-        [](const Pose_snapshot& p, Ai_system& a)
+        [](const Pose_snapshot& p, AI_system& a)
         {
             if (p.raycast_down({ 0.0f, 100.0f, 1.0f }, 2.5f))
                 a.add_hit();
         },
-        poses.state(), ai);
+        poses.state(), AI);
 
     // The sim: exclusive write on the machine, heaviest node in the frame.
     // Boundary commit (under the grant this node already holds) -> step ->
@@ -453,7 +453,7 @@ Physics_stats run_physics_frames(int frames)
     stats.frames = frames;
     stats.bodies = world.access([](const Physics_world& w) { return w.body_count(); }).sync();
     stats.spawned = spawns.access([](const Spawn_queue& q) { return q.spawned_count(); }).sync();
-    stats.vision_hits = ai.access([](const Ai_system& a) { return a.hits(); }).sync();
+    stats.vision_hits = AI.access([](const AI_system& a) { return a.hits(); }).sync();
     stats.player_y = poses.read([player_body](const Pose_snapshot& s) { return s.of(player_body).pos.y; }).sync();
     stats.pose_hash = poses.read([](const Pose_snapshot& s) { return s.hash(); }).sync();
     return stats;
