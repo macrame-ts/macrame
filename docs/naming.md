@@ -31,6 +31,13 @@ taken username blocks the matching org.
    libs, PHP CLI kit, macramejs) none in-domain; no trademark (generic craft
    word). Caveats: first-contact knot reading must be answered by the tagline
    (README leads with it); `é` is branding-only.
+   **Org variants (checked 2026-07): ALL free** — `macrame-ts`, `macrame-cpp`,
+   `macrame-lib`, `macrame-tasks`, `macrame-io`; bare `macrame` is a
+   zero-activity dormant user (0 repos; not reclaimable). Author preference:
+   **`macrame-ts`** ("ts" = task system, echoing the `ts::` namespace). The
+   earlier TypeScript-suffix caveat applies to a LIBRARY named x-ts, not to an
+   org address hosting a C++ repo (one glance self-corrects); preference
+   accepted. Target shape: `github.com/macrame-ts/macrame`.
 
 1. **Entente** — *a friendly understanding / informal alliance between parties,
    and the parties collectively* (Fr. "understanding"; the Entente Cordiale).
