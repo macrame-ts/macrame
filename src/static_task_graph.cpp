@@ -2,7 +2,7 @@
 #include "ts/fatal.h"
 
 #if TS_PROFILING
-#include "dot_writer.h"
+#include "graph_introspect.h"
 #include "graph_trace.h"
 #include <chrono>
 #endif
@@ -216,150 +216,16 @@ void Static_task_graph::compile(const char* dot_path)
     compiled_ = true;
 
 #if TS_PROFILING
+    // Structure consumers live in tools/graph_introspect.h -- the graph only hands over
+    // its nodes and explicit edges.
     if (dot_path)
-        dump_dot(dot_path);
+        tools::write_structure_dot(nodes_, explicit_edges_, dot_path);
     if (trace_)
-        push_trace_structure();   // re-push on recompile (resets the trace's aggregates)
+        tools::push_structure(*trace_, nodes_, explicit_edges_);   // re-push on recompile (resets the trace's aggregates)
 #else
     (void)dot_path;
 #endif
 }
-
-#if TS_PROFILING
-
-namespace
-{
-
-// A node's DOT label: its `Node_name` literal, else the named add_node's call site
-// (`file:line`, basename only), else `node<N>`.
-std::string dot_label(const char* name, const std::source_location& site, bool has_site, int index)
-{
-    if (name)
-        return name;
-    if (has_site)
-    {
-        std::string_view file = site.file_name();
-        if (auto pos = file.find_last_of("/\\"); pos != std::string_view::npos)
-            file.remove_prefix(pos + 1);
-        return std::string(file) + ":" + std::to_string(site.line());
-    }
-    return "node" + std::to_string(index);
-}
-
-// Object labels for tooltips: the owning pipe's `debug_name` (`ts::Named`) when set, else
-// an `objN` ordinal in first-declaration order. `access` and `pipes` are parallel arrays
-// (same argument order), so the instance's pipe is at the same position. Templated on the
-// (private) node type; shared by the DOT dump and the trace structure push.
-template<typename Nodes>
-std::map<const void*, std::string> object_labels(const Nodes& nodes)
-{
-    std::map<const void*, std::string> label;
-    for (const auto& node : nodes)
-        for (size_t k = 0; k < node.access.size(); ++k)
-        {
-            const char* name = node.pipes[k]->debug_name;
-            label.try_emplace(node.access[k].first,
-                name ? std::string(name) : "obj" + std::to_string(label.size()));
-        }
-    return label;
-}
-
-// The conflict detail between two nodes: one "objN: X->Y" entry per shared instance with
-// at least one writer (empty = no conflict).
-template<typename NodeT>
-std::string conflict_detail(const NodeT& a, const NodeT& b, std::map<const void*, std::string>& label)
-{
-    std::string detail;
-    for (const auto& [instance_a, mode_a] : a.access)
-        for (const auto& [instance_b, mode_b] : b.access)
-            if (instance_a == instance_b
-                && (mode_a == Access::read_write || mode_b == Access::read_write))
-            {
-                if (!detail.empty())
-                    detail += "; ";
-                detail += label[instance_a] + ": ";
-                detail += (mode_a == Access::read_write) ? 'W' : 'R';
-                detail += "->";
-                detail += (mode_b == Access::read_write) ? 'W' : 'R';
-            }
-    return detail;
-}
-
-} // namespace
-
-// Structure dump, called from compile() when a path is given. Re-derives the conflict
-// edges with detail (which object, which modes) -- an extra O(nodes^2) scan, paid only
-// when dumping; the compile path proper stays untouched.
-void Static_task_graph::dump_dot(const char* path) const
-{
-    tools::Dot_writer dot;
-
-    for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
-        dot.add_node(i, dot_label(nodes_[i].name, nodes_[i].name_site, nodes_[i].has_name_site, i));
-
-    std::map<const void*, std::string> object_label = object_labels(nodes_);
-
-    // Explicit edges first (deduped; an edge that is also conflict-derived renders
-    // explicit -- solid -- and appends the conflict detail to its tooltip). Every edge
-    // gets a tooltip: without one, browsers fall back to the SVG <title> element, which
-    // is the internal edge id (`n11->n12`).
-    std::set<std::pair<int, int>> explicit_set(explicit_edges_.begin(), explicit_edges_.end());
-    for (const auto& [from, to] : explicit_set)
-    {
-        std::string detail = conflict_detail(nodes_[from], nodes_[to], object_label);
-        std::string tooltip = "explicit ordering";
-        if (!detail.empty())
-            tooltip += "; " + detail;
-        dot.add_edge(from, to, tools::Dot_writer::Edge_kind::explicit_ordering, tooltip);
-    }
-
-    // Derived edges (declaration-index order, matching compile()'s tiebreak), minus any
-    // already emitted as explicit.
-    for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
-        for (int j = i + 1; j < static_cast<int>(nodes_.size()); ++j)
-        {
-            if (explicit_set.contains({ i, j }))
-                continue;
-            std::string detail = conflict_detail(nodes_[i], nodes_[j], object_label);
-            if (!detail.empty())
-                dot.add_edge(i, j, tools::Dot_writer::Edge_kind::derived, detail);
-        }
-
-    dot.dump(path);
-}
-
-// Push the compiled structure into the attached trace: labels, declared accesses (object
-// label + mode), and the same deduped edge set the DOT dump renders, with provenance.
-// Resets the trace's aggregates (`begin_structure`).
-void Static_task_graph::push_trace_structure() const
-{
-    tools::Graph_trace& t = *trace_;
-    t.begin_structure(static_cast<int>(nodes_.size()));
-
-    std::map<const void*, std::string> object_label = object_labels(nodes_);
-
-    for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
-    {
-        t.set_node_label(i, dot_label(nodes_[i].name, nodes_[i].name_site, nodes_[i].has_name_site, i));
-        for (const auto& [instance, mode] : nodes_[i].access)
-            t.add_node_access(i, object_label[instance], mode == Access::read_write);
-    }
-
-    std::set<std::pair<int, int>> explicit_set(explicit_edges_.begin(), explicit_edges_.end());
-    for (const auto& [from, to] : explicit_set)
-        t.add_edge(from, to, true, conflict_detail(nodes_[from], nodes_[to], object_label));
-    for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
-        for (int j = i + 1; j < static_cast<int>(nodes_.size()); ++j)
-        {
-            if (explicit_set.contains({ i, j }))
-                continue;
-            std::string detail = conflict_detail(nodes_[i], nodes_[j], object_label);
-            if (!detail.empty())
-                t.add_edge(i, j, false, detail);
-        }
-}
-
-#endif // TS_PROFILING
 
 void Static_task_graph::set_trace(tools::Graph_trace* trace)
 {
@@ -368,7 +234,7 @@ void Static_task_graph::set_trace(tools::Graph_trace* trace)
         ts::fatal("Static_task_graph::set_trace requires a compiled graph (call compile() first)");
     trace_ = trace;
     if (trace_)
-        push_trace_structure();
+        tools::push_structure(*trace_, nodes_, explicit_edges_);
 #else
     (void)trace;
 #endif

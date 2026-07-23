@@ -65,6 +65,7 @@
     <ClInclude Include="include\ts\scheduler.h" />
     <ClInclude Include="include\ts\static_task_graph.h" />
     <ClInclude Include="tools\dot_writer.h" />
+    <ClInclude Include="tools\graph_introspect.h" />
     <ClInclude Include="tools\graph_trace.h" />
     <ClInclude Include="include\ts\task.h" />
     <ClInclude Include="include\ts\ts.h" />

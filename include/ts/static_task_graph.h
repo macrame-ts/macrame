@@ -273,10 +273,6 @@ private:
     void add_edge(int prerequisite, int successor);
     static bool conflicts(const Node& a, const Node& b);
     void detect_cycles() const;
-#if TS_PROFILING
-    void dump_dot(const char* path) const;      // structure dump; called from compile()
-    void push_trace_structure() const;          // labels/accesses/edges -> the attached trace
-#endif
 
     // Per-node acquire: when a node becomes data-ready it acquires the objects it touches,
     // one at a time in canonical (ascending pipe-index) order, holding each -- mode-aware
