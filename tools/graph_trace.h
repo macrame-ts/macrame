@@ -803,6 +803,28 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
     };
 
+    // Critical dead-time zones, in the BACKGROUND: for an edge that binds >= 10% of runs,
+    // its mean ready-but-waiting gap drawn as a hatched box ending at the successor's bar
+    // start -- the frame time lost to scheduling at that spot. The box is slightly TALLER
+    // than a bar, so where sub-row packing has placed another node's bar over the span
+    // (the usual case on a starved budget) the zone still shows as a protruding frame
+    // around it -- and being behind the bars, it never intercepts their hover tooltips
+    // (`pointer-events: none` as well, so the protruding margins are inert too; the
+    // number lives on the edge tooltip).
+    for (const Edge_agg& e : edges_)
+    {
+        double share = runs_ > 0
+            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
+        double wpx = e.binding_gap.mean * px_per_us;
+        if (share < 0.10 || wpx < 2.0)
+            continue;
+        double x_end = X(bar_start[static_cast<size_t>(e.to)]);
+        double x0 = std::max(pad_l, x_end - wpx);
+        line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.0f\" rx=\"4\" "
+             "fill=\"url(#dead)\" pointer-events=\"none\"/>\n",
+             x0, bar_top(e.to) - 4.0, x_end - x0, bar_h + 8.0);
+    }
+
     // Bars (tooltip data on the group; the overlay script renders it), then edges on top.
     for (int i = 0; i < count; ++i)
     {
@@ -871,27 +893,6 @@ inline bool Graph_trace::write_SVG(const char* path) const
             out += "</text>\n";
         }
         out += "</g>\n";
-    }
-
-    // Critical dead-time overlays, ON TOP of the bars: for an edge that binds >= 10% of
-    // runs, its mean ready-but-waiting gap drawn as a hatched strip ending at the
-    // successor's bar start -- the frame time lost to scheduling at that spot, visible
-    // without hovering (the number is also on the edge tooltip). Drawn after the bars
-    // deliberately: on a starved worker budget the pre-successor span is usually occupied
-    // by another node's bar (sub-row packing fills gaps), and the semi-transparent hatch
-    // striping that bar says exactly what the successor was waiting behind; under the
-    // bars it would be fully hidden by their opaque fill.
-    for (const Edge_agg& e : edges_)
-    {
-        double share = runs_ > 0
-            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
-        double wpx = e.binding_gap.mean * px_per_us;
-        if (share < 0.10 || wpx < 2.0)
-            continue;
-        double x_end = X(bar_start[static_cast<size_t>(e.to)]);
-        double x0 = std::max(pad_l, x_end - wpx);
-        line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.0f\" rx=\"2\" fill=\"url(#dead)\"/>\n",
-             x0, bar_top(e.to), x_end - x0, bar_h);
     }
 
     for (const Edge_agg& e : edges_)
