@@ -604,9 +604,30 @@ inline bool Graph_trace::write_SVG(const char* path) const
     const double row_h = 30.0, bar_h = 20.0, lane_pad = 6.0;
     const double px_per_us = plot_w / span_us;
 
+    // Rows are laid out busiest-lane-first: workers are interchangeable, so the vertical
+    // order is free, and sorting by drawn work packs the dense lanes together at the top
+    // (idle lanes sink to the bottom; the external lane, if any, stays last). Labels keep
+    // the worker id, so a row is still traceable to its histogram.
+    std::vector<double> lane_busy(static_cast<size_t>(lane_count), 0.0);
+    for (int i = 0; i < count; ++i)
+        lane_busy[static_cast<size_t>(lane_index(i))]
+            += bar_end[static_cast<size_t>(i)] - bar_start[static_cast<size_t>(i)];
+    std::vector<int> lane_order;
+    for (int l = 0; l < worker_lanes; ++l)
+        lane_order.push_back(l);
+    std::sort(lane_order.begin(), lane_order.end(), [&](int a, int b)
+    {
+        double ba = lane_busy[static_cast<size_t>(a)], bb = lane_busy[static_cast<size_t>(b)];
+        return ba != bb ? ba > bb : a < b;
+    });
+    if (external_lane)
+        lane_order.push_back(worker_lanes);
+    if (lane_order.empty())
+        lane_order.push_back(0);
+
     std::vector<double> lane_top(static_cast<size_t>(lane_count));
     double y = header_h;
-    for (int l = 0; l < lane_count; ++l)
+    for (int l : lane_order)
     {
         lane_top[static_cast<size_t>(l)] = y;
         y += lane_rows[static_cast<size_t>(l)] * row_h + lane_pad;
