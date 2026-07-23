@@ -118,9 +118,28 @@ first constructor argument. The name is stored on the pipe — the shared
 per-object structure every layer already reaches — so the dump (and future
 tooling) resolves it without new plumbing.
 
-Everything downstream of the name (the dump today, runtime capture later) is
-gated by `TS_PROFILING` (default on; define it to 0 for shipping); the
-formatter itself lives outside the library proper, in `tools/`.
+Everything downstream of the name (the structure dump and the runtime trace)
+is gated by `TS_PROFILING` (default on; define it to 0 for shipping); the
+formatters live outside the library proper, in `tools/`.
+
+The runtime trace aggregates rather than records: per node, a Welford
+mean/variance, P^2 quantile markers (Jain–Chlamtac) for P50/P95, min/max, and
+a per-worker histogram — O(nodes + edges) state however many runs fold in. The
+graph's entire involvement is three stamps into pre-sized `Run_state` arrays
+and one call at run settle; every statistic, the timeline reconstruction, and
+the SVG live in `tools/graph_trace.h`, so the scheduler logic stays legible.
+
+The reconstructed "average run" has one subtlety. With *mean*-based bars an
+edge's endpoints can never cross: `start_v >= end_u` holds pointwise in every
+real run, expectation preserves pointwise order, and `E[start] + E[dur] =
+E[end]` by linearity. Medians make a better "typical run" (they ignore
+outlier frames), but they are not linear — median bars of an edge-connected
+pair can overlap even though no real run overlapped them. The resolution is
+the edge's streamed **meet point** (the mean of predecessor-end and
+successor-start): crossing bars are clamped to it, predecessors first in
+topological order. Unrelated nodes sharing a lane are deliberately *not*
+clamped — their aggregate overlap is real (the lane is only the node's modal
+worker), so they stack into sub-rows instead of being hidden.
 
 ---
 

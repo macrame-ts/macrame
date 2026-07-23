@@ -1,12 +1,13 @@
 @echo off
 setlocal
 rem Render a Graphviz .dot file to .svg (next to it) and open it with the default app.
-rem Usage:  show_graph.bat [path\to\graph.dot]     (default: game_frame.dot)
-rem Generate the input with:  task_system --dot [path]
+rem Usage:  show_graph.bat [path\to\graph.dot]
+rem No argument: renders sample_game_frame.dot AND opens sample_game_frame_avg.svg (the
+rem average-run trace) if present -- the pair task_system --dot / --trace produces.
 rem If Graphviz is missing, offers to install it via winget.
 
 set "DOTFILE=%~1"
-if "%DOTFILE%"=="" set "DOTFILE=game_frame.dot"
+if "%DOTFILE%"=="" set "DOTFILE=sample_game_frame.dot"
 
 set "DOTEXE=dot"
 where dot >nul 2>nul
@@ -27,6 +28,8 @@ set "SVGFILE=%DOTFILE:.dot=.svg%"
 if errorlevel 1 exit /b 1
 echo wrote %SVGFILE%
 start "" "%SVGFILE%"
+if not "%~1"=="" exit /b 0
+if exist "sample_game_frame_avg.svg" start "" "sample_game_frame_avg.svg"
 exit /b 0
 
 :install_graphviz

@@ -3,6 +3,8 @@
 
 #if TS_PROFILING
 #include "dot_writer.h"
+#include "graph_trace.h"
+#include <chrono>
 #endif
 
 #include <atomic>
@@ -18,7 +20,13 @@ struct Static_task_graph::Run_state
     explicit Run_state(size_t node_count)
         : remaining_deps(node_count)
         , preheld(node_count)
-    {}
+    {
+#if TS_PROFILING
+        node_start.resize(node_count);
+        node_end.resize(node_count);
+        node_worker.resize(node_count);
+#endif
+    }
 
     Static_task_graph* graph = nullptr;
     Scheduler* scheduler = nullptr;
@@ -27,7 +35,26 @@ struct Static_task_graph::Run_state
     std::vector<std::atomic<std::uint64_t>> preheld;     // per node: bitmask of pipe_indices positions handed from a predecessor (skip acquire)
     std::atomic<int> remaining_nodes{ 0 };
     detail::Task_ptr done;
+#if TS_PROFILING
+    // Trace stamps: raw `steady_clock` ticks + executing worker per node, written only
+    // when a trace is attached (each node writes its own slot; the settle's acq_rel
+    // chain publishes them to the folding thread). Sized once; no per-run allocation.
+    std::vector<long long> node_start;
+    std::vector<long long> node_end;
+    std::vector<int> node_worker;
+    long long run_begin = 0;
+#endif
 };
+
+#if TS_PROFILING
+namespace
+{
+long long trace_now()
+{
+    return std::chrono::steady_clock::now().time_since_epoch().count();
+}
+}
+#endif
 
 namespace
 {
@@ -187,6 +214,8 @@ void Static_task_graph::compile(const char* dot_path)
 #if TS_PROFILING
     if (dot_path)
         dump_dot(dot_path);
+    if (trace_)
+        push_trace_structure();   // re-push on recompile (resets the trace's aggregates)
 #else
     (void)dot_path;
 #endif
@@ -213,6 +242,45 @@ std::string dot_label(const char* name, const std::source_location& site, bool h
     return "node" + std::to_string(index);
 }
 
+// Object labels for tooltips: the owning pipe's `debug_name` (`ts::Named`) when set, else
+// an `objN` ordinal in first-declaration order. `access` and `pipes` are parallel arrays
+// (same argument order), so the instance's pipe is at the same position. Templated on the
+// (private) node type; shared by the DOT dump and the trace structure push.
+template<typename Nodes>
+std::map<const void*, std::string> object_labels(const Nodes& nodes)
+{
+    std::map<const void*, std::string> label;
+    for (const auto& node : nodes)
+        for (size_t k = 0; k < node.access.size(); ++k)
+        {
+            const char* name = node.pipes[k]->debug_name;
+            label.try_emplace(node.access[k].first,
+                name ? std::string(name) : "obj" + std::to_string(label.size()));
+        }
+    return label;
+}
+
+// The conflict detail between two nodes: one "objN: X->Y" entry per shared instance with
+// at least one writer (empty = no conflict).
+template<typename NodeT>
+std::string conflict_detail(const NodeT& a, const NodeT& b, std::map<const void*, std::string>& label)
+{
+    std::string detail;
+    for (const auto& [instance_a, mode_a] : a.access)
+        for (const auto& [instance_b, mode_b] : b.access)
+            if (instance_a == instance_b
+                && (mode_a == Access::read_write || mode_b == Access::read_write))
+            {
+                if (!detail.empty())
+                    detail += "; ";
+                detail += label[instance_a] + ": ";
+                detail += (mode_a == Access::read_write) ? 'W' : 'R';
+                detail += "->";
+                detail += (mode_b == Access::read_write) ? 'W' : 'R';
+            }
+    return detail;
+}
+
 } // namespace
 
 // Structure dump, called from compile() when a path is given. Re-derives the conflict
@@ -225,37 +293,7 @@ void Static_task_graph::dump_dot(const char* path) const
     for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
         dot.add_node(i, dot_label(nodes_[i].name, nodes_[i].name_site, nodes_[i].has_name_site, i));
 
-    // Object labels for tooltips: the owning pipe's `debug_name` (`ts::Named`) when set,
-    // else an `objN` ordinal in first-declaration order. `access` and `pipes` are parallel
-    // arrays (same argument order), so the instance's pipe is at the same position.
-    std::map<const void*, std::string> object_label;
-    for (const Node& node : nodes_)
-        for (size_t k = 0; k < node.access.size(); ++k)
-        {
-            const char* name = node.pipes[k]->debug_name;
-            object_label.try_emplace(node.access[k].first,
-                name ? std::string(name) : "obj" + std::to_string(object_label.size()));
-        }
-
-    // The conflict detail between nodes i < j: one "objN: X->Y" entry per shared instance
-    // with at least one writer (empty = no conflict).
-    auto conflict_detail = [&](const Node& a, const Node& b)
-    {
-        std::string detail;
-        for (const auto& [instance_a, mode_a] : a.access)
-            for (const auto& [instance_b, mode_b] : b.access)
-                if (instance_a == instance_b
-                    && (mode_a == Access::read_write || mode_b == Access::read_write))
-                {
-                    if (!detail.empty())
-                        detail += "; ";
-                    detail += object_label[instance_a] + ": ";
-                    detail += (mode_a == Access::read_write) ? 'W' : 'R';
-                    detail += "->";
-                    detail += (mode_b == Access::read_write) ? 'W' : 'R';
-                }
-        return detail;
-    };
+    std::map<const void*, std::string> object_label = object_labels(nodes_);
 
     // Explicit edges first (deduped; an edge that is also conflict-derived renders
     // explicit -- solid -- and appends the conflict detail to its tooltip). Every edge
@@ -264,7 +302,7 @@ void Static_task_graph::dump_dot(const char* path) const
     std::set<std::pair<int, int>> explicit_set(explicit_edges_.begin(), explicit_edges_.end());
     for (const auto& [from, to] : explicit_set)
     {
-        std::string detail = conflict_detail(nodes_[from], nodes_[to]);
+        std::string detail = conflict_detail(nodes_[from], nodes_[to], object_label);
         std::string tooltip = "explicit ordering";
         if (!detail.empty())
             tooltip += "; " + detail;
@@ -278,7 +316,7 @@ void Static_task_graph::dump_dot(const char* path) const
         {
             if (explicit_set.contains({ i, j }))
                 continue;
-            std::string detail = conflict_detail(nodes_[i], nodes_[j]);
+            std::string detail = conflict_detail(nodes_[i], nodes_[j], object_label);
             if (!detail.empty())
                 dot.add_edge(i, j, tools::Dot_writer::Edge_kind::derived, detail);
         }
@@ -286,7 +324,51 @@ void Static_task_graph::dump_dot(const char* path) const
     dot.dump(path);
 }
 
+// Push the compiled structure into the attached trace: labels, declared accesses (object
+// label + mode), and the same deduped edge set the DOT dump renders, with provenance.
+// Resets the trace's aggregates (`begin_structure`).
+void Static_task_graph::push_trace_structure() const
+{
+    tools::Graph_trace& t = *trace_;
+    t.begin_structure(static_cast<int>(nodes_.size()));
+
+    std::map<const void*, std::string> object_label = object_labels(nodes_);
+
+    for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
+    {
+        t.set_node_label(i, dot_label(nodes_[i].name, nodes_[i].name_site, nodes_[i].has_name_site, i));
+        for (const auto& [instance, mode] : nodes_[i].access)
+            t.add_node_access(i, object_label[instance], mode == Access::read_write);
+    }
+
+    std::set<std::pair<int, int>> explicit_set(explicit_edges_.begin(), explicit_edges_.end());
+    for (const auto& [from, to] : explicit_set)
+        t.add_edge(from, to, true, conflict_detail(nodes_[from], nodes_[to], object_label));
+    for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
+        for (int j = i + 1; j < static_cast<int>(nodes_.size()); ++j)
+        {
+            if (explicit_set.contains({ i, j }))
+                continue;
+            std::string detail = conflict_detail(nodes_[i], nodes_[j], object_label);
+            if (!detail.empty())
+                t.add_edge(i, j, false, detail);
+        }
+}
+
 #endif // TS_PROFILING
+
+void Static_task_graph::set_trace(tools::Graph_trace* trace)
+{
+#if TS_PROFILING
+    if (trace && !compiled_)
+        ts::fatal("Static_task_graph::set_trace requires a compiled graph (call compile() first)");
+    trace_ = trace;
+    if (trace_)
+        push_trace_structure();
+#else
+    (void)trace;
+#endif
+}
 
 void Static_task_graph::detect_cycles() const
 {
@@ -411,6 +493,15 @@ void Static_task_graph::run_graph_node(const detail::Task_ptr& block, std::uint6
     auto prev = std::move(detail::current_task);
     detail::current_task = block;
 
+#if TS_PROFILING
+    if (self->graph->trace_)
+    {
+        Run_state& trun = *self->graph->run_;
+        trun.node_start[self->index] = trace_now();
+        trun.node_worker[self->index] = current_worker_index;
+    }
+#endif
+
     self->graph->nodes_[self->index].run();   // node body: installs its own Access_scope
 
     detail::current_task = std::move(prev);
@@ -467,6 +558,11 @@ void Static_task_graph::node_complete(Run_state& run, int index)
 {
     Node& node = run.graph->nodes_[index];
 
+#if TS_PROFILING
+    if (run.graph->trace_)
+        run.node_end[index] = trace_now();   // body + nested tasks have settled
+#endif
+
     // Phase 1: settle successor data-deps; collect those this node's completion makes ready
     // (it is exclusively their trigger, so this node's thread owns them until we hand off /
     // dispatch them below -- no race with another prerequisite).
@@ -506,6 +602,15 @@ void Static_task_graph::node_complete(Run_state& run, int index)
         // overwriting `run.done` and dropping its own handle -- destroying this block
         // mid-notify. The local ref holds it until settle returns.
         detail::Task_ptr done = run.done;
+#if TS_PROFILING
+        // The one trace containment call: fold this run's stamps on the settling thread,
+        // BEFORE the completion handle settles (a sync()ed caller then reads a consistent
+        // trace). Cancelled runs are skipped -- their stamps are partial.
+        if (run.graph->trace_ && !run.token.is_cancel_requested())
+            run.graph->trace_->on_run_complete(
+                run.node_start.data(), run.node_end.data(), run.node_worker.data(),
+                static_cast<int>(run.node_start.size()), run.run_begin, trace_now());
+#endif
         if (run.token.is_cancel_requested())
             done->cancel();
         else
@@ -527,6 +632,10 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token t
     run.scheduler = &scheduler;
     run.token = token;
     run.done = detail::make_bare_block();
+#if TS_PROFILING
+    if (trace_)
+        run.run_begin = trace_now();
+#endif
 
     for (size_t i = 0; i < nodes_.size(); ++i)
     {

@@ -1,6 +1,7 @@
 #include "graph_tests.h"
 #include "ts/guarded.h"
 #include "ts/static_task_graph.h"
+#include "graph_trace.h"
 #include "harness.h"
 #include "test_util.h"
 
@@ -448,6 +449,75 @@ void test_dot_dump()
     TS_CHECK(read_value(y) == 1);
 }
 
+// The aggregated runtime trace (`set_trace` + `Graph_trace`): run counts, streamed stat
+// sanity, and the average-run SVG containing labels, an access line, and the global runs
+// stat. Exact-string checks kept minimal (styling changes shouldn't break this test).
+void test_graph_trace()
+{
+    ts::Guarded<int> x{ ts::Named{"counter"}, 0 };
+    ts::Guarded<int> y{ 0 };
+
+    ts::Static_task_graph g;
+    g.add_node("writer_a", [](int& v) { ++v; }, x);
+    g.add_node("reader_b", [](const int& v, int& w) { w = v; }, x, y);
+    g.compile();
+
+    ts::tools::Graph_trace trace;
+    g.set_trace(&trace);
+
+    constexpr int n = 20;
+    for (int i = 0; i < n; ++i)
+        g.execute().sync();
+
+    TS_CHECK(trace.run_count() == n);
+    for (int i = 0; i < g.node_count(); ++i)
+    {
+        auto s = trace.node_stats(i);
+        TS_CHECK(s.runs == n);
+        TS_CHECK(s.min_us <= s.p50_us && s.p50_us <= s.max_us);
+        TS_CHECK(s.mean_us >= s.min_us && s.mean_us <= s.max_us);
+        TS_CHECK(s.p95_us <= s.max_us);
+    }
+
+    const char* path = "graph_trace_test.svg";
+    TS_CHECK(trace.write_svg(path));
+    std::string svg;
+    {
+        std::ifstream f(path, std::ios::binary);
+        svg.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    std::remove(path);
+
+    TS_CHECK(svg.find("writer_a") != std::string::npos);
+    TS_CHECK(svg.find("reader_b") != std::string::npos);
+    TS_CHECK(svg.find("counter: W") != std::string::npos);   // declared access in the tooltip
+    TS_CHECK(svg.find("runs: 20") != std::string::npos);     // global stats panel
+
+    g.set_trace(nullptr);
+    g.execute().sync();
+    TS_CHECK(trace.run_count() == n);   // detached: no further folds
+}
+
+// A cancelled run is not folded (its stamps are partial).
+void test_graph_trace_cancelled()
+{
+    ts::Guarded<int> x{ 0 };
+    ts::Static_task_graph g;
+    g.add_node([](int& v) { ++v; }, x);
+    g.compile();
+
+    ts::tools::Graph_trace trace;
+    g.set_trace(&trace);
+    g.execute().sync();
+    TS_CHECK(trace.run_count() == 1);
+
+    ts::Cancellation_source src;
+    src.request_cancel();
+    g.execute(ts::default_scheduler(), src.token()).sync();   // cancelled run
+    TS_CHECK(trace.run_count() == 1);                          // not folded
+    g.set_trace(nullptr);
+}
+
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
@@ -480,6 +550,8 @@ void run_graph_tests()
     run("graph inline chain on caller", test_graph_inline_chain_on_caller);
     run("graph inline rerun", test_graph_inline_rerun);
     run("dot dump", test_dot_dump);
+    run("graph trace", test_graph_trace);
+    run("graph trace cancelled run", test_graph_trace_cancelled);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);

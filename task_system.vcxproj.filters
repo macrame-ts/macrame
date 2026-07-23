@@ -131,6 +131,9 @@
     <ClInclude Include="tools\dot_writer.h">
       <Filter>tools</Filter>
     </ClInclude>
+    <ClInclude Include="tools\graph_trace.h">
+      <Filter>tools</Filter>
+    </ClInclude>
     <ClInclude Include="include\ts\task.h">
       <Filter>include\ts</Filter>
     </ClInclude>

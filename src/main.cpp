@@ -12,11 +12,13 @@ namespace sample
 {
 void run_game_frame_sample(int frames = 20, float time_scale = 1.0f);
 void dump_game_frame_dot(const char* path);
+void trace_game_frame(int frames, const char* dot_path, const char* svg_path);
 void run_physics_sample(int frames = 60);
 void run_blackboard_sample();
 }
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 int main(int argc, char** argv)
@@ -39,7 +41,10 @@ int main(int argc, char** argv)
             "  --bench        run the benchmarks only\n"
             "  --stress       run the sample many frames at a fast scale (for sanitizers)\n"
             "  --dot [path]   write the game_frame graph structure as Graphviz DOT\n"
-            "                 (default game_frame.dot; render with `dot -Tsvg`)\n"
+            "                 (default sample_game_frame.dot; render with show_graph.bat)\n"
+            "  --trace [n]    run the game_frame sample n frames (default 200) with an\n"
+            "                 aggregating trace; writes sample_game_frame_avg.svg (the\n"
+            "                 average run) plus sample_game_frame.dot\n"
             "  --memprofile   run the allocation profiler (needs a TS_MEM_PROFILE build)\n"
             "  --version, -v  print the version\n"
             "  --help, -h     show this message\n",
@@ -58,9 +63,20 @@ int main(int argc, char** argv)
     // Structure dump: compile the sample's frame graph, write the DOT file, exit.
     if (argc >= 2 && std::strcmp(argv[1], "--dot") == 0)
     {
-        const char* path = argc >= 3 ? argv[2] : "game_frame.dot";
+        const char* path = argc >= 3 ? argv[2] : "sample_game_frame.dot";
         sample::dump_game_frame_dot(path);
         std::printf("wrote %s\n", path);
+        return 0;
+    }
+
+    // Aggregated trace: run the frame sample with a Graph_trace attached; writes the
+    // average-run SVG plus the structure DOT.
+    if (argc >= 2 && std::strcmp(argv[1], "--trace") == 0)
+    {
+        int frames = argc >= 3 ? std::atoi(argv[2]) : 200;
+        if (frames <= 0)
+            frames = 200;
+        sample::trace_game_frame(frames, "sample_game_frame.dot", "sample_game_frame_avg.svg");
         return 0;
     }
 

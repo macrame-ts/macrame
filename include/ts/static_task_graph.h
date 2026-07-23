@@ -27,6 +27,13 @@ namespace ts
 
 class Static_task_graph;
 
+namespace tools
+{
+// Aggregated runtime trace (tools/graph_trace.h). Forward-declared so the public header
+// does not depend on the tools folder; only static_task_graph.cpp includes it.
+class Graph_trace;
+}
+
 // A node's debug name: an optional static-storage string plus the `add_node` call site.
 // Implicit from a literal -- `g.add_node("propagation", fn, objs...)` -- and
 // default-constructible: `g.add_node({}, fn, objs...)` captures the call site alone, so
@@ -169,6 +176,14 @@ public:
     // (query with `Task::is_cancelled()`); in-flight nodes still finish.
     Task<void> execute(Scheduler& scheduler = default_scheduler(), Cancellation_token token = {});
 
+    // Attach an aggregating runtime trace (tools/graph_trace.h), or detach with nullptr.
+    // Requires a compiled graph: the compiled structure (node labels, declared accesses,
+    // edge provenance) is pushed into the trace immediately, then each completed run is
+    // folded into it at settle (cancelled runs are skipped). A recompile re-pushes the
+    // structure, resetting the trace's aggregates. The trace must outlive its attachment;
+    // it is not owned. No-op when `TS_PROFILING` is 0.
+    void set_trace(tools::Graph_trace* trace);
+
     int node_count() const { return static_cast<int>(nodes_.size()); }
 
 private:
@@ -259,7 +274,8 @@ private:
     static bool conflicts(const Node& a, const Node& b);
     void detect_cycles() const;
 #if TS_PROFILING
-    void dump_dot(const char* path) const;   // structure dump; called from compile()
+    void dump_dot(const char* path) const;      // structure dump; called from compile()
+    void push_trace_structure() const;          // labels/accesses/edges -> the attached trace
 #endif
 
     // Per-node acquire: when a node becomes data-ready it acquires the objects it touches,
@@ -300,6 +316,9 @@ private:
     std::vector<detail::Pipe*> distinct_pipes_;        // every object the graph touches (indexes pipe acquire)
     std::unique_ptr<Run_state> run_;                   // reused across execute() runs (one run at a time)
     bool compiled_ = false;
+#if TS_PROFILING
+    tools::Graph_trace* trace_ = nullptr;              // attached via set_trace; not owned
+#endif
 };
 
 } // namespace ts

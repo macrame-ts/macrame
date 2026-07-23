@@ -23,6 +23,7 @@ std::size_t physics_pose_hash(int frames);   // final snapshot hash after `frame
 #include "ts/guarded.h"
 #include "ts/deferred.h"
 #include "ts/versioned.h"
+#include "graph_trace.h"   // tools/: worker-side stamps + settle-side fold under TSan
 
 #if defined(__cpp_impl_coroutine)
 #include "ts/coroutine_support.h"
@@ -148,7 +149,9 @@ void stress_signal()
     }
 }
 
-// Graph with internal parallel bands, re-executed in a loop.
+// Graph with internal parallel bands, re-executed in a loop -- with an aggregating trace
+// attached, so the worker-side stamps and the settle-side fold run under TSan (stamps on
+// several workers, fold on the settling one, stats read on the main thread after sync).
 void stress_graph()
 {
     ts::Guarded<int> a{ 0 }, b{ 0 }, c{ 0 };
@@ -157,8 +160,13 @@ void stress_graph()
     g.add_node([](const int& x, int& y) { y = x * 10; }, a, b);
     g.add_node([](const int& x, const int& y, int& z) { z = x + y; }, a, b, c);
     g.compile();
+    ts::tools::Graph_trace trace;
+    g.set_trace(&trace);
     for (int i = 0; i < 200; ++i)
         g.execute().sync();
+    assert(trace.run_count() == 200);
+    assert(trace.node_stats(0).runs == 200);
+    g.set_trace(nullptr);
 }
 
 // A graph node fans out NESTED tasks over disjoint elements of the object it owns,

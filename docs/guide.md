@@ -563,10 +563,50 @@ graph: a `W->R` edge is real dataflow, while a `R->W` or `W->W` edge is an
 ordering artifact you may be able to remove by double-buffering (`Versioned`)
 or deferral (`Deferred`).
 
-The dump (and future profiling instrumentation) compiles out with
+The dump (and all profiling instrumentation) compiles out with
 `TS_PROFILING=0`; the `compile(dot_path)` parameter remains and becomes a
 no-op. Node names are kept in all builds — they are one pointer per node and
 pay for themselves in debugging.
+
+### 6.2 Runtime traces: the average run
+
+The structure dump shows what `compile()` derived; a runtime trace shows how it
+actually executes. Attach a `ts::tools::Graph_trace` (from `tools/graph_trace.h`)
+to a compiled graph, run it any number of times, and render the aggregate:
+
+```cpp
+ts::tools::Graph_trace trace;
+graph.set_trace(&trace);            // requires compile(); pass nullptr to detach
+for (int f = 0; f < 1000; ++f)
+    graph.execute().sync();
+trace.write_svg("my_frame_avg.svg");
+```
+
+The SVG is an **average run**: one bar per node on worker lanes (each node on
+the worker that ran it most often; a lane for non-worker threads appears only
+if used), bars at the median start with median duration, dependency edges as
+arcs above them in the structure dump's styling. Hovering a bar shows the
+node's stats — mean / P95 / σ / CV / min–max execution time, its modal worker
+and how often it ran elsewhere — plus its declared accesses (`transforms: R`).
+A panel at the top shows the global numbers: run count, makespan mean/min/max,
+worker count.
+
+No samples are stored: statistics stream into fixed-size state (mean/variance,
+P50/P95 quantile markers, min/max, a per-worker histogram), so a million runs
+cost the same memory as ten. Two consequences of drawing medians are handled
+for you: an edge's bars can overlap in the aggregate even though no real run
+overlapped them (medians aren't additive) — such bars are clamped to the
+edge's average hand-off point; and unrelated nodes that used the same lane in
+different runs may genuinely overlap — those stack into sub-rows instead,
+because that overlap is information.
+
+Tracing costs two clock reads per node per run when attached, one branch when
+not, and nothing at all with `TS_PROFILING=0`. Cancelled runs are not folded;
+a recompile re-pushes the structure and resets the aggregates.
+
+The sample wires this up as `task_system --trace [frames]`, writing
+`sample_game_frame_avg.svg` plus `sample_game_frame.dot`; a no-argument
+`show_graph.bat` renders the structure dump and opens both.
 
 ---
 
