@@ -16,7 +16,7 @@ namespace ts::tools
 
 // Aggregated runtime trace for a `Static_task_graph`: attach with
 // `graph.set_trace(&trace)` (after `compile()`), run any number of times, then
-// `write_svg(path)` renders the AVERAGE run -- node bars on worker lanes, dependency
+// `write_SVG(path)` renders the AVERAGE run -- node bars on worker lanes, dependency
 // edges as arcs above them, per-node stats in hover tooltips.
 //
 // No samples are retained: every statistic is streamed (Welford mean/variance, P^2
@@ -94,9 +94,9 @@ public:
             a.max_dur = std::max(a.max_dur, d);
             a.duration.add(d);
             a.start.add(s);
-            a.dur_p50.add(d);
-            a.dur_p95.add(d);
-            a.start_p50.add(s);
+            a.dur_P50.add(d);
+            a.dur_P95.add(d);
+            a.start_P50.add(s);
             a.dispatch_wait.add(std::max(0.0,
                 static_cast<double>(starts[i] - readys[i]) * ticks_to_us));
             int w = workers[i];
@@ -138,9 +138,9 @@ public:
         {
             a.duration = {};
             a.start = {};
-            a.dur_p50 = { 0.50 };
-            a.dur_p95 = { 0.95 };
-            a.start_p50 = { 0.50 };
+            a.dur_P50 = { 0.50 };
+            a.dur_P95 = { 0.95 };
+            a.start_P50 = { 0.50 };
             a.min_dur = 0.0;
             a.max_dur = 0.0;
             a.worker_runs.clear();
@@ -167,7 +167,7 @@ public:
     struct Node_stats
     {
         long long runs = 0;
-        double mean_us = 0.0, p50_us = 0.0, p95_us = 0.0, stddev_us = 0.0;
+        double mean_us = 0.0, P50_us = 0.0, P95_us = 0.0, stddev_us = 0.0;
         double min_us = 0.0, max_us = 0.0;
         double start_p50_us = 0.0;
         int modal_worker = -1;          // -1 = external (non-worker) threads
@@ -182,12 +182,12 @@ public:
         Node_stats s;
         s.runs = a.duration.n;
         s.mean_us = a.duration.mean;
-        s.p50_us = a.dur_p50.value();
-        s.p95_us = a.dur_p95.value();
+        s.P50_us = a.dur_P50.value();
+        s.P95_us = a.dur_P95.value();
         s.stddev_us = a.duration.stddev();
         s.min_us = a.min_dur;
         s.max_us = a.max_dur;
-        s.start_p50_us = a.start_p50.value();
+        s.start_p50_us = a.start_P50.value();
         long long modal_count = 0;
         modal_count = modal(a, s.modal_worker);
         s.off_modal = a.duration.n > 0
@@ -206,7 +206,7 @@ public:
     }
 
     // Render the average run; returns false (reported to stderr) on I/O failure.
-    bool write_svg(const char* path) const;
+    bool write_SVG(const char* path) const;
 
 private:
     // Streaming mean/variance (Welford).
@@ -310,9 +310,9 @@ private:
         std::vector<std::pair<std::string, bool>> accesses;   // object label, write?
         Welford duration;    // µs
         Welford start;       // µs offset from run begin
-        P2 dur_p50{ 0.50 };
-        P2 dur_p95{ 0.95 };
-        P2 start_p50{ 0.50 };
+        P2 dur_P50{ 0.50 };
+        P2 dur_P95{ 0.95 };
+        P2 start_P50{ 0.50 };
         double min_dur = 0.0;
         double max_dur = 0.0;
         std::vector<long long> worker_runs;   // runs per worker index
@@ -340,7 +340,7 @@ private:
     // is the incoming-edge node that finished last (its completion released this node).
     // One counter per node and edge on the chain; a single run has one chain, but across
     // runs different chains bind, so the aggregate is a FREQUENCY, not a single path.
-    // Distinct from the structural (CPM) path in `write_svg`, which sees only durations
+    // Distinct from the structural (CPM) path in `write_SVG`, which sees only durations
     // and edges -- the measured chain absorbs queue latency and pipe contention too.
     void fold_critical_chain(const long long* starts, const long long* ends, int node_count)
     {
@@ -463,7 +463,7 @@ private:
 
 // --- the average-run renderer ---------------------------------------------------------
 
-inline bool Graph_trace::write_svg(const char* path) const
+inline bool Graph_trace::write_SVG(const char* path) const
 {
     const int count = static_cast<int>(nodes_.size());
 
@@ -472,8 +472,8 @@ inline bool Graph_trace::write_svg(const char* path) const
     for (int i = 0; i < count; ++i)
     {
         const Node_agg& a = nodes_[static_cast<size_t>(i)];
-        bar_start[static_cast<size_t>(i)] = std::max(0.0, a.start_p50.value());
-        bar_end[static_cast<size_t>(i)] = bar_start[static_cast<size_t>(i)] + std::max(0.0, a.dur_p50.value());
+        bar_start[static_cast<size_t>(i)] = std::max(0.0, a.start_P50.value());
+        bar_end[static_cast<size_t>(i)] = bar_start[static_cast<size_t>(i)] + std::max(0.0, a.dur_P50.value());
     }
 
     // Topological order (Kahn over the pushed edges), for the meet-point clamp: medians
@@ -504,7 +504,7 @@ inline bool Graph_trace::write_svg(const char* path) const
     // average frame before it extends the CPM length.
     std::vector<double> dur(static_cast<size_t>(count)), est(static_cast<size_t>(count), 0.0);
     for (int i = 0; i < count; ++i)
-        dur[static_cast<size_t>(i)] = std::max(0.0, nodes_[static_cast<size_t>(i)].dur_p50.value());
+        dur[static_cast<size_t>(i)] = std::max(0.0, nodes_[static_cast<size_t>(i)].dur_P50.value());
     for (int u : topo)
         for (int e : out_edges[static_cast<size_t>(u)])
         {
@@ -742,7 +742,7 @@ inline bool Graph_trace::write_svg(const char* path) const
 
         std::vector<std::string> tip;
         tip.push_back(a.label);
-        tip.push_back("Exec: mean " + fmt_us(s.mean_us) + " | P95 " + fmt_us(s.p95_us)
+        tip.push_back("Exec: mean " + fmt_us(s.mean_us) + " | P95 " + fmt_us(s.P95_us)
              + " | \xCF\x83 " + fmt_us(s.stddev_us)
              + " (CV " + fmt_us(s.mean_us > 0.0 ? 100.0 * s.stddev_us / s.mean_us : 0.0) + "%)"
              + " | min " + fmt_us(s.min_us) + " | max " + fmt_us(s.max_us) + " \xC2\xB5s");

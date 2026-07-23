@@ -409,7 +409,7 @@ void test_graph_inline_rerun()
     TS_CHECK(read_value(x) == 5);
 }
 
-// The DOT structure dump (`compile(dot_path)`): named / unnamed labels, derived edges
+// The DOT structure dump (`compile(DOT_path)`): named / unnamed labels, derived edges
 // dashed with a conflict tooltip, an explicit edge solid (its coinciding conflict kept
 // as the tooltip).
 void test_dot_dump()
@@ -474,13 +474,13 @@ void test_graph_trace()
     {
         auto s = trace.node_stats(i);
         TS_CHECK(s.runs == n);
-        TS_CHECK(s.min_us <= s.p50_us && s.p50_us <= s.max_us);
+        TS_CHECK(s.min_us <= s.P50_us && s.P50_us <= s.max_us);
         TS_CHECK(s.mean_us >= s.min_us && s.mean_us <= s.max_us);
-        TS_CHECK(s.p95_us <= s.max_us);
+        TS_CHECK(s.P95_us <= s.max_us);
     }
 
     const char* path = "graph_trace_test.svg";
-    TS_CHECK(trace.write_svg(path));
+    TS_CHECK(trace.write_SVG(path));
     std::string svg;
     {
         std::ifstream f(path, std::ios::binary);
@@ -551,7 +551,7 @@ void test_graph_trace_critical()
     }
 
     const char* path = "graph_trace_critical_test.svg";
-    TS_CHECK(trace.write_svg(path));
+    TS_CHECK(trace.write_SVG(path));
     std::string svg;
     {
         std::ifstream f(path, std::ios::binary);
@@ -581,7 +581,7 @@ void test_graph_trace_priority()
     g.execute().sync();
 
     const char* path = "graph_trace_priority_test.svg";
-    TS_CHECK(trace.write_svg(path));
+    TS_CHECK(trace.write_SVG(path));
     std::string svg;
     {
         std::ifstream f(path, std::ios::binary);

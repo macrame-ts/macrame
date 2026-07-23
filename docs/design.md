@@ -96,7 +96,7 @@ declarations, and it is what coroutine support reuses wholesale (§5).
 ### 2.3 Introspection: the graph knows its own structure
 
 A derived schedule the user never wrote down needs a way to be read back —
-tuning a graph means seeing which edges exist and why. `compile(dot_path)`
+tuning a graph means seeing which edges exist and why. `compile(DOT_path)`
 dumps the DAG as Graphviz DOT with per-edge provenance: explicit orderings
 solid, conflict-derived edges dashed with the object and modes on hover. The
 distinction is actionable: a `W->R` edge is dataflow, while `R->W`/`W->W`

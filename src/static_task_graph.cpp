@@ -99,7 +99,7 @@ bool Static_task_graph::conflicts(const Node& a, const Node& b)
     return false;
 }
 
-void Static_task_graph::compile(const char* dot_path)
+void Static_task_graph::compile(const char* DOT_path)
 {
     for (Node& node : nodes_)
     {
@@ -189,7 +189,7 @@ void Static_task_graph::compile(const char* dot_path)
     // the DOT dump when a path was given, and a re-arm of the attached trace (its
     // aggregates reset). No-op arguments are handled inside; compiles to nothing under
     // TS_PROFILING=0.
-    tools::export_structure(nodes_, explicit_edges_, dot_path, trace_);
+    tools::export_structure(nodes_, explicit_edges_, DOT_path, trace_);
 }
 
 void Static_task_graph::set_trace(tools::Graph_trace* trace)
@@ -197,7 +197,7 @@ void Static_task_graph::set_trace(tools::Graph_trace* trace)
     if (trace && !compiled_)
         ts::fatal("Static_task_graph::set_trace requires a compiled graph (call compile() first)");
     trace_ = trace;
-    tools::export_structure(nodes_, explicit_edges_, /*dot_path*/ nullptr, trace_);
+    tools::export_structure(nodes_, explicit_edges_, /*DOT_path*/ nullptr, trace_);
 }
 
 void Static_task_graph::detect_cycles() const

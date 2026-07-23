@@ -128,12 +128,12 @@ void visit_structure(const Nodes& nodes, const std::vector<std::pair<int, int>>&
 // Consumer: the Graphviz DOT structure dump. No-op on a null path. (Internal -- the
 // graph calls `export_structure` below.)
 template<typename Nodes>
-void write_dot_dump(const Nodes& nodes, const std::vector<std::pair<int, int>>& explicit_edges,
+void write_DOT_dump(const Nodes& nodes, const std::vector<std::pair<int, int>>& explicit_edges,
                     const char* path)
 {
     if (!path)
         return;
-    Dot_writer dot;
+    DOT_writer dot;
     visit_structure(nodes, explicit_edges,
         [&dot](int i, const std::string& label, const auto&, Priority)
         {
@@ -148,10 +148,10 @@ void write_dot_dump(const Nodes& nodes, const std::vector<std::pair<int, int>>& 
                 std::string tooltip = "explicit ordering";
                 if (!detail.empty())
                     tooltip += "; " + detail;
-                dot.add_edge(from, to, Dot_writer::Edge_kind::explicit_ordering, tooltip);
+                dot.add_edge(from, to, DOT_writer::Edge_kind::explicit_ordering, tooltip);
             }
             else
-                dot.add_edge(from, to, Dot_writer::Edge_kind::derived, detail);
+                dot.add_edge(from, to, DOT_writer::Edge_kind::derived, detail);
         });
     dot.dump(path);
 }
@@ -182,13 +182,13 @@ void arm_trace(Graph_trace* trace, const Nodes& nodes,
 }
 
 // The graph's one entry point, called at compile() and set_trace(): export the compiled
-// structure to the tooling consumers -- the DOT dump when `dot_path` is non-null, and a
+// structure to the tooling consumers -- the DOT dump when `DOT_path` is non-null, and a
 // (re-)arm of the trace when `trace` is non-null.
 template<typename Nodes>
 void export_structure(const Nodes& nodes, const std::vector<std::pair<int, int>>& explicit_edges,
-                      const char* dot_path, Graph_trace* trace)
+                      const char* DOT_path, Graph_trace* trace)
 {
-    write_dot_dump(nodes, explicit_edges, dot_path);
+    write_DOT_dump(nodes, explicit_edges, DOT_path);
     arm_trace(trace, nodes, explicit_edges);
 }
 

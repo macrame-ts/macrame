@@ -565,7 +565,7 @@ ordering artifact you may be able to remove by double-buffering (`Versioned`)
 or deferral (`Deferred`).
 
 The dump (and all profiling instrumentation) compiles out with
-`TS_PROFILING=0`; the `compile(dot_path)` parameter remains and becomes a
+`TS_PROFILING=0`; the `compile(DOT_path)` parameter remains and becomes a
 no-op. Node names are kept in all builds — they are one pointer per node and
 pay for themselves in debugging.
 
@@ -580,7 +580,7 @@ ts::tools::Graph_trace trace;
 graph.set_trace(&trace);            // requires compile(); pass nullptr to detach
 for (int f = 0; f < 1000; ++f)
     graph.execute().sync();
-trace.write_svg("my_frame_avg.svg");
+trace.write_SVG("my_frame_avg.svg");
 ```
 
 The SVG is an **average run**: one bar per node on worker lanes (each node on

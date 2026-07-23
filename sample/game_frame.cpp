@@ -570,7 +570,7 @@ double serial_budget_ms()
 // `submit.after(<the three draw producers>)` -- staging holds no grant on its
 // target, so there is no conflict edge to derive; the ordering is intent, and
 // is declared as such.
-ts::Static_task_graph build_frame_graph(World& w, const char* dot_path = nullptr)
+ts::Static_task_graph build_frame_graph(World& w, const char* DOT_path = nullptr)
 {
     ts::Static_task_graph g;
 
@@ -667,7 +667,7 @@ ts::Static_task_graph build_frame_graph(World& w, const char* dot_path = nullptr
     submit;
     submit.after(culling).after(particles).after(ui);
 
-    g.compile(dot_path);
+    g.compile(DOT_path);
     return g;
 }
 
@@ -715,14 +715,14 @@ void dump_game_frame_dot(const char* path)
 // Run `frames` frames with an aggregating `Graph_trace` attached; writes the average-run
 // timeline SVG plus the structure DOT (so the pair stays in sync). With `TS_PROFILING`
 // 0 the frames still run but nothing is traced.
-void trace_game_frame(int frames, const char* dot_path, const char* svg_path)
+void trace_game_frame(int frames, const char* DOT_path, const char* SVG_path)
 {
     constexpr int entities = 1000;
     time_scale = 1.0f;
     reset_stats();
 
     World world{ entities };
-    ts::Static_task_graph graph = build_frame_graph(world, dot_path);
+    ts::Static_task_graph graph = build_frame_graph(world, DOT_path);
 #if TS_PROFILING
     ts::tools::Graph_trace trace;
     trace.set_title("Sample \"game_frame\"");
@@ -730,13 +730,13 @@ void trace_game_frame(int frames, const char* dot_path, const char* svg_path)
     for (int f = 0; f < frames; ++f)
         graph.execute().sync();
     graph.set_trace(nullptr);   // the trace is scoped inside this function; detach before it dies
-    trace.write_svg(svg_path);
+    trace.write_SVG(SVG_path);
     std::printf("[game_frame] traced %lld runs -> %s (structure: %s)\n",
-        trace.run_count(), svg_path, dot_path);
+        trace.run_count(), SVG_path, DOT_path);
 #else
     for (int f = 0; f < frames; ++f)
         graph.execute().sync();
-    (void)svg_path;
+    (void)SVG_path;
     std::printf("[game_frame] TS_PROFILING is 0: ran %d frames, no trace written\n", frames);
 #endif
 }

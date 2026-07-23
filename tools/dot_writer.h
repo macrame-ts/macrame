@@ -10,12 +10,12 @@ namespace ts::tools
 {
 
 // Minimal Graphviz DOT emitter for the graph structure dump
-// (`Static_task_graph::compile(dot_path)`). Collects nodes and edges, then writes a
+// (`Static_task_graph::compile(DOT_path)`). Collects nodes and edges, then writes a
 // `digraph` with a fixed dark style scheme (monokai-derived): green edges, solid =
 // explicit ordering (`after`/`before`), dashed = derived from declared access; a legend
 // cluster shows the styles. Render with Graphviz (`dot -Tsvg file.dot -o file.svg`, or
 // `show_graph.bat`) or any online viewer.
-class Dot_writer
+class DOT_writer
 {
 public:
     enum class Edge_kind
@@ -106,7 +106,7 @@ public:
         file.write(out.data(), static_cast<std::streamsize>(out.size()));
         if (!file)
         {
-            std::fprintf(stderr, "Dot_writer: cannot write '%s'\n", path);
+            std::fprintf(stderr, "DOT_writer: cannot write '%s'\n", path);
             return false;
         }
         return true;

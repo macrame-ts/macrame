@@ -14,7 +14,7 @@
 
 // Profiling / introspection instrumentation (the DOT structure dump today; runtime capture
 // is future work). On by default; define TS_PROFILING=0 in shipping builds to compile it
-// out (the `compile(dot_path)` parameter stays in the signature and becomes a no-op).
+// out (the `compile(DOT_path)` parameter stays in the signature and becomes a no-op).
 #ifndef TS_PROFILING
 #define TS_PROFILING 1
 #endif
@@ -167,9 +167,9 @@ public:
     }
 
     // Resolve access conflicts + explicit edges into a DAG; detect cycles. A non-null
-    // `dot_path` also writes the compiled structure as a Graphviz DOT file (see
+    // `DOT_path` also writes the compiled structure as a Graphviz DOT file (see
     // `tools/dot_writer.h` for the style scheme); no-op when `TS_PROFILING` is 0.
-    void compile(const char* dot_path = nullptr);
+    void compile(const char* DOT_path = nullptr);
 
     // Run the compiled graph; returns a completion handle. Re-runnable. If `token` is
     // cancelled, not-yet-started nodes are skipped and the completion is cancelled
