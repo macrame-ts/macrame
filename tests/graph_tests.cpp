@@ -565,8 +565,9 @@ void test_graph_trace_critical()
     g.set_trace(nullptr);
 }
 
-// Node priority reaches the trace and renders: the tooltip carries a priority line, the H
-// letter's red appears, and the legend explains the letters.
+// Node priority reaches the trace and renders: the tooltip carries a priority line, the
+// name of a high-priority node is filled with the priority red, and the legend explains
+// the name-colour scheme.
 void test_graph_trace_priority()
 {
     ts::Guarded<int> x{ 0 }, y{ 0 };
@@ -591,8 +592,16 @@ void test_graph_trace_priority()
 
     TS_CHECK(svg.find("Priority: high") != std::string::npos);   // tooltip data
     TS_CHECK(svg.find("Priority: low") != std::string::npos);
-    TS_CHECK(svg.find("#ff5f45") != std::string::npos);          // the H letter's red
-    TS_CHECK(svg.find("= node priority") != std::string::npos);  // legend row
+    // The name text is filled with the priority colour; the label renders inside the bar
+    // (with a text-anchor) or outside (without), depending on measured widths -- accept
+    // either form.
+    bool hi_red = svg.find("fill=\"#ff5f45\">hi</text>") != std::string::npos
+        || svg.find("fill=\"#ff5f45\" text-anchor=\"middle\">hi</text>") != std::string::npos;
+    bool lo_grey = svg.find("fill=\"#75715e\">lo</text>") != std::string::npos
+        || svg.find("fill=\"#75715e\" text-anchor=\"middle\">lo</text>") != std::string::npos;
+    TS_CHECK(hi_red);
+    TS_CHECK(lo_grey);
+    TS_CHECK(svg.find("= node name colour = priority") != std::string::npos);   // legend row
     g.set_trace(nullptr);
 }
 
@@ -610,8 +619,11 @@ void test_graph_trace_weld_dead_time()
     };
 
     ts::Static_task_graph g;
-    g.add_node("weld_a", [busy](int& v) { busy(300); ++v; }, x);
-    g.add_node("weld_b", [busy](int& v) { busy(100); ++v; }, x).set_inline();
+    // Body lengths set the time scale: the weld threshold is ~5px, so a ~1.2ms span
+    // budgets ~5 us of inline-dispatch gap -- headroom against Debug jitter (at 400 us
+    // total the budget was ~1.7 us and the check flaked on a loaded machine).
+    g.add_node("weld_a", [busy](int& v) { busy(900); ++v; }, x);
+    g.add_node("weld_b", [busy](int& v) { busy(300); ++v; }, x).set_inline();
     g.compile();
 
     ts::tools::Graph_trace trace;

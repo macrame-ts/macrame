@@ -434,12 +434,9 @@ private:
         return buf;
     }
 
-    // Priority display: one letter at the bar's right end. H is a warm red -- distinct
-    // from the critical pink (#f92672) and the critical-node orange (#fd971f).
-    static const char* priority_letter(Priority p)
-    {
-        return p == Priority::high ? "H" : p == Priority::low ? "L" : "N";
-    }
+    // Priority display: the node NAME takes the priority colour (high = warm red --
+    // distinct from the critical pink (#f92672) and the critical-node orange (#fd971f) --
+    // normal = green, low = grey). Criticality stays on the bar border and label weight.
     static const char* priority_color(Priority p)
     {
         return p == Priority::high ? "#ff5f45" : p == Priority::low ? "#75715e" : "#a6e22e";
@@ -764,15 +761,21 @@ inline bool Graph_trace::write_SVG(const char* path) const
         line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical dead time (successor ready but waiting)</text>\n",
              ax1 + 14.0, ly6 + 4.0);
         line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\">"
-             "<tspan font-weight=\"700\" fill=\"%s\">H</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
-             "<tspan font-weight=\"700\" fill=\"%s\">N</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
-             "<tspan font-weight=\"700\" fill=\"%s\">L</tspan>"
-             "<tspan fill=\"#cfcfc2\"> = node priority (high / normal / low)</tspan></text>\n",
+             "<tspan fill=\"%s\">high</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
+             "<tspan fill=\"%s\">normal</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
+             "<tspan fill=\"%s\">low</tspan>"
+             "<tspan fill=\"#cfcfc2\"> = node name colour = priority</tspan></text>\n",
              ax0, base + 126.0,
              priority_color(Priority::high), priority_color(Priority::normal), priority_color(Priority::low));
     }
 
-    // Lane separators + labels.
+    // Lane separators + labels. Lanes are numbered by DISPLAY position (W0 = the busiest,
+    // top row), not by physical worker id: workers are interchangeable, and after the
+    // busiest-first sort real ids would read as shuffled noise. The external lane keeps
+    // its qualitative label.
+    std::vector<int> display_pos(static_cast<size_t>(lane_count), 0);
+    for (size_t d = 0; d < lane_order.size(); ++d)
+        display_pos[static_cast<size_t>(lane_order[d])] = static_cast<int>(d);
     for (int l = 0; l < lane_count; ++l)
     {
         double top = lane_top[static_cast<size_t>(l)];
@@ -780,7 +783,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
         line("<line x1=\"%.0f\" y1=\"%.1f\" x2=\"%.0f\" y2=\"%.1f\" stroke=\"#3e3d32\" stroke-width=\"1\"/>\n",
              pad_l, top + h + lane_pad * 0.5, pad_l + plot_w, top + h + lane_pad * 0.5);
         bool ext = external_lane && l == worker_lanes;
-        std::string lbl = ext ? std::string("ext") : "w" + std::to_string(l);
+        std::string lbl = ext ? std::string("ext") : "W" + std::to_string(display_pos[static_cast<size_t>(l)]);
         out += "<text x=\"" + std::to_string(pad_l - 10.0) + "\" y=\"" + std::to_string(top + h * 0.5 + 4.0)
              + "\" font-size=\"11\" fill=\"#cfcfc2\" text-anchor=\"end\">";
         append_escaped(out, lbl);
@@ -836,13 +839,15 @@ inline bool Graph_trace::write_SVG(const char* path) const
             tip.push_back(std::move(acc));
         }
 
-        // Criticality highlight: border and label blend cyan -> orange with the node's
-        // share of binding chains (`crit_ramp`), label weight follows -- no single-path
-        // pretense; frequency IS the cross-run answer.
+        // Two colour channels on a bar: the BORDER blends cyan -> orange with the node's
+        // share of binding chains (`crit_ramp`, label weight follows -- no single-path
+        // pretense; frequency IS the cross-run answer), while the NAME text is filled with
+        // the priority colour (red high / green normal / grey low).
         double hf = crit_ramp(s.critical_share);
         std::string color = blend_hex(0x66, 0xd9, 0xef, 0xfd, 0x97, 0x1f, hf);
         double border_w = 1.0 + 1.5 * hf;
         int weight = 400 + static_cast<int>(std::lround(300.0 * hf));
+        const char* label_fill = priority_color(a.priority);
 
         out += "<g class=\"hv\" data-hl=\"" + color + "\" data-tip=\"";
         append_tip_attr(tip);
@@ -854,30 +859,15 @@ inline bool Graph_trace::write_SVG(const char* path) const
         if (text_w + 8.0 <= w)
         {
             line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"11\" font-weight=\"%d\" "
-                 "fill=\"%s\" text-anchor=\"middle\">", x + w * 0.5, yb + 14.0, weight, color.c_str());
+                 "fill=\"%s\" text-anchor=\"middle\">", x + w * 0.5, yb + 14.0, weight, label_fill);
             append_escaped(out, a.label);
             out += "</text>\n";
-            // Priority letter, right end of the bar. Inset from the border and drawn after
-            // the rect, so it sits on the flat fill (no border stroke through the glyph);
-            // when the bar fits the label but not the letter, the letter moves just past
-            // the right edge instead.
-            if (text_w + 26.0 <= w)
-                line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" font-weight=\"700\" "
-                     "fill=\"%s\" text-anchor=\"end\">%s</text>\n",
-                     x + w - 4.0, yb + 14.0, priority_color(a.priority), priority_letter(a.priority));
-            else
-                line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" font-weight=\"700\" "
-                     "fill=\"%s\">%s</text>\n",
-                     x + w + 4.0, yb + 14.0, priority_color(a.priority), priority_letter(a.priority));
         }
         else
         {
-            // Outside label: the priority letter rides along after the text.
             line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" font-weight=\"%d\" "
-                 "fill=\"%s\">", x + w + 5.0, yb + 14.0, weight, color.c_str());
+                 "fill=\"%s\">", x + w + 5.0, yb + 14.0, weight, label_fill);
             append_escaped(out, a.label);
-            line("<tspan font-weight=\"700\" fill=\"%s\"> %s</tspan>",
-                 priority_color(a.priority), priority_letter(a.priority));
             out += "</text>\n";
         }
         out += "</g>\n";
