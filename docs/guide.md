@@ -589,8 +589,9 @@ if used), bars at the median start with median duration, dependency edges as
 arcs above them in the structure dump's styling (solid = explicit, dashed =
 derived). Hovering a bar raises a formatted tooltip — the node name in the
 bar's own colour, then the stats: mean / P95 / σ / CV / min–max execution
-time, its modal worker and how often it ran elsewhere — plus its declared
-accesses (`transforms: R`). The tooltips are scripted into the SVG itself
+time — plus its declared accesses (`transforms: R`). (No worker stat: workers
+are interchangeable, so a node's lane is a presentation choice, not a
+property.) The tooltips are scripted into the SVG itself
 (they work with the file open in a browser; not when embedded via `<img>`).
 A panel at the top shows the global numbers: run count, makespan mean/min/max,
 critical work, structural CP, worker count.

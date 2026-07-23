@@ -21,6 +21,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # access-violation death tests no longer fire, so the full --tests run is not expected to pass
 # under a shipping build -- it is a release/ship artifact, not a test build.
 option(TS_SAFETY_CHECKS "Compile in the access-safety harness" ON)
+# Profiling/introspection instrumentation (DOT dump, runtime trace). OFF mirrors the
+# vcxproj Shipping configuration (TS_PROFILING=0).
+option(TS_PROFILING "Compile in graph profiling instrumentation" ON)
 
 set(TS_CORE_SOURCES
     src/access.cpp
@@ -72,6 +75,9 @@ if(WIN32)
     if(NOT TS_SAFETY_CHECKS)
         target_compile_definitions(task_system PRIVATE TS_SAFETY_CHECKS=0)
     endif()
+    if(NOT TS_PROFILING)
+        target_compile_definitions(task_system PRIVATE TS_PROFILING=0)
+    endif()
     # Exceptions off: strip CMake's default /EHsc.
     string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
     if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
@@ -93,6 +99,9 @@ else()
     target_include_directories(ts_tsan PRIVATE include sample tools)
     if(NOT TS_SAFETY_CHECKS)
         target_compile_definitions(ts_tsan PRIVATE TS_SAFETY_CHECKS=0)
+    endif()
+    if(NOT TS_PROFILING)
+        target_compile_definitions(ts_tsan PRIVATE TS_PROFILING=0)
     endif()
     target_compile_options(ts_tsan PRIVATE -fno-exceptions -pthread)
     target_link_options(ts_tsan PRIVATE -pthread)

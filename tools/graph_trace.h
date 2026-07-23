@@ -191,6 +191,13 @@ public:
         return s;
     }
 
+    // Optional title prefix for the rendered SVG (e.g. `Sample "game_frame"` -> the
+    // header reads `Sample "game_frame": average run`).
+    void set_title(std::string title)
+    {
+        title_ = std::move(title);
+    }
+
     // Render the average run; returns false (reported to stderr) on I/O failure.
     bool write_svg(const char* path) const;
 
@@ -428,6 +435,7 @@ private:
     double makespan_min_ = 0.0;
     double makespan_max_ = 0.0;
     long long runs_ = 0;
+    std::string title_;   // survives reset()/begin_structure(); set once by the owner
 };
 
 // --- the average-run renderer ---------------------------------------------------------
@@ -605,7 +613,9 @@ inline bool Graph_trace::write_svg(const char* path) const
     line("<rect width=\"%.0f\" height=\"%.0f\" fill=\"#272822\"/>\n", total_w, total_h);
 
     // Header: title, global stats, legend (inline arrows).
-    out += "<text x=\"16\" y=\"26\" font-size=\"15\" font-weight=\"600\" fill=\"#f8f8f2\">average run</text>\n";
+    out += "<text x=\"16\" y=\"26\" font-size=\"15\" font-weight=\"600\" fill=\"#f8f8f2\">";
+    append_escaped(out, title_.empty() ? "average run" : title_ + ": average run");
+    out += "</text>\n";
     {
         std::string stats = "runs: " + std::to_string(runs_)
             + "  |  makespan mean " + fmt_us(makespan_.mean) + " \xC2\xB5s (min " + fmt_us(makespan_min_)
@@ -706,8 +716,8 @@ inline bool Graph_trace::write_svg(const char* path) const
              + " | \xCF\x83 " + fmt_us(s.stddev_us)
              + " (CV " + fmt_us(s.mean_us > 0.0 ? 100.0 * s.stddev_us / s.mean_us : 0.0) + "%)"
              + " | min " + fmt_us(s.min_us) + " | max " + fmt_us(s.max_us) + " \xC2\xB5s");
-        tip.push_back("Worker: " + (s.modal_worker >= 0 ? "w" + std::to_string(s.modal_worker) : std::string("ext"))
-             + " modal, " + fmt_us(100.0 * s.off_modal) + "% off-modal");
+        // No worker line: workers are interchangeable, so the modal assignment is a lane
+        // choice, not a property of the node.
         tip.push_back("Critical: in " + fmt_us(100.0 * s.critical_share) + "% of runs");
         if (slack[static_cast<size_t>(i)] > 0.5)
             tip.push_back("Slack: " + fmt_us(slack[static_cast<size_t>(i)]) + " \xC2\xB5s");

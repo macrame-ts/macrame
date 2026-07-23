@@ -15,19 +15,97 @@
 namespace ts
 {
 
+namespace
+{
+
+// Per-run trace stamps: raw `steady_clock` ticks + executing worker per node, written
+// only while a trace is attached (each node writes its own slot; the settle's acq_rel
+// chain publishes them to the folding thread; sized once, no per-run allocation).
+// `mark_ready` is the data-ready instant (dependency counter hit zero); the gap to
+// `mark_start` is acquire + queue latency, attributed per node by the trace. Every method
+// compiles to a no-op without `TS_PROFILING`, so the run logic below carries no `#if`s.
+class Trace_stamps
+{
+#if TS_PROFILING
+public:
+    explicit Trace_stamps(size_t node_count)
+        : ready_(node_count)
+        , start_(node_count)
+        , end_(node_count)
+        , worker_(node_count)
+    {}
+
+    // Arms (or disarms) stamping for the run starting now.
+    void begin_run(const tools::Graph_trace* trace)
+    {
+        tracing_ = trace != nullptr;
+        if (tracing_)
+            run_begin_ = now();
+    }
+
+    void mark_ready(int index)
+    {
+        if (tracing_)
+            ready_[static_cast<size_t>(index)] = now();
+    }
+
+    void mark_start(int index)
+    {
+        if (tracing_)
+        {
+            start_[static_cast<size_t>(index)] = now();
+            worker_[static_cast<size_t>(index)] = current_worker_index;
+        }
+    }
+
+    void mark_end(int index)
+    {
+        if (tracing_)
+            end_[static_cast<size_t>(index)] = now();   // body + nested tasks have settled
+    }
+
+    // The one containment call: fold the run's stamps into the trace, on the settling
+    // thread. Skipped for cancelled runs (their stamps are partial).
+    void fold(tools::Graph_trace* trace, bool cancelled) const
+    {
+        if (!tracing_ || !trace || cancelled)
+            return;
+        trace->on_run_complete(ready_.data(), start_.data(), end_.data(), worker_.data(),
+            static_cast<int>(start_.size()), run_begin_, now());
+    }
+
+private:
+    static long long now()
+    {
+        return std::chrono::steady_clock::now().time_since_epoch().count();
+    }
+
+    std::vector<long long> ready_;
+    std::vector<long long> start_;
+    std::vector<long long> end_;
+    std::vector<int> worker_;
+    long long run_begin_ = 0;
+    bool tracing_ = false;
+#else
+public:
+    explicit Trace_stamps(size_t) {}
+    void begin_run(const tools::Graph_trace*) {}
+    void mark_ready(int) {}
+    void mark_start(int) {}
+    void mark_end(int) {}
+    void fold(tools::Graph_trace*, bool) const {}
+#endif
+};
+
+} // namespace
+
 struct Static_task_graph::Run_state
 {
     explicit Run_state(size_t node_count)
         : remaining_deps(node_count)
         , preheld(node_count)
-    {
-#if TS_PROFILING
-        node_ready.resize(node_count);
-        node_start.resize(node_count);
-        node_end.resize(node_count);
-        node_worker.resize(node_count);
-#endif
-    }
+        , stamps(node_count)
+    {}
 
     Static_task_graph* graph = nullptr;
     Scheduler* scheduler = nullptr;
@@ -36,29 +114,8 @@ struct Static_task_graph::Run_state
     std::vector<std::atomic<std::uint64_t>> preheld;     // per node: bitmask of pipe_indices positions handed from a predecessor (skip acquire)
     std::atomic<int> remaining_nodes{ 0 };
     detail::Task_ptr done;
-#if TS_PROFILING
-    // Trace stamps: raw `steady_clock` ticks + executing worker per node, written only
-    // when a trace is attached (each node writes its own slot; the settle's acq_rel
-    // chain publishes them to the folding thread). Sized once; no per-run allocation.
-    // `node_ready` is the data-ready instant (dependency counter hit zero); the gap to
-    // `node_start` is acquire + queue latency, attributed per node by the trace.
-    std::vector<long long> node_ready;
-    std::vector<long long> node_start;
-    std::vector<long long> node_end;
-    std::vector<int> node_worker;
-    long long run_begin = 0;
-#endif
+    Trace_stamps stamps;
 };
-
-#if TS_PROFILING
-namespace
-{
-long long trace_now()
-{
-    return std::chrono::steady_clock::now().time_since_epoch().count();
-}
-}
-#endif
 
 namespace
 {
@@ -229,14 +286,12 @@ void Static_task_graph::compile(const char* dot_path)
 
 void Static_task_graph::set_trace(tools::Graph_trace* trace)
 {
-#if TS_PROFILING
     if (trace && !compiled_)
         ts::fatal("Static_task_graph::set_trace requires a compiled graph (call compile() first)");
     trace_ = trace;
+#if TS_PROFILING
     if (trace_)
         tools::push_structure(*trace_, nodes_, explicit_edges_);
-#else
-    (void)trace;
 #endif
 }
 
@@ -271,10 +326,7 @@ void Static_task_graph::detect_cycles() const
 // single remaining_deps 0-transition, or a root at kickoff), so acquisition starts once.
 void Static_task_graph::on_data_ready(Run_state& run, int index)
 {
-#if TS_PROFILING
-    if (run.graph->trace_)
-        run.node_ready[index] = trace_now();
-#endif
+    run.stamps.mark_ready(index);
     acquire_next(run, index, 0, /*synchronous*/ true);
 }
 
@@ -367,14 +419,7 @@ void Static_task_graph::run_graph_node(const detail::Task_ptr& block, std::uint6
     auto prev = std::move(detail::current_task);
     detail::current_task = block;
 
-#if TS_PROFILING
-    if (self->graph->trace_)
-    {
-        Run_state& trun = *self->graph->run_;
-        trun.node_start[self->index] = trace_now();
-        trun.node_worker[self->index] = current_worker_index;
-    }
-#endif
+    self->graph->run_->stamps.mark_start(self->index);
 
     self->graph->nodes_[self->index].run();   // node body: installs its own Access_scope
 
@@ -432,10 +477,7 @@ void Static_task_graph::node_complete(Run_state& run, int index)
 {
     Node& node = run.graph->nodes_[index];
 
-#if TS_PROFILING
-    if (run.graph->trace_)
-        run.node_end[index] = trace_now();   // body + nested tasks have settled
-#endif
+    run.stamps.mark_end(index);
 
     // Phase 1: settle successor data-deps; collect those this node's completion makes ready
     // (it is exclusively their trigger, so this node's thread owns them until we hand off /
@@ -476,16 +518,9 @@ void Static_task_graph::node_complete(Run_state& run, int index)
         // overwriting `run.done` and dropping its own handle -- destroying this block
         // mid-notify. The local ref holds it until settle returns.
         detail::Task_ptr done = run.done;
-#if TS_PROFILING
-        // The one trace containment call: fold this run's stamps on the settling thread,
-        // BEFORE the completion handle settles (a sync()ed caller then reads a consistent
-        // trace). Cancelled runs are skipped -- their stamps are partial.
-        if (run.graph->trace_ && !run.token.is_cancel_requested())
-            run.graph->trace_->on_run_complete(
-                run.node_ready.data(), run.node_start.data(), run.node_end.data(),
-                run.node_worker.data(), static_cast<int>(run.node_start.size()),
-                run.run_begin, trace_now());
-#endif
+        // Fold this run's stamps into the trace BEFORE the completion handle settles (a
+        // sync()ed caller then reads a consistent trace).
+        run.stamps.fold(run.graph->trace_, run.token.is_cancel_requested());
         if (run.token.is_cancel_requested())
             done->cancel();
         else
@@ -507,10 +542,7 @@ Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token t
     run.scheduler = &scheduler;
     run.token = token;
     run.done = detail::make_bare_block();
-#if TS_PROFILING
-    if (trace_)
-        run.run_begin = trace_now();
-#endif
+    run.stamps.begin_run(trace_);
 
     for (size_t i = 0; i < nodes_.size(); ++i)
     {

@@ -725,6 +725,7 @@ void trace_game_frame(int frames, const char* dot_path, const char* svg_path)
     ts::Static_task_graph graph = build_frame_graph(world, dot_path);
 #if TS_PROFILING
     ts::tools::Graph_trace trace;
+    trace.set_title("Sample \"game_frame\"");
     graph.set_trace(&trace);
     for (int f = 0; f < frames; ++f)
         graph.execute().sync();

@@ -181,7 +181,8 @@ public:
     // edge provenance) is pushed into the trace immediately, then each completed run is
     // folded into it at settle (cancelled runs are skipped). A recompile re-pushes the
     // structure, resetting the trace's aggregates. The trace must outlive its attachment;
-    // it is not owned. No-op when `TS_PROFILING` is 0.
+    // it is not owned. With `TS_PROFILING` 0 the attachment is accepted but records
+    // nothing (stamps and fold compile out).
     void set_trace(tools::Graph_trace* trace);
 
     int node_count() const { return static_cast<int>(nodes_.size()); }
@@ -312,9 +313,9 @@ private:
     std::vector<detail::Pipe*> distinct_pipes_;        // every object the graph touches (indexes pipe acquire)
     std::unique_ptr<Run_state> run_;                   // reused across execute() runs (one run at a time)
     bool compiled_ = false;
-#if TS_PROFILING
-    tools::Graph_trace* trace_ = nullptr;              // attached via set_trace; not owned
-#endif
+    // Attached via set_trace; not owned. Unconditional (one pointer) so the run logic
+    // needs no `TS_PROFILING` blocks; without profiling it is stored but never read.
+    tools::Graph_trace* trace_ = nullptr;
 };
 
 } // namespace ts
