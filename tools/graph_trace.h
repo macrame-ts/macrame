@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ts/priority.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -46,6 +48,11 @@ public:
     void set_node_label(int index, std::string label)
     {
         nodes_[static_cast<size_t>(index)].label = std::move(label);
+    }
+
+    void set_node_priority(int index, Priority priority)
+    {
+        nodes_[static_cast<size_t>(index)].priority = priority;
     }
 
     void add_node_access(int index, std::string object, bool write)
@@ -299,6 +306,7 @@ private:
     struct Node_agg
     {
         std::string label;
+        Priority priority = Priority::normal;
         std::vector<std::pair<std::string, bool>> accesses;   // object label, write?
         Welford duration;    // µs
         Welford start;       // µs offset from run begin
@@ -406,6 +414,21 @@ private:
         char buf[48];
         std::snprintf(buf, sizeof buf, us >= 100.0 ? "%.0f" : "%.1f", us);
         return buf;
+    }
+
+    // Priority display: one letter at the bar's right end. H is a warm red -- distinct
+    // from the critical pink (#f92672) and the critical-node orange (#fd971f).
+    static const char* priority_letter(Priority p)
+    {
+        return p == Priority::high ? "H" : p == Priority::low ? "L" : "N";
+    }
+    static const char* priority_color(Priority p)
+    {
+        return p == Priority::high ? "#ff5f45" : p == Priority::low ? "#75715e" : "#a6e22e";
+    }
+    static const char* priority_word(Priority p)
+    {
+        return p == Priority::high ? "high" : p == Priority::low ? "low" : "normal";
     }
 
     // Criticality ramp shared by node borders/labels and edge colours: no effect under a
@@ -648,6 +671,13 @@ inline bool Graph_trace::write_svg(const char* path) const
              "stroke=\"#fd971f\" stroke-width=\"2\"/>\n", ax0, ly4 - 5.0, ax1 - ax0);
         line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical node (orange = share of runs)</text>\n",
              ax1 + 14.0, ly4 + 4.0);
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\">"
+             "<tspan font-weight=\"700\" fill=\"%s\">H</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
+             "<tspan font-weight=\"700\" fill=\"%s\">N</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
+             "<tspan font-weight=\"700\" fill=\"%s\">L</tspan>"
+             "<tspan fill=\"#cfcfc2\"> = node priority (high / normal / low)</tspan></text>\n",
+             ax0, 140.0,
+             priority_color(Priority::high), priority_color(Priority::normal), priority_color(Priority::low));
     }
 
     // Time grid + axis labels: a 1/2/5-series step giving at most ~8 ticks.
@@ -722,6 +752,7 @@ inline bool Graph_trace::write_svg(const char* path) const
         if (slack[static_cast<size_t>(i)] > 0.5)
             tip.push_back("Slack: " + fmt_us(slack[static_cast<size_t>(i)]) + " \xC2\xB5s");
         tip.push_back("Dispatch wait: mean " + fmt_us(s.dispatch_wait_us) + " \xC2\xB5s");
+        tip.push_back("Priority: " + std::string(priority_word(a.priority)));
         if (!a.accesses.empty())
         {
             std::string acc = "Access: ";
@@ -755,12 +786,27 @@ inline bool Graph_trace::write_svg(const char* path) const
                  "fill=\"%s\" text-anchor=\"middle\">", x + w * 0.5, yb + 14.0, weight, color.c_str());
             append_escaped(out, a.label);
             out += "</text>\n";
+            // Priority letter, right end of the bar. Inset from the border and drawn after
+            // the rect, so it sits on the flat fill (no border stroke through the glyph);
+            // when the bar fits the label but not the letter, the letter moves just past
+            // the right edge instead.
+            if (text_w + 26.0 <= w)
+                line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" font-weight=\"700\" "
+                     "fill=\"%s\" text-anchor=\"end\">%s</text>\n",
+                     x + w - 4.0, yb + 14.0, priority_color(a.priority), priority_letter(a.priority));
+            else
+                line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" font-weight=\"700\" "
+                     "fill=\"%s\">%s</text>\n",
+                     x + w + 4.0, yb + 14.0, priority_color(a.priority), priority_letter(a.priority));
         }
         else
         {
+            // Outside label: the priority letter rides along after the text.
             line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" font-weight=\"%d\" "
                  "fill=\"%s\">", x + w + 5.0, yb + 14.0, weight, color.c_str());
             append_escaped(out, a.label);
+            line("<tspan font-weight=\"700\" fill=\"%s\"> %s</tspan>",
+                 priority_color(a.priority), priority_letter(a.priority));
             out += "</text>\n";
         }
         out += "</g>\n";

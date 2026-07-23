@@ -4,6 +4,7 @@
 #include "graph_trace.h"
 
 #include "ts/access.h"
+#include "ts/priority.h"
 
 #include <map>
 #include <set>
@@ -20,8 +21,8 @@ namespace ts::tools
 // templates over the graph's private `Node` type: access control restricts naming a type,
 // not deducing it, so the graph passes its `nodes_` from inside a member function and
 // everything instantiates here, where `Pipe` and `Access` are complete. A `Node` provides
-// `name`/`name_site`/`has_name_site`, `access` (instance pointer + `Access` pairs), and
-// `pipes` (parallel to `access`).
+// `name`/`name_site`/`has_name_site`, `access` (instance pointer + `Access` pairs),
+// `pipes` (parallel to `access`), and `priority`.
 
 // A node's display label: its `Node_name` literal, else the named add_node's call site
 // (`file:line`, basename only), else `node<N>`.
@@ -78,9 +79,9 @@ std::string conflict_detail(const Node& a, const Node& b, std::map<const void*, 
     return detail;
 }
 
-// The one derivation walk. Visits every node -- `node_fn(index, label, accesses)` where
-// `accesses` is (object label, is_write) pairs -- then every deduped edge in compile()'s
-// order -- `edge_fn(from, to, explicit_ordering, conflict_detail)`: explicit edges first
+// The one derivation walk. Visits every node -- `node_fn(index, label, accesses,
+// priority)` where `accesses` is (object label, is_write) pairs -- then every deduped
+// edge in compile()'s order -- `edge_fn(from, to, explicit_ordering, conflict_detail)`: explicit edges first
 // (with the conflict detail of a coinciding conflict, possibly empty), then the remaining
 // conflict-derived pairs (declaration-index order, detail always non-empty). Re-derives
 // conflicts with detail -- an O(nodes^2) scan, paid only when a consumer runs; the compile
@@ -96,7 +97,7 @@ void visit_structure(const Nodes& nodes, const std::vector<std::pair<int, int>>&
         std::vector<std::pair<std::string, bool>> accesses;
         for (const auto& [instance, mode] : nodes[i].access)
             accesses.emplace_back(labels[instance], mode == Access::read_write);
-        node_fn(i, node_label(nodes[i], i), accesses);
+        node_fn(i, node_label(nodes[i], i), accesses, nodes[i].priority);
     }
 
     std::set<std::pair<int, int>> explicit_set(explicit_edges.begin(), explicit_edges.end());
@@ -121,9 +122,9 @@ void write_structure_dot(const Nodes& nodes, const std::vector<std::pair<int, in
 {
     Dot_writer dot;
     visit_structure(nodes, explicit_edges,
-        [&dot](int i, const std::string& label, const auto&)
+        [&dot](int i, const std::string& label, const auto&, Priority)
         {
-            dot.add_node(i, label);
+            dot.add_node(i, label);   // the DOT dump does not render priority (yet)
         },
         [&dot](int from, int to, bool explicit_ordering, const std::string& detail)
         {
@@ -150,9 +151,11 @@ void push_structure(Graph_trace& trace, const Nodes& nodes,
 {
     trace.begin_structure(static_cast<int>(nodes.size()));
     visit_structure(nodes, explicit_edges,
-        [&trace](int i, const std::string& label, const std::vector<std::pair<std::string, bool>>& accesses)
+        [&trace](int i, const std::string& label, const std::vector<std::pair<std::string, bool>>& accesses,
+                 Priority priority)
         {
             trace.set_node_label(i, label);
+            trace.set_node_priority(i, priority);
             for (const auto& [object, write] : accesses)
                 trace.add_node_access(i, object, write);
         },

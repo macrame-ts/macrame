@@ -565,6 +565,37 @@ void test_graph_trace_critical()
     g.set_trace(nullptr);
 }
 
+// Node priority reaches the trace and renders: the tooltip carries a priority line, the H
+// letter's red appears, and the legend explains the letters.
+void test_graph_trace_priority()
+{
+    ts::Guarded<int> x{ 0 }, y{ 0 };
+
+    ts::Static_task_graph g;
+    g.add_node("hi", [](int& v) { ++v; }, x).priority(ts::Priority::high);
+    g.add_node("lo", [](int& v) { ++v; }, y).priority(ts::Priority::low);
+    g.compile();
+
+    ts::tools::Graph_trace trace;
+    g.set_trace(&trace);
+    g.execute().sync();
+
+    const char* path = "graph_trace_priority_test.svg";
+    TS_CHECK(trace.write_svg(path));
+    std::string svg;
+    {
+        std::ifstream f(path, std::ios::binary);
+        svg.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    std::remove(path);
+
+    TS_CHECK(svg.find("Priority: high") != std::string::npos);   // tooltip data
+    TS_CHECK(svg.find("Priority: low") != std::string::npos);
+    TS_CHECK(svg.find("#ff5f45") != std::string::npos);          // the H letter's red
+    TS_CHECK(svg.find("= node priority") != std::string::npos);  // legend row
+    g.set_trace(nullptr);
+}
+
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
@@ -600,6 +631,7 @@ void run_graph_tests()
     run("graph trace", test_graph_trace);
     run("graph trace cancelled run", test_graph_trace_cancelled);
     run("graph trace critical path", test_graph_trace_critical);
+    run("graph trace priority", test_graph_trace_priority);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);
