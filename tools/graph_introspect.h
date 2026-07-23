@@ -125,10 +125,11 @@ void visit_structure(const Nodes& nodes, const std::vector<std::pair<int, int>>&
         }
 }
 
-// Consumer: the Graphviz DOT structure dump (`compile(dot_path)`). No-op on a null path.
+// Consumer: the Graphviz DOT structure dump. No-op on a null path. (Internal -- the
+// graph calls `export_structure` below.)
 template<typename Nodes>
-void write_structure_dot(const Nodes& nodes, const std::vector<std::pair<int, int>>& explicit_edges,
-                         const char* path)
+void write_dot_dump(const Nodes& nodes, const std::vector<std::pair<int, int>>& explicit_edges,
+                    const char* path)
 {
     if (!path)
         return;
@@ -155,12 +156,12 @@ void write_structure_dot(const Nodes& nodes, const std::vector<std::pair<int, in
     dot.dump(path);
 }
 
-// Consumer: the attached trace's structure (labels, priorities, declared accesses, edges
-// with provenance). No-op on a null trace; resets the trace's aggregates
-// (`begin_structure`).
+// Consumer: (re-)arm the attached trace with the compiled structure (labels, priorities,
+// declared accesses, edges with provenance) -- resets its aggregates (`begin_structure`).
+// No-op on a null trace. (Internal -- the graph calls `export_structure` below.)
 template<typename Nodes>
-void push_structure(Graph_trace* trace, const Nodes& nodes,
-                    const std::vector<std::pair<int, int>>& explicit_edges)
+void arm_trace(Graph_trace* trace, const Nodes& nodes,
+               const std::vector<std::pair<int, int>>& explicit_edges)
 {
     if (!trace)
         return;
@@ -180,20 +181,26 @@ void push_structure(Graph_trace* trace, const Nodes& nodes,
         });
 }
 
+// The graph's one entry point, called at compile() and set_trace(): export the compiled
+// structure to the tooling consumers -- the DOT dump when `dot_path` is non-null, and a
+// (re-)arm of the trace when `trace` is non-null.
+template<typename Nodes>
+void export_structure(const Nodes& nodes, const std::vector<std::pair<int, int>>& explicit_edges,
+                      const char* dot_path, Graph_trace* trace)
+{
+    write_dot_dump(nodes, explicit_edges, dot_path);
+    arm_trace(trace, nodes, explicit_edges);
+}
+
 } // namespace ts::tools
 
-#else // TS_PROFILING == 0: the graph still calls the consumers; they compile to nothing.
+#else // TS_PROFILING == 0: the graph still calls the export; it compiles to nothing.
 
 namespace ts::tools
 {
 
 template<typename Nodes>
-void write_structure_dot(const Nodes&, const std::vector<std::pair<int, int>>&, const char*)
-{
-}
-
-template<typename Nodes>
-void push_structure(Graph_trace*, const Nodes&, const std::vector<std::pair<int, int>>&)
+void export_structure(const Nodes&, const std::vector<std::pair<int, int>>&, const char*, Graph_trace*)
 {
 }
 

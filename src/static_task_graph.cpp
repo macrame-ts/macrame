@@ -185,12 +185,11 @@ void Static_task_graph::compile(const char* dot_path)
 
     compiled_ = true;
 
-    // Structure consumers (tools/graph_introspect.h): the graph only hands over its
-    // nodes and explicit edges. Both no-op on a null argument and compile to nothing
-    // under TS_PROFILING=0. The push re-arms an attached trace on recompile (resetting
-    // its aggregates).
-    tools::write_structure_dot(nodes_, explicit_edges_, dot_path);
-    tools::push_structure(trace_, nodes_, explicit_edges_);
+    // Export the compiled structure to the tooling consumers (tools/graph_introspect.h):
+    // the DOT dump when a path was given, and a re-arm of the attached trace (its
+    // aggregates reset). No-op arguments are handled inside; compiles to nothing under
+    // TS_PROFILING=0.
+    tools::export_structure(nodes_, explicit_edges_, dot_path, trace_);
 }
 
 void Static_task_graph::set_trace(tools::Graph_trace* trace)
@@ -198,7 +197,7 @@ void Static_task_graph::set_trace(tools::Graph_trace* trace)
     if (trace && !compiled_)
         ts::fatal("Static_task_graph::set_trace requires a compiled graph (call compile() first)");
     trace_ = trace;
-    tools::push_structure(trace_, nodes_, explicit_edges_);
+    tools::export_structure(nodes_, explicit_edges_, /*dot_path*/ nullptr, trace_);
 }
 
 void Static_task_graph::detect_cycles() const
