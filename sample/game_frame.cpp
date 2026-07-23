@@ -77,6 +77,8 @@ std::atomic<int> streamed{ 0 };
 std::atomic<int> batches{ 0 };
 // Deferred demo: draw commands applied by the submit node.
 std::atomic<long long> drawn{ 0 };
+// Multi-object access demo: per-frame HUD snapshots over two stores at once.
+std::atomic<int> hud_snapshots{ 0 };
 
 void update_max(std::atomic<int>& max, int value)
 {
@@ -92,6 +94,7 @@ void reset_stats()
     streamed.store(0);
     batches.store(0);
     drawn.store(0);
+    hud_snapshots.store(0);
 }
 
 // Mock a system's CPU cost: spin-wait for the budget. Precise (unlike
@@ -229,13 +232,14 @@ struct World
 {
     explicit World(int n)
         : skeletons{ ts::Named{"skeletons"}, n }, nav_mesh{ ts::Named{"nav_mesh"}, n }
-        , renderables{ ts::Named{"renderables"}, n }, velocities{ ts::Named{"velocities"}, n }
+        , renderables{ ts::Named{"renderables"}, n }
         , asset_source{ ts::Named{"asset_source"}, n }
         , input{ ts::Named{"input"}, n }, net{ ts::Named{"net"}, n }
         , assets{ ts::Named{"assets"}, n }, combat{ ts::Named{"combat"}, n }
         , economy{ ts::Named{"economy"}, n }, quests{ ts::Named{"quests"}, n }
         , paths{ ts::Named{"paths"}, n }, intents{ ts::Named{"intents"}, n }
         , local_xf{ ts::Named{"local_xf"}, n }, bodies{ ts::Named{"bodies"}, n }
+        , velocities{ ts::Named{"velocities"}, n }
         , cloth{ ts::Named{"cloth"}, n }, visibility{ ts::Named{"visibility"}, n }
         , particles{ ts::Named{"particles"}, n }, audio_out{ ts::Named{"audio_out"}, n }
         , UI{ ts::Named{"UI"}, n }
@@ -245,7 +249,6 @@ struct World
     ts::Guarded<Skeletons> skeletons;
     ts::Guarded<Nav_mesh> nav_mesh;          // Navigation reads the store; AI queries the service
     ts::Guarded<Renderables> renderables;
-    ts::Guarded<Velocities> velocities;
     ts::Guarded<Asset_source> asset_source;  // Streaming loads from this
 
     // single-writer outputs (writer named by the type)
@@ -259,6 +262,7 @@ struct World
     ts::Guarded<Intents> intents;
     ts::Guarded<Local_xf> local_xf;
     ts::Guarded<Bodies> bodies;
+    ts::Guarded<Velocities> velocities;      // physics integrates them; propagation reads them
 
     // the published transforms: staged by propagation, flipped by the publish node
     ts::Versioned<Transforms> transforms{ ts::Named{"transforms"} };
@@ -483,10 +487,14 @@ void tick_animation(const Skeletons& skeletons, const Intents& intents,
     parallel_fill(local_xf, 2.0f, 3.0);   // internal parallelism: per-skeleton
 }
 
-void tick_physics(const Velocities& velocities, const Combat& combat,
+// Physics owns two outputs: it integrates velocities (write) and resolves body
+// positions from them. Propagation reads both bodies and velocities, so the
+// physics->propagation edge derives from TWO conflicts -- the dump shows them
+// joined in one tooltip.
+void tick_physics(Velocities& velocities, const Combat& combat,
                   Bodies& bodies)                                                 // 4.5
 {
-    read_all(velocities);
+    fill(velocities, 1.0f);               // velocity integration (deterministic)
     read_all(combat);
     parallel_fill(bodies, 3.0f, 4.5);     // internal parallelism: per-island
 }
@@ -566,22 +574,25 @@ double serial_budget_ms()
 // Nodes are added in frame order, so the conflict tiebreak (declaration index)
 // matches intent: everything before the publish node reads last frame's
 // transforms, everything after it reads this frame's. The explicit edges are
-// exactly the grant-free orderings: `flip.after(propagation)` and
-// `submit.after(<the three draw producers>)` -- staging holds no grant on its
-// target, so there is no conflict edge to derive; the ordering is intent, and
-// is declared as such.
+// the grant-free orderings -- `flip.after(propagation)` and
+// `submit.after(<the three draw producers>)`, where staging holds no grant on
+// its target so there is no conflict edge to derive -- plus one pinned intent:
+// `cloth.after(flip)` duplicates a derived edge on purpose (see the cloth
+// node).
 ts::Static_task_graph build_frame_graph(World& w, const char* DOT_path = nullptr)
 {
     ts::Static_task_graph g;
 
-    // Node priorities are deliberately left at default. A hand optimization
-    // pass (see docs/TODO.md, profiler-guided optimization) tried rank
-    // priorities and prev-transform placements for cloth/particles; no
-    // configuration beat plain greedy dispatch beyond measurement noise, and
-    // two mechanisms argue against naive ranking: `low` is valve-gated
-    // background (a mislabeled dependency stalls its dependents), and `high`
-    // dispatches through the global queues rather than the per-worker deques.
-    // The simplest configuration wins until measured evidence says otherwise.
+    // Node priorities model importance, not measured wins: a hand pass (see
+    // docs/TODO.md, profiler-guided optimization) found no configuration beating
+    // plain greedy dispatch beyond noise at this scale, so most nodes stay at
+    // default. The marked ones state semantics -- `low` on the deferrable
+    // terminal leaves (audio, debug_overlay; safe because nothing depends on
+    // them -- `low` is valve-gated background, and a mislabeled dependency would
+    // stall its dependents), `high` on the frame's longest pole (physics) and
+    // the present deadline (submit). Their real function is arbitration against
+    // DYNAMIC work sharing the same queues -- nav queries, streaming
+    // continuations, `parallel_for` slices -- not ordering the graph itself.
     g.add_node("input", &tick_input, w.input);
     g.add_node("networking", &tick_networking, w.input, w.net);
     // Streaming and AI capture the service wrappers (they submit async work);
@@ -602,28 +613,33 @@ ts::Static_task_graph build_frame_graph(World& w, const char* DOT_path = nullptr
     // that filler slices delay the serial spine (a ready node waits for a
     // worker to finish its current slice; nothing evicts a runner). Notes in
     // docs/TODO.md under profiler-guided optimization; they stay post-flip.
-    g.add_node("audio", &tick_audio, w.transforms.state(), w.audio_out);
+    g.add_node("audio", &tick_audio, w.transforms.state(), w.audio_out)
+        .priority(ts::Priority::low);
     g.add_node("AI", [&w](const Transforms& prev_xf, const Paths& paths, const Combat& combat,
                           const Economy& economy, const Quests& quests, Intents& intents)
     {
         tick_AI(w.nav_mesh, prev_xf, paths, combat, economy, quests, intents);
     }, w.transforms.state(), w.paths, w.combat, w.economy, w.quests, w.intents);
     g.add_node("animation", &tick_animation, w.skeletons, w.intents, w.local_xf);
-    g.add_node("physics", &tick_physics, w.velocities, w.combat, w.bodies);
+    g.add_node("physics", &tick_physics, w.velocities, w.combat, w.bodies)
+        .priority(ts::Priority::high);
 
     // Propagation: computes this frame's transforms from animation + physics
-    // output and stages the batch -- one command, cheap to replay. No grant on
-    // the transforms; it never contends with their readers.
+    // output (velocity-aware interpolation reads the velocities too) and stages
+    // the batch -- one command, cheap to replay. No grant on the transforms; it
+    // never contends with their readers.
     auto propagation = g.add_node("propagation",
-        [rec = w.transforms.recorder()](const Local_xf& local_xf, const Bodies& bodies) mutable
+        [rec = w.transforms.recorder()](const Local_xf& local_xf, const Bodies& bodies,
+                                        const Velocities& velocities) mutable
         {
+            read_all(velocities);
             std::vector<float> out(static_cast<std::size_t>(local_xf.size()));
             for (int i = 0, n = local_xf.size(); i < n; ++i)
                 out[static_cast<std::size_t>(i)] = local_xf.get(i) + bodies.get(i);
             parallel_cost(1.0);   // internal parallelism: per-subtree
             rec.stage([batch = std::move(out)](Transforms& t) { t.apply(batch); });
         },
-        w.local_xf, w.bodies);
+        w.local_xf, w.bodies, w.velocities);
     propagation;
 
     auto flip = g.add_node("flip", ts::publish_body(w.transforms), w.transforms.state());
@@ -633,7 +649,14 @@ ts::Static_task_graph build_frame_graph(World& w, const char* DOT_path = nullptr
     // minted in declaration order (cloth has none; culling, particles, UI) --
     // the apply order at commit is recorder-creation order, fixed at build
     // time, independent of thread timing.
-    g.add_node("cloth", &tick_cloth, w.transforms.state(), w.cloth);
+    // Cloth's post-flip position is INTENT, pinned explicitly on top of the
+    // derived conflict edge: if a future latency experiment moves cloth onto
+    // last frame's transforms (the audio trade), the derived edge disappears
+    // with the declaration -- this edge keeps the schedule shape stable while
+    // the access experiment runs. The dump renders the pair solid (explicit
+    // wins) with the conflict kept in the tooltip.
+    auto cloth = g.add_node("cloth", &tick_cloth, w.transforms.state(), w.cloth);
+    cloth.after(flip);
     auto culling = g.add_node("culling",
         [rec = w.draw_staged.recorder()](const Transforms& xf, const Renderables& r,
                                          Visibility& v) mutable
@@ -652,7 +675,7 @@ ts::Static_task_graph build_frame_graph(World& w, const char* DOT_path = nullptr
         read_all(economy);                               // deduces a read via the probe
         read_all(xf);
         spin(0.2);
-    }, w.economy, w.transforms.state());
+    }, w.economy, w.transforms.state()).priority(ts::Priority::low);
     // `UI_node`, not `UI`: the handle would shadow the `UI` type in the lambda parameter.
     auto UI_node = g.add_node("UI",
         [rec = w.draw_staged.recorder()](const Quests& quests, UI& u) mutable
@@ -667,6 +690,7 @@ ts::Static_task_graph build_frame_graph(World& w, const char* DOT_path = nullptr
     }, w.transforms.state(), w.draw_lists);
     submit;
     submit.after(culling).after(particles).after(UI_node);
+    submit.priority(ts::Priority::high);
 
     g.compile(DOT_path);
     return g;
@@ -694,7 +718,20 @@ void game_frame_stats(int frames, float scale,
     using clock = std::chrono::steady_clock;
     auto t0 = clock::now();
     for (int f = 0; f < frames; ++f)
+    {
+        // Multi-object access demo: one HUD snapshot reads two stores in a single
+        // atomically-acquired call -- `ts::async` takes both pipes in canonical
+        // order, so it interleaves safely with the frame's nodes (it queues behind
+        // whichever node holds a store rather than racing it). Fire-and-forget;
+        // World destruction drains the pipes.
+        ts::async([](const Combat& combat, const Economy& economy)
+        {
+            if (combat.size() > 0 && economy.size() > 0)
+                hud_snapshots.fetch_add(1, std::memory_order_relaxed);
+        }, world.combat, world.economy);
+
         graph.execute().sync();
+    }
     double total_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
 
     avg_ms = total_ms / frames;
@@ -760,6 +797,8 @@ void run_game_frame_sample(int frames, float scale)
         streamed.load(), batches.load());
     std::printf("  %lld draw commands staged by 3 producers, applied by submit via Deferred\n",
         drawn.load());
+    std::printf("  %d HUD snapshots via multi-object ts::async (combat + economy)\n",
+        hud_snapshots.load());
 }
 
 } // namespace sample
