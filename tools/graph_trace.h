@@ -401,6 +401,24 @@ private:
         return buf;
     }
 
+    // Criticality ramp shared by node borders/labels and edge colours: no effect under a
+    // 10% share of binding chains, full effect from 80% up, linear between.
+    static double crit_ramp(double share)
+    {
+        return share < 0.10 ? 0.0 : std::min(1.0, (share - 0.10) / 0.70);
+    }
+
+    // Linear colour blend for the criticality ramps.
+    static std::string blend_hex(int r0, int g0, int b0, int r1, int g1, int b1, double f)
+    {
+        char buf[8];
+        std::snprintf(buf, sizeof buf, "#%02x%02x%02x",
+            static_cast<int>(std::lround(r0 + (r1 - r0) * f)),
+            static_cast<int>(std::lround(g0 + (g1 - g0) * f)),
+            static_cast<int>(std::lround(b0 + (b1 - b0) * f)));
+        return buf;
+    }
+
     std::vector<Node_agg> nodes_;
     std::vector<Edge_agg> edges_;
     std::vector<std::vector<int>> in_edges_;   // edge indices by target, for the chain walk
@@ -551,7 +569,7 @@ inline bool Graph_trace::write_svg(const char* path) const
     for (int i = 0; i < count; ++i)
         span_us = std::max(span_us, bar_end[static_cast<size_t>(i)]);
     const double pad_l = 64.0, pad_r = 28.0, plot_w = 1150.0;
-    const double header_h = 114.0, axis_h = 30.0;
+    const double header_h = 150.0, axis_h = 30.0;
     const double row_h = 30.0, bar_h = 20.0, lane_pad = 6.0;
     const double px_per_us = plot_w / span_us;
 
@@ -599,25 +617,27 @@ inline bool Graph_trace::write_svg(const char* path) const
         out += "</text>\n";
     }
     {
-        // Legend rows: a short sample arrow, then its explanation, inline.
-        const double ly1 = 64.0, ly2 = 82.0, ax0 = 16.0, ax1 = 56.0;
-        line("<line x1=\"%.0f\" y1=\"%.0f\" x2=\"%.0f\" y2=\"%.0f\" stroke=\"#f92672\" stroke-width=\"2.4\"/>\n",
-             ax0, ly1, ax1, ly1);
-        line("<polygon points=\"%.0f,%.0f %.0f,%.0f %.0f,%.0f\" fill=\"#f92672\"/>\n",
-             ax1, ly1 - 4.0, ax1, ly1 + 4.0, ax1 + 7.0, ly1);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">explicit ordering (after/before)</text>\n",
-             ax1 + 14.0, ly1 + 4.0);
-        line("<line x1=\"%.0f\" y1=\"%.0f\" x2=\"%.0f\" y2=\"%.0f\" stroke=\"#a6e22e\" stroke-width=\"1.8\" "
-             "stroke-dasharray=\"5,3\"/>\n", ax0, ly2, ax1, ly2);
-        line("<polygon points=\"%.0f,%.0f %.0f,%.0f %.0f,%.0f\" fill=\"#a6e22e\"/>\n",
-             ax1, ly2 - 4.0, ax1, ly2 + 4.0, ax1 + 7.0, ly2);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">derived from declared access (hover for detail)</text>\n",
-             ax1 + 14.0, ly2 + 4.0);
-        const double ly3 = 100.0;
+        // Legend rows: a short sample arrow, then its explanation, inline. Line STYLE
+        // carries provenance (solid = explicit, dashed = derived); colour carries
+        // criticality (green -> pink by share of binding chains).
+        const double ax0 = 16.0, ax1 = 56.0;
+        auto legend_arrow = [&](double ly, const char* stroke, const char* dash, const char* text)
+        {
+            line("<line x1=\"%.0f\" y1=\"%.0f\" x2=\"%.0f\" y2=\"%.0f\" stroke=\"%s\" stroke-width=\"1.8\"%s/>\n",
+                 ax0, ly, ax1, ly, stroke, dash);
+            line("<polygon points=\"%.0f,%.0f %.0f,%.0f %.0f,%.0f\" fill=\"%s\"/>\n",
+                 ax1, ly - 4.0, ax1, ly + 4.0, ax1 + 7.0, ly, stroke);
+            line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">%s</text>\n",
+                 ax1 + 14.0, ly + 4.0, text);
+        };
+        legend_arrow(64.0, "#a6e22e", "", "explicit ordering (after/before)");
+        legend_arrow(82.0, "#a6e22e", " stroke-dasharray=\"5,3\"", "derived from declared access (hover for detail)");
+        legend_arrow(100.0, "#f92672", "", "critical-path edge (pink = share of runs)");
+        const double ly4 = 118.0;
         line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"#3e3d32\" "
-             "stroke=\"#fd971f\" stroke-width=\"2\"/>\n", ax0, ly3 - 5.0, ax1 - ax0);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical path (brightness = share of runs)</text>\n",
-             ax1 + 14.0, ly3 + 4.0);
+             "stroke=\"#fd971f\" stroke-width=\"2\"/>\n", ax0, ly4 - 5.0, ax1 - ax0);
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical node (orange = share of runs)</text>\n",
+             ax1 + 14.0, ly4 + 4.0);
     }
 
     // Time grid + axis labels: a 1/2/5-series step giving at most ~8 ticks.
@@ -656,62 +676,80 @@ inline bool Graph_trace::write_svg(const char* path) const
         out += "</text>\n";
     }
 
-    // Bars (with tooltips), then edges on top.
+    // Multi-line tooltip data: each line escaped, joined with a literal `&#10;` character
+    // reference -- a raw newline in an attribute value would be normalized to a space by
+    // the XML parser; the reference survives and reaches the overlay script as '\n'.
+    auto append_tip_attr = [&](const std::vector<std::string>& lines_v)
+    {
+        for (size_t k = 0; k < lines_v.size(); ++k)
+        {
+            if (k > 0)
+                out += "&#10;";
+            append_escaped(out, lines_v[k]);
+        }
+    };
+
+    // Bars (tooltip data on the group; the overlay script renders it), then edges on top.
     for (int i = 0; i < count; ++i)
     {
         const Node_agg& a = nodes_[static_cast<size_t>(i)];
         Node_stats s = node_stats(i);
         double x = X(bar_start[static_cast<size_t>(i)]);
-        double w = std::max(2.0, (bar_end[static_cast<size_t>(i)] - bar_start[static_cast<size_t>(i)]) * px_per_us);
+        // Floor the drawn width so near-zero-duration nodes (the publish flip, ~µs) stay
+        // visible and hoverable; the truthful duration is in the tooltip.
+        double w = std::max(3.0, (bar_end[static_cast<size_t>(i)] - bar_start[static_cast<size_t>(i)]) * px_per_us);
         double yb = bar_top(i);
 
-        std::string tip = a.label;
-        tip += "\nruns: " + std::to_string(s.runs);
-        tip += "\nexec: mean " + fmt_us(s.mean_us) + " | P95 " + fmt_us(s.p95_us)
+        std::vector<std::string> tip;
+        tip.push_back(a.label);
+        tip.push_back("Exec: mean " + fmt_us(s.mean_us) + " | P95 " + fmt_us(s.p95_us)
              + " | \xCF\x83 " + fmt_us(s.stddev_us)
              + " (CV " + fmt_us(s.mean_us > 0.0 ? 100.0 * s.stddev_us / s.mean_us : 0.0) + "%)"
-             + " | min " + fmt_us(s.min_us) + " | max " + fmt_us(s.max_us) + " \xC2\xB5s";
-        tip += "\nworker: " + (s.modal_worker >= 0 ? "w" + std::to_string(s.modal_worker) : std::string("ext"))
-             + " modal, " + fmt_us(100.0 * s.off_modal) + "% off-modal";
-        tip += "\ncritical in " + fmt_us(100.0 * s.critical_share) + "% of runs";
+             + " | min " + fmt_us(s.min_us) + " | max " + fmt_us(s.max_us) + " \xC2\xB5s");
+        tip.push_back("Worker: " + (s.modal_worker >= 0 ? "w" + std::to_string(s.modal_worker) : std::string("ext"))
+             + " modal, " + fmt_us(100.0 * s.off_modal) + "% off-modal");
+        tip.push_back("Critical: in " + fmt_us(100.0 * s.critical_share) + "% of runs");
         if (slack[static_cast<size_t>(i)] > 0.5)
-            tip += "\nslack: " + fmt_us(slack[static_cast<size_t>(i)]) + " \xC2\xB5s";
-        tip += "\ndispatch wait: mean " + fmt_us(s.dispatch_wait_us) + " \xC2\xB5s";
+            tip.push_back("Slack: " + fmt_us(slack[static_cast<size_t>(i)]) + " \xC2\xB5s");
+        tip.push_back("Dispatch wait: mean " + fmt_us(s.dispatch_wait_us) + " \xC2\xB5s");
         if (!a.accesses.empty())
         {
-            tip += "\naccess:";
-            for (const auto& [obj, write] : a.accesses)
-                tip += "\n  " + obj + ": " + (write ? "W" : "R");
+            std::string acc = "Access: ";
+            for (size_t k = 0; k < a.accesses.size(); ++k)
+            {
+                if (k > 0)
+                    acc += "; ";
+                acc += a.accesses[k].first + ": " + (a.accesses[k].second ? "W" : "R");
+            }
+            tip.push_back(std::move(acc));
         }
 
-        // Criticality highlight: orange border, thickness/brightness/label weight scaled
-        // by the node's share of binding chains -- full effect at >= 80%, fading below,
-        // none under 10% (no single-path pretense; frequency IS the cross-run answer).
-        double hf = s.critical_share < 0.10
-            ? 0.0 : std::min(1.0, (s.critical_share - 0.10) / 0.70);
-        const char* border = hf > 0.0 ? "#fd971f" : "#66d9ef";
+        // Criticality highlight: border and label blend cyan -> orange with the node's
+        // share of binding chains (`crit_ramp`), label weight follows -- no single-path
+        // pretense; frequency IS the cross-run answer.
+        double hf = crit_ramp(s.critical_share);
+        std::string color = blend_hex(0x66, 0xd9, 0xef, 0xfd, 0x97, 0x1f, hf);
         double border_w = 1.0 + 1.5 * hf;
-        double border_op = hf > 0.0 ? 0.45 + 0.55 * hf : 1.0;
         int weight = 400 + static_cast<int>(std::lround(300.0 * hf));
 
-        out += "<g><title>";
-        append_escaped(out, tip);
-        out += "</title>\n";
+        out += "<g class=\"hv\" data-hl=\"" + color + "\" data-tip=\"";
+        append_tip_attr(tip);
+        out += "\">\n";
         line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.0f\" rx=\"3\" "
-             "fill=\"#3e3d32\" stroke=\"%s\" stroke-width=\"%.1f\" stroke-opacity=\"%.2f\"/>\n",
-             x, yb, w, bar_h, border, border_w, border_op);
+             "fill=\"#3e3d32\" stroke=\"%s\" stroke-width=\"%.1f\"/>\n",
+             x, yb, w, bar_h, color.c_str(), border_w);
         double text_w = 6.4 * static_cast<double>(a.label.size());
         if (text_w + 8.0 <= w)
         {
             line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"11\" font-weight=\"%d\" "
-                 "fill=\"#f8f8f2\" text-anchor=\"middle\">", x + w * 0.5, yb + 14.0, weight);
+                 "fill=\"%s\" text-anchor=\"middle\">", x + w * 0.5, yb + 14.0, weight, color.c_str());
             append_escaped(out, a.label);
             out += "</text>\n";
         }
         else
         {
             line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" font-weight=\"%d\" "
-                 "fill=\"#cfcfc2\">", x + w + 5.0, yb + 14.0, weight);
+                 "fill=\"%s\">", x + w + 5.0, yb + 14.0, weight, color.c_str());
             append_escaped(out, a.label);
             out += "</text>\n";
         }
@@ -725,27 +763,97 @@ inline bool Graph_trace::write_svg(const char* path) const
         double x2 = X(bar_start[static_cast<size_t>(e.to)]);
         double y2 = bar_top(e.to);
         double lift = std::min(48.0, 14.0 + std::abs(x2 - x1) * 0.05 + std::abs(y2 - y1) * 0.12);
-        std::string tip = e.explicit_ordering
-            ? (e.conflict.empty() ? std::string("explicit ordering") : "explicit ordering; " + e.conflict)
-            : e.conflict;
-        const char* stroke = e.explicit_ordering ? "#f92672" : "#a6e22e";
+        std::vector<std::string> tip;
+        tip.push_back(e.explicit_ordering ? "explicit ordering" : "derived from declared access");
+        if (!e.conflict.empty())
+            tip.push_back(e.conflict);
+        tip.push_back("Critical: in " + fmt_us(runs_ > 0
+            ? 100.0 * static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0) + "% of runs");
+        // Dash carries provenance (solid = explicit, dashed = derived); colour carries
+        // criticality, green -> pink by the edge's share of binding chains. Width is
+        // uniform per kind.
+        double crit = crit_ramp(runs_ > 0
+            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0);
+        std::string stroke = blend_hex(0xa6, 0xe2, 0x2e, 0xf9, 0x26, 0x72, crit);
         const char* extra = e.explicit_ordering ? "" : " stroke-dasharray=\"5,3\"";
-        // Thickness carries the edge's criticality (share of runs it was on the binding
-        // chain), up to ~2x; color keeps the provenance identity.
-        double crit = runs_ > 0
-            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
-        double width = (e.explicit_ordering ? 2.0 : 1.5) * (1.0 + crit);
+        double width = e.explicit_ordering ? 2.0 : 1.5;
 
-        out += "<g><title>";
-        append_escaped(out, tip);
-        out += "</title>\n";
+        out += "<g class=\"hv\" data-hl=\"" + stroke + "\" data-tip=\"";
+        append_tip_attr(tip);
+        out += "\">\n";
+        // Invisible fat twin of the arc: a comfortable hover target for a 2px stroke.
+        line("<path d=\"M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f\" fill=\"none\" "
+             "stroke=\"transparent\" stroke-width=\"9\"/>\n",
+             x1, y1, x1, y1 - lift, x2, y2 - lift, x2, y2);
         line("<path d=\"M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f\" fill=\"none\" "
              "stroke=\"%s\" stroke-width=\"%.1f\"%s/>\n",
-             x1, y1, x1, y1 - lift, x2, y2 - lift, x2, y2, stroke, width, extra);
+             x1, y1, x1, y1 - lift, x2, y2 - lift, x2, y2, stroke.c_str(), width, extra);
         line("<polygon points=\"%.1f,%.1f %.1f,%.1f %.1f,%.1f\" fill=\"%s\"/>\n",
-             x2 - 3.5, y2 - 7.0, x2 + 3.5, y2 - 7.0, x2, y2 - 0.5, stroke);
+             x2 - 3.5, y2 - 7.0, x2 + 3.5, y2 - 7.0, x2, y2 - 0.5, stroke.c_str());
         out += "</g>\n";
     }
+
+    // Hover-tooltip overlay: renders each element's `data-tip` lines styled (headline in
+    // the element's own colour, field names bold). Runs when the SVG is opened as a
+    // document (browser tab, <object>, <iframe>); inert when embedded via <img> --
+    // acceptable, the picture still stands alone.
+    out += "<style>.hv{cursor:default}</style>\n";
+    out += "<script><![CDATA[\n"
+        "(function(){\n"
+        "var svg=document.documentElement;\n"
+        "var NS='http://www.w3.org/2000/svg';\n"
+        "var tt=document.createElementNS(NS,'g');\n"
+        "tt.setAttribute('visibility','hidden');tt.setAttribute('pointer-events','none');\n"
+        "var bg=document.createElementNS(NS,'rect');\n"
+        "bg.setAttribute('fill','#1d1e19');bg.setAttribute('fill-opacity','0.96');\n"
+        "bg.setAttribute('stroke','#66d9ef');bg.setAttribute('rx','4');\n"
+        "var tx=document.createElementNS(NS,'text');\n"
+        "tx.setAttribute('font-size','11');tx.setAttribute('font-family',\"'Segoe UI', sans-serif\");\n"
+        "tt.appendChild(bg);tt.appendChild(tx);svg.appendChild(tt);\n"
+        "function show(el,evt){\n"
+        "  while(tx.firstChild)tx.removeChild(tx.firstChild);\n"
+        "  var lines=(el.getAttribute('data-tip')||'').split('\\n');\n"
+        "  var hl=el.getAttribute('data-hl')||'#66d9ef';\n"
+        "  bg.setAttribute('stroke',hl);\n"
+        "  for(var i=0;i<lines.length;i++){\n"
+        "    var t=document.createElementNS(NS,'tspan');\n"
+        "    t.setAttribute('x','8');t.setAttribute('dy',i===0?'17':'14');\n"
+        "    if(i===0){\n"
+        "      t.setAttribute('font-weight','700');t.setAttribute('font-size','13');\n"
+        "      t.setAttribute('fill',hl);t.textContent=lines[i];\n"
+        "    }else{\n"
+        "      var p=lines[i].indexOf(': ');\n"
+        "      if(p>0){\n"
+        "        var b=document.createElementNS(NS,'tspan');\n"
+        "        b.setAttribute('font-weight','700');b.setAttribute('fill','#f8f8f2');\n"
+        "        b.textContent=lines[i].slice(0,p+1);t.appendChild(b);\n"
+        "        var v=document.createElementNS(NS,'tspan');\n"
+        "        v.setAttribute('fill','#cfcfc2');v.textContent=' '+lines[i].slice(p+2);t.appendChild(v);\n"
+        "      }else{t.setAttribute('fill','#cfcfc2');t.textContent=lines[i];}\n"
+        "    }\n"
+        "    tx.appendChild(t);\n"
+        "  }\n"
+        "  tt.setAttribute('visibility','visible');\n"
+        "  move(evt);\n"
+        "}\n"
+        "function move(evt){\n"
+        "  var pt=svg.createSVGPoint();pt.x=evt.clientX;pt.y=evt.clientY;\n"
+        "  var m=svg.getScreenCTM();if(m)pt=pt.matrixTransform(m.inverse());\n"
+        "  var b=tx.getBBox();var w=b.width+16,h=b.height+12;\n"
+        "  bg.setAttribute('width',w);bg.setAttribute('height',h);\n"
+        "  var vb=svg.viewBox.baseVal;\n"
+        "  var x=pt.x+14,y=pt.y+14;\n"
+        "  if(x+w>vb.width-4)x=pt.x-w-10;if(x<4)x=4;\n"
+        "  if(y+h>vb.height-4)y=pt.y-h-10;if(y<4)y=4;\n"
+        "  tt.setAttribute('transform','translate('+x+','+y+')');\n"
+        "}\n"
+        "Array.prototype.forEach.call(document.querySelectorAll('.hv'),function(el){\n"
+        "  el.addEventListener('mouseenter',function(e){show(el,e);});\n"
+        "  el.addEventListener('mousemove',move);\n"
+        "  el.addEventListener('mouseleave',function(){tt.setAttribute('visibility','hidden');});\n"
+        "});\n"
+        "})();\n"
+        "]]></script>\n";
 
     out += "</svg>\n";
 

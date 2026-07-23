@@ -441,7 +441,7 @@ void test_dot_dump()
     // a->b: derived from the x conflict (W->R), dashed + tooltip with x's `ts::Named` name
     TS_CHECK(dot.find("n0 -> n1 [style=dashed, color=\"#a6e22e\", penwidth=1.8, tooltip=\"counter: W->R\"") != std::string::npos);
     // b->c: explicit (solid, no dash), tooltip still carries the y conflict
-    TS_CHECK(dot.find("n1 -> n2 [color=\"#f92672\", penwidth=2.6, tooltip=\"explicit ordering; obj1: W->R\"") != std::string::npos);
+    TS_CHECK(dot.find("n1 -> n2 [color=\"#a6e22e\", penwidth=2.0, tooltip=\"explicit ordering; obj1: W->R\"") != std::string::npos);
 
     // The graph still runs after a dumping compile.
     g.execute().sync();
@@ -490,8 +490,11 @@ void test_graph_trace()
 
     TS_CHECK(svg.find("writer_a") != std::string::npos);
     TS_CHECK(svg.find("reader_b") != std::string::npos);
-    TS_CHECK(svg.find("counter: W") != std::string::npos);   // declared access in the tooltip
+    TS_CHECK(svg.find("counter: W") != std::string::npos);   // declared access in the tooltip data
     TS_CHECK(svg.find("runs: 20") != std::string::npos);     // global stats panel
+    TS_CHECK(svg.find("data-tip=") != std::string::npos);    // overlay tooltip data present
+    TS_CHECK(svg.find("<script>") != std::string::npos);     // the overlay script itself
+    TS_CHECK(svg.find("&#10;runs") == std::string::npos);    // per-node runs line removed (global only)
 
     g.set_trace(nullptr);
     g.execute().sync();
@@ -556,8 +559,9 @@ void test_graph_trace_critical()
     }
     std::remove(path);
 
-    TS_CHECK(svg.find("critical in ") != std::string::npos);          // node tooltip
-    TS_CHECK(svg.find("critical path (brightness") != std::string::npos);   // legend row
+    TS_CHECK(svg.find("Critical: in ") != std::string::npos);         // node tooltip data
+    TS_CHECK(svg.find("critical-path edge (pink") != std::string::npos);    // legend row
+    TS_CHECK(svg.find("critical node (orange") != std::string::npos);       // legend row
     g.set_trace(nullptr);
 }
 

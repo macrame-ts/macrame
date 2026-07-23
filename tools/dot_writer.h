@@ -11,10 +11,10 @@ namespace ts::tools
 
 // Minimal Graphviz DOT emitter for the graph structure dump
 // (`Static_task_graph::compile(dot_path)`). Collects nodes and edges, then writes a
-// `digraph` with a fixed dark style scheme (monokai-derived): solid pink = explicit
-// ordering (`after`/`before`), dashed green = derived from declared access;
-// a graph label carries the legend. Render with Graphviz (`dot -Tsvg file.dot -o
-// file.svg`, or `show_graph.bat`) or any online viewer.
+// `digraph` with a fixed dark style scheme (monokai-derived): green edges, solid =
+// explicit ordering (`after`/`before`), dashed = derived from declared access; a legend
+// cluster shows the styles. Render with Graphviz (`dot -Tsvg file.dot -o file.svg`, or
+// `show_graph.bat`) or any online viewer.
 class Dot_writer
 {
 public:
@@ -64,9 +64,12 @@ public:
         for (const Edge_entry& e : edges_)
         {
             out += "    n" + std::to_string(e.from) + " -> n" + std::to_string(e.to);
+            // Line style carries provenance (solid = explicit, dashed = derived); one
+            // colour for both -- matches the trace renderer, where colour is reserved
+            // for criticality.
             std::string attrs = (e.kind == Edge_kind::derived)
                 ? "style=dashed, color=\"#a6e22e\", penwidth=1.8"
-                : "color=\"#f92672\", penwidth=2.6";
+                : "color=\"#a6e22e\", penwidth=2.0";
             if (!e.tooltip.empty())
             {
                 // `href` is required for Graphviz to emit the tooltip into SVG output.
@@ -93,7 +96,7 @@ public:
         // their left edges -- and therefore the sample arrows -- are the same length.
         out += "        l1 [label=\"explicit ordering (after/before)\\l\", width=3];\n";
         out += "        l3 [label=\"derived from declared access (hover for detail)\\l\", width=3];\n";
-        out += "        l0 -> l1 [color=\"#f92672\", penwidth=2.6, tooltip=\"explicit ordering\"];\n";
+        out += "        l0 -> l1 [color=\"#a6e22e\", penwidth=2.0, tooltip=\"explicit ordering\"];\n";
         out += "        l2 -> l3 [style=dashed, color=\"#a6e22e\", penwidth=1.8, tooltip=\"derived edge\"];\n";
         out += "    }\n";
 

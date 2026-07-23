@@ -554,8 +554,9 @@ ts::Versioned<Poses>  poses{ ts::Named{"poses"} };
 
 Render the dump with Graphviz (`dot -Tsvg frame.dot -o frame.svg`, or the
 repo's `show_graph.bat`) or paste it into an online viewer (e.g. edotor.net).
-The output is dark-themed; solid pink edges are your explicit `after`/`before`
-orderings, dashed green edges were derived from declared access — hovering
+The output is dark-themed; edges are green with the line style carrying their
+origin: solid edges are your explicit `after`/`before` orderings, dashed edges
+were derived from declared access — hovering
 one (in SVG) shows which object and modes produced it (`physics: W->R`;
 unnamed objects fall back to an `objN` ordinal). The picture answers
 "why does this edge exist", which is exactly what you need when re-shaping a
@@ -585,19 +586,23 @@ trace.write_svg("my_frame_avg.svg");
 The SVG is an **average run**: one bar per node on worker lanes (each node on
 the worker that ran it most often; a lane for non-worker threads appears only
 if used), bars at the median start with median duration, dependency edges as
-arcs above them in the structure dump's styling. Hovering a bar shows the
-node's stats — mean / P95 / σ / CV / min–max execution time, its modal worker
-and how often it ran elsewhere — plus its declared accesses (`transforms: R`).
+arcs above them in the structure dump's styling (solid = explicit, dashed =
+derived). Hovering a bar raises a formatted tooltip — the node name in the
+bar's own colour, then the stats: mean / P95 / σ / CV / min–max execution
+time, its modal worker and how often it ran elsewhere — plus its declared
+accesses (`transforms: R`). The tooltips are scripted into the SVG itself
+(they work with the file open in a browser; not when embedded via `<img>`).
 A panel at the top shows the global numbers: run count, makespan mean/min/max,
 critical work, structural CP, worker count.
 
-The **critical path** is highlighted in orange: each run, the trace walks back
+The **critical path** is picked out by colour: each run, the trace walks back
 from the last-finishing node through the predecessor whose completion released
 each node — the chain that actually bound that run's makespan. Across runs
-this yields a per-node *share* (different chains bind different runs), drawn
-as border brightness/thickness and label weight: a solid orange bar was
-critical in essentially every run, a faint one occasionally, plain cyan never.
-Edge thickness carries the same share. The tooltip adds three numbers:
+this yields a per-node *share* (different chains bind different runs). A
+node's border and label blend cyan → orange with that share — a solid orange
+bar was critical in essentially every run, plain cyan never — and an edge's
+colour blends green → pink the same way, keeping its solid/dashed origin
+marking. The tooltip adds three numbers:
 "critical in N% of runs" (measured), "slack" (structural — how far the node
 can slip in the average frame before the dependency chain lengthens; omitted
 when ~0), and "dispatch wait" (mean ready-to-start latency: queue + object
