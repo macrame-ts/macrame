@@ -68,8 +68,9 @@ std::map<const void*, std::string> object_labels(const Nodes& nodes)
     return label;
 }
 
-// The conflict detail between two nodes: one "objN: X->Y" entry per shared instance with
-// at least one writer (empty = no conflict).
+// The conflict detail between two nodes: one "resource: RW->RO" entry per shared instance
+// with at least one writer (empty = no conflict). RW = read-write (writer), RO = read-only
+// (reader); the trace tooltip colour-codes them, the DOT dump shows the text.
 template<typename Node>
 std::string conflict_detail(const Node& a, const Node& b, std::map<const void*, std::string>& label)
 {
@@ -82,9 +83,9 @@ std::string conflict_detail(const Node& a, const Node& b, std::map<const void*, 
                 if (!detail.empty())
                     detail += "; ";
                 detail += label[instance_a] + ": ";
-                detail += (mode_a == Access::read_write) ? 'W' : 'R';
+                detail += (mode_a == Access::read_write) ? "RW" : "RO";
                 detail += "->";
-                detail += (mode_b == Access::read_write) ? 'W' : 'R';
+                detail += (mode_b == Access::read_write) ? "RW" : "RO";
             }
     return detail;
 }

@@ -462,12 +462,23 @@ private:
         return buf;
     }
 
+    // Frame-scale value in milliseconds (2 decimals) -- reads more naturally than µs for
+    // the whole-frame figure.
+    static std::string fmt_ms(double us)
+    {
+        char buf[48];
+        std::snprintf(buf, sizeof buf, "%.2f", us / 1000.0);
+        return buf;
+    }
+
     // Priority display: the node NAME takes the priority colour (high = warm red --
     // distinct from the critical pink (#f92672) and the critical-node orange (#fd971f) --
     // normal = green, low = grey). Criticality stays on the bar border and label weight.
     static const char* priority_color(Priority p)
     {
-        return p == Priority::high ? "#ff5f45" : p == Priority::low ? "#75715e" : "#a6e22e";
+        // low grey brightened to the midpoint toward white so low-priority node text
+        // (bar label + tooltip name) stays clearly legible on the dark ground.
+        return p == Priority::high ? "#ff5f45" : p == Priority::low ? "#bab8ad" : "#a6e22e";
     }
     static const char* priority_word(Priority p)
     {
@@ -651,9 +662,13 @@ inline bool Graph_trace::write_SVG(const char* path) const
         out += buf;
     };
 
+    // Render 20% larger by default: the drawing coordinates (viewBox) are unchanged, only
+    // the presented width/height scale up, so text and geometry grow together with no
+    // clipping risk.
+    const double view_scale = 1.2;
     line("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%.0f\" height=\"%.0f\" "
          "viewBox=\"0 0 %.0f %.0f\" font-family=\"'Segoe UI', sans-serif\">\n",
-         total_w, total_h, total_w, total_h);
+         total_w * view_scale, total_h * view_scale, total_w, total_h);
     line("<rect width=\"%.0f\" height=\"%.0f\" fill=\"#272822\"/>\n", total_w, total_h);
     // Hatch for the critical dead-time bands (and the legend swatch). The tile carries a
     // faint solid tint UNDER the diagonal stroke: a full-height band must read as "the
@@ -687,14 +702,16 @@ inline bool Graph_trace::write_SVG(const char* path) const
         out += "</tspan><tspan fill=\"#cfcfc2\"> | </tspan>";
         out += "<tspan fill=\"" + std::string(dead_color) + "\">";
         append_escaped(out, "critical dead time: " + fmt_us(dead_us) + " \xC2\xB5s ("
-            + fmt_us(100.0 * dead_share) + "% of makespan)");
+            + fmt_us(100.0 * dead_share) + "% of frame time)");
         out += "</tspan></text>\n";
 
+        // "structural CP" = the CPM critical-path length: the dependency lower bound on
+        // frame time from median durations and edges alone (no scheduling waits).
         std::string stats = "runs: " + std::to_string(runs_)
-            + "  |  makespan mean " + fmt_us(makespan_.mean) + " \xC2\xB5s (min " + fmt_us(makespan_min_)
-            + ", max " + fmt_us(makespan_max_) + ")  |  critical work mean "
-            + fmt_us(critical_work_.mean) + " \xC2\xB5s  |  structural CP " + fmt_us(cpm_us)
-            + " \xC2\xB5s  |  workers: " + std::to_string(workers_seen);
+            + "  |  frame time mean " + fmt_ms(makespan_.mean) + " ms (min " + fmt_ms(makespan_min_)
+            + ", max " + fmt_ms(makespan_max_) + ")  |  critical work mean "
+            + fmt_ms(critical_work_.mean) + " ms  |  structural CP " + fmt_ms(cpm_us)
+            + " ms  |  workers: " + std::to_string(workers_seen);
         out += "<text x=\"16\" y=\"68\" font-size=\"11\" fill=\"#cfcfc2\">";
         append_escaped(out, stats);
         out += "</text>\n";
@@ -828,6 +845,40 @@ inline bool Graph_trace::write_SVG(const char* path) const
         flush();
     }
 
+    // Colored inline segments for the scripted tooltip: `RRGGBBtext` (backtick-delimited,
+    // 6 hex digits then text) -- the overlay renders that run in that colour. Backtick
+    // never appears in a label / resource / number, so it is a safe sentinel.
+    auto seg = [](const char* hex6, std::string_view text)
+    {
+        std::string s = "`";
+        s += hex6;
+        s.append(text);
+        s += "`";
+        return s;
+    };
+    auto mode_seg = [&](bool write)   // RW red / RO green, matching the access colours
+    {
+        return seg(write ? "ff5f45" : "a6e22e", write ? "RW" : "RO");
+    };
+    auto crit_seg = [&](double share, const std::string& name)
+    {
+        std::string hex = blend_hex(0xa6, 0xe2, 0x2e, 0xf9, 0x26, 0x72, crit_ramp(share));
+        return seg(hex.c_str() + 1, name);   // skip the '#'
+    };
+
+    // Incoming / outgoing edge index lists per node, for the tooltip edge lists.
+    std::vector<std::vector<int>> node_in(static_cast<size_t>(count)), node_out(static_cast<size_t>(count));
+    for (int ei = 0; ei < static_cast<int>(edges_.size()); ++ei)
+    {
+        node_out[static_cast<size_t>(edges_[static_cast<size_t>(ei)].from)].push_back(ei);
+        node_in[static_cast<size_t>(edges_[static_cast<size_t>(ei)].to)].push_back(ei);
+    }
+    auto edge_share = [&](int ei)
+    {
+        return runs_ > 0
+            ? static_cast<double>(edges_[static_cast<size_t>(ei)].critical_runs) / static_cast<double>(runs_) : 0.0;
+    };
+
     // Bars (tooltip data on the group; the overlay script renders it), then edges on top.
     for (int i = 0; i < count; ++i)
     {
@@ -840,40 +891,70 @@ inline bool Graph_trace::write_SVG(const char* path) const
         double yb = bar_top(i);
 
         std::vector<std::string> tip;
-        tip.push_back(a.label);
+        tip.push_back(a.label);   // line 0 headline; priority shown right-aligned (data-prio)
         tip.push_back("Exec: mean " + fmt_us(s.mean_us) + " | P95 " + fmt_us(s.P95_us)
              + " | \xCF\x83 " + fmt_us(s.stddev_us)
              + " (CV " + fmt_us(s.mean_us > 0.0 ? 100.0 * s.stddev_us / s.mean_us : 0.0) + "%)"
-             + " | min " + fmt_us(s.min_us) + " | max " + fmt_us(s.max_us) + " \xC2\xB5s");
+             + " | min/max " + fmt_us(s.min_us) + "/" + fmt_us(s.max_us) + " \xC2\xB5s");
         // No worker line: workers are interchangeable, and rows carry no worker identity.
         tip.push_back("Critical: in " + fmt_us(100.0 * s.critical_share) + "% of runs");
         if (slack[static_cast<size_t>(i)] > 0.5)
             tip.push_back("Slack: " + fmt_us(slack[static_cast<size_t>(i)]) + " \xC2\xB5s");
         tip.push_back("Dispatch wait: mean " + fmt_us(s.dispatch_wait_us) + " \xC2\xB5s");
-        tip.push_back("Priority: " + std::string(priority_word(a.priority)));
         if (!a.accesses.empty())
         {
-            std::string acc = "Access: ";
+            std::string acc = "Access: ";   // RO green / RW red per declared mode
             for (size_t k = 0; k < a.accesses.size(); ++k)
             {
                 if (k > 0)
                     acc += "; ";
-                acc += a.accesses[k].first + ": " + (a.accesses[k].second ? "W" : "R");
+                acc += a.accesses[k].first + ": " + mode_seg(a.accesses[k].second);
             }
             tip.push_back(std::move(acc));
+        }
+        // Incoming / outgoing edges (only if any): the OTHER node's name, coloured by that
+        // edge's share of binding chains (green -> pink), so the node's place in the
+        // critical structure reads at a glance.
+        if (!node_in[static_cast<size_t>(i)].empty())
+        {
+            std::string s2 = "->|  ";
+            bool first = true;
+            for (int ei : node_in[static_cast<size_t>(i)])
+            {
+                if (!first) s2 += ", ";
+                first = false;
+                s2 += crit_seg(edge_share(ei), nodes_[static_cast<size_t>(edges_[static_cast<size_t>(ei)].from)].label);
+            }
+            tip.push_back(std::move(s2));
+        }
+        if (!node_out[static_cast<size_t>(i)].empty())
+        {
+            std::string s2 = "|->  ";
+            bool first = true;
+            for (int ei : node_out[static_cast<size_t>(i)])
+            {
+                if (!first) s2 += ", ";
+                first = false;
+                s2 += crit_seg(edge_share(ei), nodes_[static_cast<size_t>(edges_[static_cast<size_t>(ei)].to)].label);
+            }
+            tip.push_back(std::move(s2));
         }
 
         // Two colour channels on a bar: the BORDER blends cyan -> orange with the node's
         // share of binding chains (`crit_ramp`, label weight follows -- no single-path
         // pretense; frequency IS the cross-run answer), while the NAME text is filled with
-        // the priority colour (red high / green normal / grey low).
+        // the priority colour (red high / green normal / brightened grey low).
         double hf = crit_ramp(s.critical_share);
         std::string color = blend_hex(0x66, 0xd9, 0xef, 0xfd, 0x97, 0x1f, hf);
         double border_w = 1.0 + 1.5 * hf;
         int weight = 400 + static_cast<int>(std::lround(300.0 * hf));
         const char* label_fill = priority_color(a.priority);
 
-        out += "<g class=\"hv\" data-hl=\"" + color + "\" data-tip=\"";
+        // data-nc: tooltip headline (node name) in the priority colour. data-prio: the
+        // right-aligned priority tag on that line, same colour.
+        out += "<g class=\"hv\" data-hl=\"" + color + "\" data-nc=\"" + label_fill
+            + "\" data-prio=\"" + priority_word(a.priority) + "-pri\" data-pc=\"" + label_fill
+            + "\" data-tip=\"";
         append_tip_attr(tip);
         out += "\">\n";
         line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.0f\" rx=\"3\" "
@@ -916,8 +997,30 @@ inline bool Graph_trace::write_SVG(const char* path) const
             ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
         std::vector<std::string> tip;
         tip.push_back(e.explicit_ordering ? "explicit ordering" : "derived from declared access");
+        // Conflict detail (from graph_introspect: "resource: RW->RO; ...") rendered per
+        // resource as a `"resource" access` line then a `{from} RW -> {to} RO` line, with
+        // RO/RW colour-coded (green/red) and the node names in default light.
         if (!e.conflict.empty())
-            tip.push_back(e.conflict);
+        {
+            const std::string& fromName = nodes_[static_cast<size_t>(e.from)].label;
+            const std::string& toName = nodes_[static_cast<size_t>(e.to)].label;
+            size_t pos = 0;
+            while (pos < e.conflict.size())
+            {
+                size_t semi = e.conflict.find("; ", pos);
+                std::string piece = e.conflict.substr(pos, semi == std::string::npos ? std::string::npos : semi - pos);
+                pos = semi == std::string::npos ? e.conflict.size() : semi + 2;
+                size_t colon = piece.find(": ");
+                size_t arrow = piece.find("->");
+                if (colon == std::string::npos || arrow == std::string::npos)
+                    continue;
+                std::string res = piece.substr(0, colon);
+                std::string fm = piece.substr(colon + 2, arrow - (colon + 2));
+                std::string tm = piece.substr(arrow + 2);
+                tip.push_back("\"" + res + "\" access");
+                tip.push_back(fromName + " " + mode_seg(fm == "RW") + " -> " + toName + " " + mode_seg(tm == "RW"));
+            }
+        }
         tip.push_back("Critical: in " + fmt_us(100.0 * share) + "% of runs");
         if (share >= 0.10 && e.binding_gap.mean > 0.5)
             tip.push_back("Critical wait: " + fmt_us(e.binding_gap.mean) + " \xC2\xB5s mean");
@@ -981,30 +1084,52 @@ inline bool Graph_trace::write_SVG(const char* path) const
         "var tx=document.createElementNS(NS,'text');\n"
         "tx.setAttribute('font-size','11');tx.setAttribute('font-family',\"'Segoe UI', sans-serif\");\n"
         "tt.appendChild(bg);tt.appendChild(tx);svg.appendChild(tt);\n"
+        // Render a run of text into `parent`, splitting on backtick: `RRGGBBtext` chunks
+        // (odd indices) are coloured, the rest use `def`.
+        "function segs(parent,text,def){\n"
+        "  var parts=text.split('`');\n"
+        "  for(var j=0;j<parts.length;j++){\n"
+        "    var s=document.createElementNS(NS,'tspan');\n"
+        "    if(j%2===0){if(!parts[j])continue;s.setAttribute('fill',def);s.textContent=parts[j];}\n"
+        "    else{var t2=parts[j].slice(6);if(!t2)continue;s.setAttribute('fill','#'+parts[j].slice(0,6));s.textContent=t2;}\n"
+        "    parent.appendChild(s);\n"
+        "  }\n"
+        "}\n"
         "function show(el,evt){\n"
         "  while(tx.firstChild)tx.removeChild(tx.firstChild);\n"
         "  var lines=(el.getAttribute('data-tip')||'').split('\\n');\n"
         "  var hl=el.getAttribute('data-hl')||'#66d9ef';\n"
+        "  var nc=el.getAttribute('data-nc')||hl;\n"
         "  bg.setAttribute('stroke',hl);\n"
+        "  var name=null;\n"
         "  for(var i=0;i<lines.length;i++){\n"
         "    var t=document.createElementNS(NS,'tspan');\n"
         "    t.setAttribute('x','8');t.setAttribute('dy',i===0?'17':'14');\n"
         "    if(i===0){\n"
         "      t.setAttribute('font-weight','700');t.setAttribute('font-size','13');\n"
-        "      t.setAttribute('fill',hl);t.textContent=lines[i];\n"
+        "      t.setAttribute('fill',nc);t.textContent=lines[i];name=t;\n"
         "    }else{\n"
-        "      var p=lines[i].indexOf(': ');\n"
-        "      if(p>0){\n"
+        "      var bt=lines[i].indexOf('`');var p=lines[i].indexOf(': ');\n"
+        "      if(p>0&&(bt<0||bt>p)){\n"
         "        var b=document.createElementNS(NS,'tspan');\n"
         "        b.setAttribute('font-weight','700');b.setAttribute('fill','#f8f8f2');\n"
         "        b.textContent=lines[i].slice(0,p+1);t.appendChild(b);\n"
-        "        var v=document.createElementNS(NS,'tspan');\n"
-        "        v.setAttribute('fill','#cfcfc2');v.textContent=' '+lines[i].slice(p+2);t.appendChild(v);\n"
-        "      }else{t.setAttribute('fill','#cfcfc2');t.textContent=lines[i];}\n"
+        "        segs(t,' '+lines[i].slice(p+2),'#cfcfc2');\n"
+        "      }else{segs(t,lines[i],'#cfcfc2');}\n"
         "    }\n"
         "    tx.appendChild(t);\n"
         "  }\n"
         "  tt.setAttribute('visibility','visible');\n"
+        // Priority tag right-aligned on the name line (nodes only; edges have no data-prio).
+        "  var prio=el.getAttribute('data-prio');\n"
+        "  if(prio&&name){\n"
+        "    var b0=tx.getBBox();var pr=document.createElementNS(NS,'tspan');\n"
+        "    pr.setAttribute('y','17');pr.setAttribute('font-weight','700');pr.setAttribute('font-size','12');\n"
+        "    pr.setAttribute('text-anchor','end');pr.setAttribute('fill',el.getAttribute('data-pc')||nc);\n"
+        "    pr.textContent=prio;tx.appendChild(pr);\n"
+        "    var rt=Math.max(b0.x+b0.width, 8+name.getComputedTextLength()+18+pr.getComputedTextLength());\n"
+        "    pr.setAttribute('x',rt);\n"
+        "  }\n"
         "  move(evt);\n"
         "}\n"
         "function move(evt){\n"

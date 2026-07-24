@@ -438,10 +438,10 @@ void test_dot_dump()
     TS_CHECK(dot.find("writer_a") != std::string::npos);
     TS_CHECK(dot.find("reader_b") != std::string::npos);
     TS_CHECK(dot.find("node2") != std::string::npos);
-    // a->b: derived from the x conflict (W->R), dashed + tooltip with x's `ts::Named` name
-    TS_CHECK(dot.find("n0 -> n1 [style=dashed, color=\"#a6e22e\", penwidth=1.8, tooltip=\"counter: W->R\"") != std::string::npos);
+    // a->b: derived from the x conflict (writer -> reader), dashed + tooltip with x's `ts::Named` name
+    TS_CHECK(dot.find("n0 -> n1 [style=dashed, color=\"#a6e22e\", penwidth=1.8, tooltip=\"counter: RW->RO\"") != std::string::npos);
     // b->c: explicit (solid, no dash), tooltip still carries the y conflict
-    TS_CHECK(dot.find("n1 -> n2 [color=\"#a6e22e\", penwidth=2.0, tooltip=\"explicit ordering; obj1: W->R\"") != std::string::npos);
+    TS_CHECK(dot.find("n1 -> n2 [color=\"#a6e22e\", penwidth=2.0, tooltip=\"explicit ordering; obj1: RW->RO\"") != std::string::npos);
 
     // The graph still runs after a dumping compile.
     g.execute().sync();
@@ -490,7 +490,7 @@ void test_graph_trace()
 
     TS_CHECK(svg.find("writer_a") != std::string::npos);
     TS_CHECK(svg.find("reader_b") != std::string::npos);
-    TS_CHECK(svg.find("counter: W") != std::string::npos);   // declared access in the tooltip data
+    TS_CHECK(svg.find("counter: `ff5f45RW`") != std::string::npos);   // declared access (RW, red segment) in the tooltip data
     TS_CHECK(svg.find("runs: 20") != std::string::npos);     // global stats panel
     TS_CHECK(svg.find("data-tip=") != std::string::npos);    // overlay tooltip data present
     TS_CHECK(svg.find("<script>") != std::string::npos);     // the overlay script itself
@@ -590,15 +590,15 @@ void test_graph_trace_priority()
     }
     std::remove(path);
 
-    TS_CHECK(svg.find("Priority: high") != std::string::npos);   // tooltip data
-    TS_CHECK(svg.find("Priority: low") != std::string::npos);
+    TS_CHECK(svg.find("data-prio=\"high-pri\"") != std::string::npos);   // priority tag on the tooltip name line
+    TS_CHECK(svg.find("data-prio=\"low-pri\"") != std::string::npos);
     // The name text is filled with the priority colour; the label renders inside the bar
     // (with a text-anchor) or outside (without), depending on measured widths -- accept
-    // either form.
+    // either form. Low grey is the brightened #bab8ad.
     bool hi_red = svg.find("fill=\"#ff5f45\">hi</text>") != std::string::npos
         || svg.find("fill=\"#ff5f45\" text-anchor=\"middle\">hi</text>") != std::string::npos;
-    bool lo_grey = svg.find("fill=\"#75715e\">lo</text>") != std::string::npos
-        || svg.find("fill=\"#75715e\" text-anchor=\"middle\">lo</text>") != std::string::npos;
+    bool lo_grey = svg.find("fill=\"#bab8ad\">lo</text>") != std::string::npos
+        || svg.find("fill=\"#bab8ad\" text-anchor=\"middle\">lo</text>") != std::string::npos;
     TS_CHECK(hi_red);
     TS_CHECK(lo_grey);
     TS_CHECK(svg.find("= node name colour = priority") != std::string::npos);   // legend row
@@ -625,7 +625,7 @@ void test_graph_trace_weld_dead_time()
     trace.set_node_label(1, "weld_b");
     trace.add_node_access(0, "x", true);
     trace.add_node_access(1, "x", true);
-    trace.add_edge(0, 1, false, "x: W->W");
+    trace.add_edge(0, 1, false, "x: RW->RW");
 
     // a: [100, 1000) us on worker 0; b back to back at [1001, 1300) on the same worker
     // (1 us gap << the ~5px weld threshold); window [0, 1400) with 770 us of busy time
