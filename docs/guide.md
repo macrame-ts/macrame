@@ -590,10 +590,11 @@ identity; time-overlapping bars simply occupy different rows, and row
 occupancy over time reads directly as the average frame's concurrency (free
 vertical space at some time = capacity genuinely unused there). Dependency
 edges connect the bars in the structure dump's styling (solid = explicit,
-dashed = derived). Edges are faint by default so the picture reads as bars
-first, with critical-path edges kept prominent; hovering a node brightens its
-incident edges to full so you can trace its exact dependencies. Hovering a bar
-raises a formatted tooltip — the node name
+dashed = derived). Edges are uniformly faint by default so the picture reads as
+bars first (critical edges keep their pink colour but no extra prominence —
+critical structure at rest is carried by the orange node borders and labels);
+hovering a node brightens its incident edges to full so you can trace its exact
+dependencies. Hovering a bar raises a formatted tooltip — the node name
 coloured by its queue priority (red = high, green = normal, grey = low; the
 same colouring as the name on the bar), with its priority tag right-aligned on
 that line, then the stats: mean / P95 / σ / CV / min/max execution time; the

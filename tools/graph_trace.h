@@ -1049,11 +1049,13 @@ inline bool Graph_trace::write_SVG(const char* path) const
         if (weld)
             tip.push_back("Handoff: back-to-back with the predecessor");
 
-        // Edges are faint by default so the picture reads as bars first; a critical edge
-        // stays prominent (opacity scales with its share of binding chains), and hovering
-        // a node brightens all its incident edges to full (see the overlay). data-a/data-b
-        // are the endpoints; data-op the resting opacity to restore to.
-        double edge_op = 0.18 + 0.82 * crit;
+        // Edges are ALL uniformly faint at rest so the picture reads as bars first --
+        // including critical ones, which keep their pink colour but not extra opacity
+        // (critical structure at rest is carried by the orange node borders/labels).
+        // Hovering a node brightens its incident edges to full (see the overlay); nothing
+        // is permanently bright. data-a/data-b are the endpoints, data-op the resting
+        // opacity to restore to.
+        double edge_op = 0.20;
         char opb[16];
         std::snprintf(opb, sizeof opb, "%.2f", edge_op);
         std::string ops = opb;
