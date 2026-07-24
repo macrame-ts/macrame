@@ -445,15 +445,24 @@ void tick_navmesh_rebuild(const Input& input, Nav_tiles& tiles)                 
 
 // Gameplay trio: shares inputs (last frame's transforms, input, net, script
 // events), owns disjoint outputs -> runs in parallel.
+// Combat runs a threat/damage pass per entity. The baseline runs it serially;
+// the optimised variant parallelises it across entities -- the trace shows
+// combat as one of the two fattest bars on the critical path, so a per-entity
+// split is the obvious cut. `parallel` picks the shape.
 void tick_combat(const Transforms& prev_xf, const Input& input, const Net& net,
-                 const Script_events& events, Combat& combat)                     // 0.8
+                 const Script_events& events, Combat& combat, bool parallel)       // 0.8
 {
     read_all(prev_xf);
     read_all(input);
     read_all(net);
     read_all(events);
-    fill(combat, 1.0f);
-    spin(0.8);
+    if (parallel)
+        parallel_fill(combat, 1.0f, 0.8);
+    else
+    {
+        fill(combat, 1.0f);
+        spin(0.8);
+    }
 }
 
 void tick_economy(const Transforms& prev_xf, const Input& input, const Net& net,
@@ -537,13 +546,20 @@ void tick_anim_graph(const Skeletons& skeletons, const Intents& intents,
     parallel_fill(anim_pose, 1.0f, 2.5);
 }
 
-// IK / post: serial refinement of the pose into the final local transforms.
-// Writes local_xf = 2.0 (half of the deterministic transform output).
-void tick_ik_post(const Anim_pose& anim_pose, Local_xf& local_xf)                 // 0.8
+// IK / post: refines the pose into the final local transforms. IK is per
+// character -- embarrassingly parallel across characters -- so the baseline's
+// serial pass is a critical-path bar the optimised variant splits. Writes
+// local_xf = 2.0 (half of the deterministic transform output).
+void tick_ik_post(const Anim_pose& anim_pose, Local_xf& local_xf, bool parallel)  // 0.8
 {
     read_all(anim_pose);
-    fill(local_xf, 2.0f);
-    spin(0.8);
+    if (parallel)
+        parallel_fill(local_xf, 2.0f, 0.8);
+    else
+    {
+        fill(local_xf, 2.0f);
+        spin(0.8);
+    }
 }
 
 // Skinning: matrix palette from the final pose, consumed by next frame's render.
@@ -739,6 +755,10 @@ ts::Graph_node add_particles(ts::Static_task_graph& g, World& w, Frame_variant v
 
 ts::Graph_node add_UI(ts::Static_task_graph& g, World& w, Frame_variant v)          // 1.5
 {
+    // Baseline: writes the queue directly (serialises with the other producers)
+    // and lays out the UI serially -- a 1.5 ms bar the trace flags as critical
+    // (submit waits on it). Optimised: stages grant-free AND lays out widgets in
+    // parallel.
     if (v == Frame_variant::baseline)
         return g.add_node("UI",
             [](const Quests& quests, UI& u, Draw_lists& draws)
@@ -753,8 +773,7 @@ ts::Graph_node add_UI(ts::Static_task_graph& g, World& w, Frame_variant v)      
         [rec = w.draw_staged.recorder()](const Quests& quests, UI& u) mutable
         {
             read_all(quests);
-            fill(u, 1.0f);
-            spin(1.5);
+            parallel_fill(u, 1.0f, 1.5);
             rec.stage([n = u.size() / 10](Draw_lists& d) { d.push_batch(n); });
         }, w.quests, w.UI);
 }
@@ -810,9 +829,15 @@ ts::Static_task_graph build_frame_graph(World& w, Frame_variant variant,
     }, w.input, w.assets);
     g.add_node("navmesh_rebuild", &tick_navmesh_rebuild, w.input, w.nav_tiles);
 
-    // Gameplay trio.
-    auto combat = g.add_node("combat", &tick_combat,
-        w.transforms.state(), w.input, w.net, w.script_events, w.combat);
+    // Gameplay trio. Combat is parallelised in the optimised variant (a critical
+    // bar); economy/quests stay serial (off the critical path -- no point).
+    const bool opt = variant == Frame_variant::optimised;
+    auto combat = g.add_node("combat",
+        [opt](const Transforms& prev_xf, const Input& in, const Net& net,
+              const Script_events& ev, Combat& c)
+        {
+            tick_combat(prev_xf, in, net, ev, c, opt);
+        }, w.transforms.state(), w.input, w.net, w.script_events, w.combat);
     g.add_node("economy", &tick_economy,
         w.transforms.state(), w.input, w.net, w.script_events, w.economy);
     g.add_node("quests", &tick_quests,
@@ -829,7 +854,9 @@ ts::Static_task_graph build_frame_graph(World& w, Frame_variant variant,
 
     // Animation chain.
     auto anim_graph = g.add_node("anim_graph", &tick_anim_graph, w.skeletons, w.intents, w.anim_pose);
-    auto ik_post = g.add_node("ik_post", &tick_ik_post, w.anim_pose, w.local_xf);
+    auto ik_post = g.add_node("ik_post",
+        [opt](const Anim_pose& pose, Local_xf& lx) { tick_ik_post(pose, lx, opt); },
+        w.anim_pose, w.local_xf);
     g.add_node("skinning", &tick_skinning, w.local_xf, w.skin_matrices);
 
     // Physics pipeline.
@@ -888,22 +915,39 @@ ts::Static_task_graph build_frame_graph(World& w, Frame_variant variant,
         spin(0.2);
     }, w.economy, w.transforms.state()).priority(ts::Priority::low);
 
-    // Flip publishes this frame's transforms; cloth reads the fresh version.
+    // Cloth: a version-choice lever. The baseline reads the FRESH transforms
+    // (post-flip), so it sits alone on the tail -- the last node in the frame.
+    // The optimised variant reads LAST frame's transforms (declared before the
+    // flip, like audio): one frame of cloth latency is invisible, and the node
+    // runs alongside the (now short) spine instead of after it. This only pays
+    // once the spine has been shortened enough to leave idle capacity for cloth
+    // to fill -- on the un-optimised spine the same move was neutral (cloth just
+    // competed with the critical chain). Structural (the version is set by
+    // declaration order vs the flip), so it branches here.
+    ts::Graph_node cloth;
+    if (variant == Frame_variant::optimised)
+        cloth = g.add_node("cloth", &tick_cloth, w.transforms.state(), w.cloth);
+
     auto flip = g.add_node("flip", ts::publish_body(w.transforms), w.transforms.state());
     flip.after(propagation);
-    auto cloth = g.add_node("cloth", &tick_cloth, w.transforms.state(), w.cloth);
-    cloth.after(flip);
+
+    if (variant == Frame_variant::baseline)
+    {
+        cloth = g.add_node("cloth", &tick_cloth, w.transforms.state(), w.cloth);
+        cloth.after(flip);
+    }
 
     // --- the optimisation section -----------------------------------------------
-    // Pure scheduling levers, applied to the optimised variant only, after
-    // construction and before compile. Each is a lever the trace made obvious;
-    // the structural draw-staging lever lives in the add_* helpers above.
-    if (variant == Frame_variant::optimised)
-    {
-        // (levers applied and measured in phase 2 -- see the commits that add them)
-        (void)input; (void)scripting; (void)combat; (void)ai;
-        (void)anim_graph; (void)ik_post; (void)propagation;
-    }
+    // The optimised variant's levers, applied after construction. The two that
+    // move the makespan are the per-node splits (combat, ik_post -- branched in
+    // their bodies above), because the frame is critical-path bound: the trace
+    // shows the makespan set by the serial sim spine, so ONLY shortening that
+    // chain helps. The draw-staging lever (Deferred, in the add_* helpers)
+    // improves utilization but not makespan -- it frees cores the critical path
+    // wasn't using. Pure scheduling levers (edges/inline) cannot shorten a
+    // genuine dependency chain and are deliberately absent here.
+    (void)input; (void)scripting; (void)combat; (void)ai;
+    (void)anim_graph; (void)ik_post; (void)propagation;
 
     g.compile(DOT_path);
     return g;
