@@ -779,24 +779,53 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
     };
 
-    // Critical dead-time bands, in the BACKGROUND and FULL HEIGHT: the wait is a property
-    // of the chain, not of any row or worker, so for an edge that binds >= 10% of runs its
-    // mean ready-but-waiting gap spans all rows, ending at the critical successor's bar
-    // start. Behind the bars with `pointer-events: none`, so hover is never intercepted
-    // (the number lives on the edge tooltip). Bands of different edges may overlap and
-    // visually stack -- acceptable; each still ends at its own successor.
-    for (const Edge_agg& e : edges_)
+    // Critical dead-time regions, in the BACKGROUND and FULL HEIGHT: the wait is a
+    // property of the binding chain, not of any row or worker. For an edge that binds
+    // >= 10% of runs, the region is the VISIBLE gap on screen between the predecessor's
+    // drawn right edge and the successor's drawn left edge -- pure screen coordinates, so
+    // it is always the real break between two bars and can never land on a bar (the old
+    // form subtracted a MEAN gap from a MEDIAN bar start, mixing coordinate systems, and
+    // could overlap a critical node). Overlapping regions from different edges are unioned,
+    // so no vertical slice is painted twice. These localize the headline critical dead
+    // time (frame_time_mean - critical_work_mean, computed globally) -- they are its
+    // >= 10%-share visible subset, not a sum of it. Behind the bars, `pointer-events: none`,
+    // so hover is never intercepted (the per-edge number lives on the edge tooltip).
     {
-        double share = runs_ > 0
-            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
-        double wpx = e.binding_gap.mean * px_per_us;
-        if (share < 0.10 || wpx < 2.0)
-            continue;
-        double x_end = X(bar_start[static_cast<size_t>(e.to)]);
-        double x0 = std::max(pad_l, x_end - wpx);
-        line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" "
-             "fill=\"url(#dead)\" pointer-events=\"none\"/>\n",
-             x0, rows_top, x_end - x0, rows_bottom - rows_top);
+        std::vector<std::pair<double, double>> gaps;
+        for (const Edge_agg& e : edges_)
+        {
+            double share = runs_ > 0
+                ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
+            if (share < 0.10)
+                continue;
+            double x_pred = X(bar_start[static_cast<size_t>(e.from)])
+                + std::max(3.0, (bar_end[static_cast<size_t>(e.from)]
+                                 - bar_start[static_cast<size_t>(e.from)]) * px_per_us);
+            double x_succ = X(bar_start[static_cast<size_t>(e.to)]);
+            if (x_succ - x_pred > 2.0)
+                gaps.emplace_back(x_pred, x_succ);
+        }
+        std::sort(gaps.begin(), gaps.end());
+        double cur0 = 0.0, cur1 = -1.0;
+        auto flush = [&]
+        {
+            if (cur1 > cur0)
+                line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" "
+                     "fill=\"url(#dead)\" pointer-events=\"none\"/>\n",
+                     cur0, rows_top, cur1 - cur0, rows_bottom - rows_top);
+        };
+        for (const auto& g : gaps)
+        {
+            if (g.first > cur1)
+            {
+                flush();
+                cur0 = g.first;
+                cur1 = g.second;
+            }
+            else
+                cur1 = std::max(cur1, g.second);
+        }
+        flush();
     }
 
     // Bars (tooltip data on the group; the overlay script renders it), then edges on top.
