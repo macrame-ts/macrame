@@ -638,8 +638,12 @@ inline bool Graph_trace::write_SVG(const char* path) const
     double span_us = 1.0;
     for (int i = 0; i < count; ++i)
         span_us = std::max(span_us, bar_end[static_cast<size_t>(i)]);
-    const double pad_l = 64.0, pad_r = 28.0, plot_w = 1150.0;
-    const double header_h = 84.0, axis_h = 30.0, legend_h = 148.0;
+    // Left margin minimized: the concurrency rows carry no left labels (the old W0/W1
+    // worker labels are gone), so the only thing in the gutter is the t=0 time-axis tick
+    // label, centered at x = pad_l. 24px just clears its half-width ("0.0 µs" at 10px) with
+    // a few px of breathing room, so the bars start as far left as the labels permit.
+    const double pad_l = 24.0, pad_r = 28.0, plot_w = 1150.0;
+    const double header_h = 84.0, axis_h = 30.0, legend_h = 168.0;
     const double row_h = 30.0, bar_h = 20.0;
     const double px_per_us = plot_w / span_us;
 
@@ -778,6 +782,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
              "<tspan fill=\"#cfcfc2\"> = node name colour = priority</tspan></text>\n",
              ax0, base + 126.0,
              priority_color(Priority::high), priority_color(Priority::normal), priority_color(Priority::low));
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">"
+             "edges are faint by default -- hover a node to highlight its dependencies</text>\n",
+             ax0, base + 148.0);
     }
 
     // No row separators or labels: rows are anonymous concurrency slots, not workers --
@@ -952,7 +959,8 @@ inline bool Graph_trace::write_SVG(const char* path) const
 
         // data-nc: tooltip headline (node name) in the priority colour. data-prio: the
         // right-aligned priority tag on that line, same colour.
-        out += "<g class=\"hv\" data-hl=\"" + color + "\" data-nc=\"" + label_fill
+        out += "<g class=\"hv\" data-node=\"" + std::to_string(i) + "\" data-hl=\"" + color
+            + "\" data-nc=\"" + label_fill
             + "\" data-prio=\"" + priority_word(a.priority) + "-pri\" data-pc=\"" + label_fill
             + "\" data-tip=\"";
         append_tip_attr(tip);
@@ -1041,7 +1049,17 @@ inline bool Graph_trace::write_SVG(const char* path) const
         if (weld)
             tip.push_back("Handoff: back-to-back with the predecessor");
 
-        out += "<g class=\"hv\" data-hl=\"" + stroke + "\" data-tip=\"";
+        // Edges are faint by default so the picture reads as bars first; a critical edge
+        // stays prominent (opacity scales with its share of binding chains), and hovering
+        // a node brightens all its incident edges to full (see the overlay). data-a/data-b
+        // are the endpoints; data-op the resting opacity to restore to.
+        double edge_op = 0.18 + 0.82 * crit;
+        char opb[16];
+        std::snprintf(opb, sizeof opb, "%.2f", edge_op);
+        std::string ops = opb;
+        out += "<g class=\"hv edge\" data-a=\"" + std::to_string(e.from) + "\" data-b=\""
+            + std::to_string(e.to) + "\" data-op=\"" + ops + "\" opacity=\"" + ops
+            + "\" data-hl=\"" + stroke + "\" data-tip=\"";
         append_tip_attr(tip);
         out += "\">\n";
         if (weld)
@@ -1115,6 +1133,13 @@ inline bool Graph_trace::write_SVG(const char* path) const
         "        b.setAttribute('font-weight','700');b.setAttribute('fill','#f8f8f2');\n"
         "        b.textContent=lines[i].slice(0,p+1);t.appendChild(b);\n"
         "        segs(t,' '+lines[i].slice(p+2),'#cfcfc2');\n"
+        "      }else if(lines[i].indexOf('->|')===0||lines[i].indexOf('|->')===0){\n"
+        // Edge-list line: bold the ->| / |-> marker, colour the names via segments.
+        "        var cut=(bt<0?lines[i].length:bt);\n"
+        "        var mk=document.createElementNS(NS,'tspan');\n"
+        "        mk.setAttribute('font-weight','700');mk.setAttribute('fill','#cfcfc2');\n"
+        "        mk.textContent=lines[i].slice(0,cut);t.appendChild(mk);\n"
+        "        segs(t,lines[i].slice(cut),'#cfcfc2');\n"
         "      }else{segs(t,lines[i],'#cfcfc2');}\n"
         "    }\n"
         "    tx.appendChild(t);\n"
@@ -1143,10 +1168,16 @@ inline bool Graph_trace::write_SVG(const char* path) const
         "  if(y+h>vb.height-4)y=pt.y-h-10;if(y<4)y=4;\n"
         "  tt.setAttribute('transform','translate('+x+','+y+')');\n"
         "}\n"
+        // Hover-scoped edges: faint by default (set per edge), a node's incident edges
+        // brighten to full on hover, an edge brightens itself; leaving restores all.
+        "var edges=document.querySelectorAll('.edge');\n"
+        "function hiEdges(id){Array.prototype.forEach.call(edges,function(e){if(e.getAttribute('data-a')===id||e.getAttribute('data-b')===id)e.setAttribute('opacity','1');});}\n"
+        "function loEdges(){Array.prototype.forEach.call(edges,function(e){e.setAttribute('opacity',e.getAttribute('data-op'));});}\n"
         "Array.prototype.forEach.call(document.querySelectorAll('.hv'),function(el){\n"
-        "  el.addEventListener('mouseenter',function(e){show(el,e);});\n"
+        "  el.addEventListener('mouseenter',function(e){show(el,e);var n=el.getAttribute('data-node');\n"
+        "    if(n!==null)hiEdges(n);else if(el.getAttribute('data-a')!==null)el.setAttribute('opacity','1');});\n"
         "  el.addEventListener('mousemove',move);\n"
-        "  el.addEventListener('mouseleave',function(){tt.setAttribute('visibility','hidden');});\n"
+        "  el.addEventListener('mouseleave',function(){tt.setAttribute('visibility','hidden');loEdges();});\n"
         "});\n"
         "})();\n"
         "]]></script>\n";
