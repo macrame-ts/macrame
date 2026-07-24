@@ -18,9 +18,11 @@ show_graph.bat            # renders the DOT and opens both average-run SVGs
 producing `sample_game_frame_avg_baseline.svg`,
 `sample_game_frame_avg_optimised.svg`, and `sample_game_frame.dot`.
 
-The point of the exercise is not the 17 % it ends up saving; it is *which*
+The point of the exercise is not the 35 % it ends up saving; it is *which*
 optimisations the trace tells you are worth trying, and — just as valuable —
-which ones it tells you not to bother with.
+which ones it tells you not to bother with. It ends by showing what a *finished*
+optimisation looks like: the frame stops being limited by its dependency chain
+and starts being limited by its core count, and the picture says so at a glance.
 
 ## 1. The frame
 
@@ -41,6 +43,10 @@ The frame models a heavy 30 fps-class scene, ~35 ms of work single-threaded:
 
 Every store has a single writer, so `compile()` derives the whole DAG from the
 access declarations. Nothing below knows about threads.
+
+The optimised variant also publishes a **gameplay snapshot** (`Versioned`): the
+trio's results are packed and flipped at frame end, so next frame's AI reads
+them as a stable previous version — the lever in §4 that does the most work.
 
 ## 2. Reading the baseline trace
 
@@ -88,44 +94,73 @@ makespan and reached for these first, the trace would have saved you the effort.
 
 ## 4. The levers that move the makespan
 
-Shorten the critical chain by splitting its fattest serial bars — exactly the
-nodes the picture flags:
+Two kinds of lever shorten the critical chain: **split** its fattest serial bars,
+and **cut** its length by breaking a dependency.
+
+*Split the fat serial bars.* `combat`, `ik_post` and `UI` are the widest bars on
+the chain and are modelled single-threaded. Splitting each into internally-parallel
+work (`parallel_for` across entities / characters / widgets) both shortens the
+chain and consumes the idle cores the frame had. (The `Deferred` and cloth
+version-choice levers from §3 ride along here: they don't move the makespan, but
+once the chain is shorter there is idle capacity for their work to fill.)
+
+*Cut a dependency.* The chain runs `… → trio → AI → anim → …`: AI waits for this
+frame's gameplay trio. But AI does not *need* this frame's gameplay — one frame of
+AI latency is invisible and standard. Publish the trio's results as a `Versioned`
+**gameplay snapshot** at frame end and have AI read the *previous* version. The
+`trio → AI` edges vanish; AI now starts as soon as its nav paths are ready, and the
+whole animation sub-chain slides forward. This single lever is the largest cut in
+the exercise.
 
 | lever | what | makespan |
 |---|---|---|
-| baseline | — | 4849 µs |
-| + parallelise `combat`, `ik_post` | per-entity / per-character split of the two fattest critical bars | 4430 µs (−9 %) |
-| + parallelise `UI` | per-widget layout (it was 1.5 ms serial and gating submit) | 4086 µs (−16 %) |
-| + cloth on last frame | now the spine is short there is idle capacity for cloth to fill early | 4023 µs (−17 %) |
+| baseline | — | 4793 µs |
+| + split `combat`, `ik_post`, `UI` | per-entity / character / widget `parallel_for` on the fattest critical bars | 3941 µs (−18 %) |
+| + AI reads last frame's gameplay (`Versioned`) | deletes the `trio → AI` edges; AI starts on its paths, not the trio | **3120 µs (−35 %)** |
 
-Each split turns a serial bar into internally-parallel work (`parallel_for`
-across entities), which both shortens the critical chain *and* consumes the idle
-cores the frame already had. Note the last row: the cloth version-choice that was
-neutral in §3 now pays a little — once the spine is short enough to leave idle
-capacity, moving cloth's work earlier fills it instead of fighting the chain. The
-same lever, opposite verdict, depending on the state of the frame.
+The `Versioned` cut is worth more than all the splits combined, and it costs
+almost nothing to model — a snapshot node that stages the trio's results and a
+flip node, both off the critical path. It is the same mechanism the render pipeline
+already uses to read last frame's transforms; here it is turned on the gameplay
+dependency instead.
 
-## 5. The result
+## 5. The result: dependency-bound → core-bound
 
 | | baseline | optimised |
 |---|---|---|
-| makespan | 4866 µs | **4023 µs** (−17 %) |
-| core utilization | 60 % | **64 %** |
-| critical tail | cloth (post-flip) | none (ends at propagation/flip) |
+| makespan | 4793 µs | **3120 µs** (−35 %) |
+| core utilization | 60 % (yellow) | **85 % (green)** |
+| critical dead time | 5 % (green) | 19 % (red) |
 
-The optimised frame is close to its critical-path floor: the remaining fat bars
-(`AI`, `anim_graph`, `propagation`) are already internally parallel, and the head
-(`networking`, `scripting`) is genuinely serial work. From here, faster means
-*cutting work* — a smaller scene, cheaper systems — not rearranging, because the
-cores are as full as a chain of this length allows.
+The two headline colours flip in opposite directions, and that is the whole story.
+The baseline is **dependency-bound**: cores half-idle (60 %), but the critical
+chain almost never waits (5 % dead time) — the frame is limited by the *length* of
+its chain. The optimised frame is **core-bound**: cores nearly full (85 %), and now
+the critical path *does* wait (19 % dead time) — not for a missing dependency, but
+for a free core. In the picture the single long critical spine has fragmented: no
+node is critical in more than ~60 % of runs, because the binding path now bounces
+between whichever ready node is waiting on a core.
+
+That transition is the signal that the optimisation is *done*. On a core-bound
+frame, rearranging has nothing left to exploit — every core is busy. From here,
+faster means **cutting work** (a smaller scene, cheaper systems) or **adding
+cores**, not restructuring the graph. The trace tells you when you have reached
+that point instead of guessing.
 
 ## 6. What carries over to a real frame
 
 - **Read utilization and dead time together.** Low dead time + low utilization =
   critical-path bound: shorten the chain. High dead time = scheduling bound:
-  worker count, ordering, or contention. They point at different fixes.
+  worker count, ordering, or contention. High utilization + rising dead time is
+  the *finished* state — core-bound, nothing left to rearrange.
 - **Optimise the critical path, not the utilization number.** The trace makes
   the critical chain and its fattest bars obvious; that is where makespan lives.
+- **Cutting a dependency beats splitting a bar.** The largest lever here was not a
+  faster node — it was deleting an edge. `Versioned` lets a consumer read last
+  frame's data where one frame of latency is acceptable (AI, audio, render), which
+  removes the producer from *this* frame's critical chain entirely. Look for those
+  edges first: they are cheap and they shorten the chain rather than just widening
+  a bar on it.
 - **Levers are frame-state-dependent.** A version choice or an ordering edge that
   is neutral (or harmful) on a long spine can pay once the spine is short.
   Measure each in place — the exercise did, keeping only what moved the number.

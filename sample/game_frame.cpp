@@ -27,7 +27,9 @@
 //   - `Versioned<Transforms>` -- the packaged double-buffer. Simulation stages
 //     this frame's transforms and flips; render + audio read the previous
 //     version (declared before the flip) and run from t=0; cloth reads the
-//     fresh version (declared after).
+//     fresh version (declared after). A second `Versioned` (the gameplay
+//     snapshot) is the optimised variant's biggest lever: AI reads last frame's
+//     trio results, so the trio->AI edge leaves the critical path.
 //   - `Deferred<Draw_lists>` -- the command buffer. In the optimised variant the
 //     draw producers stage grant-free and go wide; the baseline writes the queue
 //     directly, so the producers serialise -- a real inefficiency the trace
@@ -176,6 +178,14 @@ private:
     std::vector<float> data_;
 };
 
+// The gameplay snapshot: the same default-constructible float-batch shape as
+// `Transforms`, double-buffered via `Versioned`. In the optimised variant the
+// trio's results are packed into it and published for NEXT frame's AI to read --
+// one-frame-latent AI perception, a standard engine pattern (a blackboard / AI
+// world snapshot updated at frame end). Reusing `Transforms` also reuses its
+// `read_all` overload; the store is named "gameplay" for the trace.
+using Gameplay = Transforms;
+
 // The render queue -- the `Deferred` target (optimised) or a plain write target
 // (baseline). Producers in the optimised variant stage commands; the submit node
 // applies them. In the baseline the producers push directly under a write grant.
@@ -301,6 +311,11 @@ struct World
 
     // the published transforms: staged by propagation, flipped by the publish node
     ts::Versioned<Transforms> transforms{ ts::Named{"transforms"} };
+
+    // the published gameplay snapshot: the optimised variant packs the trio's
+    // results here and publishes them for NEXT frame's AI (one-frame-latent
+    // perception). Unused in the baseline (empty, no stages -- harmless).
+    ts::Versioned<Gameplay> gameplay{ ts::Named{"gameplay"} };
 
     ts::Guarded<Cloth> cloth;
     ts::Guarded<Particles> particles;
@@ -496,21 +511,13 @@ void tick_navigation(const Nav_mesh& nav_mesh, const Nav_tiles& tiles,
     parallel_fill(paths, 1.0f, 2.5);
 }
 
-// AI: per-agent path queries against the read-only nav service via async --
-// concurrent readers on other workers, overlapping AI's own logic. Speculative:
-// each query runs a longer budget than AI needs and AI cancels the batch once
-// done (cooperative early-out via the trailing token). AI reads the trio outputs
-// (this frame in the baseline; the optimised variant is discussed in `optimise`).
-void tick_AI(ts::Guarded<Nav_mesh>& nav_service,
-             const Transforms& prev_xf, const Paths& paths, const Combat& combat,
-             const Economy& economy, const Quests& quests, Intents& intents)      // 1.5
+// AI's nav-query core, shared by both variants: per-agent path queries against
+// the read-only nav service via async -- concurrent readers on other workers,
+// overlapping AI's own logic. Speculative: each query runs a longer budget than
+// AI needs and AI cancels the batch once done (cooperative early-out via the
+// trailing token). Writes this frame's intents.
+void ai_nav_and_intents(ts::Guarded<Nav_mesh>& nav_service, Intents& intents)     // 1.5
 {
-    read_all(prev_xf);
-    read_all(paths);
-    read_all(combat);
-    read_all(economy);
-    read_all(quests);
-
     ts::Cancellation_source nav_cancel;
     constexpr int queries = 6;
     for (int q = 0; q < queries; ++q)
@@ -535,6 +542,49 @@ void tick_AI(ts::Guarded<Nav_mesh>& nav_service,
     parallel_cost(1.5);
     nav_cancel.request_cancel();
     fill(intents, 1.0f);
+}
+
+// Baseline AI: reads THIS frame's trio outputs -- so the trio binds AI on the
+// critical path (the trace shows exactly this). The optimised variant reads last
+// frame's gameplay snapshot instead (tick_AI_prev), deleting the trio->AI edges.
+void tick_AI(ts::Guarded<Nav_mesh>& nav_service,
+             const Transforms& prev_xf, const Paths& paths, const Combat& combat,
+             const Economy& economy, const Quests& quests, Intents& intents)      // 1.5
+{
+    read_all(prev_xf);
+    read_all(paths);
+    read_all(combat);
+    read_all(economy);
+    read_all(quests);
+    ai_nav_and_intents(nav_service, intents);
+}
+
+// Optimised AI: reads last frame's gameplay snapshot (a `Versioned` published at
+// the end of the previous frame) in place of this frame's trio. One frame of AI
+// latency is standard, and it lets AI start as soon as its paths are ready
+// instead of waiting for the gameplay trio -- the flagship critical-path cut.
+void tick_AI_prev(ts::Guarded<Nav_mesh>& nav_service,
+                  const Transforms& prev_xf, const Paths& paths,
+                  const Gameplay& prev_gameplay, Intents& intents)                // 1.5
+{
+    read_all(prev_xf);
+    read_all(paths);
+    read_all(prev_gameplay);
+    ai_nav_and_intents(nav_service, intents);
+}
+
+// Gameplay snapshot: packs this frame's trio results into the versioned gameplay
+// store for next frame's AI. Off the critical path (nothing this frame waits on
+// it -- it feeds the NEXT frame via the published version). Optimised only.
+void tick_gameplay_snapshot(const Combat& combat, const Economy& economy,
+                            const Quests& quests, ts::Recorder<Gameplay>& rec)     // 0.1
+{
+    read_all(combat);
+    read_all(economy);
+    read_all(quests);
+    std::vector<float> batch(static_cast<std::size_t>(combat.size()), 1.0f);
+    spin(0.1);   // packing the snapshot
+    rec.stage([batch = std::move(batch)](Gameplay& g) { g.apply(batch); });
 }
 
 // Animation chain: graph eval -> IK/post -> skinning.
@@ -843,14 +893,39 @@ ts::Static_task_graph build_frame_graph(World& w, Frame_variant variant,
     g.add_node("quests", &tick_quests,
         w.transforms.state(), w.input, w.net, w.script_events, w.quests);
 
-    // AI.
+    // AI. Baseline reads THIS frame's trio (so the trio binds AI on the critical
+    // path); optimised reads last frame's gameplay snapshot instead, deleting the
+    // trio->AI edges so AI starts as soon as its paths are ready.
     g.add_node("navigation", &tick_navigation, w.nav_mesh, w.nav_tiles, w.transforms.state(), w.paths);
-    auto ai = g.add_node("AI", [&w](const Transforms& prev_xf, const Paths& paths,
-                                    const Combat& c, const Economy& e, const Quests& q,
-                                    Intents& intents)
+    ts::Graph_node ai;
+    if (opt)
+        ai = g.add_node("AI", [&w](const Transforms& prev_xf, const Paths& paths,
+                                   const Gameplay& prev_gp, Intents& intents)
+        {
+            tick_AI_prev(w.nav_mesh, prev_xf, paths, prev_gp, intents);
+        }, w.transforms.state(), w.paths, w.gameplay.state(), w.intents);
+    else
+        ai = g.add_node("AI", [&w](const Transforms& prev_xf, const Paths& paths,
+                                   const Combat& c, const Economy& e, const Quests& q,
+                                   Intents& intents)
+        {
+            tick_AI(w.nav_mesh, prev_xf, paths, c, e, q, intents);
+        }, w.transforms.state(), w.paths, w.combat, w.economy, w.quests, w.intents);
+
+    // Gameplay snapshot + publish (optimised only): pack this frame's trio into
+    // the versioned gameplay store and flip it for NEXT frame's AI. The snapshot
+    // reads the trio (this frame) and is off the critical path; AI (declared
+    // above) reads the PREVIOUS version, so the flip is ordered after it.
+    if (opt)
     {
-        tick_AI(w.nav_mesh, prev_xf, paths, c, e, q, intents);
-    }, w.transforms.state(), w.paths, w.combat, w.economy, w.quests, w.intents);
+        auto gp_snapshot = g.add_node("gameplay_snapshot",
+            [rec = w.gameplay.recorder()](const Combat& c, const Economy& e, const Quests& q) mutable
+            {
+                tick_gameplay_snapshot(c, e, q, rec);
+            }, w.combat, w.economy, w.quests);
+        auto gp_flip = g.add_node("gameplay_flip", ts::publish_body(w.gameplay), w.gameplay.state());
+        gp_flip.after(gp_snapshot);
+    }
 
     // Animation chain.
     auto anim_graph = g.add_node("anim_graph", &tick_anim_graph, w.skeletons, w.intents, w.anim_pose);
@@ -1067,6 +1142,24 @@ void trace_game_frame(int frames, const char* DOT_path, const char* SVG_path)
     ts::Scheduler workers{ { .num_threads = static_cast<uint32_t>(variant_workers) } };
     trace_variant(frames, workers, Frame_variant::baseline, SVG_path, "baseline", DOT_path);
     trace_variant(frames, workers, Frame_variant::optimised, SVG_path, "optimised", nullptr);
+}
+
+// Headless run of the OPTIMISED variant on a dedicated `workers`-thread
+// scheduler, at a fast scale -- for the sanitizer driver to exercise the
+// concurrent surface unique to that variant: the gameplay `Versioned` publisher
+// (AI reads the previous version while a flip publishes the next), the
+// `Deferred` draw-queue staging, and the explicit submit ordering. The baseline
+// `game_frame_stats` path exercises none of these.
+void stress_game_frame_optimised(int frames, int workers)
+{
+    constexpr int entities = 500;
+    time_scale = 0.05f;
+    reset_stats();
+    ts::Scheduler sched{ { .num_threads = static_cast<uint32_t>(workers) } };
+    World world{ entities };
+    ts::Static_task_graph graph = build_frame_graph(world, Frame_variant::optimised);
+    for (int f = 0; f < frames; ++f)
+        graph.execute(sched).sync();
 }
 
 void run_game_frame_sample(int frames, float scale)

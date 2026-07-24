@@ -14,6 +14,7 @@ namespace sample
 {
 void game_frame_stats(int frames, float time_scale,
                       double& avg_ms, double& serial_ms, float& transform0);
+void stress_game_frame_optimised(int frames, int workers);
 void run_blackboard_sample();
 std::size_t physics_pose_hash(int frames);   // final snapshot hash after `frames` frames
 }
@@ -1066,6 +1067,8 @@ int main()
         float xf = 0.0f;
         sample::game_frame_stats(20, 0.2f, avg, serial, xf);
     }
+    std::puts("tsan: game_frame optimised frames");
+    sample::stress_game_frame_optimised(40, 4);   // gameplay Versioned + Deferred staging
     std::puts("tsan: done (no races)");
     return 0;
 }
