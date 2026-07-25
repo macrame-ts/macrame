@@ -686,7 +686,13 @@ inline bool Graph_trace::write_SVG(const char* path) const
     const double row_h = 30.0, bar_h = 20.0;
     const double px_per_us = plot_w / span_us;
 
-    const double rows_top = header_h;
+    // A solid core-utilization strip sits between the header and the rows: the same
+    // per-time green->yellow->red utilization at full opacity, ~25% of a row tall, so the
+    // signal reads at a glance where the faint full-height wash behind the bars is subtle.
+    const double util_strip_h = row_h * 0.25;
+    const double strip_gap = 6.0;
+    const double strip_top = header_h;
+    const double rows_top = header_h + util_strip_h + strip_gap;
     const double rows_bottom = rows_top + row_count * row_h;
     const double total_w = pad_l + plot_w + pad_r;
     const double total_h = rows_bottom + axis_h + legend_h;
@@ -837,7 +843,8 @@ inline bool Graph_trace::write_SVG(const char* path) const
         line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"url(#utilkey)\" opacity=\"0.6\"/>\n",
              ax0, ly8 - 5.0, ax1 - ax0);
         line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">"
-             "background = core utilization over time (green busy -&gt; red idle)</text>\n",
+             "core utilization over time -- strip above the lanes + background wash "
+             "(green busy -&gt; red idle; hover the strip for the %%)</text>\n",
              ax1 + 14.0, ly8 + 4.0);
     }
 
@@ -883,8 +890,34 @@ inline bool Graph_trace::write_SVG(const char* path) const
                 ? blend_hex(0xe6, 0xdb, 0x74, 0xa6, 0xe2, 0x2e, (u - 0.5) * 2.0)
                 : blend_hex(0xff, 0x5f, 0x45, 0xe6, 0xdb, 0x74, u * 2.0);
             line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"%s\" "
-                 "opacity=\"0.16\" pointer-events=\"none\"/>\n",
+                 "opacity=\"0.24\" pointer-events=\"none\"/>\n",
                  x0, rows_top, x1 - x0, rows_bottom - rows_top, c.c_str());
+        }
+
+        // The solid utilization strip above the rows: same per-bucket colour at FULL
+        // opacity, and each bucket is hoverable (`.hv`) -- the tooltip reports the exact
+        // core-utilization % and time at the cursor, so the wash below has a precise scale.
+        for (size_t b = 0; b < util_buckets_.size(); ++b)
+        {
+            if (util_buckets_[b].n == 0)
+                continue;
+            double u = std::clamp(util_buckets_[b].mean, 0.0, 1.0);
+            double x0 = X(static_cast<double>(b) * util_bucket_width_us_);
+            double x1 = X(static_cast<double>(b + 1) * util_bucket_width_us_);
+            if (x0 >= x_right)
+                break;
+            if (x1 > x_right)
+                x1 = x_right;
+            std::string c = u >= 0.5
+                ? blend_hex(0xe6, 0xdb, 0x74, 0xa6, 0xe2, 0x2e, (u - 0.5) * 2.0)
+                : blend_hex(0xff, 0x5f, 0x45, 0xe6, 0xdb, 0x74, u * 2.0);
+            double t_ms = (static_cast<double>(b) + 0.5) * util_bucket_width_us_ / 1000.0;
+            char tip[96];
+            std::snprintf(tip, sizeof tip, "core utilization: %.0f%%&#10;t %.2f ms", u * 100.0, t_ms);
+            out += "<g class=\"hv\" data-hl=\"" + c + "\" data-tip=\"" + tip + "\">";
+            line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"%s\"/>\n",
+                 x0, strip_top, x1 - x0, util_strip_h, c.c_str());
+            out += "</g>\n";
         }
     }
 
