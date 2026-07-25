@@ -255,6 +255,43 @@ void test_parallel_for_priority_order()
     wait_until([&exited, workers] { return exited.load() == workers + 1; });
 }
 
+// A parallel_for launched from a task fans out on THAT task's scheduler, not the global
+// default: run it inside a task on a dedicated 2-worker scheduler and assert every executor
+// that touched an item reports a worker index of THAT scheduler ([0, 2)). If the old code
+// fanned out to the wider default pool, indices would exceed 1.
+constexpr int pf_sched_n = 512;
+std::vector<int> pf_sched_worker;      // static storage so the fn-ptr task can reach it
+std::atomic<bool> pf_sched_done{ false };
+
+void test_parallel_for_current_scheduler()
+{
+    ts::Scheduler dedicated{ { .num_threads = 2 } };
+    pf_sched_worker.assign(pf_sched_n, -2);
+    pf_sched_done.store(false);
+
+    dedicated.submit([](void*)
+    {
+        ts::parallel_for(pf_sched_n, [](int i)
+        {
+            pf_sched_worker[static_cast<size_t>(i)] = ts::current_worker_index;
+        });
+        pf_sched_done.store(true, std::memory_order_release);
+    }, nullptr);
+
+    wait_until([] { return pf_sched_done.load(std::memory_order_acquire); });
+
+    int max_w = -1;
+    bool all_valid = true;
+    for (int w : pf_sched_worker)
+    {
+        if (w < 0)               // -2 unset or -1 non-worker: every item must run on a worker
+            all_valid = false;
+        max_w = std::max(max_w, w);
+    }
+    TS_CHECK(all_valid);         // every item ran on a worker of the dedicated pool
+    TS_CHECK(max_w < 2);         // ...and only its 2 workers (not the wider default pool)
+}
+
 } // namespace
 
 void run_parallel_tests()
@@ -271,4 +308,5 @@ void run_parallel_tests()
     run("parallel_for priorities", test_parallel_for_priorities);
     run("parallel_for priority inheritance", test_parallel_for_priority_inheritance);
     run("parallel_for priority order", test_parallel_for_priority_order);
+    run("parallel_for current scheduler", test_parallel_for_current_scheduler);
 }
