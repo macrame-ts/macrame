@@ -1099,7 +1099,7 @@ std::string described_SVG_path(const char* base, const char* description)
 
 // One traced variant on `scheduler`: build the variant's graph on a fresh World,
 // attach a fresh trace, run, write the described SVG.
-void trace_variant(int frames, ts::Scheduler& scheduler, Frame_variant variant,
+void trace_variant(int frames, Frame_variant variant,
                    const char* base_SVG_path, const char* description, const char* DOT_path)
 {
     constexpr int entities = 1000;
@@ -1117,7 +1117,7 @@ void trace_variant(int frames, ts::Scheduler& scheduler, Frame_variant variant,
     trace.set_title(std::move(title));
     graph.set_trace(&trace);
     for (int f = 0; f < frames; ++f)
-        graph.execute(scheduler).sync();
+        graph.execute().sync();
     graph.set_trace(nullptr);
     std::string path = described_SVG_path(base_SVG_path, description);
     trace.write_SVG(path.c_str());
@@ -1125,7 +1125,7 @@ void trace_variant(int frames, ts::Scheduler& scheduler, Frame_variant variant,
         description, trace.run_count(), path.c_str());
 #else
     for (int f = 0; f < frames; ++f)
-        graph.execute(scheduler).sync();
+        graph.execute().sync();
     (void)base_SVG_path; (void)description;
     std::printf("[game_frame] TS_PROFILING is 0: ran %d frames\n", frames);
 #endif
@@ -1139,9 +1139,9 @@ void trace_variant(int frames, ts::Scheduler& scheduler, Frame_variant variant,
 // trace). Writes one average-run SVG per variant plus the structure DOT.
 void trace_game_frame(int frames, const char* DOT_path, const char* SVG_path)
 {
-    ts::Scheduler workers{ { .num_threads = static_cast<uint32_t>(variant_workers) } };
-    trace_variant(frames, workers, Frame_variant::baseline, SVG_path, "baseline", DOT_path);
-    trace_variant(frames, workers, Frame_variant::optimised, SVG_path, "optimised", nullptr);
+    ts::Scheduler_scope pool{ { .num_threads = static_cast<uint32_t>(variant_workers) } };
+    trace_variant(frames, Frame_variant::baseline, SVG_path, "baseline", DOT_path);
+    trace_variant(frames, Frame_variant::optimised, SVG_path, "optimised", nullptr);
 }
 
 // Headless run of the OPTIMISED variant on a dedicated `workers`-thread
@@ -1155,11 +1155,11 @@ void stress_game_frame_optimised(int frames, int workers)
     constexpr int entities = 500;
     time_scale = 0.05f;
     reset_stats();
-    ts::Scheduler sched{ { .num_threads = static_cast<uint32_t>(workers) } };
+    ts::Scheduler_scope pool{ { .num_threads = static_cast<uint32_t>(workers) } };
     World world{ entities };
     ts::Static_task_graph graph = build_frame_graph(world, Frame_variant::optimised);
     for (int f = 0; f < frames; ++f)
-        graph.execute(sched).sync();
+        graph.execute().sync();
 }
 
 void run_game_frame_sample(int frames, float scale)

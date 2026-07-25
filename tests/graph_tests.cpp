@@ -246,7 +246,7 @@ void test_cancel_skips_nodes()
 
     ts::Cancellation_source src;
     src.request_cancel();               // cancel before running
-    ts::Task<void> run = g.execute(ts::global_scheduler(), src.token());
+    ts::Task<void> run = g.execute(src.token());
     run.sync();
 
     TS_CHECK(run.is_cancelled());
@@ -340,7 +340,7 @@ void test_nested_before_successor()
 // root queues all three (in its node_complete) before the worker picks the next task.
 void test_node_priority_order()
 {
-    ts::Scheduler s{ { .num_threads = 1 } };
+    ts::Scheduler_scope s{ { .num_threads = 1 } };
     ts::Guarded<int> a{ 0 };
     std::atomic<int> seq{ 0 };
     std::atomic<int> high_ord{ 0 }, normal_ord{ 0 }, low_ord{ 0 };
@@ -352,7 +352,7 @@ void test_node_priority_order()
     g.add_node([&seq, &high_ord](const int&) { high_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::high);
     g.compile();
 
-    g.execute(s).sync();
+    g.execute().sync();
     TS_CHECK(high_ord.load() < normal_ord.load());    // high ran before normal
     TS_CHECK(normal_ord.load() < low_ord.load());     // normal ran before low
 }
@@ -516,7 +516,7 @@ void test_graph_trace_cancelled()
 
     ts::Cancellation_source src;
     src.request_cancel();
-    g.execute(ts::global_scheduler(), src.token()).sync();   // cancelled run
+    g.execute(src.token()).sync();   // cancelled run
     TS_CHECK(trace.run_count() == 1);                          // not folded
     g.set_trace(nullptr);
 }
@@ -722,9 +722,9 @@ void test_graph_trace_end_to_end_utilization()
 
     ts::tools::Graph_trace trace;
     g.set_trace(&trace);
-    ts::Scheduler one{ { .num_threads = 1 } };
+    ts::Scheduler_scope one{ { .num_threads = 1 } };
     for (int i = 0; i < 8; ++i)
-        g.execute(one).sync();
+        g.execute().sync();
     g.set_trace(nullptr);
 
     TS_CHECK(trace.run_count() == 8);

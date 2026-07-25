@@ -60,6 +60,36 @@ struct Scheduler_config
     uint32_t spin_cycles = 64;
 };
 
+// The library runs one process-wide scheduler (`global_scheduler()`, declared in guarded.h).
+// It is RECONFIGURABLE: `configure_scheduler` tears the current one down (signals quit, JOINs
+// its workers, drains) and builds a new one with `config`. This is a coarse lifecycle
+// operation for quiescent points (startup, between frames/phases) -- it is NOT thread-safe
+// against concurrent use: calling it while tasks are in flight from other threads is
+// undefined. `current_scheduler_config` returns the config currently in effect.
+void configure_scheduler(Scheduler_config config);
+Scheduler_config current_scheduler_config();
+
+// RAII: reconfigure the global scheduler for a scope, restoring the previous config on exit.
+// The single-global way to run a block on a specific pool (e.g. a sample tracing on a fixed
+// worker count) -- there are no ad-hoc `Scheduler` instances to construct. Same coarse
+// teardown+recreate semantics as `configure_scheduler`; use at quiescent points only.
+class Scheduler_scope
+{
+public:
+    explicit Scheduler_scope(Scheduler_config config)
+        : prev_(current_scheduler_config())
+    {
+        configure_scheduler(config);
+    }
+    ~Scheduler_scope() { configure_scheduler(prev_); }
+
+    Scheduler_scope(const Scheduler_scope&) = delete;
+    Scheduler_scope& operator=(const Scheduler_scope&) = delete;
+
+private:
+    Scheduler_config prev_;
+};
+
 using Task_func_ptr = void(*)(void* data);
 
 namespace detail

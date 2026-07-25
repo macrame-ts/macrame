@@ -1,14 +1,54 @@
 #include "ts/guarded.h"
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 
 namespace ts
 {
 
+namespace
+{
+// The one process-wide scheduler, reconfigurable via `configure_scheduler`. A `unique_ptr`
+// in a namespace static so program exit destroys it (joins its workers) -- clean shutdown,
+// as the old Meyers static gave. `g_fast` is a lock-free read cache for the hot path (every
+// `global_scheduler()` from an external thread); the mutex guards lazy init + the
+// teardown/recreate swap. Reconfigure racing concurrent use is undefined (documented) -- the
+// `g_fast` reset before teardown is belt-and-suspenders, not a use-vs-reconfigure guarantee.
+std::mutex g_sched_mutex;
+std::unique_ptr<Scheduler> g_scheduler;
+Scheduler_config g_config;
+std::atomic<Scheduler*> g_fast{ nullptr };
+}
+
 Scheduler& global_scheduler()
 {
-    static Scheduler scheduler;
-    return scheduler;
+    if (Scheduler* s = g_fast.load(std::memory_order_acquire))
+        return *s;
+    std::lock_guard lock(g_sched_mutex);
+    if (!g_scheduler)
+    {
+        g_scheduler = std::make_unique<Scheduler>(g_config);
+        g_fast.store(g_scheduler.get(), std::memory_order_release);
+    }
+    return *g_scheduler;
+}
+
+Scheduler_config current_scheduler_config()
+{
+    std::lock_guard lock(g_sched_mutex);
+    return g_config;
+}
+
+void configure_scheduler(Scheduler_config config)
+{
+    std::lock_guard lock(g_sched_mutex);
+    g_fast.store(nullptr, std::memory_order_release);
+    g_scheduler.reset();   // dtor: quit + join workers, drain queued tasks
+    g_config = config;
+    g_scheduler = std::make_unique<Scheduler>(config);
+    g_fast.store(g_scheduler.get(), std::memory_order_release);
 }
 
 namespace detail

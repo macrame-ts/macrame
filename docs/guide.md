@@ -84,15 +84,26 @@ run concurrently with other reads. `access` is *opportunistic* — it runs the
 functor immediately on the calling thread when the object is free, otherwise it
 queues (see §5); either way you get a `Task<R>` and only `sync()` waits.
 
-The scheduler starts lazily with one worker per hardware thread. To configure
-it, construct your own:
+The scheduler is a single process-wide instance, started lazily with one worker
+per hardware thread. There are no ad-hoc scheduler objects to construct;
+reconfigure the one global — a coarse teardown+recreate for startup or between
+phases (not while work is in flight):
 
 ```cpp
-ts::Scheduler scheduler{ { .num_threads = 4 } };
+ts::configure_scheduler({ .num_threads = 4 });
 ```
 
-(The library currently routes `ts::launch`/`async` to a process-wide default
-scheduler; per-scope scheduler selection is **WIP**.)
+or run a block on a specific pool and restore the previous config on exit:
+
+```cpp
+{
+    ts::Scheduler_scope pool{ { .num_threads = 4 } };
+    // graph.execute(), ts::launch(...), etc. run on the 4-worker pool here
+}   // previous config restored
+```
+
+`graph.execute()` and `ts::launch`/`async` all use this one global scheduler;
+nothing takes a scheduler argument.
 
 ---
 

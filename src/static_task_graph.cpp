@@ -439,10 +439,14 @@ void Static_task_graph::node_complete(Run_state& run, int index)
     }
 }
 
-Task<void> Static_task_graph::execute(Scheduler& scheduler, Cancellation_token token)
+Task<void> Static_task_graph::execute(Cancellation_token token)
 {
     if (!compiled_)
         ts::fatal("Static_task_graph::execute called before compile()");
+
+    // Runs on the one global scheduler (whatever a `Scheduler_scope` currently has it
+    // configured as).
+    Scheduler& scheduler = global_scheduler();
 
     // Reuse the run state built at compile() (one run at a time; a full get() barrier
     // between runs guarantees the previous run is quiescent -- see docs §7.1). Only the
