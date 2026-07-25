@@ -643,7 +643,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // label, centered at x = pad_l. 24px just clears its half-width ("0.0 µs" at 10px) with
     // a few px of breathing room, so the bars start as far left as the labels permit.
     const double pad_l = 24.0, pad_r = 28.0, plot_w = 1150.0;
-    const double header_h = 84.0, axis_h = 30.0, legend_h = 168.0;
+    const double header_h = 84.0, axis_h = 30.0, legend_h = 190.0;
     const double row_h = 30.0, bar_h = 20.0;
     const double px_per_us = plot_w / span_us;
 
@@ -790,6 +790,16 @@ inline bool Graph_trace::write_SVG(const char* path) const
         line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">"
              "edges are faint by default -- hover a node to highlight its dependencies</text>\n",
              ax0, base + 148.0);
+        // Utilization-background key: a green->yellow->red swatch + label.
+        const double ly8 = base + 166.0;
+        out += "<defs><linearGradient id=\"utilkey\">"
+               "<stop offset=\"0\" stop-color=\"#a6e22e\"/><stop offset=\"0.5\" stop-color=\"#e6db74\"/>"
+               "<stop offset=\"1\" stop-color=\"#ff5f45\"/></linearGradient></defs>\n";
+        line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"url(#utilkey)\" opacity=\"0.6\"/>\n",
+             ax0, ly8 - 5.0, ax1 - ax0);
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">"
+             "background = core utilization over time (green busy -&gt; red idle)</text>\n",
+             ax1 + 14.0, ly8 + 4.0);
     }
 
     // No row separators or labels: rows are anonymous concurrency slots, not workers --
@@ -807,6 +817,47 @@ inline bool Graph_trace::write_SVG(const char* path) const
             append_escaped(out, lines_v[k]);
         }
     };
+
+    // Core-utilization background: a faint full-height wash whose colour at each time slice
+    // reflects how busy the machine was there -- green (all cores busy) -> yellow (half) ->
+    // red (idle). The time-resolved companion to the utilization headline: green stretches
+    // are where the frame saturates the cores, red valleys are idle capacity (where deferred
+    // work could go). Signal = node concurrency (bars overlapping the slice) / worker count
+    // -- a proxy that UNDERCOUNTS a `parallel_for` node (one bar, many cores), so a solo
+    // parallel node reads cooler than the machine truly ran; documented, and consistent with
+    // the packed rows already being node-concurrency slots. Drawn first, so it sits behind
+    // the dead-time bands and bars; inert to hover.
+    if (workers_seen > 0)
+    {
+        std::vector<double> events;
+        for (int i = 0; i < count; ++i)
+        {
+            events.push_back(bar_start[static_cast<size_t>(i)]);
+            events.push_back(bar_end[static_cast<size_t>(i)]);
+        }
+        std::sort(events.begin(), events.end());
+        events.erase(std::unique(events.begin(), events.end(),
+            [](double a, double b) { return std::abs(a - b) < 1e-6; }), events.end());
+        for (size_t k = 0; k + 1 < events.size(); ++k)
+        {
+            double t0 = events[k], t1 = events[k + 1];
+            if (t1 - t0 < 1e-6)
+                continue;
+            double mid = (t0 + t1) * 0.5;
+            int conc = 0;
+            for (int i = 0; i < count; ++i)
+                if (bar_start[static_cast<size_t>(i)] <= mid && mid < bar_end[static_cast<size_t>(i)])
+                    ++conc;
+            double u = std::clamp(static_cast<double>(conc) / static_cast<double>(workers_seen), 0.0, 1.0);
+            // green (busy) -> yellow (half) -> red (idle), the utilization-headline ramp.
+            std::string c = u >= 0.5
+                ? blend_hex(0xe6, 0xdb, 0x74, 0xa6, 0xe2, 0x2e, (u - 0.5) * 2.0)
+                : blend_hex(0xff, 0x5f, 0x45, 0xe6, 0xdb, 0x74, u * 2.0);
+            line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"%s\" "
+                 "opacity=\"0.16\" pointer-events=\"none\"/>\n",
+                 X(t0), rows_top, X(t1) - X(t0), rows_bottom - rows_top, c.c_str());
+        }
+    }
 
     // Critical dead-time regions, in the BACKGROUND and FULL HEIGHT: the wait is a
     // property of the binding chain, not of any row or worker. For an edge that binds
