@@ -116,8 +116,18 @@ void Scheduler::signal_submit()
 constexpr int low_valve_threshold = 64;
 
 // Find one task for `worker_index`: global high (strict) -> own local deque (LIFO) -> global
-// normal -> global low -> steal `normal` from a random victim. A per-worker aging counter
+// normal -> steal `normal` from a random victim -> global low. A per-worker aging counter
 // forces `low` ahead of normal once in a while (the starvation valve).
+//
+// Steal is served BEFORE global low: a `normal` task outranks a `low` task even when the
+// only normal work left lives in another worker's local deque (reachable solely by steal).
+// The alternative -- cheap global-low pop before the steal scan -- inverts priority: a
+// low-priority global task would beat a normal task buried under a LIFO sibling in a local
+// deque (measured: `audio` at `low` beating a normal graph successor stuck behind a longer
+// sibling). Honouring the normal > low contract costs an O(workers) steal scan on the idle
+// path before falling through to a waiting low task; the valve still guarantees low makes
+// progress. (Rank-aware successor submission -- TODO 2.5 -- is the deeper fix: it keeps the
+// important normal successor as the LIFO top so it is taken locally, never left steal-only.)
 bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
 {
     static thread_local int since_low = 0;   // consecutive high/normal tasks taken by this worker
@@ -143,13 +153,9 @@ bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
         ++since_low;
         return true;
     }
-    if (queues_[2].pop(out))                                   // global low (normal was empty anyway)
-    {
-        since_low = 0;
-        return true;
-    }
 
-    // Steal a `normal` task from another worker's deque (start at a random victim, scan around).
+    // Steal a `normal` task from another worker's deque (start at a random victim, scan
+    // around) -- BEFORE global low, so a stealable normal outranks a global low task.
     int n = static_cast<int>(local_normal_.size());
     if (n > 1)
     {
@@ -167,6 +173,12 @@ bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
                 return true;
             }
         }
+    }
+
+    if (queues_[2].pop(out))                                   // global low (nothing normal anywhere)
+    {
+        since_low = 0;
+        return true;
     }
     return false;
 }
