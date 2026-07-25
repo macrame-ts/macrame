@@ -1,5 +1,14 @@
 # Worked example: reading a frame trace and optimising it
 
+> **Numbers stale (2026-07):** the absolute figures below predate the
+> `parallel_for`-fans-out-on-the-current-scheduler fix. Before it, the sample's
+> `parallel_for` work leaked to the global default pool, so these traces
+> secretly used the dedicated 6 workers *plus* a full default pool — the frame
+> times are ~2× too fast (honest optimised ≈ 6.8 ms, baseline ≈ 7.6 ms on 6
+> workers). The *shape* of the exercise (which levers help, and why) still
+> holds; the magnitudes need a re-run. See
+> [profiler-guided-optimization.md](profiler-guided-optimization.md).
+
 This walks through the `game_frame` sample as an optimisation exercise. It has
 two variants of the same ~30-system frame, built from the *same* system bodies:
 

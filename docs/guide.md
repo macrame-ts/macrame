@@ -597,9 +597,12 @@ hovering a node brightens its incident edges to full so you can trace its exact
 dependencies. Hovering a bar raises a formatted tooltip — the node name
 coloured by its queue priority (red = high, green = normal, grey = low; the
 same colouring as the name on the bar), with its priority tag right-aligned on
-that line, then the stats: mean / P95 / σ / CV / min/max execution time; the
-declared accesses with each mode colour-coded (**RO** green read-only, **RW**
-red read-write, e.g. `transforms: RO`); and the node's incoming (`->|`) and
+that line, then the stats: mean / P95 / σ / CV / min/max execution time; its
+**true busy** (body + `parallel_for` slices + async fan-out — for a parallel
+node this exceeds the bar, which is wall time, because the bar shows elapsed
+while true busy is core time summed across the fan-out); the declared accesses
+with each mode colour-coded (**RO** green read-only, **RW** red read-write,
+e.g. `transforms: RO`); and the node's incoming (`->|`) and
 outgoing (`|->`) edges, each neighbour name coloured by that edge's share of
 binding chains. The tooltips are scripted into the SVG itself (they work with
 the file open in a browser; not when embedded via `<img>`). A coloured

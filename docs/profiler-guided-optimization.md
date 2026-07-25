@@ -141,19 +141,31 @@ into a per-bucket utilization the trace draws as the background wash. Every task
 kind (slices, async, continuations) counts at its real time, so the background
 is no longer a node-concurrency proxy that undercounted `parallel_for`.
 
-Remaining (both need the same missing piece — a `current_trace_owner` TLS
-carried by launched sub-work, the way `Access_context`/`current_task` already
-propagate; the wrinkle is that busy is measured in the scheduler's opaque
-`run_task`, so a slice/async task must *carry* its owner id from submit and the
-attribution must happen where the owner is in scope — the task execution
-wrappers, not `run_task` — which touches the task core and wants its own gated
-change):
+Done (2026-07): **per-node true busy (owner attribution).** A node body sets a
+`current_trace_owner` TLS (`detail::Trace_owner_scope`); launched sub-work
+inherits it the way `Access_context` already propagates; `detail::Trace_busy_scope`
+measures each such body while armed and attributes it to the node via a
+scheduler-free bridge (so `task.h` stays scheduler-independent). Node tooltip:
+`True busy (body+slices+async)` — a `parallel_for` node reads ≫ its bar (core
+time across the fan-out vs the wall-time bar); scalar nodes ≈ body.
 
-- **Per-node true busy (owner attribution).** Tag each task with its owning
-  graph node; sum a node's body + its slices' + its async fan-out into a
-  per-node accumulator. A node tooltip then shows true cost (`parallel_for`
-  nodes >> their body bar), and it removes the last approximation from the
-  utilization picture. Fixed state: per-node Welford.
+**A prerequisite fix, and a correction it forced:** owner attribution and true
+utilization both depended on the fan-out running on the *traced* scheduler.
+`parallel_for` had hardcoded `default_scheduler()`, so a node on the sample's
+dedicated N-worker trace scheduler leaked its slices to the global default pool
+— which meant the earlier "true utilization" and every variant frame-time in
+the exercise were measured with the frame secretly spread across two pools (the
+dedicated N **plus** up to a full default pool). Fixing `parallel_for` to fan
+out on `current_scheduler` corrected this: honest single-pool numbers are
+~2× the pre-fix ones (e.g. optimised frame time 3.1 → 6.8 ms on 6 workers, its
+critical path 2.65 → 6.1 ms), and the frame is correctly critical-path-bound
+(~46–47% average utilization, peaking in the parallel stretches). The
+optimised-vs-baseline contrast survives (6.8 vs 7.6 ms). **The
+[example-frame-optimization.md](example-frame-optimization.md) numbers predate
+this fix and need a refresh.**
+
+Remaining (needs the same seam plus a per-task kind tag — a gated change to the
+task core):
 - **Per-kind aggregates + scheduling counters.** Per task kind {node, slice,
   async, continuation, nested}: count + Welford duration + total busy. Plus
   cheap `find_work` counters: steals, local-deque hits, global-queue hits,
