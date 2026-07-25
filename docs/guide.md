@@ -632,9 +632,12 @@ there (green all cores busy → yellow half → red idle) — sampled from
 per-worker busy time bucketed over the run, so every task counts at its real
 time (a `parallel_for` node's fan-out across cores registers fully). The green
 stretches saturate the cores; the red valleys are idle capacity. A panel below
-shows the global numbers: run count, frame time mean/min/max (ms), and
+shows the global numbers: run count, frame time mean/min/max (ms),
 **critical path** — the CPM dependency lower bound on frame time (median
-durations, no scheduling waits) — plus worker count. An edge's tooltip names the ordering it enforces: for a derived edge,
+durations, no scheduling waits) — worker count, and **tasks** (total across
+the trace and mean per run: every task the scheduler ran — nodes plus
+`parallel_for` slices, async jobs, and continuations — so it far exceeds the
+node count and shows the real fan-out volume). An edge's tooltip names the ordering it enforces: for a derived edge,
 the conflicting resource and the two nodes' modes (`physics RW -> propagation
 RO`); for an explicit one, "explicit ordering" (plus any coinciding conflict).
 

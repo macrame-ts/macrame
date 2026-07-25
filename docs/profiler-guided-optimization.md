@@ -164,8 +164,32 @@ optimised-vs-baseline contrast survives (6.8 vs 7.6 ms). **The
 [example-frame-optimization.md](example-frame-optimization.md) numbers predate
 this fix and need a refresh.**
 
-Remaining (needs the same seam plus a per-task kind tag — a gated change to the
-task core):
+Done (2026-07): **task volume.** A per-worker task counter in `run_task` (armed
+only, mirrors the busy counter), folded per run into a total + mean-per-run,
+shown in the stats panel (`tasks: N total (~M/run)`). M is every task the
+scheduler ran — nodes + `parallel_for` slices + async + continuations — so it
+far exceeds the node count and exposes the real fan-out (game_frame: ~135/run
+baseline, ~153/run optimised, over 30 nodes).
+
+Remaining:
+- **Task-system cost (% of frame on machinery).** Decompose each worker's frame
+  time into **B** (user functor, minus its internal submits) / **M** (machinery
+  = the `run_task` wrapper outside the functor + in-functor submits + *successful*
+  `find_work`) / **I** (idle = *failed* `find_work` + parking). Headline
+  **`M / (B + M)`** = overhead per unit of useful work (secondary:
+  `M / (workers × frame_time)`). Two refinements make it honest: (a) only
+  *successful* `find_work` counts as machinery — a failed scan before parking is
+  lack-of-parallelism/idle, *not* scheduling cost (raised in review: counting it
+  would misread idleness as overhead); (b) submit-*from-within* a functor
+  (especially `parallel_for` slice submission) *is* task-system machinery, so a
+  per-worker in-functor flag + a submit/enqueue stamp reclassifies that time from
+  B to M (raised in review: it is our work, not the user's). Seams: narrow the
+  body bracket to the functor (owner attribution mostly did this), stamp
+  successful `find_work` in the worker loop, stamp submit under the in-functor
+  flag. TSan required (worker idle + submit paths). **Caveat:** measured with
+  tracing on, so the number is an *upper bound* on the true untraced overhead
+  (includes ~2 clock reads/task) — cross-check against the untraced benchmark
+  per-task cost (~200 ns/op).
 - **Per-kind aggregates + scheduling counters.** Per task kind {node, slice,
   async, continuation, nested}: count + Welford duration + total busy. Plus
   cheap `find_work` counters: steals, local-deque hits, global-queue hits,

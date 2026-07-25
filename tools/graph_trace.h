@@ -122,7 +122,7 @@ public:
                          long long busy_ticks, int worker_count,
                          const long long* util_bucket_busy = nullptr,
                          int util_bucket_count = 0, long long bucket_width_ticks = 0,
-                         const long long* owner_busy = nullptr)
+                         const long long* owner_busy = nullptr, long long task_count = 0)
     {
         if (node_count != static_cast<int>(nodes_.size()))
             return;   // structure not pushed (or a stale attach) -- drop the sample
@@ -203,6 +203,13 @@ public:
         makespan_min_ = std::min(makespan_min_, mk);
         makespan_max_ = std::max(makespan_max_, mk);
         makespan_.add(mk);
+
+        // Task volume: every task the scheduler ran in the window (nodes + parallel_for
+        // slices + async + continuations), so it far exceeds the node count -- the real
+        // fan-out. Total across the trace + mean per run.
+        tasks_total_ += task_count;
+        tasks_per_run_.add(static_cast<double>(task_count));
+
         ++runs_;
     }
 
@@ -230,6 +237,8 @@ public:
             e.binding_gap = {};
             e.critical_runs = 0;
         }
+        tasks_total_ = 0;
+        tasks_per_run_ = {};
         critical_work_ = {};
         makespan_ = {};
         makespan_min_ = 0.0;
@@ -243,6 +252,8 @@ public:
 
     long long run_count() const { return runs_; }
     int structure_node_count() const { return static_cast<int>(nodes_.size()); }
+    long long task_total() const { return tasks_total_; }        // tasks (every kind) across the trace
+    double tasks_per_run() const { return tasks_per_run_.mean; }  // mean tasks per run
 
     // Mean core utilization over the folded runs, [0,1] (see the band constants above).
     double core_utilization() const { return core_util_.mean; }
@@ -563,6 +574,8 @@ private:
     double util_bucket_width_us_ = 0.0;      // width of each util bucket, µs (0 = none yet)
     mutable long long fixed_bucket_width_ticks_ = 0;   // fixed once from the makespan estimate
     long long runs_ = 0;
+    long long tasks_total_ = 0;   // total tasks (every kind) run across the trace
+    Welford tasks_per_run_;       // tasks per run
     std::string title_;   // survives reset()/begin_structure(); set once by the owner
 };
 
@@ -776,7 +789,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
         std::string stats = "runs: " + std::to_string(runs_)
             + "  |  frame time mean " + fmt_ms(makespan_.mean) + " ms (min " + fmt_ms(makespan_min_)
             + ", max " + fmt_ms(makespan_max_) + ")  |  critical path " + fmt_ms(cpm_us)
-            + " ms  |  workers: " + std::to_string(workers_seen);
+            + " ms  |  workers: " + std::to_string(workers_seen)
+            + "  |  tasks: " + std::to_string(tasks_total_)
+            + " (~" + std::to_string(static_cast<long long>(std::llround(tasks_per_run_.mean))) + "/run)";
         out += "<text x=\"16\" y=\"68\" font-size=\"11\" fill=\"#cfcfc2\">";
         append_escaped(out, stats);
         out += "</text>\n";

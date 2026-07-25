@@ -164,6 +164,17 @@ public:
         return sum;
     }
 
+    // Total tasks run across all workers while armed (every kind: graph node bodies,
+    // parallel_for slices, async pipe jobs, continuations). Monotonic like `busy_ticks`;
+    // the trace takes a begin/end delta per run. Relaxed sum -- advisory.
+    long long task_count() const noexcept
+    {
+        long long sum = 0;
+        for (const Busy_slot& slot : busy_)
+            sum += slot.tasks.load(std::memory_order_relaxed);
+        return sum;
+    }
+
     // Time buckets the utilization background samples each run into.
     static constexpr int util_bucket_count = 128;
 
@@ -267,6 +278,7 @@ private:
         if (busy_tracking_.load(std::memory_order_relaxed) != 0)
         {
             Busy_slot& slot = busy_[static_cast<size_t>(worker_index)];
+            slot.tasks.fetch_add(1, std::memory_order_relaxed);   // task-volume counter (every kind)
             long long t0 = std::chrono::steady_clock::now().time_since_epoch().count();
             slot.started.store(t0, std::memory_order_relaxed);   // in-flight, for busy_ticks
             task.func_(task.data_);
@@ -331,6 +343,7 @@ private:
     {
         std::atomic<long long> ticks{ 0 };
         std::atomic<long long> started{ 0 };
+        std::atomic<long long> tasks{ 0 };   // count of tasks this worker ran while armed
     };
     std::vector<Busy_slot> busy_;
     std::atomic<int> busy_tracking_{ 0 };   // armed-consumer count; 0 = untimed fast path

@@ -1,5 +1,6 @@
 #include "graph_tests.h"
 #include "ts/guarded.h"
+#include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
 #include "graph_trace.h"
 #include "harness.h"
@@ -732,6 +733,38 @@ void test_graph_trace_end_to_end_utilization()
     TS_CHECK(trace.core_utilization() <= 1.0);
 }
 
+// Task volume: a node running a `parallel_for` fans out into slice tasks, so the trace's
+// total task count exceeds the run count (which would equal it if each run were one task).
+void test_graph_trace_task_count()
+{
+    ts::Guarded<int> x{ 0 };
+    auto busy = [](int us)
+    {
+        auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
+        while (std::chrono::steady_clock::now() < until) {}
+    };
+
+    ts::Static_task_graph g;
+    g.add_node("fanout", [busy](int& v)
+    {
+        ts::parallel_for(64, [&busy](int) { busy(30); });   // fans out onto the pool
+        ++v;
+    }, x);
+    g.compile();
+
+    ts::tools::Graph_trace trace;
+    g.set_trace(&trace);
+    ts::Scheduler_scope pool{ { .num_threads = 4 } };
+    constexpr int N = 6;
+    for (int i = 0; i < N; ++i)
+        g.execute().sync();
+    g.set_trace(nullptr);
+
+    TS_CHECK(trace.run_count() == N);
+    TS_CHECK(trace.task_total() > trace.run_count());   // fan-out: slices are separate tasks
+    TS_CHECK(trace.tasks_per_run() > 1.0);
+}
+
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
@@ -771,6 +804,7 @@ void run_graph_tests()
     run("graph trace weld + dead time", test_graph_trace_weld_dead_time);
     run("graph trace row packing", test_graph_trace_row_packing);
     run("graph trace end-to-end utilization", test_graph_trace_end_to_end_utilization);
+    run("graph trace task count", test_graph_trace_task_count);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);

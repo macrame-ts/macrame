@@ -46,6 +46,7 @@ public:
             long long bucket_width = trace->fixed_bucket_width_ticks(Scheduler::util_bucket_count);
             scheduler.arm_busy_tracking(run_begin_, bucket_width, static_cast<int>(start_.size()));
             busy_begin_ = scheduler.busy_ticks();
+            tasks_begin_ = scheduler.task_count();
         }
     }
 
@@ -80,6 +81,7 @@ public:
         if (!tracing_)
             return;
         long long busy_delta = scheduler_->busy_ticks() - busy_begin_;
+        long long task_delta = scheduler_->task_count() - tasks_begin_;
         long long bucket_width = scheduler_->bucket_width();
         long long bucket_busy[Scheduler::util_bucket_count];
         scheduler_->read_bucket_busy(bucket_busy);
@@ -92,7 +94,7 @@ public:
         trace->on_run_complete(ready_.data(), start_.data(), end_.data(), worker_.data(),
             node_count, run_begin_, now(), busy_delta,
             scheduler_->worker_count(), bucket_busy, Scheduler::util_bucket_count, bucket_width,
-            owner_busy.data());
+            owner_busy.data(), task_delta);
     }
 
 private:
@@ -107,6 +109,7 @@ private:
     std::vector<int> worker_;
     long long run_begin_ = 0;
     long long busy_begin_ = 0;
+    long long tasks_begin_ = 0;
     Scheduler* scheduler_ = nullptr;   // non-const: fold disarms the busy tracking
     bool tracing_ = false;
 #else
