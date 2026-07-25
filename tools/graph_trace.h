@@ -937,48 +937,32 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // >= 10% of runs, the region is the VISIBLE gap on screen between the predecessor's
     // drawn right edge and the successor's drawn left edge -- pure screen coordinates, so
     // it is always the real break between two bars and can never land on a bar (the old
-    // form subtracted a MEAN gap from a MEDIAN bar start, mixing coordinate systems, and
-    // could overlap a critical node). Overlapping regions from different edges are unioned,
-    // so no vertical slice is painted twice. These localize the headline critical dead
-    // time (frame_time_mean - critical_work_mean, computed globally) -- they are its
-    // >= 10%-share visible subset, not a sum of it. Behind the bars, `pointer-events: none`,
-    // so hover is never intercepted (the per-edge number lives on the edge tooltip).
+    // form subtracted a MEAN gap from a MEDIAN bar start, mixing coordinate systems).
+    // Each region's OPACITY scales with its edge's criticality share, so a wait that binds
+    // rarely (say 11%) draws faint and a wait that binds most runs draws strong -- otherwise
+    // an occasional-minority wait, drawn at full strength, paints over the strongly-critical
+    // spine running on another row in the same window and reads as if the real critical path
+    // were dead time. Drawn PER EDGE (not unioned): unioning would let one faint region
+    // inherit an overlapping strong sliver's share and defeat the weighting; overlaps just
+    // stack, bounded since low-share bands are faint. These localize the headline critical
+    // dead time (frame_time_mean - critical_work_mean, computed globally) -- their >= 10%-share
+    // visible subset, weighted by frequency, not a sum. Behind the bars, `pointer-events: none`.
+    for (const Edge_agg& e : edges_)
     {
-        std::vector<std::pair<double, double>> gaps;
-        for (const Edge_agg& e : edges_)
-        {
-            double share = runs_ > 0
-                ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
-            if (share < 0.10)
-                continue;
-            double x_pred = X(bar_start[static_cast<size_t>(e.from)])
-                + std::max(3.0, (bar_end[static_cast<size_t>(e.from)]
-                                 - bar_start[static_cast<size_t>(e.from)]) * px_per_us);
-            double x_succ = X(bar_start[static_cast<size_t>(e.to)]);
-            if (x_succ - x_pred > 2.0)
-                gaps.emplace_back(x_pred, x_succ);
-        }
-        std::sort(gaps.begin(), gaps.end());
-        double cur0 = 0.0, cur1 = -1.0;
-        auto flush = [&]
-        {
-            if (cur1 > cur0)
-                line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" "
-                     "fill=\"url(#dead)\" pointer-events=\"none\"/>\n",
-                     cur0, rows_top, cur1 - cur0, rows_bottom - rows_top);
-        };
-        for (const auto& g : gaps)
-        {
-            if (g.first > cur1)
-            {
-                flush();
-                cur0 = g.first;
-                cur1 = g.second;
-            }
-            else
-                cur1 = std::max(cur1, g.second);
-        }
-        flush();
+        double share = runs_ > 0
+            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
+        if (share < 0.10)
+            continue;
+        double x_pred = X(bar_start[static_cast<size_t>(e.from)])
+            + std::max(3.0, (bar_end[static_cast<size_t>(e.from)]
+                             - bar_start[static_cast<size_t>(e.from)]) * px_per_us);
+        double x_succ = X(bar_start[static_cast<size_t>(e.to)]);
+        if (x_succ - x_pred <= 2.0)
+            continue;
+        line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" "
+             "fill=\"url(#dead)\" opacity=\"%.2f\" pointer-events=\"none\"/>\n",
+             x_pred, rows_top, x_succ - x_pred, rows_bottom - rows_top,
+             std::clamp(share, 0.10, 1.0));
     }
 
     // Colored inline segments for the scripted tooltip: `RRGGBBtext` (backtick-delimited,
