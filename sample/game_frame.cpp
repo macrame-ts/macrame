@@ -1168,7 +1168,7 @@ void run_game_frame_sample(int frames, float scale)
     float transform0 = 0.0f;
     game_frame_stats(frames, scale, avg_ms, serial_ms, transform0);
 
-    int workers = ts::default_scheduler().worker_count();
+    int workers = ts::global_scheduler().worker_count();
     double ideal_ms = serial_ms / workers;
     std::printf("\n[game_frame] %d frames, 1000 entities, scale %.2f\n", frames, scale);
     std::printf("  %.2f ms/frame; %.2f ms of work across %d workers -> ideal %.2f ms/frame, "

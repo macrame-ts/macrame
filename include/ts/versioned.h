@@ -133,7 +133,7 @@ public:
     // the batch order is still fixed at the cut, so `replay` resync stays exact.
     Parallel_recorder<T> parallel_recorder()
     {
-        return Parallel_recorder<T>(journal_, default_scheduler());
+        return Parallel_recorder<T>(journal_, global_scheduler());
     }
 
     // Read the current published version -- an ordinary read job on the front's

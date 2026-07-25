@@ -246,7 +246,7 @@ void test_cancel_skips_nodes()
 
     ts::Cancellation_source src;
     src.request_cancel();               // cancel before running
-    ts::Task<void> run = g.execute(ts::default_scheduler(), src.token());
+    ts::Task<void> run = g.execute(ts::global_scheduler(), src.token());
     run.sync();
 
     TS_CHECK(run.is_cancelled());
@@ -516,7 +516,7 @@ void test_graph_trace_cancelled()
 
     ts::Cancellation_source src;
     src.request_cancel();
-    g.execute(ts::default_scheduler(), src.token()).sync();   // cancelled run
+    g.execute(ts::global_scheduler(), src.token()).sync();   // cancelled run
     TS_CHECK(trace.run_count() == 1);                          // not folded
     g.set_trace(nullptr);
 }

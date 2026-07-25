@@ -151,7 +151,7 @@ time across the fan-out vs the wall-time bar); scalar nodes ≈ body.
 
 **A prerequisite fix, and a correction it forced:** owner attribution and true
 utilization both depended on the fan-out running on the *traced* scheduler.
-`parallel_for` had hardcoded `default_scheduler()`, so a node on the sample's
+`parallel_for` had hardcoded `global_scheduler()`, so a node on the sample's
 dedicated N-worker trace scheduler leaked its slices to the global default pool
 — which meant the earlier "true utilization" and every variant frame-time in
 the exercise were measured with the frame secretly spread across two pools (the

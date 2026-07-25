@@ -5,7 +5,7 @@
 namespace ts
 {
 
-Scheduler& default_scheduler()
+Scheduler& global_scheduler()
 {
     static Scheduler scheduler;
     return scheduler;
@@ -71,7 +71,7 @@ void submit_ready(Task_ptr block, std::uint64_t gen)
     }
     TS_FORENSIC(block.get(), E_submit, gen, 0);
     // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
-    default_scheduler().submit(&run_block_dispatch, block.release(), priority);
+    global_scheduler().submit(&run_block_dispatch, block.release(), priority);
 }
 
 namespace

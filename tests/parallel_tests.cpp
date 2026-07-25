@@ -206,7 +206,7 @@ void set_flag(void* p)
 // while the other workers stay held (no concurrent pops to interleave).
 void test_parallel_for_priority_order()
 {
-    ts::Scheduler& sched = ts::default_scheduler();
+    ts::Scheduler& sched = ts::global_scheduler();
     const int workers = sched.worker_count();
     std::atomic<int> entered{ 0 }, exited{ 0 };
 

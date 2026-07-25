@@ -72,7 +72,7 @@ public:
     // Same lifetime rule: mint once, reuse.
     Parallel_recorder<T> parallel_recorder()
     {
-        return Parallel_recorder<T>(journal_, default_scheduler());
+        return Parallel_recorder<T>(journal_, global_scheduler());
     }
 
     // Apply everything staged so far to `target`, which the caller must already

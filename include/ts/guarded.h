@@ -20,7 +20,7 @@ namespace ts
 {
 
 // Ambient scheduler used by `access()` / `async()` (v1: a process-wide default).
-Scheduler& default_scheduler();
+Scheduler& global_scheduler();
 
 namespace detail
 {
@@ -441,9 +441,9 @@ private:
         // The block IS the pipe job -- no closure. Inline fast-path (`access`): if `try_inline`
         // and the pipe is free right now, run the body on this thread; otherwise (or for `async`)
         // enqueue as usual.
-        if (try_inline && detail::pipe_try_inline(default_scheduler(), pipe_, mode, core))
+        if (try_inline && detail::pipe_try_inline(global_scheduler(), pipe_, mode, core))
             return Task<R>(core);
-        detail::pipe_enqueue(default_scheduler(), pipe_, mode, core, opts.priority);
+        detail::pipe_enqueue(global_scheduler(), pipe_, mode, core, opts.priority);
         return Task<R>(core);
     }
 
@@ -506,7 +506,7 @@ Task<R> async_dispatch(Task_ptr block, Pipe* const* pipes, const Access* modes, 
     }
 
     auto state = make_ref<Multi_async_state>();
-    state->scheduler = &default_scheduler();
+    state->scheduler = &global_scheduler();
     for (const auto& [p, m] : by_pipe)
         state->holds.push_back({ p, m });
 

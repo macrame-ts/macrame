@@ -174,7 +174,7 @@ public:
     // Run the compiled graph; returns a completion handle. Re-runnable. If `token` is
     // cancelled, not-yet-started nodes are skipped and the completion is cancelled
     // (query with `Task::is_cancelled()`); in-flight nodes still finish.
-    Task<void> execute(Scheduler& scheduler = default_scheduler(), Cancellation_token token = {});
+    Task<void> execute(Scheduler& scheduler = global_scheduler(), Cancellation_token token = {});
 
     // Attach an aggregating runtime trace (tools/graph_trace.h), or detach with nullptr.
     // Requires a compiled graph: the compiled structure (node labels, declared accesses,

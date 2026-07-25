@@ -29,7 +29,7 @@
 
 #if defined(__cpp_impl_coroutine)
 
-#include "ts/guarded.h"   // Pipe, pipe_acquire/release, Guarded(_access), default_scheduler
+#include "ts/guarded.h"   // Pipe, pipe_acquire/release, Guarded(_access), global_scheduler
 
 #include <atomic>
 #include <coroutine>
@@ -387,13 +387,13 @@ detail::Task_awaiter<R> operator co_await(Task<R>&& t)
 template<typename T>
 detail::Pipe_guard_awaiter<T, Access::read_write> read_write(Guarded<T>& w)
 {
-    return { default_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
+    return { global_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
 }
 
 template<typename T>
 detail::Pipe_guard_awaiter<T, Access::read_only> read_only(Guarded<T>& w)
 {
-    return { default_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
+    return { global_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
 }
 
 } // namespace ts
