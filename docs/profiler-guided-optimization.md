@@ -1,11 +1,13 @@
 # Profiler-guided optimization: findings and design abstract
 
-Working record of the 2026-07 dead-time investigation on the `game_frame`
-fixture, and the tuner design distilled from it. Companion to
-[TODO.md](TODO.md) 2.4 (profiler-guided optimization), 2.5 (rank-shaped
-dispatch), 2.11 (yield points), 2.12 (frame-boundary overlap). The measurement
-tooling referenced throughout is `tools/graph_trace.h` (aggregated average-run
-trace: per-node medians/variance, per-edge binding gaps, measured critical-path
+**The canonical collection point for profiler-guided design and automatic perf
+analysis.** Ideas, findings, and the closed-loop design live here; the
+[TODO.md](TODO.md) items (2.4 profiler-guided optimization, 2.5 rank-shaped
+dispatch, 2.11 yield points, 2.12 frame-boundary overlap) are the work-item
+index and point back to this document for the design detail — add new design
+thinking here, not scattered across the TODO. The measurement tooling
+referenced throughout is `tools/graph_trace.h` (aggregated average-run trace:
+per-node medians/variance, per-edge binding gaps, measured critical-path
 frequency, dispatch waits, critical path dead time).
 
 ## The fixture
@@ -47,6 +49,19 @@ while `audio`'s 1.5 ms serial body occupied a lane from t=0.
 - **Optimal edge sets are worker-count-dependent** (the dual-run picture shows
   a green 12-worker frame and a red 4-worker one from the same graph); any
   tuner output is parameterized by budget.
+- **Rank cannot come from structure alone — it needs measured durations.** A
+  node's importance (upward rank = weighted longest path to the sink) is
+  meaningless with structural weights: a chain of ten 10 µs nodes and one 3 ms
+  node have identical node *count* but 30× different critical weight, and two
+  equal-length-by-count paths can differ by any factor in time. Node count and
+  topology give no usable rank; only measured (or estimated) durations do. This
+  is why rank-shaped dispatch (2.5) and every proposal here are gated on the
+  trace capture — which now exists (`tools/graph_trace.h`). Node priority
+  (high/normal/low) is a coarse stand-in that encodes *intent*, not *cost*; the
+  real weights are the per-node medians the trace already streams. (This also
+  answered a live confusion — no, "rank by node count" is not a usable fallback;
+  it is useless, and the whole point of the profiler feedback loop below is to
+  supply the durations rank actually needs.)
 
 ## Tuner design (three tiers, least machinery first)
 
@@ -82,3 +97,38 @@ Semantic scope: the tuner proposes only semantics-safe moves autonomously
 (ordering-edge additions, rank weights, slice granularity); semantic
 relaxations (staleness-tolerant `Versioned` reader placement) are proposed but
 user-ratified, per TODO 2.4's taxonomy.
+
+## Perf capture: the on-disk feedback channel
+
+The loop needs a durable artifact linking a measured run back to the next
+`compile()`. Two consumers hang off one file.
+
+- **`perf capture`** — a well-defined on-disk file holding the aggregated trace
+  a compile needs: per-node medians, per-edge binding gaps, criticality
+  frequency, worker count. It can be a literal copy of an artifact we already
+  emit (the trace SVG is self-describing — the numbers are in it), or a
+  dedicated compact format; the analysis script writes it to a known path.
+- **Offline analysis script** — takes a perf capture (the SVG, or any format we
+  produce) and emits two things: (1) a human-readable **report of recommended
+  structural changes** — extra ordering edges, node reordering, priority and
+  `set_inline` hints — ranked by predicted makespan recovery (this is tier-1
+  `suggest()`, just run as a script over a saved capture rather than inline);
+  and (2) the **perf capture itself** — the raw input copied, or processed —
+  written to the well-defined path for the compile to read. The structural
+  recommendations stay *user-ratified* (semantic scope above); the script
+  proposes, the human applies.
+- **`graph.compile(dot_path = nullptr, perf_capture_path = nullptr)`** — an
+  optional path to a perf capture. When present, `compile()` reads the measured
+  durations and uses them as the rank weights for native dispatch shaping
+  (2.5) — *automatic*, no graph edit, no user action. Without a capture it
+  falls back to structural/priority rank (coarse, per the durations note in
+  Lessons). This closes the loop: **trace → perf capture on disk → next
+  `compile()` reads it → rank-ordered dispatch**, with the analysis script as
+  the optional side branch that turns the same capture into human-facing
+  structural advice.
+
+The split matters: the *scheduling* half (rank weights → dispatch order) is
+consumed automatically by `compile()` and changes nothing about the graph; the
+*structural* half (edges, node order, staleness relaxations) is advice a human
+ratifies. Same capture, two paths — mirroring the two optimization layers
+(scheduling vs structural) kept distinct throughout this document.
