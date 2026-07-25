@@ -68,12 +68,14 @@ struct Parallel_state
     // owns passes the harness on any worker (and, for `async_parallel_for`, even after the
     // caller's own scope unwinds). Same inheritance model as `ts::launch`/`ts::nested`.
     std::optional<Access_context> inherited_ctx;
+    int inherited_owner;          // trace owner (graph node index), snapshotted like inherited_ctx
     std::atomic<int> next{ 0 };   // next item index to claim
     std::atomic<int> done{ 0 };   // items processed (acq_rel: publishes body writes to the waiter)
 
     Parallel_state(Body b, int n_, int conc, Balance bal)
         : body(std::move(b)), n(n_), concurrency(conc), balance(bal)
         , inherited_ctx(snapshot_access())
+        , inherited_owner(trace_owner())
     {
         base_grain = (n_ + conc - 1) / conc;
         if (base_grain < 1)
@@ -127,6 +129,10 @@ void parallel_helper(void* p)
     auto* st = static_cast<Parallel_state<Body>*>(p);
     {
         Inherited_access_scope scope(st->inherited_ctx);
+        // Attribute this helper's chunk time to the owning graph node (trace true-busy), the
+        // same inheritance as the access grant. No-op untraced.
+        Trace_owner_scope trace_owner_scope(st->inherited_owner);
+        Trace_busy_scope trace_busy_scope;
         parallel_loop(st);
     }
     intrusive_dec(&st->core);

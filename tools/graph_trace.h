@@ -121,7 +121,8 @@ public:
                          int node_count, long long run_begin, long long run_end,
                          long long busy_ticks, int worker_count,
                          const long long* util_bucket_busy = nullptr,
-                         int util_bucket_count = 0, long long bucket_width_ticks = 0)
+                         int util_bucket_count = 0, long long bucket_width_ticks = 0,
+                         const long long* owner_busy = nullptr)
     {
         if (node_count != static_cast<int>(nodes_.size()))
             return;   // structure not pushed (or a stale attach) -- drop the sample
@@ -167,6 +168,12 @@ public:
             a.start_P50.add(s);
             a.dispatch_wait.add(std::max(0.0,
                 static_cast<double>(starts[i] - readys[i]) * ticks_to_us));
+            // True busy = this node's body + its parallel_for slices + its async fan-out,
+            // attributed via the scheduler's owner sink (now that parallel_for fans out on
+            // the run's scheduler). 0 when unavailable (e.g. work run inline on a non-worker
+            // thread, which the sink doesn't see).
+            if (owner_busy)
+                a.true_busy.add(static_cast<double>(owner_busy[i]) * ticks_to_us);
             int w = workers[i];
             if (w < 0)
                 ++a.external_runs;
@@ -214,6 +221,7 @@ public:
             a.worker_runs.clear();
             a.external_runs = 0;
             a.dispatch_wait = {};
+            a.true_busy = {};
             a.critical_runs = 0;
         }
         for (Edge_agg& e : edges_)
@@ -250,6 +258,7 @@ public:
         double off_modal = 0.0;         // share of runs NOT on the modal worker
         double critical_share = 0.0;    // share of runs on the measured binding chain
         double dispatch_wait_us = 0.0;  // mean ready-to-start latency (acquire + queue)
+        double true_busy_us = 0.0;      // mean body + slices + async fan-out (owner sink)
     };
 
     Node_stats node_stats(int index) const
@@ -271,6 +280,7 @@ public:
         s.critical_share = runs_ > 0
             ? static_cast<double>(a.critical_runs) / static_cast<double>(runs_) : 0.0;
         s.dispatch_wait_us = a.dispatch_wait.mean;
+        s.true_busy_us = a.true_busy.mean;
         return s;
     }
 
@@ -394,6 +404,7 @@ private:
         std::vector<long long> worker_runs;   // runs per worker index
         long long external_runs = 0;          // runs on non-worker threads
         Welford dispatch_wait;                // ready-to-start latency, µs
+        Welford true_busy;                    // body + slices + async fan-out, µs (owner sink)
         long long critical_runs = 0;          // runs where this node was on the binding chain
     };
 
@@ -1021,6 +1032,10 @@ inline bool Graph_trace::write_SVG(const char* path) const
              + " | \xCF\x83 " + fmt_us(s.stddev_us)
              + " (CV " + fmt_us(s.mean_us > 0.0 ? 100.0 * s.stddev_us / s.mean_us : 0.0) + "%)"
              + " | min/max " + fmt_us(s.min_us) + "/" + fmt_us(s.max_us) + " \xC2\xB5s");
+        // True busy (body + slices + async fan-out): for a parallel_for node this exceeds the
+        // bar duration -- the bar is wall time, this is core time across the fan-out.
+        if (s.true_busy_us > 0.5)
+            tip.push_back("True busy (body+slices+async): mean " + fmt_us(s.true_busy_us) + " \xC2\xB5s");
         // No worker line: workers are interchangeable, and rows carry no worker identity.
         tip.push_back("Critical: in " + fmt_us(100.0 * s.critical_share) + "% of runs");
         if (slack[static_cast<size_t>(i)] > 0.5)

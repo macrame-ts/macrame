@@ -326,7 +326,13 @@ void Static_task_graph::run_graph_node(const detail::Task_ptr& block, std::uint6
 
     self->graph->run_->stamps.mark_start(self->index);
 
-    self->graph->nodes_[self->index].run();   // node body: installs its own Access_scope
+    {
+        // Own this node for trace attribution: its body's busy (and, via inheritance, its
+        // slices' and async work's) counts toward this node's true-busy. No-op untraced.
+        detail::Trace_owner_scope trace_owner_scope(self->index);
+        detail::Trace_busy_scope trace_busy_scope;
+        self->graph->nodes_[self->index].run();   // node body: installs its own Access_scope
+    }
 
     detail::current_task = std::move(prev);
 

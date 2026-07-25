@@ -15,6 +15,21 @@ namespace ts
 thread_local Scheduler* current_scheduler = nullptr;
 thread_local int current_worker_index = -1;
 
+#if TS_PROFILING
+namespace detail
+{
+// The owner-attribution bridge (declared scheduler-free in detail/trace_owner.h so task.h
+// can use it): a running task's `Trace_busy_scope` routes its busy span here, to whichever
+// scheduler is current. Armed count bumped by `arm/disarm_busy_tracking`.
+std::atomic<int> trace_owner_armed{ 0 };
+void (*trace_owner_add)(int, long long) = +[](int owner, long long dt)
+{
+    if (Scheduler* s = current_scheduler)
+        s->add_owner_busy(owner, dt);
+};
+}
+#endif
+
 namespace
 {
 // Cheap per-thread xorshift for random steal-victim selection (avoids every idle worker

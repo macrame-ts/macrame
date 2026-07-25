@@ -44,7 +44,7 @@ public:
             // Bucket width comes from the trace's makespan estimate (0 on the first run, which
             // then goes un-bucketed -- negligible over a long trace); origin = this run's begin.
             long long bucket_width = trace->fixed_bucket_width_ticks(Scheduler::util_bucket_count);
-            scheduler.arm_busy_tracking(run_begin_, bucket_width);
+            scheduler.arm_busy_tracking(run_begin_, bucket_width, static_cast<int>(start_.size()));
             busy_begin_ = scheduler.busy_ticks();
         }
     }
@@ -83,12 +83,16 @@ public:
         long long bucket_width = scheduler_->bucket_width();
         long long bucket_busy[Scheduler::util_bucket_count];
         scheduler_->read_bucket_busy(bucket_busy);
+        int node_count = static_cast<int>(start_.size());
+        std::vector<long long> owner_busy(static_cast<size_t>(node_count));   // per-node true busy (ticks)
+        scheduler_->read_owner_busy(owner_busy.data(), node_count);
         scheduler_->disarm_busy_tracking();   // paired with begin_run's arm, cancelled or not
         if (!trace || cancelled)
             return;
         trace->on_run_complete(ready_.data(), start_.data(), end_.data(), worker_.data(),
-            static_cast<int>(start_.size()), run_begin_, now(), busy_delta,
-            scheduler_->worker_count(), bucket_busy, Scheduler::util_bucket_count, bucket_width);
+            node_count, run_begin_, now(), busy_delta,
+            scheduler_->worker_count(), bucket_busy, Scheduler::util_bucket_count, bucket_width,
+            owner_busy.data());
     }
 
 private:

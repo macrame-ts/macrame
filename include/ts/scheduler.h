@@ -23,6 +23,8 @@
 #include <chrono>
 #endif
 
+#include "ts/detail/trace_owner.h"   // scheduler-free seam; arm/disarm bump its bridge flag
+
 namespace ts
 {
 
@@ -141,7 +143,7 @@ public:
     // `origin` = the run's begin tick, `bucket_width` = the tick width of each utilization
     // bucket (0 disables per-bucket accumulation for this window -- e.g. the first run,
     // before a makespan estimate exists). Arming clears the per-worker bucket rows.
-    void arm_busy_tracking(long long origin, long long bucket_width) noexcept
+    void arm_busy_tracking(long long origin, long long bucket_width, int owner_count = 0) noexcept
     {
         bucket_origin_.store(origin, std::memory_order_relaxed);
         bucket_width_.store(bucket_width, std::memory_order_relaxed);
@@ -149,11 +151,42 @@ public:
             for (Bucket_row& row : bucket_busy_)
                 for (std::atomic<long long>& b : row.b)
                     b.store(0, std::memory_order_relaxed);
+        // Per-owner (graph-node) busy sink: sized + cleared per armed run (node counts can
+        // differ between compiles). Written relaxed by every worker via `add_owner_busy`.
+        if (static_cast<int>(owner_busy_.size()) != owner_count)
+            owner_busy_ = std::vector<std::atomic<long long>>(static_cast<std::size_t>(owner_count));
+        for (std::atomic<long long>& o : owner_busy_)
+            o.store(0, std::memory_order_relaxed);
         busy_tracking_.fetch_add(1, std::memory_order_relaxed);
+        detail::trace_owner_armed.fetch_add(1, std::memory_order_relaxed);   // scheduler-free owner seam
     }
-    void disarm_busy_tracking() noexcept { busy_tracking_.fetch_sub(1, std::memory_order_relaxed); }
+    void disarm_busy_tracking() noexcept
+    {
+        detail::trace_owner_armed.fetch_sub(1, std::memory_order_relaxed);
+        busy_tracking_.fetch_sub(1, std::memory_order_relaxed);
+    }
+
+    bool busy_armed() const noexcept { return busy_tracking_.load(std::memory_order_relaxed) != 0; }
 
     long long bucket_width() const noexcept { return bucket_width_.load(std::memory_order_relaxed); }
+
+    // Attribute `dt` ticks of busy time to graph node `owner` (its body / slices / async).
+    // Called from `detail::Trace_busy_scope` while armed; relaxed, contended only on a hot
+    // node's own slot (profiling-only).
+    void add_owner_busy(int owner, long long dt) noexcept
+    {
+        if (owner >= 0 && owner < static_cast<int>(owner_busy_.size()))
+            owner_busy_[static_cast<std::size_t>(owner)].fetch_add(dt, std::memory_order_relaxed);
+    }
+
+    // Copy the per-node busy into `out[0..count)` (ticks), at the fold after the run's
+    // completion barrier published the workers' writes (relaxed, like `read_bucket_busy`).
+    void read_owner_busy(long long* out, int count) const noexcept
+    {
+        for (int i = 0; i < count; ++i)
+            out[i] = i < static_cast<int>(owner_busy_.size())
+                ? owner_busy_[static_cast<std::size_t>(i)].load(std::memory_order_relaxed) : 0;
+    }
 
     // Sum the per-worker bucket busy into `out[0..util_bucket_count)` (ticks). Read at the
     // fold on the settling thread, after the run's completion barrier has published the
@@ -281,6 +314,10 @@ private:
     std::vector<Bucket_row> bucket_busy_;
     std::atomic<long long> bucket_origin_{ 0 };   // run-begin tick (bucket frame origin)
     std::atomic<long long> bucket_width_{ 0 };    // tick width per bucket; 0 = not bucketing
+    // Per-graph-node busy sink for per-node true-busy (body + slices + async), keyed by node
+    // index; written relaxed by any worker via `add_owner_busy`, read at the fold. Sized per
+    // armed run (see `arm_busy_tracking`).
+    std::vector<std::atomic<long long>> owner_busy_;
 #endif
 };
 

@@ -4,6 +4,7 @@
 #include "ts/fatal.h"
 #include "ts/priority.h"
 #include "ts/detail/ref_count.h"   // intrusive Ref_ptr / Ref_counted (preferred over shared_ptr)
+#include "ts/detail/trace_owner.h"   // scheduler-free trace seam: owner inheritance + busy attribution
 
 #include <array>
 #include <atomic>
@@ -789,15 +790,22 @@ template<typename Fn> using Task_result_t = typename Task_result<std::decay_t<Fn
 template<typename R, typename Fn>
 auto with_inherited_access(Fn&& fn)
 {
+    // Also snapshot the trace owner (graph-node index) so this sub-work's busy is attributed
+    // to its owning node; `Trace_busy_scope` measures the body while the owner is live. Both
+    // no-op under TS_PROFILING=0 (owner is -1, the scopes empty).
     if constexpr (takes_token_v<std::decay_t<Fn>>)
-        return [fn = std::forward<Fn>(fn), ctx = snapshot_access()](const Cancellation_token& tok) mutable -> R
+        return [fn = std::forward<Fn>(fn), ctx = snapshot_access(), owner = trace_owner()](const Cancellation_token& tok) mutable -> R
         {
+            Trace_owner_scope trace_owner_scope(owner);
+            Trace_busy_scope trace_busy_scope;
             Inherited_access_scope scope(ctx);
             return fn(tok);
         };
     else
-        return [fn = std::forward<Fn>(fn), ctx = snapshot_access()]() mutable -> R
+        return [fn = std::forward<Fn>(fn), ctx = snapshot_access(), owner = trace_owner()]() mutable -> R
         {
+            Trace_owner_scope trace_owner_scope(owner);
+            Trace_busy_scope trace_busy_scope;
             Inherited_access_scope scope(ctx);
             return fn();
         };

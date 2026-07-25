@@ -62,6 +62,7 @@
     <ClInclude Include="include\ts\parallel_for.h" />
     <ClInclude Include="include\ts\priority.h" />
     <ClInclude Include="include\ts\detail\ref_count.h" />
+    <ClInclude Include="include\ts\detail\trace_owner.h" />
     <ClInclude Include="include\ts\scheduler.h" />
     <ClInclude Include="include\ts\static_task_graph.h" />
     <ClInclude Include="tools\dot_writer.h" />
