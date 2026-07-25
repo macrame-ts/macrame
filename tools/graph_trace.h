@@ -100,10 +100,28 @@ public:
     // `worker_count` its pool size -- together the run's core utilization. Called by the
     // graph once per run, single-threaded; every duration/offset converts to microseconds
     // here.
+    // The utilization background samples each run into `n` fixed time buckets; the width is
+    // set once from the first available makespan estimate (ticks), and 0 until one exists (the
+    // first run goes un-bucketed -- negligible over a long trace). Fixing it keeps the buckets
+    // comparable across runs for the per-bucket Welford.
+    long long fixed_bucket_width_ticks(int n) const
+    {
+        if (fixed_bucket_width_ticks_ != 0)
+            return fixed_bucket_width_ticks_;
+        if (makespan_.n == 0 || n <= 0)
+            return 0;
+        fixed_bucket_width_ticks_ = static_cast<long long>((makespan_.mean / ticks_to_us) / n);
+        return fixed_bucket_width_ticks_;
+    }
+
+    // `util_bucket_busy[0..util_bucket_count)` is the per-bucket busy (summed over workers,
+    // ticks) for this run's window; `bucket_width_ticks` its bucket width (0 = not bucketed).
     void on_run_complete(const long long* readys, const long long* starts,
                          const long long* ends, const int* workers,
                          int node_count, long long run_begin, long long run_end,
-                         long long busy_ticks, int worker_count)
+                         long long busy_ticks, int worker_count,
+                         const long long* util_bucket_busy = nullptr,
+                         int util_bucket_count = 0, long long bucket_width_ticks = 0)
     {
         if (node_count != static_cast<int>(nodes_.size()))
             return;   // structure not pushed (or a stale attach) -- drop the sample
@@ -114,6 +132,21 @@ public:
                 static_cast<double>(busy_ticks)
                     / (static_cast<double>(worker_count) * static_cast<double>(window)),
                 0.0, 1.0));
+
+        // True per-time utilization: per-bucket busy / (workers x bucket width), Welford per
+        // bucket across runs. Counts every task kind (slices, async, ...) at its real time,
+        // so a parallel_for node's core fan-out registers -- unlike the old node-concurrency
+        // proxy this replaces.
+        if (util_bucket_busy && util_bucket_count > 0 && bucket_width_ticks > 0 && worker_count > 0)
+        {
+            if (static_cast<int>(util_buckets_.size()) != util_bucket_count)
+                util_buckets_.assign(static_cast<size_t>(util_bucket_count), {});
+            util_bucket_width_us_ = static_cast<double>(bucket_width_ticks) * ticks_to_us;
+            double denom = static_cast<double>(worker_count) * static_cast<double>(bucket_width_ticks);
+            for (int b = 0; b < util_bucket_count; ++b)
+                util_buckets_[static_cast<size_t>(b)].add(
+                    std::clamp(static_cast<double>(util_bucket_busy[b]) / denom, 0.0, 1.0));
+        }
 
         for (int i = 0; i < node_count; ++i)
         {
@@ -194,6 +227,9 @@ public:
         makespan_min_ = 0.0;
         makespan_max_ = 0.0;
         core_util_ = {};
+        util_buckets_.clear();
+        util_bucket_width_us_ = 0.0;
+        fixed_bucket_width_ticks_ = 0;
         runs_ = 0;
     }
 
@@ -512,6 +548,9 @@ private:
     double makespan_min_ = 0.0;
     double makespan_max_ = 0.0;
     Welford core_util_;   // per-run busy / (workers x window), [0,1]
+    std::vector<Welford> util_buckets_;      // per time-bucket true utilization, [0,1]
+    double util_bucket_width_us_ = 0.0;      // width of each util bucket, µs (0 = none yet)
+    mutable long long fixed_bucket_width_ticks_ = 0;   // fixed once from the makespan estimate
     long long runs_ = 0;
     std::string title_;   // survives reset()/begin_structure(); set once by the owner
 };
@@ -818,44 +857,34 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
     };
 
-    // Core-utilization background: a faint full-height wash whose colour at each time slice
-    // reflects how busy the machine was there -- green (all cores busy) -> yellow (half) ->
-    // red (idle). The time-resolved companion to the utilization headline: green stretches
-    // are where the frame saturates the cores, red valleys are idle capacity (where deferred
-    // work could go). Signal = node concurrency (bars overlapping the slice) / worker count
-    // -- a proxy that UNDERCOUNTS a `parallel_for` node (one bar, many cores), so a solo
-    // parallel node reads cooler than the machine truly ran; documented, and consistent with
-    // the packed rows already being node-concurrency slots. Drawn first, so it sits behind
-    // the dead-time bands and bars; inert to hover.
-    if (workers_seen > 0)
+    // Core-utilization background: a faint full-height wash coloured by the TRUE per-time core
+    // utilization -- green (all cores busy) -> yellow (half) -> red (idle). Sampled from
+    // per-worker busy time bucketed over the run (the scheduler's per-bucket counters via
+    // trace_stamps), so every task kind counts at its real time -- a `parallel_for` node's
+    // fan-out across cores registers fully, which the old node-concurrency proxy undercounted.
+    // Green stretches saturate the cores; red valleys are idle capacity (where deferred work
+    // could go). Drawn first: behind the dead-time bands and bars, inert to hover.
+    if (!util_buckets_.empty() && util_bucket_width_us_ > 0.0)
     {
-        std::vector<double> events;
-        for (int i = 0; i < count; ++i)
+        const double x_right = pad_l + plot_w;
+        for (size_t b = 0; b < util_buckets_.size(); ++b)
         {
-            events.push_back(bar_start[static_cast<size_t>(i)]);
-            events.push_back(bar_end[static_cast<size_t>(i)]);
-        }
-        std::sort(events.begin(), events.end());
-        events.erase(std::unique(events.begin(), events.end(),
-            [](double a, double b) { return std::abs(a - b) < 1e-6; }), events.end());
-        for (size_t k = 0; k + 1 < events.size(); ++k)
-        {
-            double t0 = events[k], t1 = events[k + 1];
-            if (t1 - t0 < 1e-6)
+            if (util_buckets_[b].n == 0)
                 continue;
-            double mid = (t0 + t1) * 0.5;
-            int conc = 0;
-            for (int i = 0; i < count; ++i)
-                if (bar_start[static_cast<size_t>(i)] <= mid && mid < bar_end[static_cast<size_t>(i)])
-                    ++conc;
-            double u = std::clamp(static_cast<double>(conc) / static_cast<double>(workers_seen), 0.0, 1.0);
+            double u = std::clamp(util_buckets_[b].mean, 0.0, 1.0);
+            double x0 = X(static_cast<double>(b) * util_bucket_width_us_);
+            double x1 = X(static_cast<double>(b + 1) * util_bucket_width_us_);
+            if (x0 >= x_right)
+                break;
+            if (x1 > x_right)
+                x1 = x_right;
             // green (busy) -> yellow (half) -> red (idle), the utilization-headline ramp.
             std::string c = u >= 0.5
                 ? blend_hex(0xe6, 0xdb, 0x74, 0xa6, 0xe2, 0x2e, (u - 0.5) * 2.0)
                 : blend_hex(0xff, 0x5f, 0x45, 0xe6, 0xdb, 0x74, u * 2.0);
             line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" fill=\"%s\" "
                  "opacity=\"0.16\" pointer-events=\"none\"/>\n",
-                 X(t0), rows_top, X(t1) - X(t0), rows_bottom - rows_top, c.c_str());
+                 x0, rows_top, x1 - x0, rows_bottom - rows_top, c.c_str());
         }
     }
 

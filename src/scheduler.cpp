@@ -55,6 +55,7 @@ Scheduler::Scheduler(Scheduler_config config)
 
 #if TS_PROFILING
     busy_ = std::vector<Busy_slot>(num_threads);   // before any worker starts (run_task writes)
+    bucket_busy_ = std::vector<Bucket_row>(num_threads);
 #endif
 
     workers_.reserve(num_threads);

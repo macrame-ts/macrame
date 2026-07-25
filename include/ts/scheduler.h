@@ -132,11 +132,40 @@ public:
         return sum;
     }
 
+    // Time buckets the utilization background samples each run into.
+    static constexpr int util_bucket_count = 128;
+
     // Arm/disarm busy tracking (counted -- concurrent consumers nest). Armed by a traced
     // graph run for its window; work already in flight when arming is not back-stamped
     // (an under-count of at most one task span at the window edge; advisory metric).
-    void arm_busy_tracking() noexcept { busy_tracking_.fetch_add(1, std::memory_order_relaxed); }
+    // `origin` = the run's begin tick, `bucket_width` = the tick width of each utilization
+    // bucket (0 disables per-bucket accumulation for this window -- e.g. the first run,
+    // before a makespan estimate exists). Arming clears the per-worker bucket rows.
+    void arm_busy_tracking(long long origin, long long bucket_width) noexcept
+    {
+        bucket_origin_.store(origin, std::memory_order_relaxed);
+        bucket_width_.store(bucket_width, std::memory_order_relaxed);
+        if (bucket_width > 0)
+            for (Bucket_row& row : bucket_busy_)
+                for (std::atomic<long long>& b : row.b)
+                    b.store(0, std::memory_order_relaxed);
+        busy_tracking_.fetch_add(1, std::memory_order_relaxed);
+    }
     void disarm_busy_tracking() noexcept { busy_tracking_.fetch_sub(1, std::memory_order_relaxed); }
+
+    long long bucket_width() const noexcept { return bucket_width_.load(std::memory_order_relaxed); }
+
+    // Sum the per-worker bucket busy into `out[0..util_bucket_count)` (ticks). Read at the
+    // fold on the settling thread, after the run's completion barrier has published the
+    // workers' writes (relaxed loads -- advisory, like `busy_ticks`).
+    void read_bucket_busy(long long* out) const noexcept
+    {
+        for (int b = 0; b < util_bucket_count; ++b)
+            out[b] = 0;
+        for (const Bucket_row& row : bucket_busy_)
+            for (int b = 0; b < util_bucket_count; ++b)
+                out[b] += row.b[static_cast<std::size_t>(b)].load(std::memory_order_relaxed);
+    }
 #endif
 
 private:
@@ -182,6 +211,32 @@ private:
             slot.ticks.store(slot.ticks.load(std::memory_order_relaxed) + (t1 - t0),
                              std::memory_order_relaxed);
             slot.started.store(0, std::memory_order_relaxed);
+            // Distribute the task's [t0,t1] busy span across the utilization time buckets it
+            // spans (relative to the run origin). Armed-only; most tasks touch one bucket.
+            long long bw = bucket_width_.load(std::memory_order_relaxed);
+            if (bw > 0)
+            {
+                long long origin = bucket_origin_.load(std::memory_order_relaxed);
+                long long lo = t0 - origin, hi = t1 - origin;
+                long long cap = static_cast<long long>(util_bucket_count) * bw;
+                if (hi > 0 && lo < cap)
+                {
+                    if (lo < 0) lo = 0;
+                    if (hi > cap) hi = cap;
+                    int b0 = static_cast<int>(lo / bw), b1 = static_cast<int>((hi - 1) / bw);
+                    Bucket_row& row = bucket_busy_[static_cast<std::size_t>(worker_index)];
+                    for (int b = b0; b <= b1 && b < util_bucket_count; ++b)
+                    {
+                        long long edge_lo = static_cast<long long>(b) * bw;
+                        long long edge_hi = edge_lo + bw;
+                        long long seg_lo = lo > edge_lo ? lo : edge_lo;
+                        long long seg_hi = hi < edge_hi ? hi : edge_hi;
+                        if (seg_hi > seg_lo)
+                            row.b[static_cast<std::size_t>(b)].fetch_add(seg_hi - seg_lo,
+                                                                        std::memory_order_relaxed);
+                    }
+                }
+            }
             return;
         }
 #endif
@@ -216,6 +271,16 @@ private:
     };
     std::vector<Busy_slot> busy_;
     std::atomic<int> busy_tracking_{ 0 };   // armed-consumer count; 0 = untimed fast path
+    // Per-worker time-bucketed busy for the true-utilization background (single writer: the
+    // owning worker in `run_task`; summed by `read_bucket_busy` at the fold). One padded row
+    // per worker; sized in the ctor before workers start.
+    struct alignas(64) Bucket_row
+    {
+        std::atomic<long long> b[util_bucket_count];
+    };
+    std::vector<Bucket_row> bucket_busy_;
+    std::atomic<long long> bucket_origin_{ 0 };   // run-begin tick (bucket frame origin)
+    std::atomic<long long> bucket_width_{ 0 };    // tick width per bucket; 0 = not bucketing
 #endif
 };
 

@@ -612,10 +612,15 @@ chain itself had to wait. Each significant chain wait is also drawn in place:
 a hatched pink band spanning the picture's full height, occupying the visible
 gap between the binding predecessor and the waiting critical node (screen-space
 gaps, unioned, so a band is always a real break between bars) — the wait
-belongs to the chain, not to any row. A panel below shows the global numbers:
-run count, frame time mean/min/max (ms), and **critical path** — the CPM
-dependency lower bound on frame time (median durations, no scheduling waits) —
-plus worker count. An edge's tooltip names the ordering it enforces: for a derived edge,
+belongs to the chain, not to any row. Behind the bars, a faint full-height
+**core-utilization wash** colours each time slice by how busy the machine was
+there (green all cores busy → yellow half → red idle) — sampled from
+per-worker busy time bucketed over the run, so every task counts at its real
+time (a `parallel_for` node's fan-out across cores registers fully). The green
+stretches saturate the cores; the red valleys are idle capacity. A panel below
+shows the global numbers: run count, frame time mean/min/max (ms), and
+**critical path** — the CPM dependency lower bound on frame time (median
+durations, no scheduling waits) — plus worker count. An edge's tooltip names the ordering it enforces: for a derived edge,
 the conflicting resource and the two nodes' modes (`physics RW -> propagation
 RO`); for an explicit one, "explicit ordering" (plus any coinciding conflict).
 
