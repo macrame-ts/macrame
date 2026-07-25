@@ -686,13 +686,16 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // Header: title, the dead-time headline, global stats. (The legend sits at the
     // bottom of the picture.)
     out += "<text x=\"16\" y=\"26\" font-size=\"15\" font-weight=\"600\" fill=\"#f8f8f2\">";
-    append_escaped(out, title_.empty() ? "average run" : title_ + ": average run");
+    std::string heading = title_.empty() ? "average run" : title_ + ": average run";
+    if (runs_ > 0)
+        heading += " \xE2\x80\x94 " + fmt_ms(makespan_.mean) + " ms";   // em dash + avg frame time
+    append_escaped(out, heading);
     out += "</text>\n";
     {
         // The two frame classifiers on one coloured headline (band constants at the top of
         // this header): core utilization -- how much of the machine the frame used -- then
-        // critical dead time (makespan minus the binding chain's work) -- whether the
-        // chain itself had to wait.
+        // critical path dead time (frame time minus the binding chain's work) -- whether
+        // the chain itself had to wait.
         double util = core_util_.mean;
         const char* util_color = util >= core_util_good_share ? "#a6e22e"
                                : util >= core_util_ok_share ? "#e6db74" : "#ff5f45";
@@ -705,16 +708,18 @@ inline bool Graph_trace::write_SVG(const char* path) const
         append_escaped(out, "core utilization: " + fmt_us(100.0 * util) + "%");
         out += "</tspan><tspan fill=\"#cfcfc2\"> | </tspan>";
         out += "<tspan fill=\"" + std::string(dead_color) + "\">";
-        append_escaped(out, "critical dead time: " + fmt_us(dead_us) + " \xC2\xB5s ("
+        append_escaped(out, "critical path dead time: " + fmt_us(dead_us) + " \xC2\xB5s ("
             + fmt_us(100.0 * dead_share) + "% of frame time)");
         out += "</tspan></text>\n";
 
-        // "structural CP" = the CPM critical-path length: the dependency lower bound on
-        // frame time from median durations and edges alone (no scheduling waits).
+        // "critical path" = the CPM critical-path length: the dependency lower bound on
+        // frame time from median durations and edges alone (no scheduling waits). The
+        // measured `critical_work_` still feeds the dead-time headline above; it is no
+        // longer shown as its own stat -- the critical-work vs critical-path gap is a
+        // signal for automatic perf analysis (see docs/profiler-guided-optimization.md).
         std::string stats = "runs: " + std::to_string(runs_)
             + "  |  frame time mean " + fmt_ms(makespan_.mean) + " ms (min " + fmt_ms(makespan_min_)
-            + ", max " + fmt_ms(makespan_max_) + ")  |  critical work mean "
-            + fmt_ms(critical_work_.mean) + " ms  |  structural CP " + fmt_ms(cpm_us)
+            + ", max " + fmt_ms(makespan_max_) + ")  |  critical path " + fmt_ms(cpm_us)
             + " ms  |  workers: " + std::to_string(workers_seen);
         out += "<text x=\"16\" y=\"68\" font-size=\"11\" fill=\"#cfcfc2\">";
         append_escaped(out, stats);
@@ -773,7 +778,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
         const double ly6 = base + 104.0;
         line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"url(#dead)\"/>\n",
              ax0, ly6 - 5.0, ax1 - ax0);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical dead time (successor ready but waiting)</text>\n",
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical path dead time (successor ready but waiting)</text>\n",
              ax1 + 14.0, ly6 + 4.0);
         line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\">"
              "<tspan fill=\"%s\">high</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"

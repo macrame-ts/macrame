@@ -52,7 +52,7 @@ them as a stable previous version — the lever in §4 that does the most work.
 
 The baseline on 6 workers:
 
-> **core utilization: 60 %** · **critical dead time: ~6 %** · makespan **~4.87 ms**
+> **core utilization: 60 %** · **critical path dead time: ~6 %** · frame time **~4.87 ms**
 
 Two things jump out of the picture:
 
@@ -128,9 +128,9 @@ dependency instead.
 
 | | baseline | optimised |
 |---|---|---|
-| makespan | 4793 µs | **3120 µs** (−35 %) |
+| frame time | 4793 µs | **3120 µs** (−35 %) |
 | core utilization | 60 % (yellow) | **85 % (green)** |
-| critical dead time | 5 % (green) | 19 % (red) |
+| critical path dead time | 5 % (green) | 19 % (red) |
 
 The two headline colours flip in opposite directions, and that is the whole story.
 The baseline is **dependency-bound**: cores half-idle (60 %), but the critical

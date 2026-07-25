@@ -6,7 +6,7 @@ fixture, and the tuner design distilled from it. Companion to
 dispatch), 2.11 (yield points), 2.12 (frame-boundary overlap). The measurement
 tooling referenced throughout is `tools/graph_trace.h` (aggregated average-run
 trace: per-node medians/variance, per-edge binding gaps, measured critical-path
-frequency, dispatch waits, critical dead time).
+frequency, dispatch waits, critical path dead time).
 
 ## The fixture
 
@@ -56,7 +56,16 @@ while `audio`'s 1.5 ms serial body occupied a lane from t=0.
    ancestor of the successor; proposal = a cycle-safe delaying edge (edge
    *additions* never change semantics); predicted recovery =
    `min(gap, overlap)` minus the chain-extension guard above. Deliverable
-   shape: `Graph_trace::suggest()` — a ranked report.
+   shape: `Graph_trace::suggest()` — a ranked report of candidate
+   optimizations. **TODO (not yet built):** a standalone automatic-analysis
+   pass that emits this list from a trace, so the numbers stop needing a human
+   to interpret. Signals it consumes, beyond the per-edge gaps: the
+   **critical-work vs critical-path (structural CP) gap** — measured binding
+   work minus the CPM dependency floor — classifies the whole frame and routes
+   the search (≈0: dependency-shaped, target the structural chain; ≫0: critical
+   nodes inflated by contention, protect their resources; ≪0: a low-work chain
+   straggling on waits, a scheduling problem). Core utilization and the
+   dead-time headline colour then say whether recoverable idle even exists.
 2. **Evaluation — reality, not simulation.** A 200-frame trace run costs ~1 s,
    so the loop is greedy hill-climbing with measurement as the objective:
    apply top proposal, re-trace, accept iff makespan improved, iterate

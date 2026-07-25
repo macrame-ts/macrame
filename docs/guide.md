@@ -606,15 +606,16 @@ the file open in a browser; not when embedded via `<img>`). A coloured
 headline carries the two frame classifiers: **core utilization** — the share
 of the run window the scheduler's workers spent executing tasks (green ≥ 75%,
 red < 50%; work run inline on non-worker threads is not counted) — and
-**critical dead time** (green < 5% of frame time, red > 10%). Utilization says
-how much of the machine the frame used; dead time says whether the critical
+**critical path dead time** (green < 5% of frame time, red > 10%). Utilization
+says how much of the machine the frame used; dead time says whether the critical
 chain itself had to wait. Each significant chain wait is also drawn in place:
 a hatched pink band spanning the picture's full height, occupying the visible
 gap between the binding predecessor and the waiting critical node (screen-space
 gaps, unioned, so a band is always a real break between bars) — the wait
 belongs to the chain, not to any row. A panel below shows the global numbers:
-run count, frame time mean/min/max (ms), critical work, structural CP, worker
-count. An edge's tooltip names the ordering it enforces: for a derived edge,
+run count, frame time mean/min/max (ms), and **critical path** — the CPM
+dependency lower bound on frame time (median durations, no scheduling waits) —
+plus worker count. An edge's tooltip names the ordering it enforces: for a derived edge,
 the conflicting resource and the two nodes' modes (`physics RW -> propagation
 RO`); for an explicit one, "explicit ordering" (plus any coinciding conflict).
 
