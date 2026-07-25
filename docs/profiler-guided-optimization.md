@@ -132,3 +132,33 @@ consumed automatically by `compile()` and changes nothing about the graph; the
 *structural* half (edges, node order, staleness relaxations) is advice a human
 ratifies. Same capture, two paths — mirroring the two optimization layers
 (scheduling vs structural) kept distinct throughout this document.
+
+## Task tracing: done and remaining
+
+Done (2026-07): **true time-bucketed core utilization** — the scheduler
+accumulates each armed task's busy span into per-worker time buckets, folded
+into a per-bucket utilization the trace draws as the background wash. Every task
+kind (slices, async, continuations) counts at its real time, so the background
+is no longer a node-concurrency proxy that undercounted `parallel_for`.
+
+Remaining (both need the same missing piece — a `current_trace_owner` TLS
+carried by launched sub-work, the way `Access_context`/`current_task` already
+propagate; the wrinkle is that busy is measured in the scheduler's opaque
+`run_task`, so a slice/async task must *carry* its owner id from submit and the
+attribution must happen where the owner is in scope — the task execution
+wrappers, not `run_task` — which touches the task core and wants its own gated
+change):
+
+- **Per-node true busy (owner attribution).** Tag each task with its owning
+  graph node; sum a node's body + its slices' + its async fan-out into a
+  per-node accumulator. A node tooltip then shows true cost (`parallel_for`
+  nodes >> their body bar), and it removes the last approximation from the
+  utilization picture. Fixed state: per-node Welford.
+- **Per-kind aggregates + scheduling counters.** Per task kind {node, slice,
+  async, continuation, nested}: count + Welford duration + total busy. Plus
+  cheap `find_work` counters: steals, local-deque hits, global-queue hits,
+  low-valve firings. This is what would surface a scheduling inversion (like
+  the `networking` local-deque/steal case) *directly* — a normal task showing
+  high steal-wait — rather than leaving it to be inferred from a node's
+  dispatch wait. Render as a compact global line and/or a thin per-bucket
+  kind-mix ribbon (a few bands, never per-task bars).
