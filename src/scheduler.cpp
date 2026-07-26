@@ -104,10 +104,13 @@ inline void cpu_relax() noexcept
 Scheduler::Scheduler(Scheduler_config config)
     : idle_policy_(config.idle_policy)
     , spin_cycles_(config.spin_cycles)
+    , single_threaded_(config.single_threaded)
 {
     uint32_t num_threads = config.num_threads;
     if (num_threads == 0)
         num_threads = std::thread::hardware_concurrency();
+    if (single_threaded_)
+        num_threads = 0;   // worker-less: no deques, no workers; `submit` runs tasks inline
 
     // Per-worker deques must exist before any worker starts (workers steal from all of them).
     local_normal_.reserve(num_threads);
@@ -150,6 +153,14 @@ void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
 #if TS_PROFILING
     Submit_cost_scope cost{ *this };   // in-functor submit -> machinery (single gated scope)
 #endif
+    // Worker-less mode: no queues, no workers -- the task executes inline, now, on this
+    // thread (UE's zero-worker launch shape). `priority` is a no-op here by design.
+    if (single_threaded_)
+    {
+        run_serial(func, data);
+        return;
+    }
+
     // A worker submitting `normal` to its OWN scheduler pushes to its local deque (LIFO,
     // cache-hot, no shared cache line -- the producer fast path). External/non-normal submits,
     // and a full local deque, go to the global queue for the priority.
@@ -164,6 +175,65 @@ void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
 
     signal_submit();
 }
+
+namespace
+{
+// Worker-less mode's per-thread FIFO trampoline (the same iterative-drain shape as the
+// inline-dispatch trampoline in task.h): tasks submitted while a drain is active on this
+// thread are appended and picked up in submission order by the active drain, so a chain of
+// tasks (A's body launches B, B's body launches C, ...) runs iteratively, never recursively.
+// `serial_head` is shared state (not a loop local) so a REENTRANT drain -- a body calling
+// `sync()` on work it just admitted, via `drain_serial_pending` -- continues from where the
+// outer drain stands instead of re-running entries.
+thread_local std::vector<detail::Task_entry> serial_pending;
+thread_local std::size_t serial_head = 0;
+thread_local bool serial_draining = false;
+
+void drain_serial()
+{
+    while (serial_head < serial_pending.size())
+    {
+        detail::Task_entry e = serial_pending[serial_head++];
+        e.func_(e.data_);
+    }
+}
+}
+
+void Scheduler::run_serial(Task_func_ptr func, void* data)
+{
+    serial_pending.push_back({ func, data });
+    if (serial_draining)
+        return;   // the active drain on this thread runs it, in order
+
+    serial_draining = true;
+    // Install this scheduler as the thread's current one for the drain: pipe-job
+    // re-dispatch (`run_pipe_job` reaches the scheduler via `current_scheduler`) and any
+    // nested submits must resolve here even when the submitting thread is external.
+    // `current_worker_index` stays -1 -- there are no workers, and the profiling
+    // accumulators no-op on negative indices.
+    Scheduler* prev = current_scheduler;
+    current_scheduler = this;
+    drain_serial();
+    current_scheduler = prev;
+    serial_pending.clear();   // retains capacity
+    serial_head = 0;
+    serial_draining = false;
+}
+
+namespace detail
+{
+
+// Seam for task.h's blocking waits (declared there, scheduler-free): before parking, a
+// waiter under a worker-less scheduler drains this thread's pending serial tasks -- the
+// awaited work may be sitting in the trampoline behind the waiter's own frame (a body that
+// admitted work and then `sync()`s it). Reentrant: continues the active drain's shared
+// head. No-op when nothing is pending (any scheduler mode).
+void drain_serial_pending() noexcept
+{
+    drain_serial();
+}
+
+} // namespace detail
 
 // Producer-side wake, per policy. `block`/`spin_then_block` wake one parked worker every submit;
 // `handoff` always advances the epoch (cheap -- releases any worker about to park) but issues the

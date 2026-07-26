@@ -441,8 +441,15 @@ void Static_task_graph::node_complete(Run_state& run, int index)
         // mid-notify. The local ref holds it until settle returns.
         detail::Task_ptr done = run.done;
         // Fold this run's stamps into the trace BEFORE the completion handle settles (a
-        // sync()ed caller then reads a consistent trace).
-        run.stamps.fold(run.graph->trace_, run.token.is_cancel_requested());
+        // sync()ed caller then reads a consistent trace). A worker-less run is skipped:
+        // its per-node starts are cumulative serial offsets, dispatch-wait measures the
+        // trampoline, the critical path degenerates to the whole chain, and utilization
+        // has no workers to measure -- folding it would corrupt the parallel profile. (A
+        // separate serial-baseline lane -- clean per-node total_work + serial-vs-parallel
+        // contention deltas -- is a planned trace feature, not a fold into these
+        // aggregates.)
+        run.stamps.fold(run.graph->trace_,
+            run.token.is_cancel_requested() || run.scheduler->single_threaded());
         if (run.token.is_cancel_requested())
             done->cancel();
         else
@@ -450,8 +457,9 @@ void Static_task_graph::node_complete(Run_state& run, int index)
     }
 }
 
-Task<void> Static_task_graph::execute(Cancellation_token token)
+Task<void> Static_task_graph::execute(Execution_options opts)
 {
+    Cancellation_token token = std::move(opts.token);
     if (!compiled_)
         ts::fatal("Static_task_graph::execute called before compile()");
 

@@ -1,5 +1,6 @@
 #include "integration_tests.h"
 #include "ts/guarded.h"
+#include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
 #include "harness.h"
 #include "test_util.h"
@@ -13,6 +14,7 @@ void game_frame_stats(int frames, float time_scale,
 }
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -648,6 +650,108 @@ void test_when_all_retraction_no_deadlock()
 
 } // namespace
 
+// Worker-less global scheduler (`Scheduler_scope{{.single_threaded = true}}`): every layer
+// runs inline on the calling thread -- launch/then, Guarded async, parallel_for, and a
+// graph with conflict-derived edges and a nested task. Everything must complete on the
+// main thread, and a launch/async is already done when the call returns.
+void test_single_threaded_end_to_end()
+{
+    ts::Scheduler_scope scope{ { .single_threaded = true } };
+    const std::thread::id main_id = std::this_thread::get_id();
+
+    // Bare launch + then: inline, done at return, on this thread.
+    std::thread::id launch_ran_on{};
+    ts::Task<int> t = ts::launch([&launch_ran_on] { launch_ran_on = std::this_thread::get_id(); return 6; });
+    TS_CHECK(t.is_done());
+    TS_CHECK(launch_ran_on == main_id);
+    ts::Task<int> t2 = t.then([](int v) { return v * 7; });
+    TS_CHECK(t2.is_done());
+    TS_CHECK(t2.sync() == 42);
+
+    // Guarded async: pipe job runs inline at admission.
+    ts::Guarded<tests::Counter> c;
+    c.async([](tests::Counter& k) { k.add(5); });
+    TS_CHECK(c.async([](const tests::Counter& k) { return k.value(); }).sync() == 5);
+
+    // parallel_for: all slices on the caller.
+    std::array<int, 64> data{};
+    ts::parallel_for(64, [&data, main_id](int i)
+    {
+        if (std::this_thread::get_id() == main_id)
+            data[static_cast<std::size_t>(i)] = i;
+    });
+    int sum = 0;
+    for (int v : data) sum += v;
+    TS_CHECK(sum == 64 * 63 / 2);   // every slice ran, all on the main thread
+
+    // Graph: conflict edge (writer -> reader on the same object) + a nested task in the
+    // writer; the reader must observe both writes, and every body runs on the main thread.
+    ts::Guarded<tests::Counter> g_obj;
+    std::atomic<int> reader_saw{ -1 };
+    std::atomic<bool> off_thread{ false };
+    ts::Static_task_graph g;
+    g.add_node([main_id, &off_thread](tests::Counter& k)
+    {
+        if (std::this_thread::get_id() != main_id) off_thread.store(true);
+        k.add(1);
+        ts::nested([&k, main_id, &off_thread]
+        {
+            if (std::this_thread::get_id() != main_id) off_thread.store(true);
+            k.add(2);
+        });
+    }, g_obj);
+    g.add_node([&reader_saw, main_id, &off_thread](const tests::Counter& k)
+    {
+        if (std::this_thread::get_id() != main_id) off_thread.store(true);
+        reader_saw.store(k.value());
+    }, g_obj);
+    g.compile();
+
+    ts::Task<void> done = g.execute();
+    TS_CHECK(done.is_done());   // the whole run happened inside execute()
+    TS_CHECK(!off_thread.load());
+    TS_CHECK(reader_saw.load() == 3);   // writer body + its nested write, both before the reader
+}
+
+// The drain-before-park rule: a body that admits pipe work and then blocks on it must not
+// deadlock -- `sync()` drains the thread's serial trampoline (where the admitted job sits,
+// behind the running body's frame) before parking.
+void test_single_threaded_sync_inside_body()
+{
+    ts::Scheduler_scope scope{ { .single_threaded = true } };
+
+    ts::Guarded<tests::Counter> c;
+    int seen = ts::launch([&c]
+    {
+        ts::Task<int> inner = c.async([](tests::Counter& k) { k.add(9); return k.value(); });
+        return inner.sync();   // admitted behind this frame; the drain hook runs it
+    }).sync();
+    TS_CHECK(seen == 9);
+}
+
+// Two worker-less runs of a conflict-shaped graph execute the nodes in the same order:
+// worker-less dispatch is deterministic (single thread, FIFO trampoline).
+void test_single_threaded_deterministic_order()
+{
+    ts::Scheduler_scope scope{ { .single_threaded = true } };
+
+    ts::Guarded<int> a{ 0 }, b{ 0 };
+    std::vector<int> order;
+    ts::Static_task_graph g;
+    g.add_node([&order](int& x) { order.push_back(0); x = 1; }, a);
+    g.add_node([&order](const int&) { order.push_back(1); }, a);
+    g.add_node([&order](int& y) { order.push_back(2); y = 1; }, b);
+    g.add_node([&order](const int&, const int&) { order.push_back(3); }, a, b);
+    g.compile();
+
+    g.execute().sync();
+    std::vector<int> first = order;
+    order.clear();
+    g.execute().sync();
+    TS_CHECK(order == first);   // bit-identical node order across runs
+    TS_CHECK(order.size() == 4);
+}
+
 void run_integration_tests()
 {
     std::printf("\n[integration] tests\n");
@@ -663,6 +767,9 @@ void run_integration_tests()
     run("reader node overlaps async read", test_reader_node_overlaps_async_read);
     run("multi async basic", test_multi_async_basic);
     run("multi async exclusion", test_multi_async_exclusion);
+    run("single-threaded: end to end", test_single_threaded_end_to_end);
+    run("single-threaded: sync inside body", test_single_threaded_sync_inside_body);
+    run("single-threaded: deterministic order", test_single_threaded_deterministic_order);
     run("multi async no deadlock", test_multi_async_no_deadlock);
     run("multi async options", test_multi_async_options);
     run("multi async generic lambda", test_multi_async_generic_lambda);

@@ -58,6 +58,15 @@ struct Scheduler_config
     // `spin_then_block`/`handoff`: number of `find_work` scans an idle worker spins before it
     // parks (UE's `WorkerSpinCycles` is ~53). Ignored by `spin`.
     uint32_t spin_cycles = 64;
+    // Worker-less mode (UE's no-multithreading shape): no worker threads exist, and every
+    // submitted task executes INLINE at its submit point, on the submitting thread, via a
+    // bounded FIFO trampoline (a chain of tasks drains iteratively, not recursively). Serves
+    // deterministic debugging/tests, thread-less platforms, and low-end fallback. Semantics
+    // to be aware of: a task body runs BEFORE `launch`/`async` returns (reentrancy is
+    // observable -- launching under a user lock runs the body under that lock); priorities
+    // and the idle policy are no-ops; work triggered from an external thread runs on that
+    // thread. `num_threads` is ignored when set.
+    bool single_threaded = false;
 };
 
 // The library runs one process-wide scheduler (`global_scheduler()`, declared in guarded.h).
@@ -134,8 +143,11 @@ public:
     void submit(Task_func_ptr func, void* data, Priority priority = Priority::normal);
 
     // Number of worker threads (the natural default concurrency for `parallel_for`).
-    // Defined in the .cpp -- `Worker_thread` is incomplete here.
+    // Defined in the .cpp -- `Worker_thread` is incomplete here. 0 in worker-less mode.
     int worker_count() const noexcept;
+
+    // Worker-less (single-threaded) scheduler: no workers, tasks execute inline at submit.
+    bool single_threaded() const noexcept { return single_threaded_; }
 
 #if TS_PROFILING
     // Total wall time (raw `steady_clock` ticks) this scheduler's workers have spent
@@ -337,6 +349,12 @@ private:
     // Producer-side signal after a submit, per `idle_policy_` (see the enum).
     void signal_submit();
 
+    // Worker-less mode: run `{func, data}` inline on the calling thread via the per-thread
+    // FIFO trampoline (see `serial_pending` in the .cpp). Installs this scheduler as the
+    // thread's current scheduler for the drain (pipe job re-dispatch and nested submits
+    // resolve to it), so external threads submitting into a worker-less scheduler work.
+    void run_serial(Task_func_ptr func, void* data);
+
     // Idle behavior for the configured policy, called by the worker when `find_work` came up
     // empty. Returns true with a task in `out` to run; false means "re-scan / re-check quit and
     // loop" (it parked and was woken, or it spin-yielded). The `handoff` path also maintains
@@ -425,6 +443,7 @@ private:
     std::atomic<int> num_spinning_ = 0;
     const Idle_policy idle_policy_;
     const std::uint32_t spin_cycles_;
+    const bool single_threaded_;
     std::vector<detail::Worker_thread> workers_;
 #if TS_PROFILING
     // Per-worker busy-time counters, one padded slot each (single writer: the owning

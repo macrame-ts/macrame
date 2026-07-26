@@ -224,6 +224,26 @@ this project treats as disqualifying (§7.6). The shipped handoff keeps
 correctness on an always-advanced epoch; the spinner count is advisory and
 relaxed.
 
+**Worker-less (single-threaded) mode** (`Scheduler_config::single_threaded`)
+is UE's no-multithreading shape, verified against its source before adoption:
+UE creates zero workers when the platform lacks threads and its
+`LaunchInternal` then executes each task inline at the launch point, looping
+the continuation chain. Ours mirrors that: no workers, `submit` runs the
+task now on the submitting thread through a bounded FIFO trampoline (the
+same iterative-drain shape as inline dispatch), a blocking wait drains the
+thread's pending trampoline entries before parking (a body that admits work
+and then `sync()`s it would otherwise deadlock — the same rule UE's wait
+paths follow), and work triggered from an external thread runs on that
+thread. One structural consequence landed with it: pipe job submission was
+moved *outside* the pipe mutex (admission state still updates under the
+lock; the admitted batch is submitted after unlock) — under inline-at-submit
+a job body releasing its own pipe would otherwise deadlock on the held
+mutex, and shorter critical sections are better in every mode. Worker-less
+graph runs are excluded from the trace's parallel aggregates (their timings
+describe the trampoline, not scheduling); their clean per-node durations are
+the planned serial-baseline lane for the profiler-guided-optimization cost
+model. Priorities and idle policies are inert in this mode by design.
+
 **Scheduler as one implementation behind the `Task` API, not a plugin
 zoo.** The intent is at most two or three interchangeable scheduler
 implementations sharing the `Task`/`Guarded`/graph surface — the current
@@ -237,6 +257,16 @@ monolith, so a new implementation reuses most of them and adds only its
 distinguishing logic (a different idle/wake policy, an extra pool, an OS-QoS
 band). Anything fancier than a wake-policy choice is out of scope at this
 stage; the goal is a small, legible menu, not a general framework.
+
+A corollary that is a standing rule: **the scheduler's public API stays
+minimal, because it is the seam an alternative scheduler must reimplement.**
+The contract the task layer consumes is `submit(func, data, priority)` plus
+two queries (`worker_count()`, `single_threaded()`) and construction-time
+config; everything else — queues, deques, eventcount, idle policies, the
+profiling accumulators — is internal. Every public member added to
+`Scheduler` is a member every future implementation must honor; additions
+need that justification, and features should land as config fields or
+internal machinery before they land as API.
 
 **The pipe's FIFO is a semantic contract, not a scheduling choice.** A
 `Guarded` object's accessors run in submission order with reader coalescing.

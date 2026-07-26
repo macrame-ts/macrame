@@ -5,6 +5,8 @@
 
 #include <atomic>
 #include <cstdio>
+#include <thread>
+#include <vector>
 
 using ts::test::run;
 using tests::wait_until;
@@ -209,6 +211,52 @@ void test_low_starvation_valve()
     TS_CHECK(low_order.load() < normals);     // and NOT last -- the valve served it mid-stream
 }
 
+// Worker-less mode: no workers exist, and a submitted task executes inline, on the
+// submitting thread, before `submit` returns.
+void test_single_threaded_inline()
+{
+    ts::Scheduler s{ { .single_threaded = true } };
+    TS_CHECK(s.worker_count() == 0);
+
+    struct Probe
+    {
+        std::thread::id ran_on{};
+        bool ran = false;
+    } probe;
+    s.submit(+[](void* p)
+    {
+        auto* pr = static_cast<Probe*>(p);
+        pr->ran_on = std::this_thread::get_id();
+        pr->ran = true;
+    }, &probe);
+
+    TS_CHECK(probe.ran);   // completed before submit returned -- no wait needed
+    TS_CHECK(probe.ran_on == std::this_thread::get_id());
+}
+
+// Chained submissions from inside a running body drain FIFO via the trampoline: the
+// running body finishes before its submissions run, and they run in submission order.
+void test_single_threaded_chain_order()
+{
+    ts::Scheduler s{ { .single_threaded = true } };
+
+    struct Chain
+    {
+        ts::Scheduler* s;
+        std::vector<int> order;
+    } chain{ &s, {} };
+
+    s.submit(+[](void* p)
+    {
+        auto* c = static_cast<Chain*>(p);
+        c->s->submit(+[](void* q) { static_cast<Chain*>(q)->order.push_back(2); }, c);
+        c->s->submit(+[](void* q) { static_cast<Chain*>(q)->order.push_back(3); }, c);
+        c->order.push_back(1);   // the body completes before its submissions run
+    }, &chain);
+
+    TS_CHECK((chain.order == std::vector<int>{ 1, 2, 3 }));
+}
+
 } // namespace
 
 void run_scheduler_tests()
@@ -226,5 +274,7 @@ void run_scheduler_tests()
     run("empty queue exits", test_empty_exit);
     run("submit from task", test_submit_from_task);
     run("low starvation valve", test_low_starvation_valve);
+    run("single-threaded: inline at submit", test_single_threaded_inline);
+    run("single-threaded: FIFO chain order", test_single_threaded_chain_order);
     run("stress 100k", test_stress);
 }

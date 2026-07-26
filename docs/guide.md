@@ -105,6 +105,34 @@ or run a block on a specific pool and restore the previous config on exit:
 `graph.execute()` and `ts::launch`/`async` all use this one global scheduler;
 nothing takes a scheduler argument.
 
+### 2.1 Single-threaded (worker-less) mode
+
+```cpp
+ts::Scheduler_scope serial{ { .single_threaded = true } };
+graph.execute().sync();   // the whole run happens on this thread, deterministically
+```
+
+With `single_threaded = true` the scheduler has **no worker threads at all**:
+every task executes inline, at the point it is submitted, on the submitting
+thread (a chain of tasks drains iteratively — no stack growth). Everything
+works — graphs, `async`, nested tasks, `parallel_for`, the harness — and runs
+in a deterministic order. Use it for:
+
+- **Debugging and bisection**: breaks parallel but works single-threaded →
+  suspect an ordering/declaration bug; breaks in both → plain logic bug.
+  Breakpoints and stack traces stay on one thread.
+- **Deterministic tests**: same inputs, same execution order, every run.
+- **Platforms or builds without threads**, and very small workloads where
+  worker wake-up costs more than the parallelism returns.
+
+Semantics to be aware of: a task body runs *before* `launch`/`async` returns
+(so launching while holding your own lock runs the body under that lock);
+priorities are inert; work triggered from another thread (an external
+callback completing a `Signal`) runs on *that* thread — "single-threaded"
+means no workers, not one blessed thread. A body that blocks waiting for
+something only another thread could produce will deadlock, exactly as in any
+single-threaded program.
+
 ---
 
 ## 3. The access model

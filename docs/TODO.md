@@ -106,6 +106,27 @@ IDs — when an item is done, mark it, don't renumber.
        relates to the shelved `Granted<T>` wrapper (1.9) and the sub-object range harness (1.6).
        Design-first — the goal is to shrink the escaped-ref hole, accepting that raw-`T&`
        extraction can always launder the check away (the language boundary; only Rust closes it).
+   14. `[ ]` **(P2, designed 2026-07, benchmark-gated) Rebase the pipe onto the block machinery
+       (pipes-as-edges — UE `FPipe` generalized to reader/writer).** UE's pipe is lock-free not
+       by clever atomics but by *not being a scheduler structure*: one atomic `LastTask`;
+       push = exchange + `AddSubsequent` on the previous task — serialization compiled into
+       dependency edges, with the existing task machinery doing all dispatch (verified in
+       Pipe.cpp). Our generalization: writers chain FPipe-style (atomic tail, prerequisite edge
+       on the previous holder); a reader batch becomes a **reader-group sentinel** — a bare
+       block whose nested-task counter counts active readers (existing `num_locks` machinery
+       verbatim); a subsequent writer takes one edge from the sentinel; last reader out
+       completes it. Reservations (graph acquire) become bodyless blocks whose dispatch fires
+       `on_acquired` and whose completion IS the release. `wait_until_idle` = task-count +
+       eventcount (copy UE's pattern incl. its last-decrement use-after-free caution). Gains:
+       structurally inline-safe (nothing dispatches under a lock), lock-free producers, reader
+       join/leave = `fetch_add` not mutex, and unification — subsumes the pending graph/
+       `when_all` rebase thread; 1.7's standalone `Pipe` falls out. Costs: the tail-push
+       protocol (writer arrival closes the group to joiners; a reader's failed join-CAS
+       re-reads the tail — a known queued-RW-lock construction, ~100 careful lines), one
+       pooled bare block per reader batch (rides 4.1's free-list), write-epoch bump migration,
+       a serious TSan campaign. GATE: measure pipe-mutex contention on a reader-heavy fixture
+       first — no rewrite without evidence. (A `shared_mutex` is NOT the interim answer:
+       every pipe op mutates admission state, so all would take it exclusive.)
 
 2. **Static task graph**
    1. `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.
@@ -121,11 +142,26 @@ IDs — when an item is done, mark it, don't renumber.
    5. `[ ]` **(P2) Compile-time rank → native dispatch shaping.** Compute upward rank per node at `compile()` (longest path to sink; weights = node priority now, measured durations once 2.4's capture exists; reuses the Kahn order, O(V+E) once). At run the graph shapes dispatch WITHOUT the scheduler's priority classes — avoiding `high`'s global-queue detour and `low`'s valve (2.4's blockers): (a) rank-aware successor submission order when one completion releases several ready nodes (owner deques pop LIFO — submit lowest-rank first so the settling worker pops the highest; thieves take the other end); (b) inline-successor selection by rank (`set_inline` currently picks without regard to importance). Converts `Graph_node::priority` from a queue-class request into a rank weight. Related: D6's static effective-priority pass should ride this mechanism (not the Priority classes) until M2 stage 5; priority-as-conflict-tiebreak belongs behind 2.2's opt-in (it changes observed values). Sequence AFTER the graph-viz timing capture — 2.4's dry-run showed dispatch-shaping effects are unmeasurable without it.
    6. `[ ]` **(P3, downgraded 2026-07 — author unconvinced; revisit on a demonstrated
       disabled-writer-stalls-readers case) Per-run node enable predicate (conditional execution).** The research pass's one design challenge ([research-static-vs-dynamic.md](research-static-vs-dynamic.md) — every mature static-graph system grew a dynamic escape; pure DAGs fail on data-dependent control flow first): the graph has no in-graph skip/branch. The cheap 80%: a per-run predicate on a node, evaluated before acquisition — a disabled node acquires nothing, completes immediately, releases successors (render graphs' conditional-pass-execution pattern). Preserves acyclicity, the derived-edge story, and the safety model; deliberately NOT Taskflow-style condition tasks (their weak/strong-dependency semantics carry documented race/deadlock pitfalls). Full loops/branches stay out of scope — dynamic tasks and `co_await` are the escape for data-dependent shape, as designed.
-   7. `[ ]` **(P1) Serial execution mode** — `execute({.serial = true})`: run nodes one at a time
-      in compiled topological order on the calling thread, harness active. Deterministic
-      debugging + bisection baseline ("breaks parallel, works serial → ordering/declaration bug").
-      RDG immediate mode / Bevy single-threaded executor precedent
-      ([research-deepdive.md](research-deepdive.md) §11.2). Near-zero cost: the Kahn order exists.
+   7. `[x]` **(P1) Serial execution mode — DONE as GLOBAL worker-less mode (2026-07).**
+      Rescoped from graph-only `execute({.serial=true})` to the UE shape after reading UE's
+      source (zero workers when threads unavailable; `LaunchInternal` executes inline at launch,
+      looping the continuation chain): `Scheduler_config{.single_threaded = true}` = no workers,
+      every submit executes inline on the submitting thread via a bounded FIFO trampoline
+      (per-thread pending vector + shared head, reentrant); blocking waits drain the thread's
+      pending entries before parking (`drain_serial_pending` seam in task.h → scheduler.cpp), so
+      a body that admits work then `sync()`s it doesn't deadlock. Serves debugging/bisection,
+      deterministic tests, thread-less platforms, low-end fallback. Enabler shipped with it
+      (Tier 0): pipe job submission moved OUTSIDE `pipe.mutex` (`dispatch` collects the admitted
+      batch under the lock; `submit_admitted` after unlock) — inline-at-submit would deadlock on
+      a body releasing its own pipe under the held mutex. Worker-less graph runs skip the trace
+      fold (their timings describe the trampoline, not scheduling). `execute` now takes
+      `Execution_options{.token}` (no bare-token overload — author decision); 2 call sites
+      migrated. Graph-scoped serial (`.serial` per run, compiled-topo order, rest of app stays
+      parallel) DEFERRED — revisit only if serialize-one-graph-in-a-live-app materializes; it
+      would reuse this routing core plus a TLS gate. Tests: inline-at-submit, FIFO chain order,
+      end-to-end (launch/then/async/parallel_for/graph+nested all on the caller thread),
+      sync-inside-body drain, deterministic run-twice order; 486 checks green, Shipping + stress
+      clean.
    8. `[ ]` **(P1) Graph/`Guarded` lifetime fatals** — fatal in `~Static_task_graph` while a run
       is in flight; pipe-side registration count (compile +1, graph dtor −1) so `~Guarded` fatals
       if a live compiled graph still references it, naming the graph
@@ -214,6 +250,17 @@ IDs — when an item is done, mark it, don't renumber.
     6. `[ ]` **(P1-cheap, docs) "Declaration order is program order" contract.** One paragraph in guide.md making explicit the contract the graph already implements (conflicting nodes run in `add_node` order — the STF/pipe-FIFO philosophy applied to the graph). Removes the "invisible edge" surprise the derived-edge model risks; prerequisite framing for the ordering-ambiguity discussion ([ordering-ambiguity.md](ordering-ambiguity.md) §4.1). Do with the next docs pass.
     7. `[ ]` **(P2, docs) Layered-disclosure front page + scope statement.** guide.md should let a reader be productive with the six core functions before meeting `Deferred`/`Versioned`/coroutines/`parallel_for` (API-surface width is the adoption risk, [research-deepdive.md](research-deepdive.md) §14); and state once, plainly, the scope boundary (O(100)-node coarse frame skeletons; problem-given million-node graphs are Taskflow/HPC territory — §16).
     8. `[ ]` **(P2, docs) Known-limits section.** Draft written in [limits.md](limits.md) (2026-07): the honest catalog of what the harness and access declarations do NOT catch — coverage gaps (uninstrumented methods, PODs, escaped refs, sub-object escapes, stale inherited grants, shipping builds) and the failures no declaration system can catch (semantic/order races, deadlock-by-misuse, the completeness hazard), plus the TSan-as-complement posture. Refine and fold into guide.md.
+    9. `[ ]` **(P2, trace — handoff to the tracing session) Serial-baseline trace lane.**
+       Worker-less (`single_threaded`) graph runs are excluded from the parallel trace fold
+       (their starts are cumulative serial offsets; dispatch-wait measures the trampoline;
+       the critical path degenerates; utilization has no workers) — but their per-node body
+       durations are the CLEANEST cost-model input there is (no contention, no co-runner
+       cache interference): exactly the per-node `total_work` 2.4's simulator needs. Add a
+       separate duration-only per-node aggregate for worker-less runs + a serial-vs-parallel
+       delta view in the SVG (a node much slower in parallel = contention/false-sharing
+       suspect — a diagnostic nothing else provides). Lives in `graph_trace.h` /
+       `trace_stamps.h` (the tracing session's files; the fold-skip hook in
+       `static_task_graph.cpp` already passes the skip flag).
 
 ---
 

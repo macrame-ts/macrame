@@ -117,28 +117,38 @@ void submit_ready(Task_ptr block, std::uint64_t gen)
 namespace
 {
 
-void dispatch(Scheduler& scheduler, Pipe& pipe);
+// Jobs admitted by one `dispatch` pass, collected under the pipe mutex and SUBMITTED AFTER
+// it is released (see `dispatch`). Small inline buffer: a pass admits one writer or a short
+// run of readers.
+using Admitted = std::vector<Job>;
+
+void dispatch(Pipe& pipe, Admitted& admitted);
+void submit_admitted(Scheduler& scheduler, Pipe& pipe, Admitted& admitted);
 
 // Release the pipe in `mode` and admit whatever the release unblocks; notify a
 // `wait_until_idle` waiter if the pipe drained. The tail shared by every way a pipe access
 // ends (queued job body returning, inline body returning, `pipe_release`).
 void release_and_redispatch(Scheduler& scheduler, Pipe& pipe, Access mode)
 {
-    std::scoped_lock lock(pipe.mutex);
-    if (mode == Access::read_only)
-        --pipe.active_readers;
-    else
+    Admitted admitted;
     {
-        pipe.writer_active = false;
+        std::scoped_lock lock(pipe.mutex);
+        if (mode == Access::read_only)
+            --pipe.active_readers;
+        else
+        {
+            pipe.writer_active = false;
 #if TS_SAFETY_CHECKS
-        pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window closes
+            pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window closes
 #endif
+        }
+
+        dispatch(pipe, admitted);
+
+        if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
+            pipe.idle.notify_all();
     }
-
-    dispatch(scheduler, pipe);
-
-    if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
-        pipe.idle.notify_all();
+    submit_admitted(scheduler, pipe, admitted);
 }
 
 // Trampoline for an admitted pipe job (one per mode, so the mode needs no storage): the
@@ -166,25 +176,18 @@ void run_pipe_job(void* data, Access mode)
 void run_pipe_job_read(void* data) { run_pipe_job(data, Access::read_only); }
 void run_pipe_job_write(void* data) { run_pipe_job(data, Access::read_write); }
 
-// Hand an admitted job to the scheduler. Caller holds `pipe.mutex` (orders the
-// `dispatch_arg` publish before any later dispatch of the same block could exist -- there
-// is none: one dispatch per pipe block).
-void submit_job(Scheduler& scheduler, Pipe& pipe, Job job)
-{
-    job.block->dispatch_arg.store(
-        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&pipe)),
-        std::memory_order_release);
-    Task_func_ptr trampoline = job.mode == Access::read_only ? &run_pipe_job_read
-                                                             : &run_pipe_job_write;
-    // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
-    scheduler.submit(trampoline, job.block.release(), job.priority);
-}
-
-// Admit as many front jobs as the reader/writer rules allow. Caller holds `pipe.mutex`.
+// Admit as many front jobs as the reader/writer rules allow, moving them into `admitted`
+// for the caller to submit AFTER `pipe.mutex` is released. Caller holds `pipe.mutex`.
 //   - readers: any number may run concurrently, but not alongside a writer
 //   - writer: runs alone (no readers, no other writer)
 //   - FIFO: a writer at the front holds back later jobs until prior readers drain
-void dispatch(Scheduler& scheduler, Pipe& pipe)
+// Admission mutates the pipe state (reader count / writer flag) under the lock, so the
+// admitted-but-not-yet-submitted window is invisible: `wait_until_idle` counts the job as
+// active, and no concurrent `dispatch` can admit it twice (it left the deque). Submission
+// happens outside the lock because a worker-less scheduler EXECUTES at submit -- a job body
+// releasing this same pipe under the held mutex would deadlock (and shorter critical
+// sections are better in every mode).
+void dispatch(Pipe& pipe, Admitted& admitted)
 {
     while (!pipe.jobs.empty())
     {
@@ -206,16 +209,34 @@ void dispatch(Scheduler& scheduler, Pipe& pipe)
 #endif
         }
 
-        Job job = std::move(front);
+        admitted.push_back(std::move(front));
         pipe.jobs.pop_front();
+    }
+}
 
+// Submit one `dispatch` pass's admitted jobs, in admission order (FIFO preserved). Runs
+// WITHOUT `pipe.mutex`.
+void submit_admitted(Scheduler& scheduler, Pipe& pipe, Admitted& admitted)
+{
+    for (Job& job : admitted)
+    {
         if (job.reservation)
-            // Signal the holder that it now owns the pipe; leave `writer_active` set
-            // (the reservation is released explicitly via `pipe_release`, not on the
-            // callback's completion).
+        {
+            // Signal the holder that it now owns the pipe; `writer_active`/`active_readers`
+            // stay set (the reservation is released explicitly via `pipe_release`, not on
+            // the callback's completion).
             submit_closure(scheduler, std::move(job.on_acquired), job.priority);
-        else
-            submit_job(scheduler, pipe, std::move(job));
+            continue;
+        }
+        // The `dispatch_arg` publish (release) is ordered before the submit that makes the
+        // block reachable; one dispatch per pipe block, so no later publish exists to race.
+        job.block->dispatch_arg.store(
+            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&pipe)),
+            std::memory_order_release);
+        Task_func_ptr trampoline = job.mode == Access::read_only ? &run_pipe_job_read
+                                                                 : &run_pipe_job_write;
+        // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
+        scheduler.submit(trampoline, job.block.release(), job.priority);
     }
 }
 
@@ -224,9 +245,13 @@ void dispatch(Scheduler& scheduler, Pipe& pipe)
 void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block,
                   Priority priority)
 {
-    std::scoped_lock lock(pipe.mutex);
-    pipe.jobs.push_back(Job{ mode, /*reservation*/ false, priority, std::move(block), {} });
-    dispatch(scheduler, pipe);
+    Admitted admitted;
+    {
+        std::scoped_lock lock(pipe.mutex);
+        pipe.jobs.push_back(Job{ mode, /*reservation*/ false, priority, std::move(block), {} });
+        dispatch(pipe, admitted);
+    }
+    submit_admitted(scheduler, pipe, admitted);
 }
 
 bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired)

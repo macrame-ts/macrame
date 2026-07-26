@@ -171,12 +171,21 @@ public:
     // `tools/dot_writer.h` for the style scheme); no-op when `TS_PROFILING` is 0.
     void compile(const char* DOT_path = nullptr);
 
-    // Run the compiled graph; returns a completion handle. Re-runnable. If `token` is
+    // Per-run options for `execute`. An aggregate (house style: `Launch_options`,
+    // `Access_options`); spelled `execute({.token = t})` at call sites.
+    struct Execution_options
+    {
+        Cancellation_token token;
+    };
+
+    // Run the compiled graph; returns a completion handle. Re-runnable. If the token is
     // cancelled, not-yet-started nodes are skipped and the completion is cancelled
     // (query with `Task::is_cancelled()`); in-flight nodes still finish.
     // Runs on the one global scheduler (there are no ad-hoc `Scheduler` instances; use a
-    // `Scheduler_scope` to run on a specific pool for a scope).
-    Task<void> execute(Cancellation_token token = {});
+    // `Scheduler_scope` to run on a specific pool for a scope -- including a worker-less
+    // `{.single_threaded = true}` one, which runs the whole graph deterministically on the
+    // calling thread).
+    Task<void> execute(Execution_options opts = {});
 
     // Attach an aggregating runtime trace (tools/graph_trace.h), or detach with nullptr.
     // Requires a compiled graph: the compiled structure (node labels, declared accesses,

@@ -37,6 +37,12 @@ class Cancel_callback;
 namespace detail
 {
 
+// Defined in scheduler.cpp (a scheduler-free seam, like `submit_ready`): before parking, a
+// blocking wait drains the calling thread's pending worker-less-mode tasks -- the awaited
+// work may sit in the serial trampoline behind the waiter's own frame (a body that admitted
+// work and then waits on it). No-op when nothing is pending (any scheduler mode).
+void drain_serial_pending() noexcept;
+
 // Shared cancellation state behind a source / its tokens / its callbacks. The request
 // flag is atomic so the hot `is_cancel_requested()` needs no lock; the callback list
 // (fired by `request_cancel`) is mutex-guarded, with `firing`/`firing_thread`/`done` for
@@ -617,6 +623,10 @@ struct Task_control_block
     static void retract_or_wait(const Task_ptr& blk)
     {
         retract(blk);
+        // Worker-less mode: the awaited work (a pipe job, a released successor) may be
+        // queued on THIS thread's serial trampoline behind the current frame -- run it
+        // before parking, or nothing ever would. No-op otherwise.
+        drain_serial_pending();
         blk->wait();
     }
 };
