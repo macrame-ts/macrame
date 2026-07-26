@@ -231,10 +231,12 @@ private:
 
         node.pipes = { (&access.pipe_)... };
 
-        node.run = [fn = std::forward<Fn>(fn), instances]() mutable
+        auto epochs = std::make_tuple(&access.pipe_.write_epoch...);
+        node.run = [fn = std::forward<Fn>(fn), instances, epochs]() mutable
         {
             Access_context ctx;
-            (ctx.add(static_cast<const void*>(std::get<I>(instances)), Modes), ...);
+            (ctx.add(static_cast<const void*>(std::get<I>(instances)), Modes,
+                     std::get<I>(epochs)), ...);
             Access_scope scope(ctx);
             fn(detail::mode_ref<Modes>(std::get<I>(instances))...);
         };

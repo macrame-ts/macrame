@@ -128,7 +128,12 @@ void release_and_redispatch(Scheduler& scheduler, Pipe& pipe, Access mode)
     if (mode == Access::read_only)
         --pipe.active_readers;
     else
+    {
         pipe.writer_active = false;
+#if TS_SAFETY_CHECKS
+        pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window closes
+#endif
+    }
 
     dispatch(scheduler, pipe);
 
@@ -196,6 +201,9 @@ void dispatch(Scheduler& scheduler, Pipe& pipe)
             if (pipe.writer_active || pipe.active_readers > 0)
                 break;
             pipe.writer_active = true;
+#if TS_SAFETY_CHECKS
+            pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window opens
+#endif
         }
 
         Job job = std::move(front);
@@ -239,6 +247,9 @@ bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_
         else if (!pipe.writer_active && pipe.active_readers == 0)
         {
             pipe.writer_active = true;   // acquired now; hold as an exclusive writer
+#if TS_SAFETY_CHECKS
+            pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window opens
+#endif
             return true;
         }
     }
@@ -291,6 +302,9 @@ bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_p
             if (pipe.writer_active || pipe.active_readers > 0)
                 return false;
             pipe.writer_active = true;   // exclusive writer
+#if TS_SAFETY_CHECKS
+            pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window opens
+#endif
         }
     }
 

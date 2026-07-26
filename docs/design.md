@@ -109,6 +109,20 @@ suspension) carries the parent's grant set by value. That one rule lets a
 graph node fan out dynamic work over its declared data without new
 declarations, and it is what coroutine support reuses wholesale (§5).
 
+Inheritance is bounded by **grant-window validity**: each pipe carries a
+write-epoch with seqlock parity (bumped at write-grant acquire and release;
++2 on a graph write handoff, which elides both pipe operations), and every
+context entry declared under a pipe grant captures the epoch at declaration.
+A snapshot that outlives its window — a non-nested `ts::launch` running
+after the node that spawned it released its objects — fails the comparison
+at the next instrumented access and faults with a stale-grant diagnostic
+rather than silently racing the next acquirer. The parity choice makes one
+rule serve both modes: a write entry is valid while its holder's window is
+open; a read entry is valid until a *writer* acquires (other readers coming
+and going don't bump), which is the actual safety condition, not the
+origin reader's own lifetime. Nested-gated sub-work is structurally never
+stale — the parent's completion, and so its release, waits for it.
+
 ### 2.3 Introspection: the graph knows its own structure
 
 A derived schedule the user never wrote down needs a way to be read back —

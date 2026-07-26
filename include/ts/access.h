@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <optional>
 #include <typeinfo>
 
@@ -15,11 +17,31 @@ enum class Access { read_only, read_write };
 // Per-task permission set, installed thread-locally while a task runs. Small by
 // design: a task touches a handful of instances, so an inline array + linear
 // scan beats a hash set. Identity of an instance is its address.
+//
+// An entry may carry a GRANT-VALIDITY source: a pointer to the object's pipe
+// `write_epoch` plus the value captured when the grant was declared. The epoch has
+// seqlock-style parity -- bumped at every write-grant acquire and release (and by +2 on a
+// graph write handoff) -- so "epoch unchanged" means the grant window this entry was
+// declared under is still the pipe's current one: a write holder's window is still open,
+// or no writer has acquired since a read grant was captured. A snapshot copy of the
+// context (`snapshot_access`, grant inheritance) carries the captured values with it, so
+// a task that outlives the access scope it inherited from fails the comparison and faults
+// with a stale-grant diagnostic instead of silently racing the next acquirer. Entries
+// without a source (null epoch) never go stale -- hand-built contexts and grant-free
+// internal scopes. The epoch pointer is dereferenced only under `TS_SAFETY_CHECKS`; the
+// existing lifetime contract (a `Guarded` outlives its accessors) covers its validity.
 class Access_context
 {
 public:
-    void add(const void* instance, Access mode) noexcept;
-    bool grants(const void* instance, Access mode) const noexcept;
+    enum class Grant { none, granted, stale };
+
+    void add(const void* instance, Access mode) noexcept { add(instance, mode, nullptr); }
+    void add(const void* instance, Access mode, const std::atomic<std::uint64_t>* epoch) noexcept;
+    Grant check(const void* instance, Access mode) const noexcept;
+    bool grants(const void* instance, Access mode) const noexcept
+    {
+        return check(instance, mode) == Grant::granted;
+    }
 
 private:
     static constexpr int max_entries = 8;
@@ -28,6 +50,8 @@ private:
     {
         const void* instance;
         Access mode;
+        const std::atomic<std::uint64_t>* epoch;   // null = never stale
+        std::uint64_t captured;
     };
 
     Entry entries_[max_entries];
@@ -40,7 +64,7 @@ namespace detail
 // null when this thread is not executing a task -> any guarded access faults.
 extern thread_local const Access_context* current_access;
 
-[[noreturn]] void access_violation(const char* type_name, Access mode) noexcept;
+[[noreturn]] void access_violation(const char* type_name, Access mode, bool stale = false) noexcept;
 
 // Snapshot the calling thread's access grant by value (empty if no task is running).
 // Used to propagate a task's grants to sub-work launched from it (`ts::launch` /
@@ -64,16 +88,22 @@ template<typename T>
 inline void access_check(T* self) noexcept
 {
     const Access_context* ctx = detail::current_access;
-    if (!ctx || !ctx->grants(self, Access::read_write))
-        detail::access_violation(typeid(T).name(), Access::read_write);
+    Access_context::Grant g =
+        ctx ? ctx->check(self, Access::read_write) : Access_context::Grant::none;
+    if (g != Access_context::Grant::granted)
+        detail::access_violation(typeid(T).name(), Access::read_write,
+                                 g == Access_context::Grant::stale);
 }
 
 template<typename T>
 inline void access_check(const T* self) noexcept
 {
     const Access_context* ctx = detail::current_access;
-    if (!ctx || !ctx->grants(self, Access::read_only))
-        detail::access_violation(typeid(T).name(), Access::read_only);
+    Access_context::Grant g =
+        ctx ? ctx->check(self, Access::read_only) : Access_context::Grant::none;
+    if (g != Access_context::Grant::granted)
+        detail::access_violation(typeid(T).name(), Access::read_only,
+                                 g == Access_context::Grant::stale);
 }
 
 #if TS_SAFETY_CHECKS

@@ -72,13 +72,23 @@ IDs — when an item is done, mark it, don't renumber.
        split-along-the-seams doc patterns); [research-deepdive.md](research-deepdive.md) §13/§19
        maps how Bevy (per-component + filters) and Unity (per-container, escape attributes)
        evolved under the same pressure. Flagged by the 2026-07 research pass.
-   11. `[ ]` **(P1) Grant-generation validity check** — close the stale inherited-grant hole:
-       `ts::launch` snapshots the launcher's grant with no validity window, so a task launched
-       from a graph node / pipe accessor can run after the grant's scope released its objects,
-       with the harness silent ([research-deepdive.md](research-deepdive.md) §13.6.5). Stamp
-       `Access_context` snapshots with a per-grant generation; `access_check` fatals on a stale
-       grant ("task outlived the access scope it inherited from"). Alternative considered
-       (blunter): inherit into `ts::nested` only.
+   11. `[x]` **(P1) Grant-generation validity check — DONE (2026-07).** The stale
+       inherited-grant hole ([research-deepdive.md](research-deepdive.md) §13.6.5) is closed via
+       a per-pipe **write-epoch with seqlock parity** (`Pipe::write_epoch`): bumped at write-grant
+       acquire + release (under the pipe mutex, relaxed) and by +2 on a graph write handoff
+       (which elides both pipe ops); reader traffic never bumps. Every `Access_context` entry
+       declared under a pipe grant captures the epoch (all declaration sites threaded: single-
+       object access/async, multi-object, graph nodes, coroutine pipe guards, `Versioned` front
+       scopes); `Access_context::check` returns granted/stale/none and `access_check` fatals on
+       stale with a dedicated diagnostic naming the fix (`ts::nested`/`add_nested`). One rule
+       serves both modes: a write entry is valid while its window is open, a read entry until a
+       writer acquires. Compiled out under `TS_SAFETY_CHECKS=0` (bumps, capture, compare all
+       gated; the 8-byte pipe field stays for layout stability). Chosen over per-owner
+       generations (refcount traffic, per-owner plumbing) and inherit-into-`nested`-only
+       (arming-after-launch races the child's first check). Tests: epoch unit verdicts, read-era
+       semantics, `stale_inherited_grant` death scenario; suite 470 checks green, Shipping
+       compiles, Release+Shipping stress clean (no false positives across handoff /
+       `parallel_for` / `Versioned` paths).
    12. `[ ]` **(P1) Blocking-`sync()`-under-grant check** — the documented "never block inside a
        graph node / access body" rule is unenforced; detect a blocking `sync()` while a
        node/pipe grant is active ([research-deepdive.md](research-deepdive.md) §3.5). Needs a

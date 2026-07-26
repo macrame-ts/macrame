@@ -269,7 +269,7 @@ public:
     {
         if (current_access)
             ctx_ = *current_access;   // extend the coroutine's existing grant, don't replace it
-        ctx_.add(obj_, Mode);
+        ctx_.add(obj_, Mode, &pipe_.write_epoch);
         prev_ = current_access;
         current_access = &ctx_;
         ++pipe_guard_depth;

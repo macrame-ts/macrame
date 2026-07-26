@@ -54,6 +54,14 @@ struct Pipe
     std::deque<Job> jobs;
     int active_readers = 0;
     bool writer_active = false;
+    // Grant-window epoch for the harness's stale-inherited-grant check (see
+    // `Access_context`). Seqlock-style parity: bumped at every write-grant acquire and
+    // release (always under `mutex`; +2 on a graph write handoff, which elides both pipe
+    // ops), so it is odd while a writer holds and even during reader eras. Reader
+    // acquires/releases do not bump -- a read grant goes stale exactly when a writer
+    // acquires after its capture, which is the actual safety condition. Bumps are gated
+    // by `TS_SAFETY_CHECKS`; the field itself is unconditional for layout stability.
+    std::atomic<std::uint64_t> write_epoch{ 0 };
     // Debug name of the owning `Guarded`/`Versioned` (`ts::Named`): a static literal,
     // referenced not copied. Consumed by the graph's DOT dump (edge tooltips) and future
     // profiling; kept in all builds (one pointer).
@@ -411,14 +419,17 @@ private:
         // The body (stored in the block) runs `fn` under this object's access scope. If
         // `fn` takes a trailing token, the body does too and `Executable::run` forwards the
         // block's token (uniform with the bare-task path's `with_inherited_access`).
+        // The context captures the pipe's write-epoch at body start (inside the grant
+        // window), so an inherited snapshot that outlives this access goes stale.
         auto core = [&]
         {
+            const std::atomic<std::uint64_t>* epoch = &pipe_.write_epoch;
             if constexpr (detail::accessor_takes_token_v<Fn, decltype(*inst)>)
             {
-                auto body = [inst, fn = std::forward<Fn>(fn)](const Cancellation_token& tok) mutable -> R
+                auto body = [inst, epoch, fn = std::forward<Fn>(fn)](const Cancellation_token& tok) mutable -> R
                 {
                     Access_context ctx;
-                    ctx.add(inst, mode);
+                    ctx.add(inst, mode, epoch);
                     Access_scope scope(ctx);
                     return fn(*inst, tok);
                 };
@@ -426,10 +437,10 @@ private:
             }
             else
             {
-                auto body = [inst, fn = std::forward<Fn>(fn)]() mutable -> R
+                auto body = [inst, epoch, fn = std::forward<Fn>(fn)]() mutable -> R
                 {
                     Access_context ctx;
-                    ctx.add(inst, mode);
+                    ctx.add(inst, mode, epoch);
                     Access_scope scope(ctx);
                     return fn(*inst);
                 };
@@ -531,11 +542,13 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
 {
     using R = std::invoke_result_t<Fn, Mode_ref_t<Modes, Ts>...>;
     auto instances = std::make_tuple(Guarded_access::instance(objs)...);
+    auto epochs = std::make_tuple(&Guarded_access::pipe(objs).write_epoch...);
 
-    auto body = [instances, fn = std::forward<Fn>(fn)]() mutable -> R
+    auto body = [instances, epochs, fn = std::forward<Fn>(fn)]() mutable -> R
     {
         Access_context ctx;
-        (ctx.add(static_cast<const void*>(std::get<I>(instances)), Modes), ...);
+        (ctx.add(static_cast<const void*>(std::get<I>(instances)), Modes,
+                 std::get<I>(epochs)), ...);
         Access_scope scope(ctx);
         return fn(mode_ref<Modes>(std::get<I>(instances))...);
     };

@@ -78,15 +78,16 @@ range harness (TODO 1.6) is the designed answer; today the grant covers the
 object, not the handed-out interior, so interior access after the method
 returns is unchecked.
 
-**§2.5 — Stale inherited grants (a soundness gap, being fixed).**
-`ts::launch` snapshots the launcher's grant set by value with no validity
-window. A task launched from a graph node or pipe accessor can therefore run
-*after* that node completed and released its objects, while the harness
-still sees a valid inherited grant and stays silent — racing the next
-legitimate acquirer. This is on the roadmap as a P1 fix (TODO 1.11: stamp
-snapshots with a per-grant generation, fault on a stale grant). Listed here
-because until it lands, an inherited grant can outlive the scope it was
-inherited from.
+**§2.5 — Stale inherited grants (CLOSED, 2026-07).** This was a real gap:
+`ts::launch` snapshots the launcher's grant set with no validity window, so
+a non-nested task could run after its origin scope released the objects,
+harness silent. Fixed (TODO 1.11): every context entry declared under a
+pipe grant captures the pipe's write-epoch; a snapshot that outlives its
+grant window fails the comparison at the next instrumented access and
+faults with a stale-grant diagnostic. Residual within this item: the check
+fires at *instrumented* access only (§2.1–2.4 still apply), and detection
+of a window closing mid-access is advisory (an epoch read races the close
+by nature — the harness is diagnostics, not arbitration).
 
 **§2.6 — Shipping builds.** `TS_SAFETY_CHECKS=0` removes the oracle
 entirely. Every comparable system shares this (Unity is editor-only, RDG is

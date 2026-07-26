@@ -231,6 +231,15 @@ Sub-work inherits grants: a task launched from inside a task body (or a
 `parallel_for` chunk, or a nested task) carries the parent's grants, so
 fan-out over data the parent owns just works.
 
+An inherited grant is only valid while the access scope it came from is
+still open. Nested sub-work (`ts::nested`, `ts::add_nested`) is always
+safe — the parent's completion (and so its grant release) waits for it. A
+plain `ts::launch` that is *not* gated as nested can outlive the parent's
+access scope; if it then touches the parent's guarded data, the harness
+aborts with a stale-grant diagnostic instead of letting the access race
+whoever holds the object next. The fix is always the same: gate the
+sub-work with `ts::nested`/`ts::add_nested`.
+
 ---
 
 ## 4. Tasks

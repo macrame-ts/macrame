@@ -285,8 +285,8 @@ private:
     void swap_replicas(T& front)
     {
         Access_context ctx;
-        ctx.add(&front, Access::read_write);
-        ctx.add(&shadow_, Access::read_write);
+        ctx.add(&front, Access::read_write, &detail::Guarded_access::pipe(front_).write_epoch);
+        ctx.add(&shadow_, Access::read_write);   // shadow: no pipe -- grant-free by design
         Access_scope scope(ctx);
         using std::swap;
         swap(front, shadow_);
@@ -306,8 +306,8 @@ private:
         {
             {
                 Access_context ctx;
-                ctx.add(&shadow_, Access::read_write);
-                ctx.add(&front, Access::read_only);
+                ctx.add(&shadow_, Access::read_write);   // shadow: no pipe -- grant-free by design
+                ctx.add(&front, Access::read_only, &detail::Guarded_access::pipe(front_).write_epoch);
                 Access_scope scope(ctx);
                 if (policy_ == Resync::replay)
                 {

@@ -87,6 +87,24 @@ void run_death_scenario(const char* name)
         for (int i = 0; i < 9; ++i)
             ctx.add(&objs[i], Access::read_write);   // 9th add overflows `max_entries` -> fatal
     }
+    else if (std::strcmp(name, "stale_inherited_grant") == 0)
+    {
+        ts::Guarded<Counter> c;
+        ts::Signal go;
+        ts::Task<void> stray;
+        ts::Static_task_graph g;
+        g.add_node([&stray, &go](Counter& k)
+        {
+            // Deliberately NOT `ts::nested`/`add_nested`: the task inherits the node's
+            // grant but does not gate the node's completion. Gated on `go`, so it runs
+            // only after the node has completed and released its write hold on `c`.
+            stray = ts::task([&k] { k.increment(); }).after(go).launch();
+        }, c);
+        g.compile();
+        g.execute().sync();   // node done; its write grant on `c` released (epoch moved)
+        go.trigger();
+        stray.sync();         // body writes `c` under the stale inherited grant -> fatal
+    }
     else if (std::strcmp(name, "graph_cycle") == 0)
     {
         ts::Guarded<int> a{ 0 }, b{ 0 };
