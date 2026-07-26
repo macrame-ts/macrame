@@ -38,6 +38,22 @@ No production system we surveyed combines *per-object-instance* granularity,
 library. That intersection is the bet this library makes. The full survey is
 in [task-systems-comparison.md](task-systems-comparison.md).
 
+Two positioning facts sharpen the bet
+([research-deepdive.md](research-deepdive.md) §15, §2). First, the industry
+already ships static frame skeletons: Unreal's tick system (`ETickingGroup`
+phases, per-function tick prerequisites, opt-in `bRunOnAnyThread`) is a
+coarse declared frame graph that has sat in the engine for a decade —
+underused for parallelism because nothing declares what a tick touches, so
+the engine cannot safely move work off the game thread by default. The
+missing piece is not the graph shape or the dynamic runtime; it is the
+access layer that makes the static structure safely parallelizable — which
+is what this library supplies. Second, the boundary is deliberate: workloads
+whose top-level shape is data-dependent per run (renderers are the canonical
+case — the pass set is a function of frame content, which is why every
+render graph redeclares per frame) are out of scope for the static graph by
+design; it targets the stable frame skeleton, and data-dependent work lives
+in the dynamic layer under the same access model.
+
 ---
 
 ## 2. The access model
@@ -193,6 +209,20 @@ fences, and `atomic_thread_fence` is invisible to ThreadSanitizer, which
 this project treats as disqualifying (§7.6). The shipped handoff keeps
 correctness on an always-advanced epoch; the spinner count is advisory and
 relaxed.
+
+**Scheduler as one implementation behind the `Task` API, not a plugin
+zoo.** The intent is at most two or three interchangeable scheduler
+implementations sharing the `Task`/`Guarded`/graph surface — the current
+work-stealing pool, and (roadmap) a foreground/background two-pool variant
+whose background band runs on OS-low-priority oversubscribed threads so the
+OS preempts it out the instant foreground work appears (TODO 3.7). The
+design constraint that keeps that tractable: the scheduler's parts —
+eventcount, Chase-Lev deques, per-priority MPMC queues, the low-starvation
+valve, the submit/steal loop — are composable building blocks, not a
+monolith, so a new implementation reuses most of them and adds only its
+distinguishing logic (a different idle/wake policy, an extra pool, an OS-QoS
+band). Anything fancier than a wake-policy choice is out of scope at this
+stage; the goal is a small, legible menu, not a general framework.
 
 **The pipe's FIFO is a semantic contract, not a scheduling choice.** A
 `Guarded` object's accessors run in submission order with reader coalescing.
@@ -490,6 +520,42 @@ it:
 - **Forensic instrumentation kept in-tree** (compiled out by default): the
   event-ring harness that cracked the TOCTOU (§4.5) remains as a regression
   tool, alongside the deterministic allocation profiler.
+- **Platform reality of the oracles.** ThreadSanitizer has no Windows
+  runtime, and most game development happens on Windows: TSan therefore
+  verifies *this library's* concurrency machinery (portable sources, Linux
+  CI), while a Windows-hosted game gets ASan, stress loops, and — chiefly —
+  the access harness, which is the only race-adjacent oracle available on
+  the dominant platform. That asymmetry is an argument for keeping the
+  harness cheap enough to leave enabled: at ~1 ns per check, shipping with
+  `TS_SAFETY_CHECKS` on may be viable for many titles, unlike the
+  editor-only/development-only enforcement every surveyed system defaults
+  to (Unity, RDG, Chromium). This is not offered as a blanket
+  recommendation: the per-*call* cost is fixed but the per-*frame* cost is
+  workload-shaped — a check on a hot trivial getter called millions of
+  times a frame is a real tax, and no benchmark can characterize every
+  program's method mix, so "leave it on" stays a per-title measured
+  decision rather than a default. The design point is only that the option
+  exists at all, which the editor-only competitors cannot offer.
+- **Why both oracles, framed precisely.** The two are not the same check
+  from two angles; they have inverted profiles and verify adjacent layers.
+  TSan is *sound but incomplete*: given the synchronization it observes, a
+  reported race is a real happens-before violation (order-independent
+  verdict — it catches a race on runs where the timing happened to work,
+  needing only the unordered pair to execute, not the corrupting order),
+  but it sees only interleavings actually sampled, so coverage is
+  schedule-dependent and it verifies the *implementation* under the contract
+  (queue, pipe, refcounts, lock-counter, retraction claims). The access
+  harness is the dual — *complete but narrow*: any undeclared touch of a
+  `Guarded` is caught on the first run of that path, deterministically and
+  with no concurrency required (it catches the *latent* race the completeness
+  hazard warns of, before parallelization realizes it), but the property is
+  only declared-access completeness and only over `Guarded` objects, and it
+  validates *possession* of a grant, not *ordering* against the writer that
+  produced a value. Neither subsumes the other: a sound-but-incomplete
+  dynamic detector plus a complete-but-narrow always-on invariant is the
+  verification strategy, not a redundancy to collapse. Extending the harness
+  from possession-checking toward ordering-checking is the grant-generation
+  direction (TODO 1.11/1.13, the Unity version-stamped-handle idea).
 
 ---
 
