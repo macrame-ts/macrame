@@ -2,6 +2,7 @@
 #include "benchmarks.h"
 #include "mem_profile.h"
 #include "harness.h"
+#include "ts/fatal.h"
 #include "ts/version.h"
 
 // Single-file samples (by design -- no headers): the mock game-engine frame
@@ -24,6 +25,7 @@ void run_blackboard_sample();
 int main(int argc, char** argv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered: last line is visible if a test crashes
+    ts::install_crash_handler();                 // raw AV / stack overflow self-reports (stack + minidump)
 
     if (argc >= 2 && (std::strcmp(argv[1], "--version") == 0 || std::strcmp(argv[1], "-v") == 0))
     {

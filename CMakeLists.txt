@@ -88,6 +88,12 @@ if(WIN32)
         # clang-cl: disable exceptions explicitly.
         target_compile_options(task_system PRIVATE /EHs-c-)
     endif()
+    # Emit debug info even in Release so std::stacktrace and MiniDumpWriteDump resolve symbols
+    # (the CI runner otherwise shows only `task_system+0xHEX`). /Zi + /DEBUG produces a PDB next
+    # to the exe; /OPT:REF,ICF restores the Release code-folding that /DEBUG turns off, so this
+    # keeps optimized codegen -- only debug info is added. Applies to cl and clang-cl.
+    target_compile_options(task_system PRIVATE /Zi)
+    target_link_options(task_system PRIVATE /DEBUG /OPT:REF /OPT:ICF)
 else()
     # The portable stress driver (Linux/macOS; TSan has no Windows runtime).
     option(TS_TSAN "Build the stress driver with ThreadSanitizer" ON)

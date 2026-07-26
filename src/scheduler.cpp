@@ -133,6 +133,16 @@ Scheduler::~Scheduler()
     // parking policy needs this; only `spin` never parks.
     if (idle_policy_ != Idle_policy::spin)
         events_.notify_all();
+
+    // Join the workers HERE, in the destructor body, before any member is torn down.
+    // Relying on the `workers_` member destructor to join is unsafe: members destruct in
+    // reverse declaration order, and the `TS_PROFILING` counters (`busy_`, `bucket_busy_`,
+    // `owner_busy_`) are declared AFTER `workers_` (deliberately -- to keep the hot members'
+    // layout, see scheduler.h), so they would be freed first. A worker still mid-`run_task`
+    // then touches a freed `busy_[worker_index]` -> heap-use-after-free (a ~1% teardown race,
+    // TS_PROFILING-only). Joining now guarantees no worker runs during member destruction.
+    // (`Worker_thread` holds a `std::jthread` that joins on destruction; `clear()` runs them.)
+    workers_.clear();
 }
 
 void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
