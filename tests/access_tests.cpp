@@ -59,6 +59,7 @@ void test_harness_allows()
 void test_death_no_context()    { TS_CHECK(ts::test::expect_death("access_no_context")); }
 void test_death_ro_write()      { TS_CHECK(ts::test::expect_death("access_ro_write")); }
 void test_death_wrong_instance(){ TS_CHECK(ts::test::expect_death("access_wrong_instance")); }
+void test_death_context_overflow(){ TS_CHECK(ts::test::expect_death("access_context_overflow")); }
 
 } // namespace
 
@@ -71,4 +72,5 @@ void run_access_tests()
     run("death: no context", test_death_no_context);
     run("death: read-only context + write", test_death_ro_write);
     run("death: wrong instance", test_death_wrong_instance);
+    run("death: context overflow", test_death_context_overflow);
 }

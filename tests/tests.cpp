@@ -80,6 +80,13 @@ void run_death_scenario(const char* name)
         ts::Access_scope scope(ctx);
         c.increment();   // c not declared -> violation
     }
+    else if (std::strcmp(name, "access_context_overflow") == 0)
+    {
+        int objs[9] = {};
+        ts::Access_context ctx;
+        for (int i = 0; i < 9; ++i)
+            ctx.add(&objs[i], Access::read_write);   // 9th add overflows `max_entries` -> fatal
+    }
     else if (std::strcmp(name, "graph_cycle") == 0)
     {
         ts::Guarded<int> a{ 0 }, b{ 0 };

@@ -8,6 +8,15 @@ namespace ts
 
 void Access_context::add(const void* instance, Access mode) noexcept
 {
+#if TS_SAFETY_CHECKS
+    // Silent truncation is a latent footgun: a task declaring more than `max_entries`
+    // objects would lose the overflowing declaration, and a later legitimate access to
+    // that object then faults spuriously in `grants` -- a false positive surfacing far
+    // from the cause. Fail loud at the declaration instead.
+    if (count_ == max_entries)
+        ts::fatal("Access_context overflow: more than 8 declared objects in one task; "
+            "raise Access_context::max_entries");
+#endif
     if (count_ < max_entries)
         entries_[count_++] = { instance, mode };
 }
