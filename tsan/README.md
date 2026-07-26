@@ -70,6 +70,23 @@ configs need `--disable-cpuid-features` or fall back to the perturbation route),
 and it serializes onto one core, which itself changes timing — record under the
 same core-pinning that made the race appear.
 
+## Native Windows alternative
+
+TSan has no Windows runtime and none is planned: the compiler instrumentation
+is target-independent, but the runtime (shadow-memory mapping into a fixed VA
+layout, interceptors for the Win32 sync primitives, the thread/TLS/SEH model)
+has never been ported. ASan was ported (smaller runtime, higher demand); TSan
+was not, for priority reasons, not fundamental ones. WSL (above) is the
+practical answer for this portable codebase.
+
+The only *native*-Windows substitute is **Intel Inspector** (oneAPI): a
+binary-instrumentation dynamic race detector — no recompile, no shadow-mapping
+port needed, runs on the MSVC build directly. It is far slower than TSan and
+commercial, but it is the one race-adjacent oracle besides the access harness
+that runs on the dominant platform. Use it when a race is suspected in
+Windows-only code paths that the portable driver here does not exercise;
+otherwise WSL + this driver is the primary gate.
+
 ## Notes
 
 - The driver (`tsan_main.cpp`) deliberately avoids the test harness
