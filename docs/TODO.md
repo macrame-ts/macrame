@@ -119,17 +119,19 @@ IDs — when an item is done, mark it, don't renumber.
        `sync_own_object_deadlock` death scenario (child aborts on observing the sharp report;
        bounded poll so a miss fails instead of hanging). 503 checks green; full run (samples +
        benchmarks) zero failures; Shipping compiles.
-   13. `[ ]` **(P1, harness item — T21) Escaped-reference hardening.** The sharpest harness
-       gap (§13.6.3 of [research-deepdive.md](research-deepdive.md)): a body hands a `T&` to a
-       helper that stores it, and later access through the stored pointer never re-enters an
-       instrumented method, so the harness stays silent. Unity partially catches the analogue
-       because its container *views carry their safety state* (a version-stamped handle inside
-       the view struct — a stale escaped view fails its next check on a version bump). Investigate
-       the version-stamped-handle idea for `Guarded` (a grant carries a generation; a handle
-       handed out captures it; deref re-checks against the pipe's current generation), and how it
-       relates to the shelved `Granted<T>` wrapper (1.9) and the sub-object range harness (1.6).
-       Design-first — the goal is to shrink the escaped-ref hole, accepting that raw-`T&`
-       extraction can always launder the check away (the language boundary; only Rust closes it).
+   13. `[S]` **Escaped-reference hardening (T21) — analyzed, SHELVED (author, 2026-07).**
+       Decision document: [escaped-refs-hardening.md](escaped-refs-hardening.md). Findings:
+       (a) `Granted<T>` confirmed in the noise quadrant — five-system precedent survey
+       (Chromium raw_ptr conceding `.get()` and winning via quarantine not deref checks; folly
+       stating the launder hole verbatim; MSVC's checked-in-release default reversed) shows
+       checked handles succeed only as the sole access path, tool-enforced, or with guarantees
+       that survive extraction — 1.9 stays shelved with receipts. (b) Option A
+       (interval-containment grants = 1.6's implementation; unlocks instrumented member types
+       under a parent grant) and Option B (grant-scoped ASan poisoning off the pipe's
+       acquire/release edges — catches stashed raw `T&` on Windows where TSan doesn't exist)
+       both viable; author verdict: B "interesting but too limited, maybe in the future"; A
+       shelved with it. Page protection rejected on numbers. Escaped-ref coverage remains
+       TSan's job per [limits.md](limits.md); revisit on a real adoption-blocking incident.
    14. `[ ]` **(P2, designed 2026-07, benchmark-gated) Rebase the pipe onto the block machinery
        (pipes-as-edges — UE `FPipe` generalized to reader/writer).** UE's pipe is lock-free not
        by clever atomics but by *not being a scheduler structure*: one atomic `LastTask`;
@@ -320,7 +322,15 @@ change after public. Feed the going-public "API-stability pass".
    `Pipe::Job::on_acquired` (`move_only_function`) allocates on the graph / multi-async
    reservation path (unlike the allocation-free block/async dispatch); the tunable-SBO
    `Function<Sig,N>` item is the fix. Not a standalone task.
-6. **Entity-naming approach — review before it hardens (author 2026-07, T18).** We name nodes
+6. **Safety-field gating convention — pick one (flagged 2026-07).** Three harness-adjacent
+   additions chose two conventions: `Pipe::write_epoch` (T1) is an unconditional field with
+   gated behavior ("layout stability" — a weak argument, since mixed `TS_SAFETY_CHECKS` across
+   TUs is an ODR violation regardless); `Pipe::graph_refs` (T3) and the whole `TS_ENSURE`
+   facility (T4) are fully gated, field included (author's explicit instruction on T3). Align
+   `write_epoch` to fully-gated (one-line change) or ratify the unconditional-field style —
+   decide in the API-stability pass; the same question recurs if the shelved interval-grant
+   entry layout ([escaped-refs-hardening.md](escaped-refs-hardening.md) §6.1) is ever revived.
+7. **Entity-naming approach — review before it hardens (author 2026-07, T18).** We name nodes
    (`Node_name` / `std::source_location`) and objects (`ts::Named` leading ctor arg), which is
    what makes edge provenance and the DOT dump cheap — but the author is "not totally sold on
    `ts::Named`" (the distinct-wrapper-to-avoid-`T`-ctor-ambiguity design, design.md §2.3). Since
