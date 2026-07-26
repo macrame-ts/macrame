@@ -976,8 +976,10 @@ inline bool Graph_trace::write_SVG(const char* path) const
         // so the height reads against a scale. Each bucket is hoverable over the full strip
         // height (`.hv`, via a transparent hit rect) -- the tooltip reports the exact
         // core-utilization % and time at the cursor.
-        line("<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"#75715e\" "
-             "stroke-width=\"0.6\" opacity=\"0.5\"/>\n",
+        // The 100% line is red: unreached headroom between the bars and the line is the
+        // idle-capacity signal, and the contrast makes the shortfall legible at a glance.
+        line("<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"#ff5f45\" "
+             "stroke-width=\"0.8\" opacity=\"0.8\"/>\n",
              pad_l, strip_top, x_right, strip_top);
         line("<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"#75715e\" "
              "stroke-width=\"0.6\" opacity=\"0.8\"/>\n",
