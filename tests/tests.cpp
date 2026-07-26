@@ -87,6 +87,26 @@ void run_death_scenario(const char* name)
         for (int i = 0; i < 9; ++i)
             ctx.add(&objs[i], Access::read_write);   // 9th add overflows `max_entries` -> fatal
     }
+    else if (std::strcmp(name, "guarded_outlived_by_graph") == 0)
+    {
+        ts::Static_task_graph g;
+        {
+            ts::Guarded<int> a{ 0 };
+            g.add_node([](int&) {}, a);
+            g.compile();
+        }   // ~Guarded: a compiled graph still references it -> fatal
+    }
+    else if (std::strcmp(name, "graph_destroyed_mid_run") == 0)
+    {
+        ts::Guarded<int> a{ 0 };
+        ts::Signal go;   // never triggered: the run stays in flight
+        {
+            ts::Static_task_graph g;
+            g.add_node([&go](int&) { go.sync(); }, a);
+            g.compile();
+            ts::Task<void> run = g.execute();   // remaining_nodes set at execute entry
+        }   // ~Static_task_graph with the run in flight -> fatal
+    }
     else if (std::strcmp(name, "stale_inherited_grant") == 0)
     {
         ts::Guarded<Counter> c;

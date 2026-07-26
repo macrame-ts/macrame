@@ -5,8 +5,10 @@
 #include "graph_introspect.h"
 
 #include <atomic>
+#include <cstdio>
 #include <deque>
 #include <map>
+#include <new>
 #include <set>
 
 namespace ts
@@ -48,11 +50,47 @@ struct Graph_node_block
 
 } // namespace
 
-// Defaulted here, where Run_state is complete (the header's `run_` unique_ptr needs it).
+// Defined here, where Run_state is complete (the header's `run_` unique_ptr needs it).
 Static_task_graph::Static_task_graph() = default;
-Static_task_graph::~Static_task_graph() = default;
 Static_task_graph::Static_task_graph(Static_task_graph&&) noexcept = default;
-Static_task_graph& Static_task_graph::operator=(Static_task_graph&&) noexcept = default;
+
+#if TS_SAFETY_CHECKS
+void Static_task_graph::check_quiescent_and_release_pipes(const char* where) noexcept
+{
+    if (run_ && run_->remaining_nodes.load(std::memory_order_acquire) != 0)
+    {
+        char msg[160];
+        std::snprintf(msg, sizeof msg,
+            "Static_task_graph %s while a run is in flight (sync() the run's completion first)",
+            where);
+        ts::fatal(msg);
+    }
+    // A moved-from graph's vector is empty (the registrations rode the move); a
+    // never-compiled graph's likewise.
+    for (detail::Pipe* p : distinct_pipes_)
+        p->graph_refs.fetch_sub(1, std::memory_order_release);
+}
+#endif
+
+Static_task_graph::~Static_task_graph()
+{
+#if TS_SAFETY_CHECKS
+    check_quiescent_and_release_pipes("destroyed");
+#endif
+}
+
+Static_task_graph& Static_task_graph::operator=(Static_task_graph&& other) noexcept
+{
+    if (this == &other)
+        return *this;
+    // Destroy-and-move-construct in place: the destructor carries the quiescence check
+    // and pipe deregistration for the overwritten graph, and the member-wise move stays
+    // maintenance-free (no hand-listed member moves to drift out of sync). Exceptions
+    // are disabled project-wide, so the reconstruct cannot be interrupted.
+    this->~Static_task_graph();
+    new (this) Static_task_graph(std::move(other));
+    return *this;
+}
 
 void Static_task_graph::add_edge(int prerequisite, int successor)
 {
@@ -101,6 +139,12 @@ bool Static_task_graph::conflicts(const Node& a, const Node& b)
 
 void Static_task_graph::compile(const char* DOT_path)
 {
+#if TS_SAFETY_CHECKS
+    // Recompiling releases the previous compile's pipe registrations (the new set
+    // re-registers below); also fatals on a recompile while a run is in flight.
+    check_quiescent_and_release_pipes("recompiled");
+#endif
+
     for (Node& node : nodes_)
     {
         node.successors.clear();
@@ -133,6 +177,14 @@ void Static_task_graph::compile(const char* DOT_path)
         for (detail::Pipe* p : node.pipes)
             pipes.insert(p);
     distinct_pipes_.assign(pipes.begin(), pipes.end());
+
+#if TS_SAFETY_CHECKS
+    // Register this graph on every pipe it references; `~Guarded` fatals while any
+    // compiled graph still holds its pipe (see `Pipe::graph_refs`). Balanced by
+    // `check_quiescent_and_release_pipes` (dtor / recompile / move-assign overwrite).
+    for (detail::Pipe* p : distinct_pipes_)
+        p->graph_refs.fetch_add(1, std::memory_order_relaxed);
+#endif
 
     std::map<detail::Pipe*, int> index_of;
     for (int i = 0; i < static_cast<int>(distinct_pipes_.size()); ++i)

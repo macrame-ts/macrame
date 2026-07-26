@@ -840,6 +840,38 @@ void test_graph_trace_overhead_end_to_end()
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
+void test_death_guarded_outlived() { TS_CHECK(ts::test::expect_death("guarded_outlived_by_graph")); }
+void test_death_graph_mid_run()    { TS_CHECK(ts::test::expect_death("graph_destroyed_mid_run")); }
+
+// The pipe-registration counts stay balanced across recompiles, moves, and a move-assign
+// overwrite -- so destroying the graphs and then the objects raises no lifetime fatal, and
+// every configuration still runs correctly.
+void test_lifetime_registration_balance()
+{
+    ts::Guarded<int> a{ 0 };
+    ts::Guarded<int> b{ 0 };
+    {
+        ts::Static_task_graph g;
+        g.add_node([](int& x) { x += 1; }, a);
+        g.compile();
+        g.compile();   // recompile releases + re-registers (balanced)
+        g.execute().sync();
+
+        ts::Static_task_graph g2 = std::move(g);   // registration rides the move
+        g2.execute().sync();
+
+        ts::Static_task_graph g3;
+        g3.add_node([](int& y) { y += 10; }, b);
+        g3.compile();
+        g3.execute().sync();
+        g3 = std::move(g2);   // overwrite releases g3's registration of `b`
+        g3.execute().sync();
+    }   // all graphs destroyed -> all registrations released
+
+    TS_CHECK(a.async([](const int& x) { return x; }).sync() == 3);   // three runs of the writer
+    TS_CHECK(b.async([](const int& y) { return y; }).sync() == 10);
+    // `a`/`b` destruct at scope end without a lifetime fatal = the balance held.
+}
 
 } // namespace
 
@@ -882,4 +914,7 @@ void run_graph_tests()
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);
+    run("death: Guarded outlived by graph", test_death_guarded_outlived);
+    run("death: graph destroyed mid-run", test_death_graph_mid_run);
+    run("lifetime registration balance", test_lifetime_registration_balance);
 }

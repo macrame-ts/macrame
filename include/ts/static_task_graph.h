@@ -100,10 +100,12 @@ class Static_task_graph
     friend class Graph_node;
 
 public:
-    // Declared out-of-line (defaulted in the .cpp) because the reused `run_`
-    // (unique_ptr<Run_state>) has an incomplete pointee here. Movable so a graph can be
-    // built-and-returned (e.g. build_frame_graph); execute() refreshes the blocks' back
-    // pointers, so a moved graph is valid on its next run.
+    // Declared out-of-line because the reused `run_` (unique_ptr<Run_state>) has an
+    // incomplete pointee here. Movable so a graph can be built-and-returned (e.g.
+    // build_frame_graph); execute() refreshes the blocks' back pointers, so a moved graph
+    // is valid on its next run. Under `TS_SAFETY_CHECKS` the destructor (and a move-assign
+    // overwrite) fatals while a run is in flight, and balances the pipes'
+    // graph-registration counts (see `Pipe::graph_refs` / `~Guarded`).
     Static_task_graph();
     ~Static_task_graph();
     Static_task_graph(Static_task_graph&&) noexcept;
@@ -320,6 +322,13 @@ private:
     static void run_graph_node(const detail::Task_ptr& block, std::uint64_t generation);
     static void graph_node_completed(detail::Task_control_block* block);
     static void node_trampoline(void* node);
+
+#if TS_SAFETY_CHECKS
+    // Fatal if a run is in flight (`where` names the misuse); balance the pipes'
+    // `graph_refs` for the current `distinct_pipes_`. Called by the destructor, a
+    // move-assign overwrite, and `compile()` (recompile releases the previous set).
+    void check_quiescent_and_release_pipes(const char* where) noexcept;
+#endif
 
     std::vector<Node> nodes_;
     std::vector<std::pair<int, int>> explicit_edges_;

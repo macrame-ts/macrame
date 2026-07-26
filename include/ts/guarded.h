@@ -6,6 +6,7 @@
 
 #include <concepts>
 #include <condition_variable>
+#include <cstdio>
 #include <deque>
 #include <functional>
 #include <map>
@@ -62,6 +63,14 @@ struct Pipe
     // acquires after its capture, which is the actual safety condition. Bumps are gated
     // by `TS_SAFETY_CHECKS`; the field itself is unconditional for layout stability.
     std::atomic<std::uint64_t> write_epoch{ 0 };
+#if TS_SAFETY_CHECKS
+    // Count of compiled `Static_task_graph`s whose `distinct_pipes_` reference this pipe
+    // (`compile()` +1; graph destruction, recompile, and move-assign-overwrite -1).
+    // `~Guarded` fatals while it is nonzero: destroying the object would leave the graph
+    // holding dangling pipe/instance pointers for its next run (the Taskflow-#82 class of
+    // lifetime misuse, caught at the cause instead of crashing far from it).
+    std::atomic<int> graph_refs{ 0 };
+#endif
     // Debug name of the owning `Guarded`/`Versioned` (`ts::Named`): a static literal,
     // referenced not copied. Consumed by the graph's DOT dump (edge tooltips) and future
     // profiling; kept in all builds (one pointer).
@@ -338,6 +347,17 @@ public:
     // pipe outlives its last task.
     ~Guarded()
     {
+#if TS_SAFETY_CHECKS
+        if (pipe_.graph_refs.load(std::memory_order_acquire) != 0)
+        {
+            char msg[192];
+            std::snprintf(msg, sizeof msg,
+                "Guarded object%s%s destroyed while a compiled Static_task_graph still "
+                "references it (destroy or recompile the graph first)",
+                pipe_.debug_name ? " " : "", pipe_.debug_name ? pipe_.debug_name : "");
+            ts::fatal(msg);
+        }
+#endif
         pipe_.wait_until_idle();
     }
 

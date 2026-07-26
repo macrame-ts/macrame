@@ -162,10 +162,19 @@ IDs — when an item is done, mark it, don't renumber.
       end-to-end (launch/then/async/parallel_for/graph+nested all on the caller thread),
       sync-inside-body drain, deterministic run-twice order; 486 checks green, Shipping + stress
       clean.
-   8. `[ ]` **(P1) Graph/`Guarded` lifetime fatals** — fatal in `~Static_task_graph` while a run
-      is in flight; pipe-side registration count (compile +1, graph dtor −1) so `~Guarded` fatals
-      if a live compiled graph still references it, naming the graph
-      ([research-deepdive.md](research-deepdive.md) §10.2; Taskflow #82 precedent). `TS_SAFETY_CHECKS`.
+   8. `[x]` **(P1) Graph/`Guarded` lifetime fatals — DONE (2026-07).** Two fatals, fully
+      `TS_SAFETY_CHECKS`-gated (field included — `Pipe::graph_refs` compiles out entirely, per
+      author): (1) `~Static_task_graph` (and a move-assign overwrite, via destroy+placement-new
+      move-assign so member moves stay maintenance-free; and `compile()` on recompile) fatals
+      while a run is in flight (`run_->remaining_nodes != 0` — inits to 0, so pre-first-run
+      destruction is clean); (2) `compile()` registers the graph on every `distinct_pipes_`
+      pipe, the same paths release, and `~Guarded` fatals while any compiled graph still
+      references it, naming the object via `debug_name`. Moves are balanced by construction
+      (registrations ride the `distinct_pipes_` vector; moved-from is empty)
+      ([research-deepdive.md](research-deepdive.md) §10.2; Taskflow #82 precedent). Tests:
+      `guarded_outlived_by_graph` + `graph_destroyed_mid_run` death scenarios, and a
+      recompile/move/move-assign-overwrite balance test; 490 checks green, Shipping + stress
+      clean.
    9. `[ ]` **(P3) Over-declaration diagnostic** — report objects a node declared but never
       accessed (silent lost parallelism; RDG's unused-declaration warnings are the precedent —
       [research-deepdive.md](research-deepdive.md) §7.4). Caveat (author, 2026-07): conditional
