@@ -765,6 +765,78 @@ void test_graph_trace_task_count()
     TS_CHECK(trace.tasks_per_run() > 1.0);
 }
 
+// Task-system overhead metric on SYNTHETIC folds: `on_run_complete`'s trailing body/machinery
+// deltas drive `overhead()` = M / (B + M) and the headline. Deterministic arithmetic.
+void test_graph_trace_overhead()
+{
+    auto ticks = [](double us)
+    {
+        return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double, std::micro>(us)).count();
+    };
+
+    ts::tools::Graph_trace trace;
+    trace.begin_structure(1);
+    trace.set_node_label(0, "solo");
+
+    long long readys[1] = { ticks(0) };
+    long long starts[1] = { ticks(0) };
+    long long ends[1] = { ticks(900) };
+    int workers[1] = { 0 };
+    // body 900 us, machinery 100 us per run -> overhead exactly 0.10.
+    for (int i = 0; i < 8; ++i)
+        trace.on_run_complete(readys, starts, ends, workers, 1, 0, ticks(1000), ticks(900), 1,
+            nullptr, 0, 0, nullptr, 1, ticks(900), ticks(100));
+
+    TS_CHECK(std::abs(trace.overhead() - 0.10) < 1e-9);
+    TS_CHECK(std::abs(trace.body_us() - 900.0) < 1e-6);
+    TS_CHECK(std::abs(trace.machinery_us() - 100.0) < 1e-6);
+    TS_CHECK(ts::tools::overhead_ok_share < ts::tools::overhead_bad_share);   // band order
+
+    const char* path = "graph_trace_overhead_test.svg";
+    TS_CHECK(trace.write_SVG(path));
+    std::string svg;
+    {
+        std::ifstream f(path, std::ios::binary);
+        svg.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    std::remove(path);
+    TS_CHECK(svg.find("task-system overhead:") != std::string::npos);   // the headline figure
+}
+
+// End-to-end: a real graph on a real pool must fold nonzero body AND machinery, with a
+// sane overhead share (bodies dominate at this granularity, so it stays well below 1).
+void test_graph_trace_overhead_end_to_end()
+{
+    ts::Guarded<int> x{ 0 };
+    auto busy = [](int us)
+    {
+        auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
+        while (std::chrono::steady_clock::now() < until) {}
+    };
+
+    ts::Static_task_graph g;
+    // Fan out: the in-body `parallel_for` submits slice tasks, which reclassify to machinery
+    // (submit-from-within-a-functor), so machinery is deterministically nonzero -- a single
+    // coarse body would leave setup below the ~100 ns clock tick and read ~0.
+    g.add_node("ov_a", [busy](int& v) { ts::parallel_for(32, [&busy](int) { busy(20); }); ++v; }, x);
+    g.add_node("ov_b", [busy](int& v) { ts::parallel_for(32, [&busy](int) { busy(20); }); ++v; }, x);
+    g.compile();
+
+    ts::tools::Graph_trace trace;
+    g.set_trace(&trace);
+    ts::Scheduler_scope pool{ { .num_threads = 4 } };
+    for (int i = 0; i < 8; ++i)
+        g.execute().sync();
+    g.set_trace(nullptr);
+
+    TS_CHECK(trace.run_count() == 8);
+    TS_CHECK(trace.body_us() > 0.0);         // user compute measured
+    TS_CHECK(trace.machinery_us() > 0.0);    // scheduler cost measured (fan-out submits + dispatch)
+    TS_CHECK(trace.overhead() > 0.0);
+    TS_CHECK(trace.overhead() < 0.5);        // ~1.3 ms of body dwarfs the fan-out machinery
+}
+
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
@@ -805,6 +877,8 @@ void run_graph_tests()
     run("graph trace row packing", test_graph_trace_row_packing);
     run("graph trace end-to-end utilization", test_graph_trace_end_to_end_utilization);
     run("graph trace task count", test_graph_trace_task_count);
+    run("graph trace overhead", test_graph_trace_overhead);
+    run("graph trace overhead end-to-end", test_graph_trace_overhead_end_to_end);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);

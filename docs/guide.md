@@ -617,12 +617,19 @@ e.g. `transforms: RO`); and the node's incoming (`->|`) and
 outgoing (`|->`) edges, each neighbour name coloured by that edge's share of
 binding chains. The tooltips are scripted into the SVG itself (they work with
 the file open in a browser; not when embedded via `<img>`). A coloured
-headline carries the two frame classifiers: **core utilization** — the share
+headline carries three frame classifiers: **core utilization** — the share
 of the run window the scheduler's workers spent executing tasks (green ≥ 75%,
-red < 50%; work run inline on non-worker threads is not counted) — and
-**critical path dead time** (green < 5% of frame time, red > 10%). Utilization
-says how much of the machine the frame used; dead time says whether the critical
-chain itself had to wait. Each significant chain wait is also drawn in place:
+red < 50%; work run inline on non-worker threads is not counted) —
+**critical path dead time** (green < 5% of frame time, red > 10%), and
+**task-system overhead** — the share of the frame's *compute* (body + machinery,
+excluding idle) spent in the scheduler's own machinery rather than your functors
+(green ≤ 5%, red > 15%). Utilization says how much of the machine the frame used;
+dead time says whether the critical chain itself had to wait; overhead says
+whether your tasks are coarse enough that scheduling them is cheap relative to
+running them (a high figure means the graph is too fine-grained — the tasks cost
+less than the machinery that dispatches them). Overhead is an upper bound: it is
+measured with tracing on, which adds a per-task clock bracket, so cross-check
+against the untraced task throughput if it matters. Each significant chain wait is also drawn in place:
 a hatched pink band spanning the picture's full height, occupying the visible
 gap between the binding predecessor and the waiting critical node (screen-space
 gaps, unioned, so a band is always a real break between bars) — the wait
@@ -634,10 +641,11 @@ time (a `parallel_for` node's fan-out across cores registers fully). The green
 stretches saturate the cores; the red valleys are idle capacity. A panel below
 shows the global numbers: run count, frame time mean/min/max (ms),
 **critical path** — the CPM dependency lower bound on frame time (median
-durations, no scheduling waits) — worker count, and **tasks** (total across
+durations, no scheduling waits) — worker count, **tasks** (total across
 the trace and mean per run: every task the scheduler ran — nodes plus
 `parallel_for` slices, async jobs, and continuations — so it far exceeds the
-node count and shows the real fan-out volume). An edge's tooltip names the ordering it enforces: for a derived edge,
+node count and shows the real fan-out volume), and the **body / machinery** split
+in µs per run that backs the overhead headline (summed across workers). An edge's tooltip names the ordering it enforces: for a derived edge,
 the conflicting resource and the two nodes' modes (`physics RW -> propagation
 RO`); for an explicit one, "explicit ordering" (plus any coinciding conflict).
 

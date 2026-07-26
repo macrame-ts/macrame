@@ -175,6 +175,73 @@ public:
         return sum;
     }
 
+    // Task-system-cost accumulators (ticks, summed over workers; relaxed -- advisory). `body`
+    // = user-functor time, `machinery` = scheduler overhead. The trace takes begin/end deltas
+    // per run; overhead = machinery / (body + machinery). See `Busy_slot`.
+    long long body_ticks() const noexcept
+    {
+        long long sum = 0;
+        for (const Busy_slot& slot : busy_)
+            sum += slot.body.load(std::memory_order_relaxed);
+        return sum;
+    }
+    long long machinery_ticks() const noexcept
+    {
+        // Mirror `busy_ticks`' in-flight handling, for the same reason: the reader is often
+        // the settling worker, INSIDE its terminal task. That task's body scope has already
+        // netted its span OUT of machinery (M -= F), but `run_task` has not yet booked the
+        // whole span back IN (M += R happens after `func_` returns) -- so a plain sum reads
+        // low by the settling body. Add each in-flight task's elapsed span (its pending
+        // `run_task` machinery), which compensates the already-subtracted body. Relaxed
+        // snapshot; advisory (a reader interleaving a completion can transiently over/under).
+        long long now = std::chrono::steady_clock::now().time_since_epoch().count();
+        long long sum = 0;
+        for (const Busy_slot& slot : busy_)
+        {
+            sum += slot.machinery.load(std::memory_order_relaxed);
+            long long started = slot.started.load(std::memory_order_relaxed);
+            if (started != 0 && now > started)
+                sum += now - started;
+        }
+        return sum;
+    }
+
+    // Add `dt` ticks of dispatch machinery (a successful `find_work` scan) to `worker_index`'s
+    // slot -- called from the worker loop, armed-only. Single writer (this worker).
+    void add_dispatch_ticks(int worker_index, long long dt) noexcept
+    {
+        Busy_slot& slot = busy_[static_cast<size_t>(worker_index)];
+        slot.machinery.fetch_add(dt, std::memory_order_relaxed);
+    }
+    // Move `dt` ticks of a worker's time from machinery to body (a user functor ran) -- the
+    // `trace_body_add` bridge target. Single writer (this worker). No-op off-worker.
+    void add_body_ticks(int worker_index, long long dt) noexcept
+    {
+        if (worker_index < 0)
+            return;
+        Busy_slot& slot = busy_[static_cast<size_t>(worker_index)];
+        slot.body.fetch_add(dt, std::memory_order_relaxed);
+        slot.machinery.fetch_add(-dt, std::memory_order_relaxed);
+    }
+    // Credit `dt` ticks to body without netting machinery -- an inline/retracted body that
+    // did not pass through `run_task` (nothing booked its span as machinery). No-op off-worker.
+    void add_body_only(int worker_index, long long dt) noexcept
+    {
+        if (worker_index < 0)
+            return;
+        busy_[static_cast<size_t>(worker_index)].body.fetch_add(dt, std::memory_order_relaxed);
+    }
+    // Move `dt` ticks of a worker's time from body to machinery (a `submit` ran inside a
+    // functor -- fan-out dispatch is task-system cost, not user work). No-op off-worker.
+    void add_submit_ticks(int worker_index, long long dt) noexcept
+    {
+        if (worker_index < 0)
+            return;
+        Busy_slot& slot = busy_[static_cast<size_t>(worker_index)];
+        slot.machinery.fetch_add(dt, std::memory_order_relaxed);
+        slot.body.fetch_add(-dt, std::memory_order_relaxed);
+    }
+
     // Time buckets the utilization background samples each run into.
     static constexpr int util_bucket_count = 128;
 
@@ -247,6 +314,23 @@ private:
     // (LIFO, cache-hot) -> global normal -> global low -> steal `normal` from a random victim.
     // High stays strict (checked first). True if a task was found.
     bool find_work(int worker_index, detail::Task_entry& out);
+    // `find_work`, timing a SUCCESSFUL scan into dispatch machinery (armed-only). A scan that
+    // finds nothing is idle (lack of parallelism), not scheduling cost, so it is not charged.
+    bool find_work_dispatch(int worker_index, detail::Task_entry& out)
+    {
+#if TS_PROFILING
+        if (busy_tracking_.load(std::memory_order_relaxed) != 0)
+        {
+            long long t0 = std::chrono::steady_clock::now().time_since_epoch().count();
+            bool got = find_work(worker_index, out);
+            if (got)
+                add_dispatch_ticks(worker_index,
+                    std::chrono::steady_clock::now().time_since_epoch().count() - t0);
+            return got;
+        }
+#endif
+        return find_work(worker_index, out);
+    }
     // Approximate: all global queues AND all local deques empty (racy; shutdown-drain check).
     bool all_empty() const;
 
@@ -281,10 +365,18 @@ private:
             slot.tasks.fetch_add(1, std::memory_order_relaxed);   // task-volume counter (every kind)
             long long t0 = std::chrono::steady_clock::now().time_since_epoch().count();
             slot.started.store(t0, std::memory_order_relaxed);   // in-flight, for busy_ticks
+            // The whole span is booked as machinery below; flag the body it dispatches so its
+            // `Trace_busy_scope` nets its own span back into body (inline bodies clear this).
+            detail::trace_body_under_run_task = true;
             task.func_(task.data_);
+            detail::trace_body_under_run_task = false;
             long long t1 = std::chrono::steady_clock::now().time_since_epoch().count();
             slot.ticks.store(slot.ticks.load(std::memory_order_relaxed) + (t1 - t0),
                              std::memory_order_relaxed);
+            // Whole task span defaults to machinery; the functor bracket inside `func_`
+            // already moved its own span to `body` (M -= F, B += F via `trace_body_add`),
+            // so this task's net machinery is (setup + completion + successor submit).
+            slot.machinery.fetch_add(t1 - t0, std::memory_order_relaxed);
             slot.started.store(0, std::memory_order_relaxed);
             // Distribute the task's [t0,t1] busy span across the utilization time buckets it
             // spans (relative to the run origin). Armed-only; most tasks touch one bucket.
@@ -344,6 +436,13 @@ private:
         std::atomic<long long> ticks{ 0 };
         std::atomic<long long> started{ 0 };
         std::atomic<long long> tasks{ 0 };   // count of tasks this worker ran while armed
+        // Task-system-cost split (all single-writer = this worker; read at fold). `body` =
+        // user-functor time (via `trace_body_add`); `machinery` = scheduler overhead:
+        // run_task defaults its whole span here, the functor bracket moves its span out to
+        // `body`, submit-from-within-a-body and successful find_work add back in. So
+        // machinery = dispatch + completion + successor/fan-out submit + successful scans.
+        std::atomic<long long> body{ 0 };
+        std::atomic<long long> machinery{ 0 };
     };
     std::vector<Busy_slot> busy_;
     std::atomic<int> busy_tracking_{ 0 };   // armed-consumer count; 0 = untimed fast path

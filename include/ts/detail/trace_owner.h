@@ -36,10 +36,26 @@ namespace ts::detail
 
 // Bridge (defined + installed by the scheduler TU): armed != 0 while a traced run is in
 // flight; `trace_owner_add(owner, dt)` adds `dt` ticks to node `owner`'s busy sink.
+// `trace_body_add(dt)` records `dt` ticks of USER-FUNCTOR time on the current worker: it
+// adds to the worker's body accumulator (B) and subtracts from its machinery accumulator
+// (M) -- so a functor's span moves from the default-machinery bucket into body. This is the
+// task-system-cost split (B = user compute, M = scheduler machinery). Scheduler-free here.
 extern std::atomic<int> trace_owner_armed;
 extern void (*trace_owner_add)(int owner, long long dt);
+extern void (*trace_body_add)(long long dt);   // B += dt, M -= dt (body booked under run_task)
+extern void (*trace_body_only)(long long dt);  // B += dt only (inline body: no run_task M to net)
 
 inline thread_local int current_trace_owner = -1;
+// True while this thread is inside a user functor (a `Trace_busy_scope`). The scheduler's
+// `submit` reads it to reclassify submit-from-within-a-body (e.g. `parallel_for` slice
+// dispatch) as machinery rather than body -- the fan-out submission is task-system cost.
+inline thread_local bool current_in_functor = false;
+// Set by `run_task` around the body it dispatches: the task's whole span is booked as
+// machinery there, so this body's span must be netted back OUT of machinery (and into
+// body). An inline-dispatched or retracted body bypasses `run_task`, so this is false for
+// it -- it only adds to body (nothing to net). Captured-and-cleared per body scope, so a
+// nested inline body inside a `run_task` body correctly reads false.
+inline thread_local bool trace_body_under_run_task = false;
 
 inline int trace_owner() noexcept { return current_trace_owner; }
 
@@ -61,26 +77,46 @@ private:
     int prev_;
 };
 
-// Measure this scope and attribute its wall span (busy) to the current owner node, via the
-// bridge. Disarmed cost: one relaxed load + branch (no clock read). Placed INSIDE the owner
-// scope so the owner is live when it attributes.
+// Brackets a user functor. While armed it (1) records its wall span as body time via
+// `trace_body_add` (the task-system-cost split: B += span, M -= span), and (2) if the task
+// has an owning node, attributes the span to that node's true-busy sink. It also flags the
+// thread as in-functor for the scope, so `submit` can reclassify fan-out dispatch as
+// machinery. Disarmed cost: one relaxed load + branch (no clock read). Placed INSIDE the
+// owner scope so the owner is live when it attributes.
 class Trace_busy_scope
 {
 public:
     Trace_busy_scope() noexcept
     {
-        if (trace_owner_armed.load(std::memory_order_relaxed) != 0 && current_trace_owner >= 0)
+        if (trace_owner_armed.load(std::memory_order_relaxed) != 0)
         {
             active_ = true;
+            owner_ = current_trace_owner;
+            in_functor_prev_ = current_in_functor;
+            current_in_functor = true;
+            // Capture whether run_task booked this span as machinery, then clear it so a
+            // nested inline body (dispatched from inside this one) reads false.
+            booked_ = trace_body_under_run_task;
+            trace_body_under_run_task = false;
             t0_ = std::chrono::steady_clock::now().time_since_epoch().count();
         }
     }
     ~Trace_busy_scope()
     {
-        if (active_ && trace_owner_add)
+        if (active_)
         {
             long long dt = std::chrono::steady_clock::now().time_since_epoch().count() - t0_;
-            trace_owner_add(current_trace_owner, dt);
+            current_in_functor = in_functor_prev_;
+            trace_body_under_run_task = booked_;
+            if (booked_)
+            {
+                if (trace_body_add)
+                    trace_body_add(dt);                // B += dt, M -= dt (net out of run_task's span)
+            }
+            else if (trace_body_only)
+                trace_body_only(dt);                   // B += dt only (inline body: no run_task span)
+            if (owner_ >= 0 && trace_owner_add)
+                trace_owner_add(owner_, dt);           // per-node true busy
         }
     }
     Trace_busy_scope(const Trace_busy_scope&) = delete;
@@ -88,6 +124,9 @@ public:
 
 private:
     bool active_ = false;
+    bool in_functor_prev_ = false;
+    bool booked_ = false;
+    int owner_ = -1;
     long long t0_ = 0;
 };
 

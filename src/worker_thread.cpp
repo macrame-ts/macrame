@@ -16,7 +16,7 @@ void Worker_thread::main(Scheduler& scheduler, int index)
     while (true)
     {
         detail::Task_entry task;
-        if (scheduler.find_work(index, task))   // local + globals + steal
+        if (scheduler.find_work_dispatch(index, task))   // local + globals + steal (times a hit as machinery)
         {
             scheduler.run_task(index, task);
             continue;

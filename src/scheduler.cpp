@@ -27,6 +27,52 @@ void (*trace_owner_add)(int, long long) = +[](int owner, long long dt)
     if (Scheduler* s = current_scheduler)
         s->add_owner_busy(owner, dt);
 };
+// The body/machinery split bridge: a functor's span moves from machinery to body on the
+// worker that ran it (the task-system-cost metric).
+void (*trace_body_add)(long long) = +[](long long dt)
+{
+    if (Scheduler* s = current_scheduler)
+        s->add_body_ticks(current_worker_index, dt);
+};
+// Inline-body variant: credit body only, no machinery netting (no run_task span to net).
+void (*trace_body_only)(long long) = +[](long long dt)
+{
+    if (Scheduler* s = current_scheduler)
+        s->add_body_only(current_worker_index, dt);
+};
+}
+#endif
+
+#if TS_PROFILING
+namespace
+{
+// Reclassifies a submit issued from inside a user body (e.g. `parallel_for` slice fan-out)
+// from body to machinery: the fan-out submission is task-system cost, not user compute.
+// Times the whole `submit` (both return paths) and, on scope exit, moves the span M += t,
+// B -= t on the submitting worker. Inert unless armed AND in-functor; off-worker no-op.
+struct Submit_cost_scope
+{
+    Scheduler* sched;
+    long long t0 = 0;
+    bool active;
+    explicit Submit_cost_scope(Scheduler& s) noexcept
+        : sched(&s)
+        , active(detail::current_in_functor
+                 && detail::trace_owner_armed.load(std::memory_order_relaxed) != 0
+                 && current_worker_index >= 0)
+    {
+        if (active)
+            t0 = std::chrono::steady_clock::now().time_since_epoch().count();
+    }
+    ~Submit_cost_scope()
+    {
+        if (active)
+            sched->add_submit_ticks(current_worker_index,
+                std::chrono::steady_clock::now().time_since_epoch().count() - t0);
+    }
+    Submit_cost_scope(const Submit_cost_scope&) = delete;
+    Submit_cost_scope& operator=(const Submit_cost_scope&) = delete;
+};
 }
 #endif
 
@@ -91,6 +137,9 @@ Scheduler::~Scheduler()
 
 void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
 {
+#if TS_PROFILING
+    Submit_cost_scope cost{ *this };   // in-functor submit -> machinery (single gated scope)
+#endif
     // A worker submitting `normal` to its OWN scheduler pushes to its local deque (LIFO,
     // cache-hot, no shared cache line -- the producer fast path). External/non-normal submits,
     // and a full local deque, go to the global queue for the priority.

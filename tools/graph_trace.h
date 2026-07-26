@@ -38,6 +38,17 @@ inline constexpr double dead_time_bad_share = 0.10;   // above: red (scheduling-
 inline constexpr double core_util_good_share = 0.75;   // at/above: green
 inline constexpr double core_util_ok_share = 0.50;     // at/above: yellow; below: red
 
+// Task-system overhead -- the share of the frame's COMPUTE (body + machinery, excluding
+// idle) spent in the scheduler's own machinery: task setup/completion, successful
+// find_work scans, and submit fan-out issued from inside a body. M / (B + M). Low is the
+// expected regime for realistic node granularity (bodies dwarf the ~sub-microsecond
+// per-task machinery); a high figure means the graph is too fine-grained -- the tasks are
+// smaller than the cost of scheduling them. Reported as an UPPER bound (the coarse per-task
+// clock brackets charge their own read latency to machinery); cross-check vs the microbench
+// ns/op. Colours the overhead headline figure in `write_SVG`.
+inline constexpr double overhead_ok_share = 0.05;      // at/below: green (bodies dominate)
+inline constexpr double overhead_bad_share = 0.15;     // above: red (too fine-grained)
+
 // Aggregated runtime trace for a `Static_task_graph`: attach with
 // `graph.set_trace(&trace)` (after `compile()`), run any number of times, then
 // `write_SVG(path)` renders the AVERAGE run -- node bars packed into anonymous
@@ -122,7 +133,8 @@ public:
                          long long busy_ticks, int worker_count,
                          const long long* util_bucket_busy = nullptr,
                          int util_bucket_count = 0, long long bucket_width_ticks = 0,
-                         const long long* owner_busy = nullptr, long long task_count = 0)
+                         const long long* owner_busy = nullptr, long long task_count = 0,
+                         long long body_ticks = 0, long long machinery_ticks = 0)
     {
         if (node_count != static_cast<int>(nodes_.size()))
             return;   // structure not pushed (or a stale attach) -- drop the sample
@@ -210,6 +222,13 @@ public:
         tasks_total_ += task_count;
         tasks_per_run_.add(static_cast<double>(task_count));
 
+        // Task-system cost: body (B) = user-functor wall time, machinery (M) = scheduler
+        // overhead (task setup/completion, successful find_work scans, in-functor submits),
+        // summed over workers per run. Overhead = M / (B + M). Idle (lack of parallelism) is
+        // NOT in either bucket, so this is a clean compute-cost split, not a utilization one.
+        body_us_.add(static_cast<double>(body_ticks) * ticks_to_us);
+        machinery_us_.add(static_cast<double>(machinery_ticks) * ticks_to_us);
+
         ++runs_;
     }
 
@@ -239,6 +258,8 @@ public:
         }
         tasks_total_ = 0;
         tasks_per_run_ = {};
+        body_us_ = {};
+        machinery_us_ = {};
         critical_work_ = {};
         makespan_ = {};
         makespan_min_ = 0.0;
@@ -254,6 +275,17 @@ public:
     int structure_node_count() const { return static_cast<int>(nodes_.size()); }
     long long task_total() const { return tasks_total_; }        // tasks (every kind) across the trace
     double tasks_per_run() const { return tasks_per_run_.mean; }  // mean tasks per run
+
+    // Task-system overhead, [0,1]: mean machinery / (mean body + mean machinery) over the
+    // folded runs. An UPPER bound on scheduler cost -- the coarse per-task clock brackets
+    // charge their own read latency to machinery. Cross-check against the microbench ns/op.
+    double body_us() const { return body_us_.mean; }
+    double machinery_us() const { return machinery_us_.mean; }
+    double overhead() const
+    {
+        double b = body_us_.mean, m = machinery_us_.mean;
+        return (b + m) > 0.0 ? m / (b + m) : 0.0;
+    }
 
     // Mean core utilization over the folded runs, [0,1] (see the band constants above).
     double core_utilization() const { return core_util_.mean; }
@@ -576,6 +608,8 @@ private:
     long long runs_ = 0;
     long long tasks_total_ = 0;   // total tasks (every kind) run across the trace
     Welford tasks_per_run_;       // tasks per run
+    Welford body_us_;             // per-run user-functor wall time (B), summed over workers, µs
+    Welford machinery_us_;        // per-run scheduler machinery (M), summed over workers, µs
     std::string title_;   // survives reset()/begin_structure(); set once by the owner
 };
 
@@ -779,6 +813,16 @@ inline bool Graph_trace::write_SVG(const char* path) const
         out += "<tspan fill=\"" + std::string(dead_color) + "\">";
         append_escaped(out, "critical path dead time: " + fmt_us(dead_us) + " \xC2\xB5s ("
             + fmt_us(100.0 * dead_share) + "% of frame time)");
+        out += "</tspan>";
+
+        // Third classifier: task-system overhead -- machinery / (body + machinery) compute
+        // (idle excluded). See the band constants; reported as an upper bound.
+        double ov = overhead();
+        const char* ov_color = ov <= overhead_ok_share ? "#a6e22e"
+                             : ov <= overhead_bad_share ? "#e6db74" : "#ff5f45";
+        out += "<tspan fill=\"#cfcfc2\"> | </tspan>";
+        out += "<tspan fill=\"" + std::string(ov_color) + "\">";
+        append_escaped(out, "task-system overhead: " + fmt_us(100.0 * ov) + "%");
         out += "</tspan></text>\n";
 
         // "critical path" = the CPM critical-path length: the dependency lower bound on
@@ -791,7 +835,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
             + ", max " + fmt_ms(makespan_max_) + ")  |  critical path " + fmt_ms(cpm_us)
             + " ms  |  workers: " + std::to_string(workers_seen)
             + "  |  tasks: " + std::to_string(tasks_total_)
-            + " (~" + std::to_string(static_cast<long long>(std::llround(tasks_per_run_.mean))) + "/run)";
+            + " (~" + std::to_string(static_cast<long long>(std::llround(tasks_per_run_.mean))) + "/run)"
+            + "  |  body " + fmt_us(body_us_.mean) + " \xC2\xB5s / machinery " + fmt_us(machinery_us_.mean)
+            + " \xC2\xB5s per run";
         out += "<text x=\"16\" y=\"68\" font-size=\"11\" fill=\"#cfcfc2\">";
         append_escaped(out, stats);
         out += "</text>\n";
