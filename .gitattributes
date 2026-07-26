@@ -1,1 +1,5 @@
-*.sh text eol=lf
+* text=auto eol=lf
+*.bat text eol=crlf
+*.vcxproj text eol=crlf
+*.filters text eol=crlf
+*.sln text eol=crlf
