@@ -19,7 +19,13 @@ bool expect_death(const char* scenario);
 // Configure the current process as a death-test child (suppress abort dialogs).
 void prepare_death_child();
 
-// Print totals; returns a process exit code (0 = all checks passed).
+// Declare that the current test deliberately triggered `n` `TS_ENSURE` failures.
+// `summary()` fails on any failure not consumed this way, so a stray ensure failure
+// in an unrelated test cannot pass silently. No-op when the facility is compiled out.
+void consume_ensure_failures(int n);
+
+// Print totals; returns a process exit code (0 = all checks passed and no
+// unconsumed ensure failures).
 int summary();
 
 } // namespace ts::test

@@ -22,6 +22,26 @@ void run_blackboard_sample();
 #include <cstdlib>
 #include <cstring>
 
+namespace
+{
+
+// Non-test entries (bench / stress / samples) have no harness to catch an ensure
+// failure -- fail their exit code instead, so CI cannot pass a run that tripped one.
+int exit_checking_ensure_failures(int code)
+{
+#if TS_SAFETY_CHECKS
+    if (ts::ensure_failure_count() != 0)
+    {
+        std::fprintf(stderr, "\n%lld ENSURE failure(s) fired -- failing the run\n",
+            ts::ensure_failure_count());
+        return code == 0 ? 1 : code;
+    }
+#endif
+    return code;
+}
+
+} // namespace
+
 int main(int argc, char** argv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered: last line is visible if a test crashes
@@ -87,14 +107,14 @@ int main(int argc, char** argv)
     if (argc >= 2 && std::strcmp(argv[1], "--stress") == 0)
     {
         sample::run_game_frame_sample(2000, 0.2f);
-        return 0;
+        return exit_checking_ensure_failures(0);
     }
 
     // Isolation entries (for narrowing down a flaky crash).
     if (argc >= 2 && std::strcmp(argv[1], "--bench") == 0)
     {
         run_benchmarks();
-        return 0;
+        return exit_checking_ensure_failures(0);
     }
     if (argc >= 2 && std::strcmp(argv[1], "--memprofile") == 0)
     {

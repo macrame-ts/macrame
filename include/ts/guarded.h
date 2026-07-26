@@ -468,6 +468,16 @@ private:
             }
         }();
         core->flags.priority = opts.priority;
+#if TS_SAFETY_CHECKS
+        // Stamp the pipe identity for the blocking-sync diagnostic. Sound to set at
+        // creation: the admission path (`submit_admitted`) stores the same value, nothing
+        // reads `dispatch_arg` as a generation on the pipe route (pipe blocks always claim
+        // gen 0), and the inline fast path never reads it at all.
+        core->flags.pipe_job = true;
+        core->dispatch_arg.store(
+            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&pipe_)),
+            std::memory_order_relaxed);
+#endif
 
         // The block IS the pipe job -- no closure. Inline fast-path (`access`): if `try_inline`
         // and the pipe is free right now, run the body on this thread; otherwise (or for `async`)

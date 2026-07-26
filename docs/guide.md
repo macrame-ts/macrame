@@ -485,6 +485,41 @@ and `async` alike (a cancellation token, a scheduling priority). There is no
   over) a graph while a run is in flight — both would otherwise dangle and
   crash far from the cause.
 
+### 5.0.1 The never-block rule is diagnosed
+
+Blocking inside a task or node body ties up a worker and risks deadlock;
+the rule has always been "consume results with `then`/`when_all` or gate
+sub-work with `ts::nested`, never `sync()` inside a body". In
+`TS_SAFETY_CHECKS` builds a violation now reports instead of just
+misbehaving: a `sync()` that is genuinely about to block, issued under an
+access scope, on work a waiter cannot run itself, fails a **`TS_ENSURE`** —
+the library's recoverable assert. The default report is
+`ENSURE FAILED: <message>` plus a call stack, with a debugger break when
+one is attached; execution then continues. A failure that recurs (say,
+every frame) is reported once per call site but *counted* every time. Two
+messages:
+
+- *"sync() on an access to an object this scope already holds"* — the
+  certain-deadlock shape: the awaited access is queued behind the very
+  grant you are waiting inside.
+- *"blocking sync() on non-retractable work inside an access scope"* — the
+  general hazard.
+
+What does **not** fire: `parallel_for` inside a node (its join runs chunks
+on the caller), `sync()` on plain launched tasks (a blocked waiter runs
+them inline — retraction), and any `sync()` from a thread holding no access
+scope. The test harness and the `--bench`/`--stress` drivers fail the run
+on any failure a test did not explicitly expect, so a violation cannot pass
+CI silently.
+
+A host application can replace how failures are presented with
+`ts::set_ensure_handler` (`std::set_terminate` shape — returns the previous
+handler): for example, a Windows game might pop an attach-a-debugger dialog
+from its handler. The library deliberately ships no dialog of its own —
+that is host policy, and there is no portable equivalent — and the failure
+counting is outside the handler, so custom presentation never hides a
+failure from the harness or CI.
+
 ### 5.1 Multi-object access
 
 To touch several guarded objects in one body, use the free function:

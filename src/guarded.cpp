@@ -310,6 +310,33 @@ void multi_acquire(Ref_ptr<Multi_async_state> state,
         multi_acquire(std::move(state), std::move(block), pos + 1);
 }
 
+#if TS_SAFETY_CHECKS
+// The `retract_or_wait` diagnostic (declared in task.h, defined here for the `Pipe`
+// layout): the caller established that the wait is about to park, an access scope is
+// active, and the target is non-retractable. Sharp message when the target is a
+// single-object pipe job on a pipe this scope holds -- that shape deadlocks (the job is
+// queued behind the very grant the waiter sits inside); general never-block warning
+// otherwise (multi-object jobs land here too: their `dispatch_arg` carries the reuse
+// generation, not a pipe, so the sharp match is out of reach for them).
+void blocking_sync_diagnose(const Task_control_block* blk) noexcept
+{
+    if (blk->flags.pipe_job)
+    {
+        const Pipe* pipe = reinterpret_cast<const Pipe*>(
+            static_cast<std::uintptr_t>(blk->dispatch_arg.load(std::memory_order_relaxed)));
+        if (pipe && current_access && current_access->holds_epoch(&pipe->write_epoch))
+        {
+            TS_ENSURE(false, "sync() on an access to an object this scope already holds -- "
+                "this deadlocks; use then/when_all or nested tasks");
+            return;
+        }
+    }
+    TS_ENSURE(false, "blocking sync() on non-retractable work inside an access scope -- "
+        "occupies a worker and risks deadlock; prefer continuations (then/when_all) or "
+        "nested tasks");
+}
+#endif
+
 bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_ptr& block)
 {
     {

@@ -89,12 +89,36 @@ IDs — when an item is done, mark it, don't renumber.
        semantics, `stale_inherited_grant` death scenario; suite 470 checks green, Shipping
        compiles, Release+Shipping stress clean (no false positives across handoff /
        `parallel_for` / `Versioned` paths).
-   12. `[ ]` **(P1) Blocking-`sync()`-under-grant check** — the documented "never block inside a
-       graph node / access body" rule is unenforced; detect a blocking `sync()` while a
-       node/pipe grant is active ([research-deepdive.md](research-deepdive.md) §3.5). Needs a
-       **recoverable (non-fatal) assert** facility — `TS_CHECK_ACCESS`-style reporting without
-       abort (author decision, 2026-07: blocking there is a perf/deadlock hazard, not certain
-       corruption) — build the facility as part of this item.
+   12. `[x]` **(P1) Blocking-`sync()`-under-grant check — DONE (2026-07).** Two pieces, fully
+       `TS_SAFETY_CHECKS`-gated: **(a) `TS_ENSURE(expr, message)`** (fatal.{h,cpp}) — the
+       UE-`ensure` shape per author: evaluates `expr` once in both configs, yields its bool
+       (`if (!TS_ENSURE(...))` recovers); on failure bumps `ts::ensure_failure_count()` on
+       EVERY occurrence but reports ONCE PER CALL SITE (captureless-lambda function-local
+       static claim — per-frame recurrences stay one stack trace, exact counts). Presentation
+       via a swappable handler (`ts::set_ensure_handler`, `std::set_terminate` shape; counting
+       stays outside it, so a host dialog can't hide failures); default handler = `ENSURE
+       FAILED:` + stacktrace + debugger-break when attached (`detail::is_debugger_present` /
+       `debug_break`, the C++26 P2546 pair polyfilled — `IsDebuggerPresent`/`__debugbreak`,
+       Linux `TracerPid` + `int3`/`brk`, macOS sysctl `P_TRACED`; feeds the future platform
+       layer 3.6). `ts::fatal` also breaks pre-`abort` at the failure site. Cleanliness is
+       enforced: the harness fails on failures not consumed via
+       `ts::test::consume_ensure_failures(n)`, `--bench`/`--stress` fail their exit on any
+       (full no-arg run covered by `summary()`). **(b) the check** at `retract_or_wait`
+       (the chokepoint every blocking task wait passes): fires only when genuinely about to park
+       (post-retraction, post-serial-drain, target unsettled) under an access scope on
+       non-retractable work; sharp same-object message when the target is a single-object pipe
+       job on a pipe the context holds (certain deadlock — `Flags::pipe_job` + `dispatch_arg`
+       stamped with the `Pipe*` at creation, matched via `Access_context::holds_epoch`;
+       `blocking_sync_diagnose` seam task.h→guarded.cpp), general never-block warning otherwise
+       (multi-object targets land on the general message — their `dispatch_arg` carries the
+       reuse generation, not a pipe). Structurally exempt: `parallel_for` (joins via its own
+       counter, never `retract_or_wait`), retractable targets (the waiter runs them), grant-free
+       threads. Tests: ensure facility (once-per-site: same site twice → +2 count, one report),
+       handler hook (install/restore, custom handler hit), deterministic warns-but-completes
+       (blocker spins until the failure lands), `parallel_for`-in-node zero failures,
+       `sync_own_object_deadlock` death scenario (child aborts on observing the sharp report;
+       bounded poll so a miss fails instead of hanging). 503 checks green; full run (samples +
+       benchmarks) zero failures; Shipping compiles.
    13. `[ ]` **(P1, harness item — T21) Escaped-reference hardening.** The sharpest harness
        gap (§13.6.3 of [research-deepdive.md](research-deepdive.md)): a body hands a `T&` to a
        helper that stores it, and later access through the stored pointer never re-enters an

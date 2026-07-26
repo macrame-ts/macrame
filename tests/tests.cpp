@@ -23,6 +23,7 @@
 #include "ts/versioned.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -87,6 +88,29 @@ void run_death_scenario(const char* name)
         for (int i = 0; i < 9; ++i)
             ctx.add(&objs[i], Access::read_write);   // 9th add overflows `max_entries` -> fatal
     }
+#if TS_SAFETY_CHECKS
+    else if (std::strcmp(name, "sync_own_object_deadlock") == 0)
+    {
+        ts::Guarded<int> a{ 0 };
+        ts::Static_task_graph g;
+        g.add_node([&a](int&)
+        {
+            // Queues behind this node's own write hold -> never admitted; the sync
+            // diagnostic fires the sharp same-object message, then the worker parks
+            // forever. The child's main thread observes the report and aborts, so the
+            // parent sees a death instead of a hang.
+            a.async([](int& v) { v = 1; }).sync();
+        }, a);
+        g.compile();
+        ts::Task<void> run = g.execute();
+        for (int i = 0; i < 10000 && ts::ensure_failure_count() == 0; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (ts::ensure_failure_count() != 0)
+            ts::fatal("sync_own_object_deadlock: sharp diagnostic observed");
+        // Diagnostic never fired: fall through and exit 0 -- the parent's
+        // `expect_death` then fails the test instead of hanging.
+    }
+#endif
     else if (std::strcmp(name, "guarded_outlived_by_graph") == 0)
     {
         ts::Static_task_graph g;

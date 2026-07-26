@@ -1,5 +1,6 @@
 #include "access_tests.h"
 #include "ts/access.h"
+#include "ts/fatal.h"
 #include "harness.h"
 #include "test_util.h"
 
@@ -97,6 +98,54 @@ void test_epoch_read_era_and_null()
     TS_CHECK(ctx.check(&z, Access::read_write) == Grant::granted);  // null source: never stale
 }
 
+#if TS_SAFETY_CHECKS
+// One fixed `TS_ENSURE` expansion site, so two calls exercise the once-per-site
+// report filter against the every-occurrence counter.
+bool trigger_ensure_site()
+{
+    return TS_ENSURE(false, "test: deliberate ensure failure (ignore)");
+}
+
+// The ensure facility: a passing expression is silent and yields true; a failing
+// site counts every occurrence but reports once; no abort. (The debugger-break
+// branch is untestable here -- no debugger attached in CI.)
+void test_ensure_facility()
+{
+    long long base = ts::ensure_failure_count();
+
+    TS_CHECK(TS_ENSURE(1 + 1 == 2, "never fires"));
+    TS_CHECK(ts::ensure_failure_count() == base);   // a pass costs nothing
+
+    TS_CHECK(!trigger_ensure_site());               // yields the expression's value
+    TS_CHECK(!trigger_ensure_site());               // same site: counts again, reports once
+    TS_CHECK(ts::ensure_failure_count() == base + 2);
+    ts::test::consume_ensure_failures(2);
+}
+
+std::atomic<int> g_custom_handler_hits{ 0 };
+void counting_ensure_handler(const char*) noexcept
+{
+    g_custom_handler_hits.fetch_add(1, std::memory_order_relaxed);
+}
+
+// The presentation hook: an installed handler replaces the default report (no
+// stderr noise from this test), the counter still advances, and restoring
+// returns the handler that was in place.
+void test_ensure_handler_hook()
+{
+    long long base = ts::ensure_failure_count();
+
+    ts::Ensure_handler prev = ts::set_ensure_handler(&counting_ensure_handler);
+    TS_ENSURE(false, "test: handler hook");   // fresh site -> reports via the custom handler
+    ts::Ensure_handler mine = ts::set_ensure_handler(prev);
+
+    TS_CHECK(mine == &counting_ensure_handler);   // restore handed back what we installed
+    TS_CHECK(g_custom_handler_hits.load() == 1);
+    TS_CHECK(ts::ensure_failure_count() == base + 1);
+    ts::test::consume_ensure_failures(1);
+}
+#endif
+
 void test_death_no_context()    { TS_CHECK(ts::test::expect_death("access_no_context")); }
 void test_death_ro_write()      { TS_CHECK(ts::test::expect_death("access_ro_write")); }
 void test_death_wrong_instance(){ TS_CHECK(ts::test::expect_death("access_wrong_instance")); }
@@ -115,6 +164,10 @@ void run_access_tests()
     run("harness allows declared access", test_harness_allows);
     run("epoch staleness verdicts", test_epoch_staleness);
     run("epoch read era + null source", test_epoch_read_era_and_null);
+#if TS_SAFETY_CHECKS
+    run("ensure facility (once-per-site)", test_ensure_facility);
+    run("ensure handler hook", test_ensure_handler_hook);
+#endif
     run("death: no context", test_death_no_context);
     run("death: read-only context + write", test_death_ro_write);
     run("death: wrong instance", test_death_wrong_instance);

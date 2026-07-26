@@ -43,6 +43,20 @@ public:
         return check(instance, mode) == Grant::granted;
     }
 
+#if TS_SAFETY_CHECKS
+    // Whether any entry's grant was declared under the given epoch source (i.e. this
+    // context holds a grant on that pipe). Consumed by the blocking-sync diagnostic,
+    // which compares a sync target's pipe against the caller's held pipes; entries
+    // without a source never match.
+    bool holds_epoch(const std::atomic<std::uint64_t>* epoch) const noexcept
+    {
+        for (int i = 0; i < count_; ++i)
+            if (entries_[i].epoch == epoch)
+                return true;
+        return false;
+    }
+#endif
+
 private:
     static constexpr int max_entries = 8;
 

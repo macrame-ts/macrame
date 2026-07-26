@@ -43,6 +43,16 @@ namespace detail
 // work and then waits on it). No-op when nothing is pending (any scheduler mode).
 void drain_serial_pending() noexcept;
 
+#if TS_SAFETY_CHECKS
+struct Task_control_block;
+// Defined in guarded.cpp (it needs the `Pipe` layout this header deliberately lacks):
+// diagnose a blocking `sync()` on non-retractable work issued under an access scope -- a
+// `TS_ENSURE` failure with the sharp same-object message when the target is a pipe job on
+// a pipe the current context holds (certain deadlock), the general never-block warning
+// otherwise. Called by `retract_or_wait` only when the wait is genuinely about to park.
+void blocking_sync_diagnose(const Task_control_block* blk) noexcept;
+#endif
+
 // Shared cancellation state behind a source / its tokens / its callbacks. The request
 // flag is atomic so the hot `is_cancel_requested()` needs no lock; the callback list
 // (fired by `request_cancel`) is mutex-guarded, with `firing`/`firing_thread`/`done` for
@@ -409,6 +419,10 @@ struct Task_control_block
         Priority priority : 2 = Priority::normal;   // queue position when dispatched
         bool retractable : 1 = false;               // safe to run inline from a waiter (no pipe/access binding)
         bool run_inline : 1 = false;                // dispatch on the settling thread, not the queue
+        // Single-object pipe job: `dispatch_arg` carries the owning `Pipe*` (stamped at
+        // creation). A spare bit consumed by the blocking-sync diagnostic; written only
+        // under `TS_SAFETY_CHECKS`.
+        bool pipe_job : 1 = false;
     };
     Flags flags;
     // -----------------------------------------------------------------------------------
@@ -627,6 +641,18 @@ struct Task_control_block
         // queued on THIS thread's serial trampoline behind the current frame -- run it
         // before parking, or nothing ever would. No-op otherwise.
         drain_serial_pending();
+#if TS_SAFETY_CHECKS
+        // About to genuinely block (retraction and the serial drain could not finish the
+        // target) under an access scope, on work a waiter cannot help along: the
+        // never-block-in-a-body rule, diagnosed at the violation instead of documented
+        // only. Retractable targets are exempt by the condition -- sanctioned fork-join
+        // (`parallel_for`, bare-task joins) retracts instead of parking. `ready` is an
+        // approximation (the target may complete concurrently after the check) -- a rare
+        // borderline report, never a missed hazard class.
+        if (current_access && !blk->flags.retractable
+            && !blk->ready.load(std::memory_order_acquire))
+            blocking_sync_diagnose(blk.get());
+#endif
         blk->wait();
     }
 };

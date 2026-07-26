@@ -134,9 +134,11 @@ can offer here.
 access body, or a wait cycle across `Signal`s (A waits on a signal B will
 trigger, B waits on A), is a liveness bug, not a data race — the harness
 does not model it. Retraction and caller-participation make the *sanctioned*
-patterns deadlock-free (design.md §4.4), and a roadmap check will flag
-blocking `sync()` under an active grant (TODO 1.12, a recoverable non-fatal
-assert), but a determined misuse can still hang. Rust's studies are again
+patterns deadlock-free (design.md §4.4), and blocking `sync()` under an
+active grant is now diagnosed (TODO 1.12, shipped 2026-07: a `TS_ENSURE`
+failure — debugger break + report, once per site — with a sharp message for
+the certain-deadlock same-object shape), but a determined misuse can still
+hang. Rust's studies are again
 instructive: its ownership model *introduced* a new deadlock idiom (implicit
 scope-end unlock → double-lock), so a safety model removing one class can
 add another.

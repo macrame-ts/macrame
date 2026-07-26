@@ -1,5 +1,6 @@
 #include "ts/fatal.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 
@@ -18,6 +19,9 @@
     #include <windows.h>
     #include <dbghelp.h>
     #pragma comment(lib, "dbghelp.lib")
+#elif defined(__APPLE__)
+    #include <sys/sysctl.h>
+    #include <unistd.h>
 #endif
 
 namespace ts
@@ -33,8 +37,146 @@ void fatal(const char* message) noexcept
 #endif
 
     std::fflush(stderr);
+#if TS_SAFETY_CHECKS
+    // Stop in the debugger at the failure site (message already on screen)
+    // instead of somewhere inside `abort`'s runtime machinery.
+    if (detail::is_debugger_present())
+        detail::debug_break();
+#endif
     std::abort();
 }
+
+#if TS_SAFETY_CHECKS
+
+namespace detail
+{
+
+#if defined(_WIN32)
+
+bool is_debugger_present() noexcept
+{
+    return ::IsDebuggerPresent() != 0;
+}
+
+void debug_break() noexcept
+{
+    __debugbreak();
+}
+
+#elif defined(__linux__)
+
+bool is_debugger_present() noexcept
+{
+    // A tracer (debugger) registers as `TracerPid` in the process status; 0 = none.
+    std::FILE* f = std::fopen("/proc/self/status", "r");
+    if (!f)
+        return false;
+    bool traced = false;
+    char line[256];
+    while (std::fgets(line, sizeof line, f))
+    {
+        int pid = 0;
+        if (std::sscanf(line, "TracerPid: %d", &pid) == 1)
+        {
+            traced = pid != 0;
+            break;
+        }
+    }
+    std::fclose(f);
+    return traced;
+}
+
+void debug_break() noexcept
+{
+#if defined(__clang__)
+    __builtin_debugtrap();
+#elif defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile("int3");
+#elif defined(__aarch64__)
+    __asm__ volatile("brk #0");
+#endif
+}
+
+#elif defined(__APPLE__)
+
+bool is_debugger_present() noexcept
+{
+    // Best-effort: `P_TRACED` in the process flags via sysctl.
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
+    struct kinfo_proc info{};
+    size_t size = sizeof info;
+    if (sysctl(mib, 4, &info, &size, nullptr, 0) != 0)
+        return false;
+    return (info.kp_proc.p_flag & P_TRACED) != 0;
+}
+
+void debug_break() noexcept
+{
+    __builtin_debugtrap();
+}
+
+#else
+
+bool is_debugger_present() noexcept { return false; }
+void debug_break() noexcept {}
+
+#endif
+
+} // namespace detail
+
+namespace
+{
+
+std::atomic<long long> g_ensure_failure_count{ 0 };
+
+// Default presentation: message + call stack to stderr, then a debugger break
+// (after the report, so the message is on screen when the debugger stops).
+void default_ensure_handler(const char* message) noexcept
+{
+    std::fprintf(stderr, "\nENSURE FAILED: %s\n", message);
+
+#if TS_HAVE_STACKTRACE
+    std::fprintf(stderr, "\ncall stack:\n%s\n",
+        std::to_string(std::stacktrace::current()).c_str());
+#endif
+
+    std::fflush(stderr);
+
+    if (detail::is_debugger_present())
+        detail::debug_break();
+}
+
+std::atomic<Ensure_handler> g_ensure_handler{ &default_ensure_handler };
+
+}
+
+Ensure_handler set_ensure_handler(Ensure_handler handler) noexcept
+{
+    return g_ensure_handler.exchange(handler ? handler : &default_ensure_handler,
+                                     std::memory_order_acq_rel);
+}
+
+long long ensure_failure_count() noexcept
+{
+    return g_ensure_failure_count.load(std::memory_order_relaxed);
+}
+
+namespace detail
+{
+
+void ensure_failed(const char* message, bool report) noexcept
+{
+    // Counting and once-per-site filtering happen out here regardless of the
+    // installed handler -- a host handler only changes presentation, never
+    // whether the harness/drivers see the failure.
+    g_ensure_failure_count.fetch_add(1, std::memory_order_relaxed);
+    if (report)
+        g_ensure_handler.load(std::memory_order_acquire)(message);
+}
+
+} // namespace detail
+
+#endif // TS_SAFETY_CHECKS
 
 #if defined(_WIN32)
 

@@ -752,6 +752,62 @@ void test_single_threaded_deterministic_order()
     TS_CHECK(order.size() == 4);
 }
 
+#if TS_SAFETY_CHECKS
+// The blocking-sync diagnostic fires -- once, deterministically -- when a node body
+// blocks on a pipe job for an object the scope does NOT hold, and the sync still
+// completes correctly. The blocker on `b`'s pipe spins until the report lands, so the
+// awaited write cannot finish before the check runs (no timing dependence).
+void test_blocking_sync_warns_but_completes()
+{
+    long long base = ts::ensure_failure_count();
+    ts::Guarded<tests::Counter> a;
+    ts::Guarded<int> b{ 0 };
+
+    ts::Static_task_graph g;
+    g.add_node([&b, base](tests::Counter& k)
+    {
+        ts::Task<void> blocker = b.async([base](int&)
+        {
+            while (ts::ensure_failure_count() == base)
+                std::this_thread::yield();
+        });
+        ts::Task<int> t = b.async([](int& v) { v = 7; return v; });
+        TS_CHECK(t.sync() == 7);   // reports (queued behind the blocker), then completes
+        k.add(1);
+    }, a);
+    g.compile();
+    g.execute().sync();
+
+    TS_CHECK(ts::ensure_failure_count() == base + 1);
+    ts::test::consume_ensure_failures(1);
+}
+
+// Sanctioned fork-join inside a node produces zero reports: `parallel_for` joins via the
+// state's own wait (never `retract_or_wait`), and bare-task joins retract.
+void test_parallel_for_in_node_no_reports()
+{
+    long long base = ts::ensure_failure_count();
+    ts::Guarded<std::array<int, 256>> data{};
+    ts::Static_task_graph g;
+    g.add_node([](std::array<int, 256>& d)
+    {
+        ts::parallel_for(256, [&d](int i) { d[static_cast<std::size_t>(i)] = i; });
+    }, data);
+    g.compile();
+    g.execute().sync();
+
+    TS_CHECK(ts::ensure_failure_count() == base);
+    ts::Task<int> total = ts::async([](const std::array<int, 256>& d)
+    {
+        int s = 0;
+        for (int v : d)
+            s += v;
+        return s;
+    }, data);
+    TS_CHECK(total.sync() == 256 * 255 / 2);
+}
+#endif
+
 void run_integration_tests()
 {
     std::printf("\n[integration] tests\n");
@@ -770,6 +826,10 @@ void run_integration_tests()
     run("single-threaded: end to end", test_single_threaded_end_to_end);
     run("single-threaded: sync inside body", test_single_threaded_sync_inside_body);
     run("single-threaded: deterministic order", test_single_threaded_deterministic_order);
+#if TS_SAFETY_CHECKS
+    run("blocking sync warns but completes", test_blocking_sync_warns_but_completes);
+    run("parallel_for in node: no reports", test_parallel_for_in_node_no_reports);
+#endif
     run("multi async no deadlock", test_multi_async_no_deadlock);
     run("multi async options", test_multi_async_options);
     run("multi async generic lambda", test_multi_async_generic_lambda);

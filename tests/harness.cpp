@@ -1,4 +1,5 @@
 #include "harness.h"
+#include "ts/fatal.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +19,7 @@ namespace
 int g_checks = 0;
 int g_failures = 0;
 int g_current_test_failures = 0;
+long long g_ensure_failures_consumed = 0;
 
 } // namespace
 
@@ -64,8 +66,26 @@ void prepare_death_child()
     SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
 }
 
+void consume_ensure_failures(int n)
+{
+    g_ensure_failures_consumed += n;
+}
+
 int summary()
 {
+#if TS_SAFETY_CHECKS
+    // Unconsumed ensure failures fail the run: a test that trips `TS_ENSURE` without
+    // declaring it (`consume_ensure_failures`) is a regression, even when every
+    // TS_CHECK passed.
+    long long unconsumed = ts::ensure_failure_count() - g_ensure_failures_consumed;
+    if (unconsumed != 0)
+    {
+        std::fprintf(stderr,
+            "\n%lld unconsumed ENSURE failure(s) (fired %lld, consumed %lld)\n",
+            unconsumed, ts::ensure_failure_count(), g_ensure_failures_consumed);
+        ++g_failures;
+    }
+#endif
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

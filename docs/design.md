@@ -539,6 +539,37 @@ harness at ~1 ns is the deliberate trade: weaker guarantee, zero model
 constraint. Senders' typed environments (§7.7) are the one path back toward
 compile-time checking worth watching.
 
+**7.9a `TS_ENSURE` (the UE-`ensure`-shaped recoverable assert).** `ts::fatal`
+is the right tool for corruption; some hazards deserve a loud diagnostic
+without killing the process — the first user is the
+blocking-`sync()`-under-grant check (a perf/deadlock hazard, not certain
+corruption; author decision). The macro evaluates its expression once in
+every configuration and yields the bool (`if (!TS_ENSURE(x, "..."))`
+recovers naturally, UE semantics); on failure it counts every occurrence
+but reports once per call site (a captureless-lambda function-local static
+is the site claim), so a per-frame recurrence is one stack trace in the log
+and an exact number in the counter. Presentation goes through a swappable
+handler (`ts::set_ensure_handler`, `std::set_terminate` shape); the default
+prints `ENSURE FAILED:` + stack and breaks into the debugger when one is
+attached (the C++26 `std::is_debugger_present`/`std::breakpoint` pair,
+polyfilled — `IsDebuggerPresent`/`__debugbreak` on Windows, `TracerPid` +
+`int3`/`brk` on Linux, sysctl `P_TRACED` on macOS — slated for the platform
+layer; `ts::fatal` uses the same break before `abort`, stopping at the
+failure site). Counting and once-filtering live outside the handler, so a
+host's custom presentation (its own attach dialog, say — the library ships
+none deliberately) can never hide a failure: the test harness fails on
+failures no test explicitly consumed, and the bench/stress drivers fail
+their exit code on any — a tripped ensure cannot pass CI by virtue of the
+program having survived it. The blocking-sync check itself lives at the one
+chokepoint every blocking task wait passes through (`retract_or_wait`),
+fires only when the wait is genuinely about to park under an access scope
+on non-retractable work, and distinguishes the certain-deadlock shape (the
+target is an access to an object the waiting scope holds — matched by
+comparing the target pipe's epoch address against the context's captured
+epoch sources) from the general never-block violation. Sanctioned fork-join
+is structurally exempt: `parallel_for` joins through its own counter, and
+retractable targets are run by the waiter instead of waited on.
+
 **7.10 Requiring copyable `T` / `.copy()` accessors.** `folly::Synchronized`
 offers lock-and-copy-out; here the guarded objects are whole subsystems
 where copying is exactly what must never happen implicitly. `Guarded<T>`

@@ -842,6 +842,12 @@ void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_be
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
 void test_death_guarded_outlived() { TS_CHECK(ts::test::expect_death("guarded_outlived_by_graph")); }
 void test_death_graph_mid_run()    { TS_CHECK(ts::test::expect_death("graph_destroyed_mid_run")); }
+#if TS_SAFETY_CHECKS
+// The sharp same-object diagnostic (a node syncing an access to an object it holds --
+// the certain-deadlock shape); subprocess because the child genuinely deadlocks after
+// reporting (it aborts once the report is observed).
+void test_death_sync_own_object()  { TS_CHECK(ts::test::expect_death("sync_own_object_deadlock")); }
+#endif
 
 // The pipe-registration counts stay balanced across recompiles, moves, and a move-assign
 // overwrite -- so destroying the graphs and then the objects raises no lifetime fatal, and
@@ -916,5 +922,8 @@ void run_graph_tests()
     run("death: undeclared access", test_death_undeclared);
     run("death: Guarded outlived by graph", test_death_guarded_outlived);
     run("death: graph destroyed mid-run", test_death_graph_mid_run);
+#if TS_SAFETY_CHECKS
+    run("death: sync own object (sharp diagnostic)", test_death_sync_own_object);
+#endif
     run("lifetime registration balance", test_lifetime_registration_balance);
 }
