@@ -296,6 +296,20 @@ IDs — when an item is done, mark it, don't renumber.
        suspect — a diagnostic nothing else provides). Lives in `graph_trace.h` /
        `trace_stamps.h` (the tracing session's files; the fold-skip hook in
        `static_task_graph.cpp` already passes the skip flag).
+    10. `[ ]` **(P2, trace) Internal profiling: decompose M to optimise the machinery.**
+        The ranked 6-point plan in
+        [profiler-guided-optimization.md](profiler-guided-optimization.md) ("Internal
+        profiling" section). Start with 1+2: (1) split machinery into named phases —
+        dispatch/submit already have bridges; add per-worker **acquire** (`pipe_acquire`/
+        handoff) and **completion** (successor release + dep-counter + object release)
+        accumulators, same armed/relaxed gating; (2) **queue-lock-wait** per worker
+        (request→hold on the priority-queue mutex) + MPMC CAS-retry counts — prices the
+        sharded/lock-free queue redesign before doing it. (3) cheap ratio counters ride
+        along (find_work hit/miss, local-pop vs steal, park/unpark) — overlaps the
+        per-kind/scheduling-counters trace item; land together. Then 4–6: per-node/per-kind
+        M attribution (reuse the `trace_owner` seam), per-feature microbench ladder over
+        the ~194 ns floor, wake-latency histogram (idle split: no-work vs
+        parked-while-work-available).
 
 ---
 

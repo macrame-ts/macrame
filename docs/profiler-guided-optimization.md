@@ -216,3 +216,46 @@ Remaining:
   high steal-wait — rather than leaving it to be inferred from a node's
   dispatch wait. Render as a compact global line and/or a thin per-bucket
   kind-mix ribbon (a few bands, never per-task bars).
+
+## Internal profiling: decomposing M to optimise the machinery itself
+
+The overhead headline says *how much* frame time is machinery; optimising the
+machinery needs *where* it goes, *which work* causes it, and *why* it is slow
+(contention vs instructions). Ranked plan (2026-07), value/effort first:
+
+1. **Decompose M into named phases.** Two bridges already separate their share
+   (`add_dispatch_ticks` = successful `find_work`, `add_submit_ticks` =
+   in-functor fan-out); the rest of M is one lump. Add per-worker **acquire**
+   (`pipe_acquire` / handoff) and **completion** (successor release +
+   dep-counter + object release) accumulators, bracketed the same armed/relaxed
+   way. Turns `M 2.48 ms` into `dispatch / acquire / completion / submit`,
+   i.e. into a decision about what to attack. ~4 clock reads/task armed, same
+   gating discipline.
+2. **Queue-lock contention.** M does not distinguish machinery *instructions*
+   from machinery *waiting on the lock*, and the single mutex-guarded priority
+   queue is the known scaling bottleneck. A per-worker queue-lock-wait
+   accumulator (request→hold time) + a CAS-retry count on the MPMC queues
+   quantifies exactly the thing a sharded/lock-free queue redesign would buy
+   back — it prices the redesign before doing it.
+3. **Cheap ratio counters (no timers).** `find_work` hit/miss, local-pop vs
+   steal ratio, park/unpark syscall count — plain `fetch_add`s. These say *why*
+   dispatch is expensive (e.g. a low hit ratio argues for better wake
+   targeting, not faster scans). Overlaps with the per-kind/scheduling-counter
+   item above; land them together.
+4. **Attribute M per node and per kind.** Extend the owner-attribution sink
+   (per-node true-busy) to machinery, so the trace shows whose completions /
+   acquires dominate (a node with many conflict edges pays more successor
+   release); split M by kind {node, slice, async, continuation} — "slices are
+   40% of M" is a batch-coarser signal. Reuses the `trace_owner` seam.
+5. **Microbench ladder.** Per-feature deltas over the ~194 ns bare-op floor:
+   one prerequisite, one continuation, one acquire, one conflict edge, each in
+   isolation. In-situ M says how much; the ladder prices each feature so a
+   design change can be costed in advance.
+6. **Wake-latency histogram.** Split idle into genuine no-work vs
+   parked-while-work-available (submit→observe gap) — the metric that would
+   justify tuning the `spin_then_block` / `handoff` parking policy.
+
+Start with 1 + 2 (3 rides along): phase decomposition makes the single M
+number actionable at near-zero cost, and lock-wait measures the one bottleneck
+already slated for redesign. 4–6 follow once the phase split shows where to
+dig.
