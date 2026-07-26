@@ -38,6 +38,38 @@ hid a killed run as "exit 0" once. The script has a watchdog (`timeout`,
 sitting at ~0% CPU forever, and it kills+removes any stale `ts_tsan` before
 building so a hung previous run can't block the next build.
 
+## Reproducing a rare race (rr)
+
+TSan detection is schedule-dependent: it only reasons about the interleaving
+that actually ran, so a race it reports on one run may not recur on the next
+(same binary, same input, different thread timing). When a report is rare and
+you need it under a debugger, pair TSan with **`rr`** (record/replay,
+Linux-only, `sudo apt install rr`):
+
+1. `rr record ./ts_tsan` — runs the TSan build and records the exact execution
+   (all nondeterminism: thread scheduling, syscalls, signals) to a trace. If
+   the race fires this run, TSan prints its report as usual *and* the trace is
+   captured.
+2. `rr replay` — replays that identical execution deterministically, forward
+   and backward, under a gdb-compatible interface. The schedule is frozen, so
+   the race is now 100% reproducible.
+3. From the TSan report take the racing address and the two stacks; in the
+   replay set a hardware watchpoint on the address (`watch *addr`) and
+   `reverse-continue` to run backward to the *previous* write — landing you on
+   the unsynchronized access that TSan flagged, with full state, as many times
+   as you need.
+
+Why it works: TSan tells you a race exists and where, but not a reproducible
+schedule; `rr` freezes one schedule so the "may-not-recur" problem disappears.
+The two are complementary — TSan is the detector, `rr` is the reproducer. This
+is the principled alternative to the ad-hoc perturbation approach (core-pinning
+with `taskset -c 0,1` to widen preemption windows, plus the in-tree forensic
+event ring) used when a race would not surface under plain stress. Caveat: `rr`
+needs a CPU with the right perf-counter support (most Intel; some AMD/VM
+configs need `--disable-cpuid-features` or fall back to the perturbation route),
+and it serializes onto one core, which itself changes timing — record under the
+same core-pinning that made the race appear.
+
 ## Notes
 
 - The driver (`tsan_main.cpp`) deliberately avoids the test harness
