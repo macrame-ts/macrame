@@ -1,0 +1,33 @@
+#!/bin/sh
+# Compile-check tsan/tsan_main.cpp -- the one TU only a Linux toolchain compiles --
+# so an API change that misses it fails the commit (~3 s) instead of the Linux CI
+# job later. Full TSan runs on pre-push and in CI. Enable per clone:
+#   git config core.hooksPath tools/hooks
+# Skips with a warning when no Linux clang is reachable (fresh machine, WSL not set up).
+
+# Only when the staged changes touch C++ sources/headers. Note the check compiles the
+# working tree, not the index -- close enough for catching API drift.
+git diff --cached --name-only | grep -qE '\.(h|cpp)$' || exit 0
+
+check='clang++ -std=c++23 -fsyntax-only -fno-exceptions -Iinclude -Isample -Itools tsan/tsan_main.cpp'
+fail_msg='pre-commit: tsan/tsan_main.cpp no longer compiles -- migrate it (or bypass once with --no-verify)'
+
+if command -v wsl.exe >/dev/null 2>&1; then
+    if ! wsl.exe -e bash -c 'command -v clang++' >/dev/null 2>&1; then
+        echo "pre-commit: no clang++ inside WSL; skipping the tsan_main.cpp compile check" >&2
+        exit 0
+    fi
+    win_pwd=$(pwd -W 2>/dev/null || pwd)
+    if ! wsl.exe -e bash -c "cd \"\$(wslpath '$win_pwd')\" && $check"; then
+        echo "$fail_msg" >&2
+        exit 1
+    fi
+elif command -v clang++ >/dev/null 2>&1; then
+    if ! eval "$check"; then
+        echo "$fail_msg" >&2
+        exit 1
+    fi
+else
+    echo "pre-commit: no WSL or clang++ found; skipping the tsan_main.cpp compile check" >&2
+fi
+exit 0

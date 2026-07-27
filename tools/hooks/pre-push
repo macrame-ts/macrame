@@ -1,0 +1,41 @@
+#!/bin/sh
+# Full ThreadSanitizer stress run (tsan/run.sh, ~40 s) before commits leave the
+# machine. Runs only when the outgoing commits touch C++ sources/headers; skips
+# with a warning when no Linux toolchain is reachable. Enable per clone:
+#   git config core.hooksPath tools/hooks
+
+zero=0000000000000000000000000000000000000000
+needs_run=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue # deleting a remote ref
+    if [ "$remote_sha" = "$zero" ]; then
+        needs_run=1 # new remote branch: no base to diff against
+    elif git diff --name-only "$remote_sha..$local_sha" 2>/dev/null | grep -qE '\.(h|cpp)$'; then
+        needs_run=1
+    fi
+done
+[ "$needs_run" = 1 ] || exit 0
+
+fail_msg='pre-push: TSan failed -- see the report above (bypass once with --no-verify)'
+
+if command -v wsl.exe >/dev/null 2>&1; then
+    if ! wsl.exe -e bash -c 'command -v clang++' >/dev/null 2>&1; then
+        echo "pre-push: no clang++ inside WSL; skipping the TSan run" >&2
+        exit 0
+    fi
+    win_pwd=$(pwd -W 2>/dev/null || pwd)
+    echo "pre-push: running TSan stress (tsan/run.sh, ~40 s)..."
+    if ! wsl.exe -e bash -c "bash \"\$(wslpath '$win_pwd')/tsan/run.sh\""; then
+        echo "$fail_msg" >&2
+        exit 1
+    fi
+elif command -v clang++ >/dev/null 2>&1; then
+    echo "pre-push: running TSan stress (tsan/run.sh, ~40 s)..."
+    if ! bash tsan/run.sh; then
+        echo "$fail_msg" >&2
+        exit 1
+    fi
+else
+    echo "pre-push: no WSL or clang++ found; skipping the TSan run" >&2
+fi
+exit 0

@@ -10,7 +10,26 @@ harness-free stress driver so the portable core (scheduler, `Guarded` pipe,
 - **WSL**: `wsl --install` (admin + reboot), then in the distro install a recent
   clang + libstdc++: `sudo apt install clang libstdc++-14-dev` (Ubuntu 24.04+).
 - **Docker**: run a container with clang, mount the repo, run `tsan/run.sh`.
-- **CI**: a Linux job that runs `tsan/run.sh` on push.
+- **CI**: a Linux job that runs `tsan/run.sh` on push (`.github/workflows/ci.yml`,
+  the `linux-tsan` job).
+
+## Git hooks (per clone, recommended)
+
+`tsan/tsan_main.cpp` is the one TU the Windows build never compiles, so an API
+change can leave it stale with a green local build — CI catches it a push later.
+`tools/hooks/` closes the gap locally:
+
+- **pre-commit**: compile-check `tsan_main.cpp` (`-fsyntax-only`, ~3 s) when the
+  staged changes touch C++ sources/headers.
+- **pre-push**: full `tsan/run.sh` (~40 s) when the outgoing commits touch C++
+  sources/headers.
+
+Both skip with a warning when no Linux clang is reachable (WSL not set up yet).
+Enable once per clone:
+
+```sh
+git config core.hooksPath tools/hooks
+```
 
 ## Run (after every major change)
 
