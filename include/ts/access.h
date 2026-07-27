@@ -9,8 +9,36 @@
 #define TS_SAFETY_CHECKS 1
 #endif
 
+// One `TS_SAFETY_CHECKS` value per binary: the macro changes inline-function bodies and
+// class layouts (safety-only fields are fully gated, per the convention in CLAUDE.md), so
+// mixing translation units compiled with different values is an ODR violation. Make the
+// mistake a LINK error instead of silent corruption: MSVC-family compilers record the
+// value per object file and the linker rejects a mismatch outright; elsewhere every
+// including TU references a symbol whose name encodes the value and only the matching one
+// is defined (src/access.cpp), so a mixed link fails with an unresolved
+// `ts::detail::config_safety_checks_*` naming the problem (best-effort: a section-GC'ing
+// linker may strip the unreferenced anchor).
+#if defined(_MSC_VER)
+#define TS_DETAIL_STRINGIZE2(x) #x
+#define TS_DETAIL_STRINGIZE(x) TS_DETAIL_STRINGIZE2(x)
+#pragma detect_mismatch("TS_SAFETY_CHECKS", TS_DETAIL_STRINGIZE(TS_SAFETY_CHECKS))
+#endif
+
 namespace ts
 {
+
+namespace detail
+{
+
+#if TS_SAFETY_CHECKS
+extern const char config_safety_checks_on;
+inline const char* const config_tripwire = &config_safety_checks_on;
+#else
+extern const char config_safety_checks_off;
+inline const char* const config_tripwire = &config_safety_checks_off;
+#endif
+
+} // namespace detail
 
 enum class Access { read_only, read_write };
 
@@ -64,8 +92,10 @@ private:
     {
         const void* instance;
         Access mode;
+#if TS_SAFETY_CHECKS
         const std::atomic<std::uint64_t>* epoch;   // null = never stale
         std::uint64_t captured;
+#endif
     };
 
     Entry entries_[max_entries];

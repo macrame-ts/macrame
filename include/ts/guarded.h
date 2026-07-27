@@ -55,15 +55,17 @@ struct Pipe
     std::deque<Job> jobs;
     int active_readers = 0;
     bool writer_active = false;
+#if TS_SAFETY_CHECKS
     // Grant-window epoch for the harness's stale-inherited-grant check (see
     // `Access_context`). Seqlock-style parity: bumped at every write-grant acquire and
     // release (always under `mutex`; +2 on a graph write handoff, which elides both pipe
     // ops), so it is odd while a writer holds and even during reader eras. Reader
     // acquires/releases do not bump -- a read grant goes stale exactly when a writer
-    // acquires after its capture, which is the actual safety condition. Bumps are gated
-    // by `TS_SAFETY_CHECKS`; the field itself is unconditional for layout stability.
+    // acquires after its capture, which is the actual safety condition. Fully compiled
+    // out with the harness (the gating convention: safety-only state carries no
+    // shipping cost; mixed-config TUs are an ODR violation caught by the link-time
+    // tripwire in access.h).
     std::atomic<std::uint64_t> write_epoch{ 0 };
-#if TS_SAFETY_CHECKS
     // Count of compiled `Static_task_graph`s whose `distinct_pipes_` reference this pipe
     // (`compile()` +1; graph destruction, recompile, and move-assign-overwrite -1).
     // `~Guarded` fatals while it is nonzero: destroying the object would leave the graph
@@ -86,6 +88,19 @@ struct Pipe
         });
     }
 };
+
+// Grant-epoch source for `Access_context::add`: the pipe's `write_epoch` under
+// `TS_SAFETY_CHECKS`, null with the harness compiled out (the three-argument `add`
+// ignores a null source). Lets the capture sites -- which compile in both configs --
+// name the fully-gated field through one spelling.
+inline const std::atomic<std::uint64_t>* pipe_epoch([[maybe_unused]] const Pipe& pipe) noexcept
+{
+#if TS_SAFETY_CHECKS
+    return &pipe.write_epoch;
+#else
+    return nullptr;
+#endif
+}
 
 // Enqueue `block` as a pipe job in `mode`; when admitted (reader/writer rules, FIFO) it is
 // dispatched to the scheduler as a raw block trampoline (`block->execute`, gen 0 -- pipe
@@ -443,7 +458,7 @@ private:
         // window), so an inherited snapshot that outlives this access goes stale.
         auto core = [&]
         {
-            const std::atomic<std::uint64_t>* epoch = &pipe_.write_epoch;
+            const std::atomic<std::uint64_t>* epoch = detail::pipe_epoch(pipe_);
             if constexpr (detail::accessor_takes_token_v<Fn, decltype(*inst)>)
             {
                 auto body = [inst, epoch, fn = std::forward<Fn>(fn)](const Cancellation_token& tok) mutable -> R
@@ -572,7 +587,7 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
 {
     using R = std::invoke_result_t<Fn, Mode_ref_t<Modes, Ts>...>;
     auto instances = std::make_tuple(Guarded_access::instance(objs)...);
-    auto epochs = std::make_tuple(&Guarded_access::pipe(objs).write_epoch...);
+    auto epochs = std::make_tuple(pipe_epoch(Guarded_access::pipe(objs))...);
 
     auto body = [instances, epochs, fn = std::forward<Fn>(fn)]() mutable -> R
     {

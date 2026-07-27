@@ -242,7 +242,7 @@ private:
 
         node.pipes = { (&access.pipe_)... };
 
-        auto epochs = std::make_tuple(&access.pipe_.write_epoch...);
+        auto epochs = std::make_tuple(detail::pipe_epoch(access.pipe_)...);
         node.run = [fn = std::forward<Fn>(fn), instances, epochs]() mutable
         {
             Access_context ctx;

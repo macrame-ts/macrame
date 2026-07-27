@@ -57,6 +57,7 @@ void test_harness_allows()
     TS_CHECK(v == 1);
 }
 
+#if TS_SAFETY_CHECKS
 // Grant-window staleness: an entry declared with an epoch source is valid while the
 // epoch holds its captured value and reports `stale` (a distinct verdict, not `none`)
 // once it moves -- the unit-level contract behind the stale-inherited-grant fatal.
@@ -97,6 +98,7 @@ void test_epoch_read_era_and_null()
     TS_CHECK(ctx.check(&x, Access::read_only) == Grant::stale);
     TS_CHECK(ctx.check(&z, Access::read_write) == Grant::granted);  // null source: never stale
 }
+#endif
 
 #if TS_SAFETY_CHECKS
 // One fixed `TS_ENSURE` expansion site, so two calls exercise the once-per-site
@@ -162,9 +164,9 @@ void run_access_tests()
     run("grants logic", test_grants);
     run("scope nesting", test_scope_nesting);
     run("harness allows declared access", test_harness_allows);
+#if TS_SAFETY_CHECKS
     run("epoch staleness verdicts", test_epoch_staleness);
     run("epoch read era + null source", test_epoch_read_era_and_null);
-#if TS_SAFETY_CHECKS
     run("ensure facility (once-per-site)", test_ensure_facility);
     run("ensure handler hook", test_ensure_handler_hook);
 #endif

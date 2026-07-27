@@ -336,14 +336,19 @@ change after public. Feed the going-public "API-stability pass".
    `Pipe::Job::on_acquired` (`move_only_function`) allocates on the graph / multi-async
    reservation path (unlike the allocation-free block/async dispatch); the tunable-SBO
    `Function<Sig,N>` item is the fix. Not a standalone task.
-6. **Safety-field gating convention — pick one (flagged 2026-07).** Three harness-adjacent
-   additions chose two conventions: `Pipe::write_epoch` (T1) is an unconditional field with
-   gated behavior ("layout stability" — a weak argument, since mixed `TS_SAFETY_CHECKS` across
-   TUs is an ODR violation regardless); `Pipe::graph_refs` (T3) and the whole `TS_ENSURE`
-   facility (T4) are fully gated, field included (author's explicit instruction on T3). Align
-   `write_epoch` to fully-gated (one-line change) or ratify the unconditional-field style —
-   decide in the API-stability pass; the same question recurs if the shelved interval-grant
-   entry layout ([escaped-refs-hardening.md](escaped-refs-hardening.md) §6.1) is ever revived.
+6. **Safety-field gating convention — RESOLVED (fully gated, 2026-07).** The convention is
+   ratified in CLAUDE.md's style section: safety-only state is fully gated by
+   `TS_SAFETY_CHECKS`, fields included; the only unconditional exception is genuinely free
+   storage (a spare bit in an existing packed byte, e.g. `Flags::pipe_job`). T1's two style-1
+   spots aligned: `Pipe::write_epoch` and `Access_context::Entry`'s epoch pair are now gated
+   (capture sites go through `detail::pipe_epoch`, which returns null with the harness off —
+   shipping contexts shrink by 16 bytes/entry). The "layout stability" argument was hollow —
+   mixed-config TUs violate ODR through inline-function bodies regardless — and is now
+   enforced instead of argued: a link-time tripwire in `access.h` (`#pragma detect_mismatch`
+   on MSVC-family; a config-named anchor symbol, defined in `access.cpp`, elsewhere) makes a
+   mixed-config link fail with a diagnostic. The same convention governs the shelved
+   interval-grant entry layout ([escaped-refs-hardening.md](escaped-refs-hardening.md) §6.1)
+   if revived.
 7. **Entity-naming approach — review before it hardens (author 2026-07, T18).** We name nodes
    (`Node_name` / `std::source_location`) and objects (`ts::Named` leading ctor arg), which is
    what makes edge provenance and the DOT dump cheap — but the author is "not totally sold on

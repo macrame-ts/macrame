@@ -6,8 +6,22 @@
 namespace ts
 {
 
+namespace detail
+{
+
+// The link-time config tripwire's anchor (see access.h): exactly one of the two names
+// exists per library build, so a TU compiled with the other `TS_SAFETY_CHECKS` value
+// fails to link with an unresolved symbol naming the mismatch.
+#if TS_SAFETY_CHECKS
+const char config_safety_checks_on = 1;
+#else
+const char config_safety_checks_off = 1;
+#endif
+
+} // namespace detail
+
 void Access_context::add(const void* instance, Access mode,
-                         const std::atomic<std::uint64_t>* epoch) noexcept
+                         [[maybe_unused]] const std::atomic<std::uint64_t>* epoch) noexcept
 {
 #if TS_SAFETY_CHECKS
     // Silent truncation is a latent footgun: a task declaring more than `max_entries`
@@ -17,12 +31,14 @@ void Access_context::add(const void* instance, Access mode,
     if (count_ == max_entries)
         ts::fatal("Access_context overflow: more than 8 declared objects in one task; "
             "raise Access_context::max_entries");
-#else
-    epoch = nullptr;   // staleness is a harness diagnostic; skip the capture when compiled out
-#endif
     if (count_ < max_entries)
         entries_[count_++] = { instance, mode, epoch,
                                epoch ? epoch->load(std::memory_order_relaxed) : 0 };
+#else
+    // Staleness is a harness diagnostic; without the harness an entry is address + mode.
+    if (count_ < max_entries)
+        entries_[count_++] = { instance, mode };
+#endif
 }
 
 Access_context::Grant Access_context::check(const void* instance, Access mode) const noexcept
