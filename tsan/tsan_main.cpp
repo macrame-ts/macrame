@@ -460,7 +460,7 @@ void stress_cancel()
     {
         ts::Cancellation_source src;
         std::jthread canceller([&] { src.request_cancel(); });
-        g.execute(src.token()).sync();
+        g.execute({.token = src.token()}).sync();
         canceller.join();
     }
 }
