@@ -256,6 +256,23 @@ bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_p
 template<typename Fn, typename A>
 concept Async_accessor = std::invocable<Fn, A> || std::invocable<Fn, A, const Cancellation_token&>;
 
+// The accessor gates: mode classification FIRST, invocability second -- the order is
+// load-bearing. `accessor_mode` classifies without ever instantiating a body
+// (introspection / the rvalue probe), while `Async_accessor` probes invocability --
+// and probing a GENERIC lambda deduces its return type, which instantiates the BODY;
+// for a mutating body probed against `const T&` that is a hard error, not a
+// substitution failure. Conjunctions short-circuit, so a failed mode gate rejects
+// cleanly at the caller and the probe is never evaluated for the wrong mode. The one
+// spelling for every read/write accessor position (`Guarded`'s verbs,
+// `Versioned::read`).
+template<typename Fn, typename T>
+concept Read_only_accessor = (accessor_mode<Fn, T>() == Access::read_only)
+    && Async_accessor<Fn, const T&>;
+
+template<typename Fn, typename T>
+concept Read_write_accessor = (accessor_mode<Fn, T>() == Access::read_write)
+    && Async_accessor<Fn, T&>;
+
 template<typename Fn, typename A>
 inline constexpr bool accessor_takes_token_v = std::invocable<Fn, A, const Cancellation_token&>;
 
@@ -396,17 +413,12 @@ public:
     //                 so prefer `async` for anything non-trivial inside a graph node.
     //   async(fn)  -- always enqueued off the calling thread. For heavy functors.
 
-    // Constraint ORDER is load-bearing in all four overloads: the mode check comes first so
-    // that `Async_accessor` (an invocability probe) is never evaluated for the wrong mode --
-    // probing a GENERIC lambda's invocability with `const T&` deduces its return type, which
-    // instantiates the BODY; for a mutating body that is a hard error, not a substitution
-    // failure. `accessor_mode` classifies without ever instantiating a body (rvalue probe /
-    // introspection), so it is the safe gate.
+    // All four overloads gate on `Read_only_accessor`/`Read_write_accessor` -- the
+    // mode-first constraint pair (see the concepts for why the order is load-bearing).
 
     // access, read_write.
     template<typename Fn>
-        requires (detail::accessor_mode<Fn, T>() == Access::read_write)
-            && detail::Async_accessor<Fn, T&>
+        requires detail::Read_write_accessor<Fn, T>
     auto access(Fn&& fn, Access_options opts = {})
         -> Task<detail::Accessor_result_t<Fn, T, Access::read_write>>
     {
@@ -416,8 +428,7 @@ public:
 
     // access, read_only.
     template<typename Fn>
-        requires (detail::accessor_mode<Fn, T>() == Access::read_only)
-            && detail::Async_accessor<Fn, const T&>
+        requires detail::Read_only_accessor<Fn, T>
     auto access(Fn&& fn, Access_options opts = {}) const
         -> Task<detail::Accessor_result_t<Fn, T, Access::read_only>>
     {
@@ -427,8 +438,7 @@ public:
 
     // async, read_write: always enqueued (never inline).
     template<typename Fn>
-        requires (detail::accessor_mode<Fn, T>() == Access::read_write)
-            && detail::Async_accessor<Fn, T&>
+        requires detail::Read_write_accessor<Fn, T>
     auto async(Fn&& fn, Access_options opts = {})
         -> Task<detail::Accessor_result_t<Fn, T, Access::read_write>>
     {
@@ -438,8 +448,7 @@ public:
 
     // async, read_only: always enqueued (never inline).
     template<typename Fn>
-        requires (detail::accessor_mode<Fn, T>() == Access::read_only)
-            && detail::Async_accessor<Fn, const T&>
+        requires detail::Read_only_accessor<Fn, T>
     auto async(Fn&& fn, Access_options opts = {}) const
         -> Task<detail::Accessor_result_t<Fn, T, Access::read_only>>
     {

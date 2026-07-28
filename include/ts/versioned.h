@@ -139,7 +139,7 @@ public:
     // Read the current published version -- an ordinary read job on the front's
     // pipe (concurrent readers overlap; a queued publish orders around it, FIFO).
     template<typename Fn>
-        requires detail::Async_accessor<Fn, const T&>
+        requires detail::Read_only_accessor<Fn, T>
     auto read(Fn&& fn, Access_options opts = {}) const
     {
         return std::as_const(front_).async(std::forward<Fn>(fn), opts);
