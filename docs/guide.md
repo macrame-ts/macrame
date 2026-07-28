@@ -896,6 +896,11 @@ Contracts, briefly (full statements live in
 - **Lost writes are loud**: destroying a `Deferred` with staged, uncommitted
   commands is fatal (under `TS_SAFETY_CHECKS`); `discard()` is the explicit
   escape.
+- **Sync before destroying**: destroying a `Deferred` while a `commit_async`
+  is still in flight is fatal (under `TS_SAFETY_CHECKS`) — sync the task it
+  returned first. The pending job uses the `Deferred`, and a destructor that
+  silently blocked on it would hide a bug. With the last commit settled the
+  destructor is non-blocking.
 
 Inside a graph node that already holds write access to the target, apply
 without a second pipe trip: `staged.commit()` (the bound object is implicit).

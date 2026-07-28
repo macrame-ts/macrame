@@ -72,7 +72,12 @@ summary + the forward plan.
    `set_divergence_check(hash)` = bitwise replica compare after replay, fatal
    on mismatch (valid: no FP drift on one binary; partial hashes fine).
 7. **Lost writes are fatal** (`TS_SAFETY_CHECKS`): staged-but-unapplied at
-   destruction; `discard()` is the escape.
+   destruction; `discard()` is the escape. Also fatal: destroying a `Deferred`
+   with a `commit_async` still in flight — sync the returned task first (the
+   pending pipe job uses the `Deferred`; a silently blocking destructor would
+   hide the bug). Compliant destruction is non-blocking: pipe writes are FIFO,
+   so the last commit settling means no job references the `Deferred` (shipping
+   builds keep the pipe wait as the safety net for the violation case).
 8. **Recorder lifetime**: mint per producer, prefer setup-time; dtors recycle
    slots (free-list; staged-but-uncut commands survive release); >4096 alive
    recorders is fatal (`Journal::max_slots` — catches mint-and-retain); a

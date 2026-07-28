@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -200,6 +201,34 @@ void run_death_scenario(const char* name)
         auto rec = d.recorder();
         rec.stage([](int& v) { ++v; });
         // `d` destroyed with a staged uncommitted command -> fatal (lost write)
+    }
+    else if (std::strcmp(name, "deferred_dtor_inflight_commit") == 0)
+    {
+        // If the in-flight fatal regresses, the destructor parks on the blocked
+        // pipe instead of aborting; exit 0 after a bound so the parent's
+        // `expect_death` fails rather than hanging.
+        std::thread([]
+        {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            std::_Exit(0);
+        }).detach();
+
+        ts::Guarded<int> target{ 0 };
+        std::atomic<bool> release{ false };
+        // Holds the pipe's write slot so the commit job cannot run or settle.
+        ts::Task<void> blocker = target.async([&release](int&)
+        {
+            while (!release.load(std::memory_order_relaxed))
+                std::this_thread::yield();
+        });
+        {
+            ts::Deferred<int> d{ target };
+            auto rec = d.recorder();
+            rec.stage([](int& v) { ++v; });
+            d.commit_async();   // queued behind the blocker: still in flight
+            // `d` destroyed with the commit unsettled -> fatal (before the
+            // staged-leftover check can fire)
+        }
     }
     else if (std::strcmp(name, "recorder_empty_stage") == 0)
     {

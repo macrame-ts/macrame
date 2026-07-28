@@ -381,9 +381,28 @@ void test_late_bound_recorder()
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 4);
 }
 
+// The destruction contract's compliant path: a synced commit_async settles the
+// last commit, so the destructor neither fatals nor waits on the pipe.
+void test_synced_commit_then_destroy()
+{
+    ts::Guarded<int> target{ 0 };
+    {
+        ts::Deferred<int> d{ target };
+        auto rec = d.recorder();
+        rec.stage([](int& v) { v += 5; });
+        d.commit_async().sync();
+    }   // dtor: last commit settled -> no fatal
+    TS_CHECK(target.async([](const int& v) { return v; }).sync() == 5);
+}
+
 void test_drop_staged_is_fatal()
 {
     TS_CHECK(ts::test::expect_death("deferred_drop_staged"));
+}
+
+void test_dtor_inflight_commit_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("deferred_dtor_inflight_commit"));
 }
 
 void test_moved_from_recorder_stage_is_fatal()
@@ -422,7 +441,9 @@ void run_deferred_tests()
     run("deferred: parallel recorder churn", test_parallel_recorder_churn);
     run("deferred: keeping recorders alive past max_slots is fatal", test_slot_overflow_is_fatal);
     run("deferred: late-bound recorder", test_late_bound_recorder);
+    run("deferred: synced commit then destroy", test_synced_commit_then_destroy);
     run("deferred: destroy with staged commands is fatal", test_drop_staged_is_fatal);
+    run("deferred: destroy with commit in flight is fatal", test_dtor_inflight_commit_is_fatal);
     run("deferred: stage on moved-from recorder is fatal", test_moved_from_recorder_stage_is_fatal);
     run("deferred: stage on empty parallel recorder is fatal", test_empty_parallel_recorder_stage_is_fatal);
 }

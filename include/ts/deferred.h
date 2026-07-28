@@ -33,8 +33,9 @@ namespace ts
 // producer handles; `commit_async()` applies everything as one pipe write job;
 // `commit()` applies to the bound object under an access grant the caller already
 // holds (a graph node's declared write, or inside a `target.async` write body) --
-// no second pipe round-trip. Must outlive any pending `commit_async` (the destructor
-// waits out the target's pipe) and any outstanding `Recorder`.
+// no second pipe round-trip. Lifetime contract: sync the task `commit_async` returns
+// before destroying the Deferred (the pending pipe job uses this object); violating
+// it is fatal under `TS_SAFETY_CHECKS`. Must also outlive any outstanding `Recorder`.
 template<typename T>
 class Deferred
 {
@@ -48,8 +49,22 @@ public:
     // intended (e.g. teardown mid-frame).
     ~Deferred()
     {
-        // Let any queued commit_async run before judging leftovers.
-        detail::Guarded_access::pipe(*target_).wait_until_idle();
+        // Pipe writes are FIFO, so the last-enqueued commit settling means no
+        // pending pipe job references this Deferred; the destructor then has
+        // nothing to wait for (unrelated jobs on the target's pipe are `~Guarded`'s
+        // business). An unsettled commit is a contract violation: surface it hard
+        // rather than block silently -- a long-parking destructor goes unnoticed
+        // and usually marks a bug worth fixing.
+        if (commit_issued_ && !last_commit_.is_done())
+        {
+#if TS_SAFETY_CHECKS
+            fatal("Deferred destroyed with a commit_async still in flight -- sync the "
+                  "returned task before destruction");
+#endif
+            // Shipping safety net: the job dereferences this Deferred when it runs;
+            // outwait the pipe so it cannot run against a destroyed one.
+            detail::Guarded_access::pipe(*target_).wait_until_idle();
+        }
 #if TS_SAFETY_CHECKS
         if (journal_.has_staged())
             fatal("Deferred destroyed with staged uncommitted commands (lost writes); commit or discard() first");
@@ -92,10 +107,13 @@ public:
 
     // Apply as an ordinary pipe write job: one acquisition amortized over the whole
     // batch. The cut happens when the job RUNS (pipe FIFO position), so it captures
-    // everything staged before the write actually happens. Returns the completion.
+    // everything staged before the write actually happens. Returns the completion;
+    // sync it before destroying the Deferred (see the destructor).
     Task<void> commit_async(Access_options opts = {})
     {
-        return target_->async([this](T&) { commit(); }, opts);
+        last_commit_ = target_->async([this](T&) { commit(); }, opts);
+        commit_issued_ = true;
+        return last_commit_;
     }
 
     // Drop everything staged so far, explicitly. The escape hatch for teardown.
@@ -107,6 +125,12 @@ public:
 private:
     Guarded<T>* target_;
     detail::Journal<T> journal_;
+    // The most recent `commit_async`'s completion; the destructor's in-flight
+    // check. FIFO makes one handle cover all commits. Unconditional (not
+    // safety-only): it gates the shipping destructor's wait-skip. `Task` has no
+    // null test, hence the flag.
+    Task<void> last_commit_;
+    bool commit_issued_ = false;
 };
 
 } // namespace ts
