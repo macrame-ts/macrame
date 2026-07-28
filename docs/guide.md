@@ -898,7 +898,7 @@ Contracts, briefly (full statements live in
   escape.
 
 Inside a graph node that already holds write access to the target, apply
-without a second pipe trip: `staged.commit(target_ref)`.
+without a second pipe trip: `staged.commit()` (the bound object is implicit).
 
 For one logical producer parallelized internally (staging from inside a
 `parallel_for`), mint a `Parallel_recorder` instead: per-worker storage, no

@@ -31,10 +31,10 @@ namespace ts
 
 // The command buffer: binds to a `Guarded<T>` for its lifetime. `recorder()` mints
 // producer handles; `commit_async()` applies everything as one pipe write job;
-// `commit(T&)` applies under an access grant the caller already holds (a graph
-// node's declared write, or inside a `target.async` write body) -- no second pipe
-// round-trip. Must outlive any pending `commit_async` (the destructor waits out
-// the target's pipe) and any outstanding `Recorder`.
+// `commit()` applies to the bound object under an access grant the caller already
+// holds (a graph node's declared write, or inside a `target.async` write body) --
+// no second pipe round-trip. Must outlive any pending `commit_async` (the destructor
+// waits out the target's pipe) and any outstanding `Recorder`.
 template<typename T>
 class Deferred
 {
@@ -75,17 +75,19 @@ public:
         return Parallel_recorder<T>(journal_, global_scheduler());
     }
 
-    // Apply everything staged so far to `target`, which the caller must already
-    // hold write access to (checked). Cut happens now: commands staged after this
-    // point ride the next commit.
-    void commit(T& target)
+    // Apply everything staged so far to the bound object, which the caller must
+    // already hold write access to (checked). The object is implicit (this Deferred
+    // binds one `Guarded<T>`), so there is no way to commit into the wrong instance.
+    // Cut happens now: commands staged after this point ride the next commit.
+    void commit()
     {
+        T* t = detail::Guarded_access::instance(*target_);
 #if TS_SAFETY_CHECKS
-        access_check(&target);   // non-const overload: requires a read_write grant
+        access_check(t);   // requires a read_write grant on the bound object
 #endif
         auto batch = journal_.cut();
         for (auto& cmd : batch)
-            cmd(target);
+            cmd(*t);
     }
 
     // Apply as an ordinary pipe write job: one acquisition amortized over the whole
@@ -93,7 +95,7 @@ public:
     // everything staged before the write actually happens. Returns the completion.
     Task<void> commit_async(Access_options opts = {})
     {
-        return target_->async([this](T& t) { commit(t); }, opts);
+        return target_->async([this](T&) { commit(); }, opts);
     }
 
     // Drop everything staged so far, explicitly. The escape hatch for teardown.

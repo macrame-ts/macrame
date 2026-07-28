@@ -38,7 +38,7 @@ summary + the forward plan.
 | file | contents |
 |---|---|
 | `journal.h` | `detail::Journal<T>` (slots, cut, free-list, `max_slots`), `Recorder<T>`, `Parallel_recorder<T>`, THE ORDERING CONTRACT comment |
-| `deferred.h` | `Deferred<T>`: `recorder()`, `parallel_recorder()`, `commit(T&)` (under held grant, checked), `commit_async(opts)`, `discard()` |
+| `deferred.h` | `Deferred<T>`: `recorder()`, `parallel_recorder()`, `commit()` (under held grant, checked; bound object implicit), `commit_async(opts)`, `discard()` |
 | `versioned.h` | `Versioned<T>`: `read()`, `recorder()`, `parallel_recorder()`, `publish(opts)`, `publish_into(T&)`, `state()`, `Resync{replay,copy,overwrite}`, `set_copy`, `set_divergence_check`, `discard()`; `ts::publish_body(v)` for graph flip nodes |
 | `sample/physics.{h,cpp}` | machine/extract decomposition fixture (sealed `Guarded<Physics_world>`, `Deferred` inputs, `Versioned` poses, id reservation, batch extract, parallel drag staging); determinism self-check |
 | `sample/blackboard.cpp` | single file (extern'd in main.cpp, no header — by design): blackboard recipe with key-change subscriptions; determinism self-check |
@@ -121,9 +121,10 @@ summary + the forward plan.
 6. **Per-slot mutex exists only for the dynamic stage-vs-cut race**;
    uncontended in one-producer use; graphs edge-order it away entirely. It is
    the thing the arena/record-stream rebase can remove.
-7. **`commit(T&)` vs `commit_async()`**: the former applies under an already
-   held write grant (verified via `access_check(&target)`) — the graph-node /
-   sim-boundary form; the latter is one ordinary pipe write.
+7. **`commit()` vs `commit_async()`**: the former applies to the bound object
+   under an already held write grant (verified via `access_check` on the bound
+   instance) — the graph-node / sim-boundary form; the latter is one ordinary
+   pipe write.
 8. **Producer→commit/flip edges are hand-wired** (`.after`); `Access::append`
    derivation was analyzed and deliberately NOT added (avoidable lattice
    dimension; staging needs no grant at all). Revisit only when the

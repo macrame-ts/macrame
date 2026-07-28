@@ -509,8 +509,8 @@ move-only producer identities; `stage(closure)` appends to private per-recorder
 storage (`detail::Journal<T>` — shared with `Versioned`), no grant on the
 target; `commit_async(opts)` is one ordinary pipe write amortized over the
 batch (cut at execution time — a cancelled commit retains its commands);
-`commit(T&)` applies under a grant the caller already holds (the graph-node
-form; also the physics sample's "commit at the sim boundary"). Apply order:
+`commit()` applies to the bound object under a grant the caller already holds
+(the graph-node form; also the physics sample's "commit at the sim boundary"). Apply order:
 recorder-creation order, FIFO within — deterministic regardless of thread
 timing, exactly the §3.2 claim.
 

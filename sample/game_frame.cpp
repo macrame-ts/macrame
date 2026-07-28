@@ -846,7 +846,7 @@ ts::Graph_node add_submit(ts::Static_task_graph& g, World& w, Frame_variant v)  
         [&w](const Transforms& prev_xf, Draw_lists& dl)
         {
             read_all(prev_xf);
-            w.draw_staged.commit(dl);
+            w.draw_staged.commit();
             drawn.fetch_add(dl.count(), std::memory_order_relaxed);
             parallel_cost(0.8);
             dl.clear();

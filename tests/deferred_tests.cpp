@@ -149,12 +149,12 @@ void test_commit_under_async_write_grant()
     auto rec = d.recorder();
     rec.stage([](Counter& c) { c.add(5); });
 
-    // The `commit(T&)` form: no second pipe acquisition, applied under the write
+    // The `commit()` form: no second pipe acquisition, applied under the write
     // hold the surrounding body already has.
     target.async([&d](Counter& c)
     {
         c.add(1);
-        d.commit(c);
+        d.commit();
         c.add(1);
     }).sync();
 
@@ -173,7 +173,7 @@ void test_commit_in_graph_node()
         ++s;
         rec.stage([](Counter& c) { c.add(10); });
     }, producer_state);
-    auto commit = g.add_node([&d](Counter& c) { d.commit(c); }, target);
+    auto commit = g.add_node([&d](Counter&) { d.commit(); }, target);
     commit.after(producer);
     g.compile();
 
