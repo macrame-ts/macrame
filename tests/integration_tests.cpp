@@ -758,6 +758,7 @@ void test_single_threaded_deterministic_order()
 // awaited write cannot finish before the check runs (no timing dependence).
 void test_blocking_sync_warns_but_completes()
 {
+    ts::test::Expected_ensures expect{ 1 };   // diagnostic fires on a worker thread; no F5 break
     long long base = ts::ensure_failure_count();
     ts::Guarded<tests::Counter> a;
     ts::Guarded<int> b{ 0 };
@@ -778,7 +779,6 @@ void test_blocking_sync_warns_but_completes()
     g.execute().sync();
 
     TS_CHECK(ts::ensure_failure_count() == base + 1);
-    ts::test::consume_ensure_failures(1);
 }
 
 // Sanctioned fork-join inside a node produces zero reports: `parallel_for` joins via the

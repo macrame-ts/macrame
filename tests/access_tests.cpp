@@ -110,9 +110,12 @@ bool trigger_ensure_site()
 
 // The ensure facility: a passing expression is silent and yields true; a failing
 // site counts every occurrence but reports once; no abort. (The debugger-break
-// branch is untestable here -- no debugger attached in CI.)
+// branch is untestable here -- no debugger attached in CI.) `Expected_ensures`
+// silences the deliberate failures (no F5 break) and consumes them on scope exit.
 void test_ensure_facility()
 {
+    ts::test::Expected_ensures expect{ 2 };
+
     long long base = ts::ensure_failure_count();
 
     TS_CHECK(TS_ENSURE(1 + 1 == 2, "never fires"));
@@ -121,7 +124,6 @@ void test_ensure_facility()
     TS_CHECK(!trigger_ensure_site());               // yields the expression's value
     TS_CHECK(!trigger_ensure_site());               // same site: counts again, reports once
     TS_CHECK(ts::ensure_failure_count() == base + 2);
-    ts::test::consume_ensure_failures(2);
 }
 
 std::atomic<int> g_custom_handler_hits{ 0 };

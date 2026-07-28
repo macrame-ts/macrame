@@ -21,6 +21,12 @@ int g_failures = 0;
 int g_current_test_failures = 0;
 long long g_ensure_failures_consumed = 0;
 
+#if TS_SAFETY_CHECKS
+// Installed by `Expected_ensures` so a deliberately-failing test presents nothing and
+// does not break into an attached debugger. Counting stays in `ensure_failed`.
+void silent_ensure_handler(const char*) noexcept {}
+#endif
+
 } // namespace
 
 bool record_check(bool passed, const char* expr, const char* file, int line, const char* message)
@@ -70,6 +76,20 @@ void consume_ensure_failures(int n)
 {
     g_ensure_failures_consumed += n;
 }
+
+#if TS_SAFETY_CHECKS
+Expected_ensures::Expected_ensures(int expected) noexcept
+    : expected_(expected)
+    , prev_(ts::set_ensure_handler(&silent_ensure_handler))
+{
+}
+
+Expected_ensures::~Expected_ensures()
+{
+    consume_ensure_failures(expected_);
+    ts::set_ensure_handler(prev_);
+}
+#endif
 
 int summary()
 {

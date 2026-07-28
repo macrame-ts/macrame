@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ts/fatal.h"
+
 namespace ts::test
 {
 
@@ -23,6 +25,29 @@ void prepare_death_child();
 // `summary()` fails on any failure not consumed this way, so a stray ensure failure
 // in an unrelated test cannot pass silently. No-op when the facility is compiled out.
 void consume_ensure_failures(int n);
+
+#if TS_SAFETY_CHECKS
+// RAII guard for a test that deliberately trips `TS_ENSURE`. Installs a silent
+// presentation handler for its lifetime, so the default debugger-break does not stop
+// a deliberately-failing test under an attached debugger (F5); on destruction it
+// consumes `expected` failures (keeping `summary()` green) and restores the handler
+// that was installed before. The failure counter still advances (counting lives in
+// `ensure_failed`, outside the handler), so a test can assert the exact count while
+// the guard is alive. Non-copyable, non-movable.
+class Expected_ensures
+{
+public:
+    explicit Expected_ensures(int expected) noexcept;
+    ~Expected_ensures();
+
+    Expected_ensures(const Expected_ensures&) = delete;
+    Expected_ensures& operator=(const Expected_ensures&) = delete;
+
+private:
+    int expected_;
+    ts::Ensure_handler prev_;
+};
+#endif
 
 // Print totals; returns a process exit code (0 = all checks passed and no
 // unconsumed ensure failures).
