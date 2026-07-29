@@ -153,6 +153,21 @@ IDs — when an item is done, mark it, don't renumber.
        a serious TSan campaign. GATE: measure pipe-mutex contention on a reader-heavy fixture
        first — no rewrite without evidence. (A `shared_mutex` is NOT the interim answer:
        every pipe op mutates admission state, so all would take it exclusive.)
+       **Addendum (2026-07, from the `Deferred::last_commit_` race):** the pipe does not
+       expose queue facts (last-enqueued write, subset completion), so a wrapper that
+       fire-and-forgets jobs and later needs "are my jobs done" must reconstruct pipe
+       ordering externally — and the reconstruction is subtle: handle-store order need not
+       match enqueue order, so recording "my last job" requires a lock spanning enqueue +
+       store (a plain or even atomic store of the newest handle can leave an earlier job's
+       handle recorded, and a settled-check on it then misses a pending job). Incident:
+       `Deferred::commit_async` raced exactly this way (caught by the pre-push TSan hook;
+       fixed with `commit_mutex_` spanning enqueue + store). Inventory: `Versioned::chain_`
+       is sound by construction (the `seq_mutex_`'d chain, not the pipe, is its ordering
+       source). This rebase dissolves the class: the atomic tail IS the last-job handle —
+       expose it (e.g. `Pipe::last_write()` completion, or a settled-check) and delete
+       `Deferred`'s external mutex; any future fire-and-forget wrapper gets ordering for
+       free. Until then the rule stands: never record pipe ordering without a lock spanning
+       enqueue + record.
 
 2. **Static task graph**
    1. `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.

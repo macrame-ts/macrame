@@ -149,6 +149,8 @@ private:
     Task<void> last_commit_;
     bool commit_issued_ = false;
     // Orders concurrent commit_async calls (enqueue + handle store as one step).
+    // Interim: the pipes-as-edges rebase (TODO 1.14) exposes the pipe's own tail
+    // as the last-write handle, deleting this mutex -- see the 1.14 addendum.
     std::mutex commit_mutex_;
 };
 
