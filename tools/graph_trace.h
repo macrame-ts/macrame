@@ -38,6 +38,17 @@ inline constexpr double dead_time_bad_share = 0.10;   // above: red (scheduling-
 inline constexpr double core_util_good_share = 0.75;   // at/above: green
 inline constexpr double core_util_ok_share = 0.50;     // at/above: yellow; below: red
 
+// Dead-time cause classification (Scalasca-style wait states, from aggregates we already
+// hold): each critical dead-time band is classified by the mean core utilization DURING
+// its gap, joined from the time-bucketed utilization. Cores saturated while the chain
+// waited = the chain waited for a CORE (core-bound -- capacity is the lever: add workers,
+// shed off-path work). Cores idle = it waited for a DEPENDENCY or dispatch (dependency-
+// bound -- cut/loosen the edge, overlap the producer, check wake latency). Between the
+// two is mixed. The thresholds reuse the utilization bands above: the same figure that
+// colours the utilization headline decides what a gap's utilization means.
+inline constexpr double gap_core_bound_share = core_util_good_share;         // >=: core-bound
+inline constexpr double gap_dependency_bound_share = core_util_ok_share;     // <: dependency-bound
+
 // Task-system overhead -- the share of the frame's COMPUTE (body + machinery, excluding
 // idle) spent in the scheduler's own machinery: task setup/completion, successful
 // find_work scans, and submit fan-out issued from inside a body. M / (B + M). Low is the
@@ -48,6 +59,11 @@ inline constexpr double core_util_ok_share = 0.50;     // at/above: yellow; belo
 // ns/op. Colours the overhead headline figure in `write_SVG`.
 inline constexpr double overhead_ok_share = 0.05;      // at/below: green (bodies dominate)
 inline constexpr double overhead_bad_share = 0.15;     // above: red (too fine-grained)
+
+// Critical-path ranking table (`write_SVG`, below the legend): nodes with a chain share
+// below this cutoff are omitted from the table; a footer reports how many were dropped
+// and the largest omitted share.
+inline constexpr double rank_min_share = 0.05;
 
 // Aggregated runtime trace for a `Static_task_graph`: attach with
 // `graph.set_trace(&trace)` (after `compile()`), run any number of times, then
@@ -681,6 +697,59 @@ inline bool Graph_trace::write_SVG(const char* path) const
         slack[static_cast<size_t>(i)] = std::max(0.0,
             lf[static_cast<size_t>(i)] - (est[static_cast<size_t>(i)] + dur[static_cast<size_t>(i)]));
 
+    // Critical-path ranking (the table below the legend): nodes ranked by expected chain
+    // contribution -- chain share x mean duration, descending -- so a briefly-critical
+    // heavy node outranks an always-critical trivial one. `dead_in` is the node's mean
+    // incoming critical dead time: over its in-edges that ever bound the chain, the
+    // binding-gap means weighted by how often each edge bound
+    // (sum(gap_mean x edge.critical_runs) / sum(edge.critical_runs)) -- "when this node's
+    // release was the chain's step, how long did it sit ready-but-waiting on average".
+    // Negative = the node was never released by a binding edge (a root).
+    struct Rank_row
+    {
+        int node = -1;
+        double share = 0.0;
+        double key = 0.0;       // share x mean duration, µs
+        double dead_in = -1.0;  // µs; < 0 = no binding in-edge
+    };
+    std::vector<Rank_row> ranking;
+    int rank_omitted = 0;
+    int rank_max_omitted = -1;
+    double rank_max_omitted_share = 0.0;
+    for (int i = 0; i < count; ++i)
+    {
+        const Node_agg& a = nodes_[static_cast<size_t>(i)];
+        double share = runs_ > 0
+            ? static_cast<double>(a.critical_runs) / static_cast<double>(runs_) : 0.0;
+        if (share < rank_min_share)
+        {
+            ++rank_omitted;
+            if (share > rank_max_omitted_share)
+            {
+                rank_max_omitted_share = share;
+                rank_max_omitted = i;
+            }
+            continue;
+        }
+        Rank_row r;
+        r.node = i;
+        r.share = share;
+        r.key = share * a.duration.mean;
+        double gap_weighted = 0.0;
+        long long gap_runs = 0;
+        for (const Edge_agg& e : edges_)
+            if (e.to == i && e.critical_runs > 0)
+            {
+                gap_weighted += e.binding_gap.mean * static_cast<double>(e.critical_runs);
+                gap_runs += e.critical_runs;
+            }
+        if (gap_runs > 0)
+            r.dead_in = gap_weighted / static_cast<double>(gap_runs);
+        ranking.push_back(r);
+    }
+    std::sort(ranking.begin(), ranking.end(),
+        [](const Rank_row& a, const Rank_row& b){ return a.key > b.key; });
+
     for (int u : topo)
         for (int e : out_edges[static_cast<size_t>(u)])
         {
@@ -740,8 +809,15 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // label, centered at x = pad_l. 24px just clears its half-width ("0.0 µs" at 10px) with
     // a few px of breathing room, so the bars start as far left as the labels permit.
     const double pad_l = 24.0, pad_r = 28.0, plot_w = 1150.0;
-    const double header_h = 84.0, axis_h = 30.0, legend_h = 190.0;
+    // Legend reflowed into three columns (3 rows, 18px pitch), height-optimised.
+    const double header_h = 84.0, axis_h = 30.0, legend_h = 68.0;
     const double row_h = 30.0, bar_h = 20.0;
+    // Ranking table below the legend: title + column header + one row per ranked node
+    // + an omission footer when the share cutoff dropped any, 16px row pitch.
+    const double table_row_h = 16.0;
+    const double table_h = 26.0
+        + table_row_h * static_cast<double>(1 + ranking.size() + (rank_omitted > 0 ? 1 : 0))
+        + 12.0;
     const double px_per_us = plot_w / span_us;
 
     // A core-utilization area chart sits between the header and the rows: each time bucket
@@ -756,13 +832,80 @@ inline bool Graph_trace::write_SVG(const char* path) const
     const double rows_top = header_h + util_strip_h + strip_gap;
     const double rows_bottom = rows_top + row_count * row_h;
     const double total_w = pad_l + plot_w + pad_r;
-    const double total_h = rows_bottom + axis_h + legend_h;
+    const double total_h = rows_bottom + axis_h + legend_h + table_h;
 
     auto X = [&](double us) { return pad_l + us * px_per_us; };
     auto bar_top = [&](int i)
     {
         return rows_top + row_of[static_cast<size_t>(i)] * row_h + (row_h - bar_h) * 0.5;
     };
+
+    // Per-edge critical dead-time band, classified by cause (see the gap_* constants):
+    // the drawn gap between the predecessor's right edge and the successor's left edge,
+    // joined with the time-bucketed utilization covering the same axis. The mean
+    // utilization during the gap is overlap-WEIGHTED (a bucket contributes by the
+    // fraction of the gap it covers -- partial buckets at the ends count partially);
+    // min/max are unweighted over the touched buckets. Computed once here; consumed by
+    // the headline split, the band rects, and the edge tooltips.
+    struct Gap_info
+    {
+        bool has_band = false;
+        double share = 0.0;
+        double gap_us = 0.0;
+        double t0 = 0.0, t1 = 0.0;   // gap window, µs from run start
+        int cls = -1;                // 0 = dependency-bound, 1 = mixed, 2 = core-bound, -1 = no util data
+        double mean_util = 0.0, min_util = 0.0, max_util = 0.0;
+    };
+    std::vector<Gap_info> gaps(edges_.size());
+    for (size_t ei = 0; ei < edges_.size(); ++ei)
+    {
+        const Edge_agg& e = edges_[ei];
+        Gap_info& g = gaps[ei];
+        g.share = runs_ > 0
+            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
+        if (g.share < 0.10)
+            continue;
+        // Same geometry as the drawn band: predecessor right edge honours the 3px width
+        // floor, converted back to time so the accounting matches the picture.
+        g.t0 = bar_start[static_cast<size_t>(e.from)]
+            + std::max(3.0 / px_per_us, bar_end[static_cast<size_t>(e.from)]
+                                        - bar_start[static_cast<size_t>(e.from)]);
+        g.t1 = bar_start[static_cast<size_t>(e.to)];
+        g.gap_us = g.t1 - g.t0;
+        if (g.gap_us * px_per_us <= 2.0)
+            continue;
+        g.has_band = true;
+        if (!util_buckets_.empty() && util_bucket_width_us_ > 0.0)
+        {
+            double wsum = 0.0, usum = 0.0;
+            double umin = 1.0, umax = 0.0;
+            size_t b0 = static_cast<size_t>(std::max(0.0, std::floor(g.t0 / util_bucket_width_us_)));
+            for (size_t b = b0; b < util_buckets_.size(); ++b)
+            {
+                double bt0 = static_cast<double>(b) * util_bucket_width_us_;
+                if (bt0 >= g.t1)
+                    break;
+                if (util_buckets_[b].n == 0)
+                    continue;
+                double overlap = std::min(g.t1, bt0 + util_bucket_width_us_) - std::max(g.t0, bt0);
+                if (overlap <= 0.0)
+                    continue;
+                double u = std::clamp(util_buckets_[b].mean, 0.0, 1.0);
+                wsum += overlap;
+                usum += overlap * u;
+                umin = std::min(umin, u);
+                umax = std::max(umax, u);
+            }
+            if (wsum > 0.0)
+            {
+                g.mean_util = usum / wsum;
+                g.min_util = umin;
+                g.max_util = umax;
+                g.cls = g.mean_util >= gap_core_bound_share ? 2
+                      : g.mean_util < gap_dependency_bound_share ? 0 : 1;
+            }
+        }
+    }
 
     std::string out;
     char buf[512];
@@ -784,9 +927,23 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // faint solid tint UNDER the diagonal stroke: a full-height band must read as "the
     // frame is losing time in this vertical slice" at a glance on #272822 -- hatch lines
     // alone wash out behind the bars crossing the band.
+    // Three variants, one per dead-time cause: pink = dependency-bound (matches the
+    // critical-pink chain semantics), amber = core-bound (capacity, distinct from both
+    // critical pink and priority-H red), alternating pink/amber = mixed. An unclassified
+    // band (no utilization data) draws the pink pattern.
     out += "<defs><pattern id=\"dead\" width=\"6\" height=\"6\" patternUnits=\"userSpaceOnUse\">"
            "<rect width=\"6\" height=\"6\" fill=\"#f92672\" opacity=\"0.10\"/>"
            "<path d=\"M0 6 L6 0\" stroke=\"#f92672\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
+           "</pattern>"
+           "<pattern id=\"deadcore\" width=\"6\" height=\"6\" patternUnits=\"userSpaceOnUse\">"
+           "<rect width=\"6\" height=\"6\" fill=\"#fd971f\" opacity=\"0.10\"/>"
+           "<path d=\"M0 6 L6 0\" stroke=\"#fd971f\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
+           "</pattern>"
+           "<pattern id=\"deadmix\" width=\"12\" height=\"6\" patternUnits=\"userSpaceOnUse\">"
+           "<rect width=\"12\" height=\"6\" fill=\"#f92672\" opacity=\"0.05\"/>"
+           "<rect width=\"12\" height=\"6\" fill=\"#fd971f\" opacity=\"0.05\"/>"
+           "<path d=\"M0 6 L6 0\" stroke=\"#f92672\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
+           "<path d=\"M6 6 L12 0\" stroke=\"#fd971f\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
            "</pattern></defs>\n";
 
     // Header: title, the dead-time headline, global stats. (The legend sits at the
@@ -817,6 +974,42 @@ inline bool Graph_trace::write_SVG(const char* path) const
         append_escaped(out, "critical path dead time: " + fmt_us(dead_us) + " \xC2\xB5s ("
             + fmt_us(100.0 * dead_share) + "% of frame time)");
         out += "</tspan>";
+
+        // Cause split: apportion the (globally computed) dead time across causes by the
+        // share-weighted gap durations of the classified bands -- each band contributes
+        // `share x gap`, the weights normalize to the global figure, so the split always
+        // sums to the headline total. Bands only localize the >= 10%-share subset, so the
+        // apportioning is approximate; a class with zero weight is omitted.
+        {
+            double w_cls[3] = { 0.0, 0.0, 0.0 };
+            double w_all = 0.0;
+            for (const Gap_info& g : gaps)
+                if (g.has_band && g.cls >= 0)
+                {
+                    double w = g.share * g.gap_us;
+                    w_cls[g.cls] += w;
+                    w_all += w;
+                }
+            if (w_all > 0.0 && dead_share > 0.0)
+            {
+                static constexpr const char* cls_color[3] = { "#f92672", "#e6db74", "#fd971f" };
+                static constexpr const char* cls_word[3] = { "dependency", "mixed", "core-bound" };
+                out += "<tspan fill=\"#cfcfc2\"> (</tspan>";
+                bool first_cls = true;
+                for (int c : { 2, 1, 0 })   // core-bound first: the actionable surprise
+                    if (w_cls[c] > 0.0)
+                    {
+                        if (!first_cls)
+                            out += "<tspan fill=\"#cfcfc2\"> / </tspan>";
+                        first_cls = false;
+                        out += "<tspan fill=\"" + std::string(cls_color[c]) + "\">";
+                        append_escaped(out, std::string(cls_word[c]) + " "
+                            + fmt_us(100.0 * dead_share * w_cls[c] / w_all) + "%");
+                        out += "</tspan>";
+                    }
+                out += "<tspan fill=\"#cfcfc2\">)</tspan>";
+            }
+        }
 
         // Third classifier: task-system overhead -- machinery / (body + machinery) compute
         // (idle excluded). See the band constants; reported as an upper bound.
@@ -868,60 +1061,120 @@ inline bool Graph_trace::write_SVG(const char* path) const
     }
 
     {
-        // Legend, at the bottom (below the time axis): a short sample glyph, then its
-        // explanation, inline. Line STYLE carries provenance (solid = explicit, dashed =
-        // derived); colour carries criticality (green -> pink by share of binding
-        // chains).
-        const double ax0 = 16.0, ax1 = 56.0;
+        // Legend, at the bottom (below the time axis), in THREE columns of up to three
+        // rows (height-optimised): a short sample glyph, then its explanation, inline.
+        // Line STYLE carries provenance (solid = explicit, dashed = derived); colour
+        // carries criticality (green -> pink by share of binding chains). Column 1 =
+        // edges, column 2 = critical node + dead-time causes, column 3 = priorities,
+        // welds. The utilization key lives above the strip itself, not here.
+        const double cols[3] = { 16.0, 430.0, 820.0 };   // per-column glyph x; 40px glyph span
+        const double glyph_w = 40.0;
         const double base = rows_bottom + axis_h;
-        auto legend_arrow = [&](double ly, const char* stroke, const char* dash, const char* text)
+        auto legend_arrow = [&](double cx, double ly, const char* stroke, const char* dash, const char* text)
         {
             line("<line x1=\"%.0f\" y1=\"%.0f\" x2=\"%.0f\" y2=\"%.0f\" stroke=\"%s\" stroke-width=\"1.8\"%s/>\n",
-                 ax0, ly, ax1, ly, stroke, dash);
+                 cx, ly, cx + glyph_w, ly, stroke, dash);
             line("<polygon points=\"%.0f,%.0f %.0f,%.0f %.0f,%.0f\" fill=\"%s\"/>\n",
-                 ax1, ly - 4.0, ax1, ly + 4.0, ax1 + 7.0, ly, stroke);
+                 cx + glyph_w, ly - 4.0, cx + glyph_w, ly + 4.0, cx + glyph_w + 7.0, ly, stroke);
             line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">%s</text>\n",
-                 ax1 + 14.0, ly + 4.0, text);
+                 cx + glyph_w + 14.0, ly + 4.0, text);
         };
-        legend_arrow(base + 14.0, "#a6e22e", "", "explicit ordering (after/before)");
-        legend_arrow(base + 32.0, "#a6e22e", " stroke-dasharray=\"5,3\"", "derived from declared access (hover for detail)");
-        legend_arrow(base + 50.0, "#f92672", "", "critical-path edge (pink = share of runs)");
-        const double ly4 = base + 68.0;
-        line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"#3e3d32\" "
-             "stroke=\"#fd971f\" stroke-width=\"2\"/>\n", ax0, ly4 - 5.0, ax1 - ax0);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical node (orange = share of runs)</text>\n",
-             ax1 + 14.0, ly4 + 4.0);
-        const double ly5 = base + 86.0;
-        line("<circle cx=\"%.0f\" cy=\"%.0f\" r=\"5\" fill=\"#a6e22e\"/>\n", (ax0 + ax1) * 0.5, ly5);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">handoff weld: connected nodes back to back</text>\n",
-             ax1 + 14.0, ly5 + 4.0);
-        const double ly6 = base + 104.0;
-        line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"url(#dead)\"/>\n",
-             ax0, ly6 - 5.0, ax1 - ax0);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">critical path dead time (successor ready but waiting)</text>\n",
-             ax1 + 14.0, ly6 + 4.0);
+        auto legend_swatch = [&](double cx, double ly, const char* fill, const char* extra, const char* text)
+        {
+            line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"%s\"%s/>\n",
+                 cx, ly - 5.0, glyph_w, fill, extra);
+            line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">%s</text>\n",
+                 cx + glyph_w + 14.0, ly + 4.0, text);
+        };
+        legend_arrow(cols[0], base + 14.0, "#a6e22e", "", "explicit ordering (after/before)");
+        legend_arrow(cols[0], base + 32.0, "#a6e22e", " stroke-dasharray=\"5,3\"", "derived from declared access");
+        legend_arrow(cols[0], base + 50.0, "#f92672", "", "critical-path edge (pink = share of runs)");
+        legend_swatch(cols[1], base + 14.0, "#3e3d32", " stroke=\"#fd971f\" stroke-width=\"2\"",
+                      "critical node (orange = share of runs)");
+        legend_swatch(cols[1], base + 32.0, "url(#dead)", "", "critical dead time, dependency-bound");
+        legend_swatch(cols[1], base + 50.0, "url(#deadcore)", "", "critical dead time, core-bound: cores busy");
         line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\">"
              "<tspan fill=\"%s\">high</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
              "<tspan fill=\"%s\">normal</tspan><tspan fill=\"#cfcfc2\"> / </tspan>"
              "<tspan fill=\"%s\">low</tspan>"
              "<tspan fill=\"#cfcfc2\"> = node name colour = priority</tspan></text>\n",
-             ax0, base + 126.0,
+             cols[2], base + 18.0,
              priority_color(Priority::high), priority_color(Priority::normal), priority_color(Priority::low));
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">"
-             "edges are faint by default -- hover a node to highlight its dependencies</text>\n",
-             ax0, base + 148.0);
-        // Utilization-background key: a green->yellow->red swatch + label.
-        const double ly8 = base + 166.0;
-        out += "<defs><linearGradient id=\"utilkey\">"
-               "<stop offset=\"0\" stop-color=\"#a6e22e\"/><stop offset=\"0.5\" stop-color=\"#e6db74\"/>"
-               "<stop offset=\"1\" stop-color=\"#ff5f45\"/></linearGradient></defs>\n";
-        line("<rect x=\"%.0f\" y=\"%.0f\" width=\"%.0f\" height=\"10\" rx=\"2\" fill=\"url(#utilkey)\" opacity=\"0.6\"/>\n",
-             ax0, ly8 - 5.0, ax1 - ax0);
-        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">"
-             "core utilization over time -- area strip above the lanes (bar height = "
-             "utilization) + background wash (green busy -&gt; red idle; hover the strip "
-             "for the %%)</text>\n",
-             ax1 + 14.0, ly8 + 4.0);
+        const double lyw = base + 32.0;
+        line("<circle cx=\"%.0f\" cy=\"%.0f\" r=\"5\" fill=\"#a6e22e\"/>\n", cols[2] + glyph_w * 0.5, lyw);
+        line("<text x=\"%.0f\" y=\"%.0f\" font-size=\"11\" fill=\"#cfcfc2\">handoff weld: nodes back to back</text>\n",
+             cols[2] + glyph_w + 14.0, lyw + 4.0);
+    }
+
+    // Critical-path ranking table, below the legend: the picture's criticality colouring
+    // as a sorted list -- rank key = chain share x mean duration (expected contribution
+    // to the binding chain), so the heavy usually-critical nodes top it. Monospace, with
+    // per-column x anchors (right-aligned numerics) rather than space padding.
+    {
+        const double tbase = rows_bottom + axis_h + legend_h;
+        const char* mono = "Consolas, 'Cascadia Mono', monospace";
+        // Column right edges (numeric, text-anchor=end) / left edges (rank gets end too).
+        const double cx_rank = 34.0, cx_name = 46.0, cx_share = 268.0, cx_mean = 356.0,
+                     cx_key = 452.0, cx_dead = 548.0, cx_slack = 628.0, cx_p95 = 712.0;
+        std::string title_row = "critical-path ranking \xE2\x80\x94 "
+            + std::to_string(runs_) + " runs, makespan " + fmt_ms(makespan_.mean) + " ms";
+        out += "<text x=\"16\" y=\"" + std::to_string(tbase + 16.0)
+             + "\" font-size=\"12\" font-weight=\"600\" fill=\"#f8f8f2\">";
+        append_escaped(out, title_row);
+        out += "</text>\n";
+        double ty = tbase + 26.0 + table_row_h;
+        auto cell = [&](double cx, const char* anchor, const std::string& fill, const std::string& text)
+        {
+            out += "<text x=\"" + std::to_string(cx) + "\" y=\"" + std::to_string(ty)
+                 + "\" font-size=\"11\" font-family=\"" + std::string(mono) + "\" text-anchor=\""
+                 + anchor + "\" fill=\"" + fill + "\">";
+            append_escaped(out, text);
+            out += "</text>\n";
+        };
+        cell(cx_rank, "end", "#75715e", "#");
+        cell(cx_name, "start", "#75715e", "node");
+        cell(cx_share, "end", "#75715e", "chain%");
+        cell(cx_mean, "end", "#75715e", "mean");
+        cell(cx_key, "end", "#75715e", "x share");
+        cell(cx_dead, "end", "#75715e", "dead-in");
+        cell(cx_slack, "end", "#75715e", "slack");
+        cell(cx_p95, "end", "#75715e", "P95");
+        const std::string us = " \xC2\xB5s";
+        for (size_t r = 0; r < ranking.size(); ++r)
+        {
+            const Rank_row& row = ranking[r];
+            const Node_agg& a = nodes_[static_cast<size_t>(row.node)];
+            ty += table_row_h;
+            // chain% takes the same cyan->orange criticality blend as the node borders.
+            std::string share_col = blend_hex(0x66, 0xd9, 0xef, 0xfd, 0x97, 0x1f, crit_ramp(row.share));
+            char pct[16];
+            std::snprintf(pct, sizeof pct, "%.0f%%", row.share * 100.0);
+            cell(cx_rank, "end", "#cfcfc2", std::to_string(r + 1));
+            cell(cx_name, "start", priority_color(a.priority), a.label);
+            cell(cx_share, "end", share_col, pct);
+            cell(cx_mean, "end", "#cfcfc2", fmt_us(a.duration.mean) + us);
+            cell(cx_key, "end", "#cfcfc2", fmt_us(row.key) + us);
+            cell(cx_dead, "end", "#cfcfc2", row.dead_in < 0.0 ? "-" : fmt_us(row.dead_in) + us);
+            cell(cx_slack, "end", "#cfcfc2",
+                 slack[static_cast<size_t>(row.node)] <= 0.5 ? "0"
+                     : fmt_us(slack[static_cast<size_t>(row.node)]) + us);
+            cell(cx_p95, "end", "#cfcfc2", fmt_us(a.dur_P95.value()) + us);
+        }
+        if (rank_omitted > 0)
+        {
+            ty += table_row_h;
+            char pct[16];
+            std::snprintf(pct, sizeof pct, "%.0f%%", rank_max_omitted_share * 100.0);
+            char cutoff[16];
+            std::snprintf(cutoff, sizeof cutoff, "%.0f%%", rank_min_share * 100.0);
+            std::string foot = std::to_string(rank_omitted)
+                + (rank_omitted == 1 ? " node" : " nodes")
+                + " with chain share < " + cutoff + " omitted";
+            if (rank_max_omitted >= 0 && rank_max_omitted_share > 0.0)
+                foot += " (max: " + nodes_[static_cast<size_t>(rank_max_omitted)].label
+                     + " " + pct + ")";
+            cell(cx_name, "start", "#75715e", foot);
+        }
     }
 
     // No row separators or labels: rows are anonymous concurrency slots, not workers --
@@ -981,6 +1234,16 @@ inline bool Graph_trace::write_SVG(const char* path) const
         line("<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"#ff5f45\" "
              "stroke-width=\"0.8\" opacity=\"0.8\"/>\n",
              pad_l, strip_top, x_right, strip_top);
+        // The strip's key sits right above it (not in the bottom legend): a small
+        // green->yellow->red gradient swatch + label, right-aligned to the plot edge.
+        out += "<defs><linearGradient id=\"utilkey\">"
+               "<stop offset=\"0\" stop-color=\"#a6e22e\"/><stop offset=\"0.5\" stop-color=\"#e6db74\"/>"
+               "<stop offset=\"1\" stop-color=\"#ff5f45\"/></linearGradient></defs>\n";
+        line("<rect x=\"%.1f\" y=\"%.1f\" width=\"40\" height=\"8\" rx=\"2\" fill=\"url(#utilkey)\" opacity=\"0.8\"/>\n",
+             x_right - 40.0, strip_top - 13.0);
+        line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"11\" fill=\"#cfcfc2\" text-anchor=\"end\">"
+             "core utilization over time</text>\n",
+             x_right - 46.0, strip_top - 5.0);
         line("<line x1=\"%.1f\" y1=\"%.1f\" x2=\"%.1f\" y2=\"%.1f\" stroke=\"#75715e\" "
              "stroke-width=\"0.6\" opacity=\"0.8\"/>\n",
              pad_l, strip_top + util_strip_h, x_right, strip_top + util_strip_h);
@@ -1027,22 +1290,21 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // stack, bounded since low-share bands are faint. These localize the headline critical
     // dead time (frame_time_mean - critical_work_mean, computed globally) -- their >= 10%-share
     // visible subset, weighted by frequency, not a sum. Behind the bars, `pointer-events: none`.
-    for (const Edge_agg& e : edges_)
+    // The pattern carries the band's CAUSE (see `Gap_info`): pink hatch = dependency-bound,
+    // amber = core-bound, alternating = mixed; unclassified (no utilization data) stays
+    // pink. Bands remain inert to hover (`pointer-events: none`) -- making them hoverable
+    // would fight the bars and edges drawn over them; the classification detail lives in
+    // the edge's tooltip instead.
+    for (size_t ei = 0; ei < edges_.size(); ++ei)
     {
-        double share = runs_ > 0
-            ? static_cast<double>(e.critical_runs) / static_cast<double>(runs_) : 0.0;
-        if (share < 0.10)
+        const Gap_info& g = gaps[ei];
+        if (!g.has_band)
             continue;
-        double x_pred = X(bar_start[static_cast<size_t>(e.from)])
-            + std::max(3.0, (bar_end[static_cast<size_t>(e.from)]
-                             - bar_start[static_cast<size_t>(e.from)]) * px_per_us);
-        double x_succ = X(bar_start[static_cast<size_t>(e.to)]);
-        if (x_succ - x_pred <= 2.0)
-            continue;
+        const char* pattern = g.cls == 2 ? "deadcore" : g.cls == 1 ? "deadmix" : "dead";
         line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" "
-             "fill=\"url(#dead)\" opacity=\"%.2f\" pointer-events=\"none\"/>\n",
-             x_pred, rows_top, x_succ - x_pred, rows_bottom - rows_top,
-             std::clamp(share, 0.10, 1.0));
+             "fill=\"url(#%s)\" opacity=\"%.2f\" pointer-events=\"none\"/>\n",
+             X(g.t0), rows_top, (g.t1 - g.t0) * px_per_us, rows_bottom - rows_top,
+             pattern, std::clamp(g.share, 0.10, 1.0));
     }
 
     // Colored inline segments for the scripted tooltip: `RRGGBBtext` (backtick-delimited,
@@ -1183,8 +1445,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
         out += "</g>\n";
     }
 
-    for (const Edge_agg& e : edges_)
+    for (size_t edge_i = 0; edge_i < edges_.size(); ++edge_i)
     {
+        const Edge_agg& e = edges_[edge_i];
         // Gantt-style anchors: exit at the source bar's right-edge MIDPOINT, enter at the
         // target's left-edge midpoint. The exit uses the drawn right edge (bars have a
         // 3px width floor), so an arrow never starts inside a collapsed bar.
@@ -1229,6 +1492,29 @@ inline bool Graph_trace::write_SVG(const char* path) const
         tip.push_back("Critical: in " + fmt_us(100.0 * share) + "% of runs");
         if (share >= 0.10 && e.binding_gap.mean > 0.5)
             tip.push_back("Critical wait: " + fmt_us(e.binding_gap.mean) + " \xC2\xB5s mean");
+        // Dead-time block, when this edge has a drawn band: the gap, its cause (the
+        // utilization-join classification, colour-matched to the band's hatch), the
+        // utilization evidence, and the lever the cause implies.
+        if (const Gap_info& g = gaps[edge_i]; g.has_band)
+        {
+            tip.push_back("Dead time: " + fmt_us(g.gap_us) + " \xC2\xB5s (drawn gap, "
+                + fmt_us(100.0 * g.share) + "% of runs weighted)");
+            if (g.cls >= 0)
+            {
+                static constexpr const char* gap_hex[3] = { "f92672", "e6db74", "fd971f" };
+                static constexpr const char* gap_word[3] = { "dependency-bound", "mixed", "core-bound" };
+                tip.push_back("Cause: " + seg(gap_hex[g.cls], gap_word[g.cls])
+                    + " (cores " + fmt_us(100.0 * g.mean_util) + "% busy during gap, "
+                    + fmt_us(100.0 * g.min_util) + "-" + fmt_us(100.0 * g.max_util) + "% across buckets)");
+                tip.push_back(g.cls == 2
+                    ? "Lever: add workers or move off-path work out of this window"
+                    : g.cls == 0
+                    ? "Lever: cut/loosen this edge or overlap the producer"
+                    : "Lever: both apply -- part capacity, part dependency");
+            }
+            else
+                tip.push_back("Cause: unclassified (no utilization data for this window)");
+        }
         // Dash carries provenance (solid = explicit, dashed = derived); colour carries
         // criticality, green -> pink by the edge's share of binding chains. Width is
         // uniform per kind.
