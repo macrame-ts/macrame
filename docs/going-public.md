@@ -37,6 +37,11 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
       + the placeholder header comment, `LICENSE` if needed, the `TS_VERSION`/`version.h`
       product string and any `--version` text, the namespace if it changes, and the GitHub
       org/repo.
+- [ ] **Re-measure `docs/example-frame-optimization.md`** — its figures predate the
+      `parallel_for` current-scheduler routing fix (see the note at the top of that doc):
+      re-run baseline/optimised makespan, utilization, and dead time on the 6-worker trace,
+      interleaved A/B with medians (the measurement rule), and update the doc's numbers
+      before publishing. The qualitative analysis and the levers stand.
 - [ ] **Re-run the secrets/paths scrub** (must be clean):
       ```
       git grep -niE "c:\\\\users\\\\[a-z]|/home/[a-z]+/|/mnt/c/" -- .            # personal paths

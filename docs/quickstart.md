@@ -56,10 +56,12 @@ the only call that blocks; launching never does.
 
 ## Guard a shared object
 
-Wrap a thread-unsafe object in `Guarded<T>`. You never get a bare `T&`; you hand
-a function to `access`, and the parameter's const-ness declares what you do — a
+Wrap a thread-unsafe object in `Guarded<T>`. The only way in is handing a
+function to `access`, and the parameter's const-ness declares what you do — a
 non-`const` parameter is a write (exclusive), a `const` parameter is a read
-(concurrent with other reads):
+(concurrent with other reads). The reference your function receives is for that
+call only; storing it past the call sidesteps the safety checks
+([limits.md](limits.md) §2.3):
 
 ```cpp
 ts::Guarded<std::vector<int>> numbers;

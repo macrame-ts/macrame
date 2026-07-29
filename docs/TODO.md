@@ -15,8 +15,8 @@ survives in git history (this file was condensed 2026-07).
 
 ## Shipped
 
-All layers built, tested (**345 checks**, TSan/ASan clean, subprocess death tests),
-documented, and CI-gated.
+All layers built, tested (**504 checks** as of 2026-07, TSan/ASan clean, subprocess
+death tests), documented, and CI-gated.
 
 - **Task core** — `launch`/`task`/`after`, `then`, `when_all` (apply-style + void-drop +
   move-only), `const& sync()` + `take()`, cooperative cancellation (+ `Cancel_callback` +
