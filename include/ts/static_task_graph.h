@@ -274,8 +274,11 @@ private:
         static_assert(std::invocable<Fn, Ts&...>,
             "node functor parameters must match the Guarded arguments "
             "(same arity, each taken by reference)");
-        fill_node_modes<detail::probed_mode<Fn, I, Ts...>()...>(
-            node, seq, std::forward<Fn>(fn), access...);
+        // Guard the forward on the same condition: a failed assert does not stop
+        // instantiation, so without it `fill_node_modes` re-errors past the message.
+        if constexpr (std::invocable<Fn, Ts&...>)
+            fill_node_modes<detail::probed_mode<Fn, I, Ts...>()...>(
+                node, seq, std::forward<Fn>(fn), access...);
     }
 
     // Tagged (`ts::as_read_only`/`as_read_write` on every arg): modes from the tags.

@@ -157,7 +157,7 @@ public:
     // cancelled `opts.token` skips the step (commands stay staged for the next
     // publish); the returned task still COMPLETES -- it is a phase gate, not the
     // skipped work itself.
-    Task<void> publish(Task_options opts = {})
+    Task<void> publish(Access_options opts = {})
     {
         Signal swapped;        // the returned handle: version visible
         Signal shadow_ready;   // gates the NEXT publish's phase 1

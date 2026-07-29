@@ -3,6 +3,7 @@
 #include "ts/fatal.h"
 #include "ts/scheduler.h"
 
+#include <concepts>
 #include <cstddef>
 #include <deque>
 #include <functional>
@@ -133,6 +134,14 @@ private:
     std::vector<Slot*> free_;     // released by recorder dtors, reused by add_slot (see the reuse note above)
 };
 
+// A staged command is type-erased into `Journal<T>::Command` and applied later under
+// the commit's write grant, so it must be callable as `void(T&)` (a non-void return
+// is discarded). Gating at the `stage` boundary names this contract at the call
+// site; without it a shape mismatch surfaces inside `move_only_function`'s
+// constructor machinery.
+template<typename Fn, typename T>
+concept Stage_command = std::invocable<Fn&, T&>;
+
 } // namespace detail
 
 // A producer identity: its own storage (contention-free staging) and a stable key
@@ -183,6 +192,7 @@ public:
     // (it outlives the staging scope). For `Versioned` targets the closure must be
     // deterministic -- it is applied to both replicas (see `Resync::replay`).
     template<typename Fn>
+        requires detail::Stage_command<Fn, T>
     void stage(Fn&& fn)
     {
 #if TS_SAFETY_CHECKS
@@ -269,6 +279,7 @@ public:
     // deterministic closures for `Versioned` targets); safe to call from any
     // thread concurrently.
     template<typename Fn>
+        requires detail::Stage_command<Fn, T>
     void stage(Fn&& fn)
     {
 #if TS_SAFETY_CHECKS

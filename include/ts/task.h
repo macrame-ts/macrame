@@ -815,6 +815,20 @@ template<typename Fn>
 struct Task_result<Fn, false> { using type = std::invoke_result_t<Fn&>; };
 template<typename Fn> using Task_result_t = typename Task_result<std::decay_t<Fn>>::type;
 
+// Dependent-false for a `static_assert` in a discarded `if constexpr` branch (the
+// plain-`false` form is C++23 but not yet uniform across the toolchains we build on).
+template<typename...> inline constexpr bool always_false = false;
+
+// A bare task body (`ts::task`/`launch`/`nested`): no parameters, or a single trailing
+// `Cancellation_token` (cooperative cancellation, see `takes_token_v`). Gated at the
+// entry points so a wrong shape rejects at the call site naming this concept instead
+// of hard-erroring inside `Task_result`. (For a *generic* wrong body the token-arity
+// probe still instantiates the body -- same rendering as before the gate; only
+// introspectable functors gain the clean rejection.)
+template<typename Fn>
+concept Task_body = std::invocable<std::decay_t<Fn>&>
+    || std::invocable<std::decay_t<Fn>&, const Cancellation_token&>;
+
 // Wrap `fn` so the task runs under the access grant active where it was BUILT (see
 // access.h): sub-work launched from a task body inherits the launcher's permissions and
 // may touch the launcher's guarded data. The snapshot is by value, so it is valid after
@@ -1054,12 +1068,19 @@ public:
         if constexpr (std::is_void_v<R>)
         {
             constexpr bool tok = detail::takes_token_v<std::decay_t<Fn>>;
-            using R2 = detail::Task_result_t<Fn>;
-            return chain<R2>([fn = std::forward<Fn>(fn)](void*, const Cancellation_token& t) mutable -> R2
+            if constexpr (!tok && !std::is_invocable_v<std::decay_t<Fn>&>)
+                static_assert(detail::always_false<Fn>,
+                    "then: a continuation off a Task<void> takes no arguments, "
+                    "optionally a trailing Cancellation_token");
+            else
             {
-                if constexpr (tok) return fn(t);
-                else return fn();
-            }, std::move(opts));
+                using R2 = detail::Task_result_t<Fn>;
+                return chain<R2>([fn = std::forward<Fn>(fn)](void*, const Cancellation_token& t) mutable -> R2
+                {
+                    if constexpr (tok) return fn(t);
+                    else return fn();
+                }, std::move(opts));
+            }
         }
         else if constexpr (detail::use_apply_v<Fn, R>)
         {
@@ -1076,14 +1097,31 @@ public:
         }
         else
         {
-            constexpr bool tok = std::is_invocable_v<std::decay_t<Fn>&, R&, const Cancellation_token&>
-                                 && !std::is_invocable_v<std::decay_t<Fn>&, R&>;
-            using R2 = typename detail::Invoke_result_tok<std::decay_t<Fn>&, tok, R&>::type;
-            return chain<R2>([fn = std::forward<Fn>(fn)](void* r, const Cancellation_token& t) mutable -> R2
+            // Gate before `Invoke_result_tok` instantiates: a wrong shape otherwise
+            // cascades through the trait (and, for a tuple producer, adds a misleading
+            // tuple-to-element conversion error).
+            constexpr bool whole = std::is_invocable_v<std::decay_t<Fn>&, R&>
+                                   || std::is_invocable_v<std::decay_t<Fn>&, R&, const Cancellation_token&>;
+            if constexpr (!whole && detail::is_tuple_v<R>)
+                static_assert(detail::always_false<Fn>,
+                    "then: a continuation off a when_all join must take the result tuple by "
+                    "reference or its elements unpacked, either optionally with a trailing "
+                    "Cancellation_token");
+            else if constexpr (!whole)
+                static_assert(detail::always_false<Fn>,
+                    "then: a continuation off a Task<R> must accept the result (R&), "
+                    "optionally with a trailing Cancellation_token");
+            else
             {
-                if constexpr (tok) return fn(*static_cast<R*>(r), t);
-                else return fn(*static_cast<R*>(r));
-            }, std::move(opts));
+                constexpr bool tok = std::is_invocable_v<std::decay_t<Fn>&, R&, const Cancellation_token&>
+                                     && !std::is_invocable_v<std::decay_t<Fn>&, R&>;
+                using R2 = typename detail::Invoke_result_tok<std::decay_t<Fn>&, tok, R&>::type;
+                return chain<R2>([fn = std::forward<Fn>(fn)](void* r, const Cancellation_token& t) mutable -> R2
+                {
+                    if constexpr (tok) return fn(*static_cast<R*>(r), t);
+                    else return fn(*static_cast<R*>(r));
+                }, std::move(opts));
+            }
         }
     }
 
@@ -1217,7 +1255,7 @@ public:
     bool is_cancelled() const noexcept { return Task<R>(core_).is_cancelled(); }
 
 private:
-    template<typename Fn> friend auto task(Fn&& fn);
+    template<typename Fn> requires detail::Task_body<Fn> friend auto task(Fn&& fn);
 
     explicit Task_builder(detail::Task_ptr core) noexcept
         : core_(std::move(core))
@@ -1231,6 +1269,7 @@ private:
 // `.after(...)`) have settled. Inherits the launcher's access grant (like `ts::launch`),
 // so a builder task used as nested sub-work may touch the parent's guarded data.
 template<typename Fn>
+    requires detail::Task_body<Fn>
 auto task(Fn&& fn)
 {
     using R = detail::Task_result_t<Fn>;
@@ -1246,9 +1285,13 @@ auto task(Fn&& fn)
 // position. Dispatches through the `submit_ready` bridge (so this stays scheduler-
 // independent) and inherits the launcher's access grant, so sub-work launched from a task
 // body may touch the launcher's data.
+// (Deduced return -- `Task<Task_result_t<Fn>>` -- rather than a trailing return type:
+// the trailing form substitutes during overload resolution, BEFORE the constraint is
+// checked, so a wrong body shape would hard-error inside `Task_result` instead of
+// failing the `Task_body` gate.)
 template<typename Fn>
+    requires detail::Task_body<Fn>
 auto launch(Fn&& fn, Launch_options opts = {})
-    -> Task<detail::Task_result_t<Fn>>
 {
     using R = detail::Task_result_t<Fn>;
     auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), std::move(opts.token));
@@ -1287,8 +1330,8 @@ void add_nested(const Task<R>& child)
 // completion gates the parent's). Sugar for `launch` + `add_nested`; call from within a
 // task body.
 template<typename Fn>
+    requires detail::Task_body<Fn>
 auto nested(Fn&& fn, Launch_options opts = {})
-    -> Task<detail::Task_result_t<Fn>>
 {
     auto t = launch(std::forward<Fn>(fn), std::move(opts));
     add_nested(t);

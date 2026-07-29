@@ -5,6 +5,7 @@
 #include "ts/guarded.h"   // global_scheduler
 
 #include <atomic>
+#include <concepts>
 #include <cstddef>
 #include <optional>
 #include <type_traits>
@@ -172,6 +173,7 @@ Parallel_state<Body>* make_parallel_state(int n, Body&& body, Parallel_options o
 // still-running helpers. `body` must be safe to call concurrently for distinct i. One heap
 // allocation (the shared state). `body` is called inline (templated), so per-item is not a cost.
 template<typename Body>
+    requires std::invocable<Body&, int>
 void parallel_for(int n, Body&& body, Parallel_options opts = {})
 {
     if (n <= 0)
@@ -198,6 +200,7 @@ void parallel_for(int n, Body&& body, Parallel_options opts = {})
 // Composable (.then / when_all). One heap allocation (the returned Task's block holds the
 // state). Do NOT block on it inside a graph node.
 template<typename Body>
+    requires std::invocable<Body&, int>
 Task<void> async_parallel_for(int n, Body&& body, Parallel_options opts = {})
 {
     if (n <= 0)

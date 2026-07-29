@@ -208,12 +208,21 @@ constexpr Access accessor_mode()
         using Args = typename Function_traits<std::decay_t<Fn>>::args;
         static_assert(std::tuple_size_v<Args> >= 1,
             "a guarded accessor must take the resource as its first parameter");
-        using Arg0 = std::tuple_element_t<0, Args>;
-        static_assert(std::is_lvalue_reference_v<Arg0>,
-            "a guarded-resource parameter must be `T&` or `const T&`: taking it by value copies "
-            "the resource (writes hit the copy and are silently discarded), and `T&&` cannot "
-            "bind the stored instance");
-        return async_mode_of<Arg0>();
+        // Short-circuit on the failed arity assert: forming `Arg0` for an empty
+        // parameter list would add a second, misleading tuple-out-of-bounds cascade
+        // after the message above. The dummy return only feeds a constraint that
+        // then fails cleanly at the caller.
+        if constexpr (std::tuple_size_v<Args> >= 1)
+        {
+            using Arg0 = std::tuple_element_t<0, Args>;
+            static_assert(std::is_lvalue_reference_v<Arg0>,
+                "a guarded-resource parameter must be `T&` or `const T&`: taking it by value copies "
+                "the resource (writes hit the copy and are silently discarded), and `T&&` cannot "
+                "bind the stored instance");
+            return async_mode_of<Arg0>();
+        }
+        else
+            return Access::read_only;
     }
     else
     {
@@ -635,8 +644,11 @@ auto async_build_probed(Access_options opts, std::index_sequence<I...> seq, Fn&&
     static_assert(std::invocable<Fn, Ts&...>,
         "multi-object access/async: functor parameters must match the Guarded objects "
         "(same arity, each taken by reference)");
-    return async_build_modes<probed_mode<Fn, I, Ts...>()...>(
-        std::move(opts), seq, std::forward<Fn>(fn), objs...);
+    // Guard the forward on the same condition: a failed assert does not stop
+    // instantiation, so without it `async_build_modes` re-errors past the message.
+    if constexpr (std::invocable<Fn, Ts&...>)
+        return async_build_modes<probed_mode<Fn, I, Ts...>()...>(
+            std::move(opts), seq, std::forward<Fn>(fn), objs...);
 }
 
 // Tagged path (`ts::as_read_only`/`as_read_write` on every arg): modes from the tags.
