@@ -135,10 +135,24 @@ void write_DOT_dump(const Nodes& nodes, const std::vector<std::pair<int, int>>& 
     if (!path)
         return;
     DOT_writer dot;
+    // Guarded-object numbering for the badge row + the top list: first-appearance order
+    // across nodes' declared accesses (i.e. declaration order), stable per compile.
+    std::vector<std::string> object_names;
+    std::map<std::string, int> object_index;
     visit_structure(nodes, explicit_edges,
-        [&dot](int i, const std::string& label, const auto&, Priority)
+        [&dot, &object_names, &object_index](int i, const std::string& label,
+            const std::vector<std::pair<std::string, bool>>& accesses, Priority)
         {
-            dot.add_node(i, label);   // the DOT dump does not render priority (yet)
+            std::vector<std::pair<int, bool>> badges;
+            for (const auto& [object, write] : accesses)
+            {
+                auto [it, inserted] = object_index.try_emplace(object,
+                    static_cast<int>(object_names.size()));
+                if (inserted)
+                    object_names.push_back(object);
+                badges.emplace_back(it->second, write);
+            }
+            dot.add_node(i, label, std::move(badges));   // the DOT dump does not render priority (yet)
         },
         [&dot](int from, int to, bool explicit_ordering, const std::string& detail)
         {
@@ -154,6 +168,7 @@ void write_DOT_dump(const Nodes& nodes, const std::vector<std::pair<int, int>>& 
             else
                 dot.add_edge(from, to, DOT_writer::Edge_kind::derived, detail);
         });
+    dot.set_objects(std::move(object_names));
     dot.dump(path);
 }
 

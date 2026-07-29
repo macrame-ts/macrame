@@ -410,9 +410,9 @@ void test_graph_inline_rerun()
     TS_CHECK(read_value(x) == 5);
 }
 
-// The DOT structure dump (`compile(DOT_path)`): named / unnamed labels, derived edges
-// dashed with a conflict tooltip, an explicit edge solid (its coinciding conflict kept
-// as the tooltip).
+// The DOT structure dump (`compile(DOT_path)`): named / unnamed labels, edge colour by
+// provenance (green explicit / cyan derived) with a conflict tooltip on the derived, the
+// guarded-object list, and the per-node access numbers in label + tooltip.
 void test_dot_dump()
 {
     ts::Guarded<int> x{ ts::Named{"counter"}, 0 };   // named -> tooltip uses the name
@@ -435,14 +435,17 @@ void test_dot_dump()
     std::remove(path);
 
     TS_CHECK(dot.rfind("digraph\n", 0) == 0);   // anonymous: a graph name would become a hover tooltip on every miss
-    TS_CHECK(dot.find("subgraph cluster_legend") != std::string::npos);
+    TS_CHECK(dot.find("legend [shape=none") != std::string::npos);
+    TS_CHECK(dot.find("guarded objects") != std::string::npos);   // the object-list table
     TS_CHECK(dot.find("writer_a") != std::string::npos);
     TS_CHECK(dot.find("reader_b") != std::string::npos);
     TS_CHECK(dot.find("node2") != std::string::npos);
-    // a->b: derived from the x conflict (writer -> reader), dashed + tooltip with x's `ts::Named` name
-    TS_CHECK(dot.find("n0 -> n1 [style=dashed, color=\"#a6e22e\", penwidth=1.8, tooltip=\"counter: RW->RO\"") != std::string::npos);
-    // b->c: explicit (solid, no dash), tooltip still carries the y conflict
+    // a->b: derived from the x conflict (writer -> reader), cyan + tooltip with x's `ts::Named` name
+    TS_CHECK(dot.find("n0 -> n1 [color=\"#66d9ef\", penwidth=1.8, tooltip=\"counter: RW->RO\"") != std::string::npos);
+    // b->c: explicit (green), tooltip still carries the y conflict
     TS_CHECK(dot.find("n1 -> n2 [color=\"#a6e22e\", penwidth=2.0, tooltip=\"explicit ordering; obj1: RW->RO\"") != std::string::npos);
+    // node tooltips decode the access numbers: writer_a writes `counter` (object 1)
+    TS_CHECK(dot.find("tooltip=\"writer_a\\n1: counter - read/write\"") != std::string::npos);
 
     // The graph still runs after a dumping compile.
     g.execute().sync();

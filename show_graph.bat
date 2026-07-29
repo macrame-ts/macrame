@@ -2,8 +2,9 @@
 setlocal
 rem Render a Graphviz .dot file to .svg (next to it) and open it with the default app.
 rem Usage:  show_graph.bat [path\to\graph.dot]
-rem No argument: renders sample_game_frame.dot AND opens sample_game_frame_avg.svg (the
-rem average-run trace) if present -- the pair task_system --dot / --trace produces.
+rem No argument: renders sample_game_frame.dot AND opens the average-run trace SVGs
+rem (sample_game_frame_avg_baseline.svg / _optimised.svg) if present -- the set
+rem task_system --dot / --trace produces.
 rem If Graphviz is missing, offers to install it via winget.
 
 set "DOTFILE=%~1"
@@ -29,8 +30,8 @@ if errorlevel 1 exit /b 1
 echo wrote %SVGFILE%
 start "" "%SVGFILE%"
 if not "%~1"=="" exit /b 0
-if exist "sample_game_frame_avg.svg" start "" "sample_game_frame_avg.svg"
-if exist "sample_game_frame_avg_4workers.svg" start "" "sample_game_frame_avg_4workers.svg"
+if exist "sample_game_frame_avg_baseline.svg" start "" "sample_game_frame_avg_baseline.svg"
+if exist "sample_game_frame_avg_optimised.svg" start "" "sample_game_frame_avg_optimised.svg"
 exit /b 0
 
 :install_graphviz
