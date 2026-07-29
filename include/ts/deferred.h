@@ -6,6 +6,7 @@
 #include "ts/detail/journal.h"
 #include "ts/task.h"
 
+#include <mutex>
 #include <utility>
 
 namespace ts
@@ -55,7 +56,16 @@ public:
         // business). An unsettled commit is a contract violation: surface it hard
         // rather than block silently -- a long-parking destructor goes unnoticed
         // and usually marks a bug worth fixing.
-        if (commit_issued_ && !last_commit_.is_done())
+        // Snapshot under the commit lock (a commit_async racing destruction is
+        // already UB; the lock still keeps the read well-defined and ordered).
+        Task<void> last;
+        bool issued;
+        {
+            std::lock_guard lock(commit_mutex_);
+            last = last_commit_;
+            issued = commit_issued_;
+        }
+        if (issued && !last.is_done())
         {
 #if TS_SAFETY_CHECKS
             fatal("Deferred destroyed with a commit_async still in flight -- sync the "
@@ -108,9 +118,16 @@ public:
     // Apply as an ordinary pipe write job: one acquisition amortized over the whole
     // batch. The cut happens when the job RUNS (pipe FIFO position), so it captures
     // everything staged before the write actually happens. Returns the completion;
-    // sync it before destroying the Deferred (see the destructor).
+    // sync it before destroying the Deferred (see the destructor). Callable
+    // concurrently (producers may fire-and-forget); the lock spans enqueue + store
+    // so `last_commit_` is the pipe-LAST commit -- store order alone would let an
+    // earlier job's handle overwrite a later one's, and the destructor's settled
+    // check would then miss a still-pending job. Uncontended in single-committer
+    // use; the enqueue inside the lock cannot re-enter (a commit body never calls
+    // `commit_async`).
     Task<void> commit_async(Access_options opts = {})
     {
+        std::lock_guard lock(commit_mutex_);
         last_commit_ = target_->async([this](T&) { commit(); }, opts);
         commit_issued_ = true;
         return last_commit_;
@@ -131,6 +148,8 @@ private:
     // null test, hence the flag.
     Task<void> last_commit_;
     bool commit_issued_ = false;
+    // Orders concurrent commit_async calls (enqueue + handle store as one step).
+    std::mutex commit_mutex_;
 };
 
 } // namespace ts
