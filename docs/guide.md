@@ -599,6 +599,11 @@ state is built at compile time and re-armed per run).
 
 Node capabilities:
 
+- `node.after(a, b, …)` / `node.before(…)` — declare explicit ordering edges to
+  other nodes (on top of the ones `compile` derives from access). The variadic
+  form reads as intent: `submit.after(cmd, particles, ui)` makes `submit` depend
+  on all three — the same as `.after(cmd).after(particles).after(ui)`, but
+  without reading like a sequence among them.
 - `node.priority(p)` — queue priority per node.
 - `node.set_inline()` — run the node on the thread that readied it when its
   objects are immediately available (low-latency chaining for small nodes).
