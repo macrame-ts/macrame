@@ -212,6 +212,17 @@ IDs — when an item is done, mark it, don't renumber.
        route-by-route table (entry x default x inline-eligibility x alloc/dispatch cost) before
        changing anything.
 
+   16. `[ ]` **(P1, author 2026-07) Nested `Guarded`: investigate, then sample or hazard doc.**
+       The case: a guarded resource whose member is itself guarded (a `Guarded<T>` where `T` holds
+       a `Guarded<U>`), and accessing the inner `Guarded` from inside the outer access scope. Work
+       through whether it composes cleanly: does the per-object `Access_context` nest correctly (an
+       inner `access`/`async` under an outer grant), do the pipes compose without deadlock (inner
+       acquire while holding the outer), and do mode deduction + the write-epoch stale-grant
+       machinery behave? If it works smoothly, add a sample or test demonstrating the pattern; if it
+       does not, document the hazards (which nestings deadlock, defeat the harness, or serialize
+       unexpectedly) AND add tests pinning the failure modes so they cannot silently regress. Either
+       outcome ships coverage. Relates to 1.6 (sub-object grants) and the completeness-hazard story.
+
 2. **Static task graph**
    1. `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.
    2. `[ ]` **(P2, raised within-band) Ambiguity detection** — `compile({.ambiguity = Warn|Error|Ignore})` determinism diagnostic; needs edge provenance; feeds profiler-guided reorder. **Research validation (2026-07, [research-static-vs-dynamic.md](research-static-vs-dynamic.md)):** ordering ambiguity is the top user-facing failure of access-derived schedules — Bevy shipped exactly this diagnostic (`ambiguity_detection`) after its stageless rework because users hit nondeterministic system order in practice. **PARKED (author, 2026-07).** Full analysis in [ordering-ambiguity.md](ordering-ambiguity.md): our declaration-index orientation is deterministic, so we lack Bevy's per-frame-nondeterminism bug class — the residual is *hidden, unratified* orientation (a refactor that swaps two `add_node` lines silently flips gameplay). The proposed feature (conflict provenance + a fragile-orientation lint + a commutativity annotation feeding the optimizer) is rescoped as optimizer infrastructure, not a safety feature — but the annotation-cost question (pairwise = combinatorial; object-level = the mitigation, unproven) is unresolved. Do nothing until real usage data (start with the tiebreak-only pair count on `game_frame`). Provenance itself is still needed by 2.4/2.5 and the DOT dump regardless.
@@ -334,6 +345,28 @@ IDs — when an item is done, mark it, don't renumber.
    2. `[ ]` **(research note — T13.4) Async I/O story.** Untouched so far. The library is CPU-compute-first; async I/O (file/socket/GPU-transfer completion) is a different axis — a blocked I/O wait must not tie up a worker. Today the sanctioned bridge is `Signal`: an external completion (OS overlapped-IO callback, GPU fence, `io_uring` CQE) calls `signal.trigger()`, and a `then`/`when_all` resumes CPU work — fire-the-IO, gate-the-continuation, never block a worker. That covers "react to completion" without an I/O runtime. What we deliberately do NOT provide (and probably shouldn't, cf. Rayon/Tokio being separate pools by design): an I/O reactor, readiness polling, or a socket/timer API. Open question to revisit only on demonstrated demand: whether a thin `Signal`-from-OS-completion helper (register an OVERLAPPED / fd / fence, get a `Signal`) is worth packaging, or stays a documented idiom. Ties to the Signal-examples doc item (10.4).
    3. `[ ]` **(research note — T25) CPU transient aliasing.** Render graphs reuse one block of memory for two scratch resources whose lifetimes don't overlap ([research-deepdive.md](research-deepdive.md) §4.4), derived from declared first-write/last-read. The CPU analogue for us would be per-node *declared transient buffers* with `compile()` computing [first-writer, last-reader] windows and aliasing storage across non-overlapping windows — a potential differentiator, but it needs a task-system feature we don't have: a *declared transient-resource* concept distinct from a `Guarded` object (a scratch buffer owned by the graph, not a persistent guarded instance). The coarse version already exists (the per-run bump arena, 4.6 — everything dies at run end); the fine version is speculative and gated on that new concept. Record only; act only if a concrete workload needs graph-derived scratch-memory reuse.
 
+   4. `[ ]` **(P2, research, author 2026-07) Survey high-level parallelisation patterns to
+      generalise.** A research pass over the broad parallel-programming pattern catalog
+      (structured/nested parallelism, dataflow + pipeline, map-reduce / scan, fork-join variants,
+      actor / mailbox, work-stealing idioms, GPU-style dispatch, ECS scheduling, render-graph
+      patterns) to FARM for patterns this library could generalise into first-class primitives or
+      documented idioms, the way `Versioned` / `Deferred` generalised double-buffering and command
+      buffers. Output: a ranked candidate list with "already covered / cheap idiom / worth a
+      primitive / out of scope" verdicts, feeding 5.1's primitive menu and the samples. Complements
+      the existing engine research ([task-systems-comparison.md](task-systems-comparison.md),
+      [research-deepdive.md](research-deepdive.md)) which studied task SYSTEMS; this studies parallel
+      PATTERNS.
+   5. `[ ]` **(P1, research, author 2026-07) Find a real integration / validation target.** A deep
+      research pass for potential applications of the library, with the concrete goal of finding an
+      OPEN-SOURCE project to integrate with and validate the access-declared-parallelism approach on
+      a real workload (not a synthetic sample): ideally a game engine, renderer, simulation, or
+      other frame-structured C++ codebase with exploitable coarse-grained parallelism and
+      thread-unsafe shared state. Deliverable: a shortlist of candidates with fit assessment
+      (workload shape, existing threading model, integration surface, license, community activity)
+      and a recommended target to prototype against. The strongest available validation of the
+      design and the best source of real API pressure, so prioritize it. Ties to the going-public
+      story ([going-public.md](going-public.md)).
+
 10. **Tooling / infra**
     1. `[ ]` **(P2)** Benchmark regression baseline + compare step (store medians, flag regressions). *(postponed — not blocking)* Also assert **allocation-free re-runs** here (T19): `execute()` on a compiled graph should show 0 allocs via `--memprofile` on the 2nd+ run — a cheap regression guard for the re-arm design, folded into this step rather than a standalone test.
     2. `[ ]` **(P2)** Proper ASan build config (reachable via `/p:EnableASAN=true` today); portable TSan build story.
@@ -377,6 +410,16 @@ IDs — when an item is done, mark it, don't renumber.
         advanced afterthought. Goal: coroutines become a first-class, encouraged style in the
         samples and in the guide's disclosure order (10.7), not a footnote. Pairs with 1.15: cleaner
         high-level coroutine code is the intended alternative to low-level task launches.
+    12. `[ ]` **(P2, docs/samples, author 2026-07) Multiple / nested static graphs sample.** A
+        single-file sample showing more than one `Static_task_graph` in play, and graphs nested
+        within graphs: a node whose body drives a sub-graph (via nested tasks so it does not block a
+        worker), and independent graphs composed at a higher level. Demonstrates the composition
+        story (large frames built from reusable sub-graphs) and surfaces the sharp edges: object
+        lifetime across graph boundaries (a `Guarded` touched by two graphs), the run-quiescence
+        invariant per graph, and whether driving a sub-graph from inside a node risks worker
+        exhaustion (the never-block-in-a-node rule; establish whether retraction/nested cover it).
+        Investigate feasibility first: if a clean composition pattern falls out, ship the sample,
+        else document the constraints. Relates to 2.3 (pipelined execution) and 10.3.
 
 ---
 
