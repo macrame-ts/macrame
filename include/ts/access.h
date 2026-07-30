@@ -79,8 +79,10 @@ public:
     bool holds_epoch(const std::atomic<std::uint64_t>* epoch) const noexcept
     {
         for (int i = 0; i < count_; ++i)
+        {
             if (entries_[i].epoch == epoch)
                 return true;
+        }
         return false;
     }
 #endif
@@ -132,22 +134,18 @@ template<typename T>
 inline void access_check(T* self) noexcept
 {
     const Access_context* ctx = detail::current_access;
-    Access_context::Grant g =
-        ctx ? ctx->check(self, Access::read_write) : Access_context::Grant::none;
+    Access_context::Grant g = ctx ? ctx->check(self, Access::read_write) : Access_context::Grant::none;
     if (g != Access_context::Grant::granted)
-        detail::access_violation(typeid(T).name(), Access::read_write,
-                                 g == Access_context::Grant::stale);
+        detail::access_violation(typeid(T).name(), Access::read_write, g == Access_context::Grant::stale);
 }
 
 template<typename T>
 inline void access_check(const T* self) noexcept
 {
     const Access_context* ctx = detail::current_access;
-    Access_context::Grant g =
-        ctx ? ctx->check(self, Access::read_only) : Access_context::Grant::none;
+    Access_context::Grant g = ctx ? ctx->check(self, Access::read_only) : Access_context::Grant::none;
     if (g != Access_context::Grant::granted)
-        detail::access_violation(typeid(T).name(), Access::read_only,
-                                 g == Access_context::Grant::stale);
+        detail::access_violation(typeid(T).name(), Access::read_only, g == Access_context::Grant::stale);
 }
 
 #if TS_SAFETY_CHECKS

@@ -589,8 +589,7 @@ void test_inline_deep_chain_no_overflow()
     ts::Signal root;
     ts::Task<void> prev = root;
     for (int i = 0; i < n; ++i)
-        prev = ts::task([&count] { count.fetch_add(1, std::memory_order_relaxed); })
-                   .set_inline().after(prev).launch();
+        prev = ts::task([&count] { count.fetch_add(1, std::memory_order_relaxed); }).set_inline().after(prev).launch();
 
     root.trigger();    // fires the chain -> all n run inline on this thread, trampolined
     prev.sync();

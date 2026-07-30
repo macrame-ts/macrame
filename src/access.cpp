@@ -29,11 +29,12 @@ void Access_context::add(const void* instance, Access mode,
     // that object then faults spuriously in `check` -- a false positive surfacing far
     // from the cause. Fail loud at the declaration instead.
     if (count_ == max_entries)
+    {
         ts::fatal("Access_context overflow: more than 8 declared objects in one task; "
             "raise Access_context::max_entries");
+    }
     if (count_ < max_entries)
-        entries_[count_++] = { instance, mode, epoch,
-                               epoch ? epoch->load(std::memory_order_relaxed) : 0 };
+        entries_[count_++] = { instance, mode, epoch, epoch ? epoch->load(std::memory_order_relaxed) : 0 };
 #else
     // Staleness is a harness diagnostic; without the harness an entry is address + mode.
     if (count_ < max_entries)
@@ -78,15 +79,19 @@ void access_violation(const char* type_name, Access mode, bool stale) noexcept
 {
     char message[256];
     if (stale)
+    {
         std::snprintf(message, sizeof message,
             "access violation: %s accessed for %s under a stale inherited grant "
             "(the task outlived the access scope it inherited from; gate it with "
             "ts::nested / ts::add_nested)",
             type_name, mode == Access::read_write ? "read_write" : "read_only");
+    }
     else
+    {
         std::snprintf(message, sizeof message,
             "access violation: %s accessed for %s without declared access",
             type_name, mode == Access::read_write ? "read_write" : "read_only");
+    }
     ts::fatal(message);
 }
 

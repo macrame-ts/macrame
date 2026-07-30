@@ -132,11 +132,13 @@ void test_concurrent_readers()
     std::vector<ts::Task<int>> tasks;
 
     for (int i = 0; i < 16; ++i)
+    {
         tasks.push_back(data.async([&gate](const int& v)
         {
             gate.arrive();
             return v;
         }));
+    }
 
     for (auto& t : tasks)
         t.sync();
@@ -154,6 +156,7 @@ void test_writer_exclusion()
     for (int round = 0; round < 20; ++round)
     {
         for (int r = 0; r < 4; ++r)
+        {
             tasks.push_back(data.async([&active, &writing, &violated](const int&)
             {
                 active.fetch_add(1);
@@ -162,6 +165,7 @@ void test_writer_exclusion()
                 std::this_thread::sleep_for(1ms);
                 active.fetch_sub(1);
             }));
+        }
 
         tasks.push_back(data.async([&active, &writing, &violated](int& v)
         {
@@ -213,11 +217,13 @@ void test_generic_readers_overlap()
     std::vector<ts::Task<int>> tasks;
 
     for (int i = 0; i < 8; ++i)
+    {
         tasks.push_back(data.async([&gate](const auto& v)
         {
             gate.arrive();
             return v;
         }));
+    }
 
     for (auto& t : tasks)
         t.sync();

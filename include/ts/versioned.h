@@ -226,8 +226,10 @@ public:
             std::lock_guard lock(seq_mutex_);
 #if TS_SAFETY_CHECKS
             if (!chain_.is_done())
+            {
                 fatal("Versioned: graph/inline publish while a dynamic publish is unresolved -- "
                       "one publisher at a time; sync() the publish or order it before the run");
+            }
 #endif
             chain_ = shadow_ready;
         }

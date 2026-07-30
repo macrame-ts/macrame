@@ -74,6 +74,7 @@ void stress_thread_safe()
     {
         std::vector<std::jthread> producers;
         for (int t = 0; t < threads; ++t)
+        {
             producers.emplace_back([&]
             {
                 for (int k = 0; k < per; ++k)
@@ -84,6 +85,7 @@ void stress_thread_safe()
                         obj.async([&reads](const int& v) { reads.fetch_add(1, std::memory_order_relaxed); return v; });
                 }
             });
+        }
     }   // join producers
     int final = obj.async([](const int& v) { return v; }).sync();   // FIFO drain
     assert(final == threads * per / 2);
@@ -101,6 +103,7 @@ void stress_inline_async()
     {
         std::vector<std::jthread> producers;
         for (int t = 0; t < threads; ++t)
+        {
             producers.emplace_back([&obj, &reads]
             {
                 for (int k = 0; k < per; ++k)
@@ -119,6 +122,7 @@ void stress_inline_async()
                     }
                 }
             });
+        }
     }   // join producers
     int final = obj.async([](const int& v) { return v; }).sync();   // FIFO drain
     assert(final == threads * per / 2);
@@ -254,6 +258,7 @@ void stress_launch()
     {
         std::vector<std::jthread> ps;
         for (int t = 0; t < threads; ++t)
+        {
             ps.emplace_back([&]
             {
                 for (int k = 0; k < per; ++k)
@@ -262,6 +267,7 @@ void stress_launch()
                     sum.fetch_add(v, std::memory_order_relaxed);
                 }
             });
+        }
     }   // join
     (void)sum;
 }
@@ -297,6 +303,7 @@ void stress_retraction()
         std::atomic<int> total{ 0 };
         std::vector<ts::Task<void>> tasks;
         for (int o = 0; o < outer; ++o)
+        {
             tasks.push_back(ts::launch([&]
             {
                 // Inner chunks + a dependent join; get() the join -> DEEP retraction
@@ -306,6 +313,7 @@ void stress_retraction()
                 auto c = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); });
                 ts::task([] {}).after(a, b, c).launch().sync();
             }));
+        }
         for (auto& t : tasks)
             t.sync();
         assert(total.load() == outer * 3);
@@ -320,6 +328,7 @@ void stress_retraction()
         std::atomic<int> total{ 0 };
         std::vector<ts::Task<void>> tasks;
         for (int o = 0; o < outer; ++o)
+        {
             tasks.push_back(ts::launch([&]
             {
                 int r = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); return 1; })
@@ -331,6 +340,7 @@ void stress_retraction()
                 int s = ts::when_all(a, b).then([](int x, int y) { return x + y; }).sync();
                 (void)s;
             }));
+        }
         for (auto& t : tasks)
             t.sync();
         assert(total.load() == outer * 4);
@@ -350,6 +360,7 @@ void stress_inline()
         std::atomic<int> count{ 0 };
         std::vector<ts::Task<void>> tasks;
         for (int o = 0; o < outer; ++o)
+        {
             tasks.push_back(ts::launch([&count]
             {
                 auto a = ts::launch([&count] { count.fetch_add(1, std::memory_order_relaxed); });
@@ -359,6 +370,7 @@ void stress_inline()
                              .set_inline().after(b).launch();
                 c.sync();
             }));
+        }
         for (auto& t : tasks)
             t.sync();
         assert(count.load() == outer * 3);
@@ -551,12 +563,13 @@ void stress_cancel_callback()
         {
             std::vector<std::jthread> threads;
             for (int t = 0; t < 4; ++t)
+            {
                 threads.emplace_back([&]
                 {
-                    ts::Cancel_callback cb(src.token(),
-                        [&fired] { fired.fetch_add(1, std::memory_order_relaxed); });
+                    ts::Cancel_callback cb(src.token(), [&fired] { fired.fetch_add(1, std::memory_order_relaxed); });
                     std::this_thread::yield();   // let its dtor race the cancel's firing
                 });
+            }
             threads.emplace_back([&] { src.request_cancel(); });
         }   // join: each callback either fired or was deregistered first; neither races
         (void)fired;
@@ -586,6 +599,7 @@ void stress_graph_async()
     {
         std::vector<std::jthread> firers;
         for (int t = 0; t < 3; ++t)
+        {
             firers.emplace_back([&]
             {
                 while (!stop.load(std::memory_order_relaxed))
@@ -595,6 +609,7 @@ void stress_graph_async()
                     y.async([](const int& v) { return v; }).sync();      // read y
                 }
             });
+        }
 
         for (int i = 0; i < 300; ++i)
             g.execute().sync();
@@ -624,11 +639,13 @@ void stress_graph_inline()
     {
         std::vector<std::jthread> firers;
         for (int t = 0; t < 3; ++t)
+        {
             firers.emplace_back([&]
             {
                 while (!stop.load(std::memory_order_relaxed))
                     x.async([](int& v) { ++v; }).sync();   // contends the inline nodes' object
             });
+        }
 
         for (int i = 0; i < 300; ++i)
             g.execute().sync();
@@ -647,6 +664,7 @@ void stress_multi_async()
     {
         std::vector<std::jthread> firers;
         for (int t = 0; t < 4; ++t)
+        {
             firers.emplace_back([&]
             {
                 for (int i = 0; i < 1500; ++i)
@@ -657,6 +675,7 @@ void stress_multi_async()
                     b.async([](const int& v) { return v; }).sync();
                 }
             });
+        }
     }   // join firers
 }
 
@@ -748,12 +767,16 @@ void stress_coroutine()
     {
         std::vector<std::jthread> drivers;
         for (int t = 0; t < threads; ++t)
+        {
             drivers.emplace_back([&]
             {
                 for (int i = 0; i < per; ++i)
+                {
                     if (co_chain(depth).sync() != depth)
                         bad.fetch_add(1, std::memory_order_relaxed);
+                }
             });
+        }
     }   // join drivers
     assert(bad.load() == 0);
 }
@@ -825,6 +848,7 @@ void stress_deferred()
         {
             std::vector<std::jthread> ps;
             for (int t = 0; t < threads; ++t)
+            {
                 ps.emplace_back([rec = d.recorder(), &d, &target]() mutable
                 {
                     for (int k = 0; k < per; ++k)
@@ -836,6 +860,7 @@ void stress_deferred()
                             target.async([](const int& v) { (void)v; });   // readers race commits
                     }
                 });
+            }
         }   // join stagers
         d.commit_async().sync();
         int final = target.async([](const int& v) { return v; }).sync();
@@ -874,12 +899,15 @@ void stress_versioned()
     {
         std::vector<std::jthread> threads;
         for (int t = 0; t < stagers; ++t)
+        {
             threads.emplace_back([rec = v.recorder()]() mutable
             {
                 for (int k = 0; k < per; ++k)
                     rec.stage([](int& x) { ++x; });
             });
+        }
         for (int t = 0; t < readers; ++t)
+        {
             threads.emplace_back([&v, &stop]
             {
                 int last = 0;
@@ -890,6 +918,7 @@ void stress_versioned()
                     last = x;
                 }
             });
+        }
         for (int p = 0; p < publishes; ++p)
             v.publish().sync();
         stop.store(true, std::memory_order_release);

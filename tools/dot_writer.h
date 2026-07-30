@@ -97,7 +97,9 @@ public:
                         out += "</FONT></TD>";
                     }
                     else
+                    {
                         out += "<TD></TD><TD></TD>";
+                    }
                 }
                 out += "</TR>\n";
             }

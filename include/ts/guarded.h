@@ -105,8 +105,7 @@ inline const std::atomic<std::uint64_t>* pipe_epoch([[maybe_unused]] const Pipe&
 // Enqueue `block` as a pipe job in `mode`; when admitted (reader/writer rules, FIFO) it is
 // dispatched to the scheduler as a raw block trampoline (`block->execute`, gen 0 -- pipe
 // blocks are never reset) and the pipe is released when the body returns. Allocation-free.
-void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block,
-                  Priority priority = Priority::normal);
+void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block, Priority priority = Priority::normal);
 
 // Acquire a pipe for out-of-band direct access in `mode`, holding it (not auto-completing)
 // until `pipe_release`. A `Static_task_graph` node accesses its objects directly, bypassing
@@ -222,12 +221,13 @@ constexpr Access accessor_mode()
             return async_mode_of<Arg0>();
         }
         else
+        {
             return Access::read_only;
+        }
     }
     else
     {
-        return (std::invocable<Fn, T&&>
-                || std::invocable<Fn, T&&, const Cancellation_token&>)
+        return (std::invocable<Fn, T&&> || std::invocable<Fn, T&&, const Cancellation_token&>)
             ? Access::read_only : Access::read_write;
     }
 }
@@ -245,8 +245,7 @@ struct Multi_async_state : Ref_counted<Multi_async_state>
 // callback. Canonical (pipe-address) order makes the multi-object acquire deadlock-free --
 // the same order the graph uses (`distinct_pipes_` is address-sorted), so nodes and
 // multi-object asyncs can't deadlock against each other.
-void multi_acquire(Ref_ptr<Multi_async_state> state,
-                   Task_ptr block, std::size_t pos);
+void multi_acquire(Ref_ptr<Multi_async_state> state, Task_ptr block, std::size_t pos);
 
 // Try to run a job INLINE on the calling thread instead of enqueuing it (the `access` verb's
 // fast path). Admissible only when the pipe is immediately free for this mode -- no queued jobs

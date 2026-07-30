@@ -59,12 +59,13 @@ std::map<const void*, std::string> object_labels(const Nodes& nodes)
 {
     std::map<const void*, std::string> label;
     for (const auto& node : nodes)
+    {
         for (size_t k = 0; k < node.access.size(); ++k)
         {
             const char* name = node.pipes[k]->debug_name;
-            label.try_emplace(node.access[k].first,
-                name ? std::string(name) : "obj" + std::to_string(label.size()));
+            label.try_emplace(node.access[k].first, name ? std::string(name) : "obj" + std::to_string(label.size()));
         }
+    }
     return label;
 }
 
@@ -76,9 +77,10 @@ std::string conflict_detail(const Node& a, const Node& b, std::map<const void*, 
 {
     std::string detail;
     for (const auto& [instance_a, mode_a] : a.access)
+    {
         for (const auto& [instance_b, mode_b] : b.access)
-            if (instance_a == instance_b
-                && (mode_a == Access::read_write || mode_b == Access::read_write))
+        {
+            if (instance_a == instance_b && (mode_a == Access::read_write || mode_b == Access::read_write))
             {
                 if (!detail.empty())
                     detail += "; ";
@@ -87,6 +89,8 @@ std::string conflict_detail(const Node& a, const Node& b, std::map<const void*, 
                 detail += "->";
                 detail += (mode_b == Access::read_write) ? "RW" : "RO";
             }
+        }
+    }
     return detail;
 }
 
@@ -116,6 +120,7 @@ void visit_structure(const Nodes& nodes, const std::vector<std::pair<int, int>>&
         edge_fn(from, to, true, conflict_detail(nodes[from], nodes[to], labels));
 
     for (int i = 0; i < static_cast<int>(nodes.size()); ++i)
+    {
         for (int j = i + 1; j < static_cast<int>(nodes.size()); ++j)
         {
             if (explicit_set.contains({ i, j }))
@@ -124,6 +129,7 @@ void visit_structure(const Nodes& nodes, const std::vector<std::pair<int, int>>&
             if (!detail.empty())
                 edge_fn(i, j, false, detail);
         }
+    }
 }
 
 // Consumer: the Graphviz DOT structure dump. No-op on a null path. (Internal -- the
@@ -166,7 +172,9 @@ void write_DOT_dump(const Nodes& nodes, const std::vector<std::pair<int, int>>& 
                 dot.add_edge(from, to, DOT_writer::Edge_kind::explicit_ordering, tooltip);
             }
             else
+            {
                 dot.add_edge(from, to, DOT_writer::Edge_kind::derived, detail);
+            }
         });
     dot.set_objects(std::move(object_names));
     dot.dump(path);

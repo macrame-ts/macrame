@@ -157,10 +157,11 @@ public:
 
         long long window = run_end - run_begin;
         if (worker_count > 0 && window > 0)
+        {
             core_util_.add(std::clamp(
-                static_cast<double>(busy_ticks)
-                    / (static_cast<double>(worker_count) * static_cast<double>(window)),
+                static_cast<double>(busy_ticks) / (static_cast<double>(worker_count) * static_cast<double>(window)),
                 0.0, 1.0));
+        }
 
         // True per-time utilization: per-bucket busy / (workers x bucket width), Welford per
         // bucket across runs. Counts every task kind (slices, async, ...) at its real time,
@@ -173,8 +174,10 @@ public:
             util_bucket_width_us_ = static_cast<double>(bucket_width_ticks) * ticks_to_us;
             double denom = static_cast<double>(worker_count) * static_cast<double>(bucket_width_ticks);
             for (int b = 0; b < util_bucket_count; ++b)
+            {
                 util_buckets_[static_cast<size_t>(b)].add(
                     std::clamp(static_cast<double>(util_bucket_busy[b]) / denom, 0.0, 1.0));
+            }
         }
 
         for (int i = 0; i < node_count; ++i)
@@ -194,8 +197,7 @@ public:
             a.dur_P50.add(d);
             a.dur_P95.add(d);
             a.start_P50.add(s);
-            a.dispatch_wait.add(std::max(0.0,
-                static_cast<double>(starts[i] - readys[i]) * ticks_to_us));
+            a.dispatch_wait.add(std::max(0.0, static_cast<double>(starts[i] - readys[i]) * ticks_to_us));
             // True busy = this node's body + its parallel_for slices + its async fan-out,
             // attributed via the scheduler's owner sink (now that parallel_for fans out on
             // the run's scheduler). 0 when unavailable (e.g. work run inline on a non-worker
@@ -204,7 +206,9 @@ public:
                 a.true_busy.add(static_cast<double>(owner_busy[i]) * ticks_to_us);
             int w = workers[i];
             if (w < 0)
+            {
                 ++a.external_runs;
+            }
             else
             {
                 if (w >= static_cast<int>(a.worker_runs.size()))
@@ -503,8 +507,10 @@ private:
 
         int cur = 0;
         for (int i = 1; i < node_count; ++i)
+        {
             if (ends[i] > ends[cur])
                 cur = i;
+        }
 
         double work = 0.0;
         while (cur >= 0)
@@ -514,18 +520,18 @@ private:
 
             int binding_edge = -1;
             for (int e : in_edges_[static_cast<size_t>(cur)])
+            {
                 if (binding_edge < 0
-                    || ends[edges_[static_cast<size_t>(e)].from]
-                     > ends[edges_[static_cast<size_t>(binding_edge)].from])
+                    || ends[edges_[static_cast<size_t>(e)].from] > ends[edges_[static_cast<size_t>(binding_edge)].from])
                     binding_edge = e;
+            }
             if (binding_edge < 0)
                 break;   // a root: the chain is complete
             Edge_agg& be = edges_[static_cast<size_t>(binding_edge)];
             ++be.critical_runs;
             // The chain's dead time at this step: the successor sat ready-but-waiting
             // (queue / acquire) after its binding predecessor finished.
-            be.binding_gap.add(std::max(0.0,
-                static_cast<double>(starts[cur] - ends[be.from]) * ticks_to_us));
+            be.binding_gap.add(std::max(0.0, static_cast<double>(starts[cur] - ends[be.from]) * ticks_to_us));
             cur = be.from;
         }
         critical_work_.add(work);
@@ -538,11 +544,13 @@ private:
         long long best = a.external_runs;
         worker = -1;
         for (size_t w = 0; w < a.worker_runs.size(); ++w)
+        {
             if (a.worker_runs[w] > best)
             {
                 best = a.worker_runs[w];
                 worker = static_cast<int>(w);
             }
+        }
         return best;
     }
 
@@ -657,12 +665,18 @@ inline bool Graph_trace::write_SVG(const char* path) const
     std::vector<int> topo;
     topo.reserve(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i)
+    {
         if (indegree[static_cast<size_t>(i)] == 0)
             topo.push_back(i);
+    }
     for (size_t h = 0; h < topo.size(); ++h)
+    {
         for (int e : out_edges[static_cast<size_t>(topo[h])])
+        {
             if (--indegree[static_cast<size_t>(edges_[static_cast<size_t>(e)].to)] == 0)
                 topo.push_back(edges_[static_cast<size_t>(e)].to);
+        }
+    }
 
     // Structural critical path (CPM) over the average frame: forward/backward pass with
     // the same median durations the bars use, zero edge latency. This is the dependency
@@ -674,11 +688,13 @@ inline bool Graph_trace::write_SVG(const char* path) const
     for (int i = 0; i < count; ++i)
         dur[static_cast<size_t>(i)] = std::max(0.0, nodes_[static_cast<size_t>(i)].dur_P50.value());
     for (int u : topo)
+    {
         for (int e : out_edges[static_cast<size_t>(u)])
         {
             size_t v = static_cast<size_t>(edges_[static_cast<size_t>(e)].to);
             est[v] = std::max(est[v], est[static_cast<size_t>(u)] + dur[static_cast<size_t>(u)]);
         }
+    }
     double cpm_us = 0.0;
     for (int i = 0; i < count; ++i)
         cpm_us = std::max(cpm_us, est[static_cast<size_t>(i)] + dur[static_cast<size_t>(i)]);
@@ -694,8 +710,10 @@ inline bool Graph_trace::write_SVG(const char* path) const
     }
     std::vector<double> slack(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i)
+    {
         slack[static_cast<size_t>(i)] = std::max(0.0,
             lf[static_cast<size_t>(i)] - (est[static_cast<size_t>(i)] + dur[static_cast<size_t>(i)]));
+    }
 
     // Critical-path ranking (the table below the legend): nodes ranked by expected chain
     // contribution -- chain share x mean duration, descending -- so a briefly-critical
@@ -738,11 +756,13 @@ inline bool Graph_trace::write_SVG(const char* path) const
         double gap_weighted = 0.0;
         long long gap_runs = 0;
         for (const Edge_agg& e : edges_)
+        {
             if (e.to == i && e.critical_runs > 0)
             {
                 gap_weighted += e.binding_gap.mean * static_cast<double>(e.critical_runs);
                 gap_runs += e.critical_runs;
             }
+        }
         if (gap_runs > 0)
             r.dead_in = gap_weighted / static_cast<double>(gap_runs);
         ranking.push_back(r);
@@ -751,6 +771,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
         [](const Rank_row& a, const Rank_row& b){ return a.key > b.key; });
 
     for (int u : topo)
+    {
         for (int e : out_edges[static_cast<size_t>(u)])
         {
             const Edge_agg& edge = edges_[static_cast<size_t>(e)];
@@ -764,6 +785,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
                 bar_end[v] = std::max(bar_end[v], bar_start[v]);
             }
         }
+    }
 
     // Concurrency rows: workers are interchangeable and the node->worker assignment
     // reshuffles every run, so per-worker lanes misrepresent the aggregate -- a lane can
@@ -776,8 +798,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // layout.
     int workers_seen = 0;
     for (int i = 0; i < count; ++i)
-        workers_seen = std::max(workers_seen,
-            static_cast<int>(nodes_[static_cast<size_t>(i)].worker_runs.size()));
+        workers_seen = std::max(workers_seen, static_cast<int>(nodes_[static_cast<size_t>(i)].worker_runs.size()));
 
     std::vector<int> pack_order(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i)
@@ -984,12 +1005,14 @@ inline bool Graph_trace::write_SVG(const char* path) const
             double w_cls[3] = { 0.0, 0.0, 0.0 };
             double w_all = 0.0;
             for (const Gap_info& g : gaps)
+            {
                 if (g.has_band && g.cls >= 0)
                 {
                     double w = g.share * g.gap_us;
                     w_cls[g.cls] += w;
                     w_all += w;
                 }
+            }
             if (w_all > 0.0 && dead_share > 0.0)
             {
                 static constexpr const char* cls_color[3] = { "#f92672", "#e6db74", "#fd971f" };
@@ -997,6 +1020,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
                 out += "<tspan fill=\"#cfcfc2\"> (</tspan>";
                 bool first_cls = true;
                 for (int c : { 2, 1, 0 })   // core-bound first: the actionable surprise
+                {
                     if (w_cls[c] > 0.0)
                     {
                         if (!first_cls)
@@ -1007,6 +1031,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
                             + fmt_us(100.0 * dead_share * w_cls[c] / w_all) + "%");
                         out += "</tspan>";
                     }
+                }
                 out += "<tspan fill=\"#cfcfc2\">)</tspan>";
             }
         }
@@ -1171,8 +1196,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
                 + (rank_omitted == 1 ? " node" : " nodes")
                 + " with chain share < " + cutoff + " omitted";
             if (rank_max_omitted >= 0 && rank_max_omitted_share > 0.0)
-                foot += " (max: " + nodes_[static_cast<size_t>(rank_max_omitted)].label
-                     + " " + pct + ")";
+                foot += " (max: " + nodes_[static_cast<size_t>(rank_max_omitted)].label + " " + pct + ")";
             cell(cx_name, "start", "#75715e", foot);
         }
     }
@@ -1513,7 +1537,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
                     : "Lever: both apply -- part capacity, part dependency");
             }
             else
+            {
                 tip.push_back("Cause: unclassified (no utilization data for this window)");
+            }
         }
         // Dash carries provenance (solid = explicit, dashed = derived); colour carries
         // criticality, green -> pink by the edge's share of binding chains. Width is

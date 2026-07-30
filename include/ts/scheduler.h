@@ -268,9 +268,13 @@ public:
         bucket_origin_.store(origin, std::memory_order_relaxed);
         bucket_width_.store(bucket_width, std::memory_order_relaxed);
         if (bucket_width > 0)
+        {
             for (Bucket_row& row : bucket_busy_)
+            {
                 for (std::atomic<long long>& b : row.b)
                     b.store(0, std::memory_order_relaxed);
+            }
+        }
         // Per-owner (graph-node) busy sink: sized + cleared per armed run (node counts can
         // differ between compiles). Written relaxed by every worker via `add_owner_busy`.
         if (static_cast<int>(owner_busy_.size()) != owner_count)
@@ -304,8 +308,10 @@ public:
     void read_owner_busy(long long* out, int count) const noexcept
     {
         for (int i = 0; i < count; ++i)
+        {
             out[i] = i < static_cast<int>(owner_busy_.size())
                 ? owner_busy_[static_cast<std::size_t>(i)].load(std::memory_order_relaxed) : 0;
+        }
     }
 
     // Sum the per-worker bucket busy into `out[0..util_bucket_count)` (ticks). Read at the
@@ -316,8 +322,10 @@ public:
         for (int b = 0; b < util_bucket_count; ++b)
             out[b] = 0;
         for (const Bucket_row& row : bucket_busy_)
+        {
             for (int b = 0; b < util_bucket_count; ++b)
                 out[b] += row.b[static_cast<std::size_t>(b)].load(std::memory_order_relaxed);
+        }
     }
 #endif
 
@@ -336,8 +344,7 @@ private:
             long long t0 = std::chrono::steady_clock::now().time_since_epoch().count();
             bool got = find_work(worker_index, out);
             if (got)
-                add_dispatch_ticks(worker_index,
-                    std::chrono::steady_clock::now().time_since_epoch().count() - t0);
+                add_dispatch_ticks(worker_index, std::chrono::steady_clock::now().time_since_epoch().count() - t0);
             return got;
         }
 #endif
@@ -417,8 +424,7 @@ private:
                         long long seg_lo = lo > edge_lo ? lo : edge_lo;
                         long long seg_hi = hi < edge_hi ? hi : edge_hi;
                         if (seg_hi > seg_lo)
-                            row.b[static_cast<std::size_t>(b)].fetch_add(seg_hi - seg_lo,
-                                                                        std::memory_order_relaxed);
+                            row.b[static_cast<std::size_t>(b)].fetch_add(seg_hi - seg_lo, std::memory_order_relaxed);
                     }
                 }
             }

@@ -134,7 +134,9 @@ void release_and_redispatch(Scheduler& scheduler, Pipe& pipe, Access mode)
     {
         std::scoped_lock lock(pipe.mutex);
         if (mode == Access::read_only)
+        {
             --pipe.active_readers;
+        }
         else
         {
             pipe.writer_active = false;
@@ -242,8 +244,7 @@ void submit_admitted(Scheduler& scheduler, Pipe& pipe, Admitted& admitted)
 
 } // namespace
 
-void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block,
-                  Priority priority)
+void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block, Priority priority)
 {
     Admitted admitted;
     {
@@ -290,8 +291,7 @@ void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode)
     release_and_redispatch(scheduler, pipe, mode);
 }
 
-void multi_acquire(Ref_ptr<Multi_async_state> state,
-                   Task_ptr block, std::size_t pos)
+void multi_acquire(Ref_ptr<Multi_async_state> state, Task_ptr block, std::size_t pos)
 {
     if (pos == state->holds.size())
     {

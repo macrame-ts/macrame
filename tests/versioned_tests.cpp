@@ -239,6 +239,7 @@ void test_concurrent_readers_and_publishes()
 
     std::vector<std::jthread> readers;
     for (int t = 0; t < reader_threads; ++t)
+    {
         readers.emplace_back([&v, &stop, &bad]
         {
             while (!stop.load())
@@ -249,6 +250,7 @@ void test_concurrent_readers_and_publishes()
                     bad.fetch_add(1);
             }
         });
+    }
 
     auto rec = v.recorder();
     for (int i = 0; i < publishes; ++i)

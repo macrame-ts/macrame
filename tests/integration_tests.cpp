@@ -156,11 +156,13 @@ void test_graph_async_stress()
     {
         std::vector<std::jthread> firers;
         for (int t = 0; t < 4; ++t)
+        {
             firers.emplace_back([&]
             {
                 while (!stop.load(std::memory_order_relaxed))
                     x.async([](Guarded& gg) { gg.touch(); }).sync();
             });
+        }
 
         for (int i = 0; i < 20; ++i)
             g.execute().sync();
@@ -539,7 +541,9 @@ void test_oversubscription_no_deadlock()
         TS_CHECK(total.load() == outer * 4);
     }
     else
+    {
         runner.detach();     // deadlocked; leak the stuck thread
+    }
 }
 
 // Deep retraction: each outer task get()s a DEPENDENT (a builder task with
@@ -576,7 +580,9 @@ void test_deep_retraction_no_deadlock()
         TS_CHECK(total.load() == outer * 3);
     }
     else
+    {
         runner.detach();
+    }
 }
 
 // Deep retraction through a `then` chain: each outer task get()s a CONTINUATION, whose
@@ -611,7 +617,9 @@ void test_then_retraction_no_deadlock()
         TS_CHECK(total.load() == outer * 2);   // producer + continuation, once per outer
     }
     else
+    {
         runner.detach();
+    }
 }
 
 // Same, through a when_all join: get() on the join walks its retraction hints, runs each
@@ -644,7 +652,9 @@ void test_when_all_retraction_no_deadlock()
         TS_CHECK(total.load() == outer * 2);
     }
     else
+    {
         runner.detach();
+    }
 }
 
 } // namespace

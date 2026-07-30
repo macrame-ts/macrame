@@ -130,10 +130,13 @@ Graph_node& Graph_node::set_inline()
 bool Static_task_graph::conflicts(const Node& a, const Node& b)
 {
     for (const auto& [instance_a, mode_a] : a.access)
+    {
         for (const auto& [instance_b, mode_b] : b.access)
-            if (instance_a == instance_b
-                && (mode_a == Access::read_write || mode_b == Access::read_write))
+        {
+            if (instance_a == instance_b && (mode_a == Access::read_write || mode_b == Access::read_write))
                 return true;
+        }
+    }
     return false;
 }
 
@@ -160,9 +163,13 @@ void Static_task_graph::compile(const char* DOT_path)
     // conflicting nodes are ordered by declaration index (deterministic tiebreak;
     // ambiguity reporting is future work, see docs/TODO.md)
     for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
+    {
         for (int j = i + 1; j < static_cast<int>(nodes_.size()); ++j)
+        {
             if (conflicts(nodes_[i], nodes_[j]))
                 edges.insert({ i, j });
+        }
+    }
 
     for (const auto& [from, to] : edges)
     {
@@ -174,8 +181,10 @@ void Static_task_graph::compile(const char* DOT_path)
     // canonical id (nodes acquire in ascending-index order -> deadlock-free multi-acquire).
     std::set<detail::Pipe*> pipes;
     for (const Node& node : nodes_)
+    {
         for (detail::Pipe* p : node.pipes)
             pipes.insert(p);
+    }
     distinct_pipes_.assign(pipes.begin(), pipes.end());
 
 #if TS_SAFETY_CHECKS
@@ -260,8 +269,10 @@ void Static_task_graph::detect_cycles() const
 
     std::deque<int> ready;
     for (size_t i = 0; i < nodes_.size(); ++i)
+    {
         if (indegree[i] == 0)
             ready.push_back(static_cast<int>(i));
+    }
 
     size_t visited = 0;
     while (!ready.empty())
@@ -270,8 +281,10 @@ void Static_task_graph::detect_cycles() const
         ready.pop_front();
         ++visited;
         for (int s : nodes_[n].successors)
+        {
             if (--indegree[s] == 0)
                 ready.push_back(s);
+        }
     }
 
     if (visited != nodes_.size())
@@ -411,6 +424,7 @@ int Static_task_graph::handoff_target(Run_state& run, const std::vector<int>& re
     {
         const Node& sn = run.graph->nodes_[s];
         for (size_t k = 0; k < sn.pipe_indices.size(); ++k)
+        {
             if (sn.pipe_indices[k] == pi)
             {
                 if (found != -1)
@@ -419,6 +433,7 @@ int Static_task_graph::handoff_target(Run_state& run, const std::vector<int>& re
                 found_mode = sn.pipe_modes[k];
                 break;
             }
+        }
     }
     return (found != -1 && found_mode == m) ? found : -1;
 }
@@ -428,12 +443,14 @@ void Static_task_graph::mark_preheld(Run_state& run, int node_index, int pi)
 {
     const Node& n = run.graph->nodes_[node_index];
     for (size_t pos = 0; pos < n.pipe_indices.size(); ++pos)
+    {
         if (n.pipe_indices[pos] == pi)
         {
             if (pos < 64)
                 run.preheld[node_index].fetch_or(std::uint64_t{ 1 } << pos, std::memory_order_relaxed);
             return;
         }
+    }
 }
 
 void Static_task_graph::node_complete(Run_state& run, int index)
@@ -448,8 +465,10 @@ void Static_task_graph::node_complete(Run_state& run, int index)
     std::vector<int>& ready = node.ready_buf;
     ready.clear();
     for (int successor : node.successors)
+    {
         if (run.remaining_deps[successor].fetch_sub(1, std::memory_order_acq_rel) == 1)
             ready.push_back(successor);
+    }
 
     // Phase 2: hand off or release each object this node held. HANDOFF (skip release + skip
     // the successor's re-acquire) when exactly one ready successor takes the object in the
@@ -477,7 +496,9 @@ void Static_task_graph::node_complete(Run_state& run, int index)
 #endif
         }
         else
+        {
             detail::pipe_release(*run.scheduler, *run.graph->distinct_pipes_[pi], m);
+        }
     }
 
     // Phase 3: trigger the ready successors (they acquire their objects, skipping any handed
@@ -565,8 +586,10 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     // over each accessor's [acquire, complete] window -- so a graph object is free in the
     // gaps (no whole-run reservation). Kick off every root (indegree 0).
     for (size_t i = 0; i < nodes_.size(); ++i)
+    {
         if (nodes_[i].indegree == 0)
             on_data_ready(run, static_cast<int>(i));
+    }
 
     return result;
 }

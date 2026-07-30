@@ -788,8 +788,10 @@ void test_graph_trace_overhead()
     int workers[1] = { 0 };
     // body 900 us, machinery 100 us per run -> overhead exactly 0.10.
     for (int i = 0; i < 8; ++i)
+    {
         trace.on_run_complete(readys, starts, ends, workers, 1, 0, ticks(1000), ticks(900), 1,
             nullptr, 0, 0, nullptr, 1, ticks(900), ticks(100));
+    }
 
     TS_CHECK(std::abs(trace.overhead() - 0.10) < 1e-9);
     TS_CHECK(std::abs(trace.body_us() - 900.0) < 1e-6);

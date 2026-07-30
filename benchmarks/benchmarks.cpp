@@ -112,6 +112,7 @@ std::vector<double> bench_contention(ts::Idle_policy policy, unsigned producers)
         {
             std::vector<std::jthread> threads;
             for (unsigned i = 0; i < producers; ++i)
+            {
                 threads.emplace_back([&]
                 {
                     uint64_t local = 0;
@@ -122,6 +123,7 @@ std::vector<double> bench_contention(ts::Idle_policy policy, unsigned producers)
                     }
                     submitted.fetch_add(local, std::memory_order_relaxed);
                 });
+            }
 
             std::this_thread::sleep_for(target);
             stop.store(true, std::memory_order_relaxed);

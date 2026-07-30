@@ -143,11 +143,13 @@ public:
             return;
         std::unique_lock lock(state_->mutex);
         for (auto it = state_->callbacks.begin(); it != state_->callbacks.end(); ++it)
+        {
             if (*it == this)
             {
                 state_->callbacks.erase(it);   // not yet fired -> just deregister
                 return;
             }
+        }
         if (state_->firing == this)            // mid-invocation
         {
             if (state_->firing_thread == std::this_thread::get_id())
@@ -844,6 +846,7 @@ auto with_inherited_access(Fn&& fn)
     // to its owning node; `Trace_busy_scope` measures the body while the owner is live. Both
     // no-op under TS_PROFILING=0 (owner is -1, the scopes empty).
     if constexpr (takes_token_v<std::decay_t<Fn>>)
+    {
         return [fn = std::forward<Fn>(fn), ctx = snapshot_access(), owner = trace_owner()](const Cancellation_token& tok) mutable -> R
         {
             Trace_owner_scope trace_owner_scope(owner);
@@ -851,7 +854,9 @@ auto with_inherited_access(Fn&& fn)
             Inherited_access_scope scope(ctx);
             return fn(tok);
         };
+    }
     else
+    {
         return [fn = std::forward<Fn>(fn), ctx = snapshot_access(), owner = trace_owner()]() mutable -> R
         {
             Trace_owner_scope trace_owner_scope(owner);
@@ -859,6 +864,7 @@ auto with_inherited_access(Fn&& fn)
             Inherited_access_scope scope(ctx);
             return fn();
         };
+    }
 }
 
 // --- apply-style continuation detection -----------------------------------
@@ -921,8 +927,7 @@ Task_ptr core_of(const Task<R>& t) noexcept;
 // to retract; its callback has fired or will fire). Pushed under `prereq`'s mutex like
 // `add_prerequisite`, and only before `dependent` is exposed, so it doesn't race
 // `dependent`'s later settle/retract.
-inline void add_retraction_hint(const Task_ptr& prereq,
-                                const Task_ptr& dependent)
+inline void add_retraction_hint(const Task_ptr& prereq, const Task_ptr& dependent)
 {
     std::scoped_lock lock(prereq->mutex);
     if (!prereq->completed)
@@ -933,8 +938,7 @@ inline void add_retraction_hint(const Task_ptr& prereq,
 // has already settled. `after` orders `succ` after `prereq` and propagates cancellation:
 // a cancelled `prereq` still releases `succ`, but marks `succ->prereq_cancelled` so it
 // settles cancelled rather than running (see `release` / `Executable::run`).
-inline void add_prerequisite(const Task_ptr& prereq,
-                             const Task_ptr& succ)
+inline void add_prerequisite(const Task_ptr& prereq, const Task_ptr& succ)
 {
     std::scoped_lock lock(prereq->mutex);
     if (!prereq->completed)

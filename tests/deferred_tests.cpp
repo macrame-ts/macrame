@@ -107,11 +107,13 @@ void test_concurrent_staging()
 
     std::vector<std::jthread> staging;
     for (int t = 0; t < threads; ++t)
+    {
         staging.emplace_back([rec = d.recorder()]() mutable
         {
             for (int i = 0; i < per_thread; ++i)
                 rec.stage([](Counter& c) { c.increment(); });
         });
+    }
     staging.clear();   // join
 
     d.commit_async().sync();

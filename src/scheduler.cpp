@@ -67,8 +67,7 @@ struct Submit_cost_scope
     ~Submit_cost_scope()
     {
         if (active)
-            sched->add_submit_ticks(current_worker_index,
-                std::chrono::steady_clock::now().time_since_epoch().count() - t0);
+            sched->add_submit_ticks(current_worker_index, std::chrono::steady_clock::now().time_since_epoch().count() - t0);
     }
     Submit_cost_scope(const Submit_cost_scope&) = delete;
     Submit_cost_scope& operator=(const Submit_cost_scope&) = delete;
@@ -421,11 +420,15 @@ bool Scheduler::handoff_wait(int worker_index, detail::Task_entry& out)
 bool Scheduler::all_empty() const
 {
     for (const auto& q : queues_)
+    {
         if (!q.empty())
             return false;
+    }
     for (const auto& d : local_normal_)
+    {
         if (!d->empty())
             return false;
+    }
     return true;
 }
 

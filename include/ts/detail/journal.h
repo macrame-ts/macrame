@@ -85,8 +85,10 @@ public:
         }
 #if TS_SAFETY_CHECKS
         if (slots_.size() >= max_slots)
+        {
             fatal("Journal: slot count exceeded max_slots -- recorders are being minted "
                   "and kept alive per frame; mint once per producer and reuse");
+        }
 #endif
         return slots_.emplace_back();
     }
