@@ -223,6 +223,18 @@ claim is a CAS on a field of a guaranteed-live object. This decides the
 single-blob layout on *safety* grounds, independent of the (hard-to-isolate)
 allocation-count comparison.
 
+The deadlock class this removes — a task blocking on other tasks that need a thread
+from the same bounded pool — is a documented, recurring failure in every comparable
+system (Taskflow, oneTBB, Rayon, Java `ForkJoinPool`, .NET TPL, GCD). Those are the two
+horns targeted busy-waiting threads between: **park** and risk that pool-exhaustion
+deadlock; **busy-wait on arbitrary queued work** (the peer mitigation — TBB `isolate`,
+Taskflow `corun`, FJP helping) and inherit a distinct hazard family (re-entrancy /
+"moonlighting" correctness bugs, TLS corruption, stack overflow, priority inversion,
+convoy latency). Retraction takes neither: automatic, targeted to the waiter's own
+subtree, thread-free. Prior-art survey with issue-tracker citations for both horns and
+the honest scope of what retraction does *not* cover:
+[retraction-vs-pool-exhaustion.md](retraction-vs-pool-exhaustion.md).
+
 ---
 
 ## 7. Nested tasks
@@ -640,7 +652,11 @@ TSan): the block settles exactly once, either way.
   in `submit_job`, when the pipe has granted the turn), so retraction only ever runs a
   task the pipe already cleared. Bounded plumbing, and only helps *admitted* jobs (a job
   still in the pipe deque isn't a scheduler task and is unreachable by retraction anyway).
-  Parked until async-retraction is a real need.
+  Parked until async-retraction is a real need. **Reframe (2026-07):** the deeper cause is
+  that pipe ordering is not a `prerequisite` chain (unlike UE's serial `FPipe`, where the
+  previous piped task *is* a prerequisite and retraction covers pipe chains for free). The
+  pipe-rebase note ([TODO.md](TODO.md) §1.14 addendum) works this through — writer retraction
+  would fall out of the rebase; reader retraction (N predecessors, no single edge) would not.
 - **`then` rebased onto proper tasks. Done.** A `then` continuation is no longer an
   inline callback in the producer's `settle`; it's a real `Executable` with the producer
   as a `num_locks` **prerequisite** — queued by default (so it carries a priority and the

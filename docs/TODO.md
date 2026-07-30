@@ -168,6 +168,31 @@ IDs — when an item is done, mark it, don't renumber.
        `Deferred`'s external mutex; any future fire-and-forget wrapper gets ordering for
        free. Until then the rule stands: never record pipe ordering without a lock spanning
        enqueue + record.
+       **Addendum (2026-07, retraction): the split-structure pipe is why pipe/`async` jobs
+       are non-retractable.** Pipe ordering lives in a separate structure (`pipe.jobs` deque
+       + reader/writer admission in `dispatch`), NOT in the block's `prerequisites`.
+       `retract` (`task.h`) walks only `prerequisites`, so it is blind to pipe admission
+       order — a pipe job flagged `retractable` could be run out of turn while still queued
+       behind a conflicting writer (the exact race [task-internals.md](task-internals.md) §6
+       cites). So pipe blocks are marked non-retractable (`run_pipe_job`, `guarded.cpp`:
+       "pipe blocks are not retractable and never inline-dispatched"), and a blocking
+       `sync()` on one parks a worker — caught only by the blocking-sync diagnostic, never
+       made safe. UE gets pipe retraction *for free* precisely because it does NOT keep a
+       separate structure: the previous piped task IS registered as a prerequisite
+       (`FTaskBase::Prerequisites` is populated "by piping, when the previous piped task is
+       added as a prerequisite"), so `TryRetractAndExecute` covers pipe chains through the
+       same recursive prerequisite walk and respects order structurally (predecessor
+       retracted first — never out of turn). The catch: UE's `FPipe` is strictly serial, so
+       each piped task has exactly ONE pipe-predecessor, which maps to a single prerequisite
+       edge. This rebase restores retraction the same way — but only cleanly for **writers**:
+       a writer chains via one prerequisite edge on the previous holder, so it becomes
+       retractable like any prerequisite (walk the edge, run inline once it clears).
+       **Readers do not map**: the reader-group sentinel has N predecessors and a reader
+       block carries no single ordering edge to walk, so reader retraction stays a separate
+       design question even post-rebase. Net: the rebase reframes §6's parked "Retraction of
+       pipe/async tasks" blocker from "admission-ordering plumbing" to "pipe ordering is not
+       a prerequisite chain," and delivers writer retraction as a side effect — reader
+       retraction not.
 
 2. **Static task graph**
    1. `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.
