@@ -47,8 +47,8 @@ void drain_serial_pending() noexcept;
 struct Task_control_block;
 // Defined in guarded.cpp (it needs the `Pipe` layout this header deliberately lacks):
 // diagnose a blocking `sync()` on non-retractable work issued under an access scope -- a
-// `TS_ENSURE` failure with the sharp same-object message when the target is a pipe job on
-// a pipe the current context holds (certain deadlock), the general never-block warning
+// `TS_ENSURE` failure with the sharp same-object message when the target is an async access
+// on an object the current context holds (certain deadlock), the general never-block warning
 // otherwise. Called by `retract_or_wait` only when the wait is genuinely about to park.
 void blocking_sync_diagnose(const Task_control_block* blk) noexcept;
 #endif
@@ -608,7 +608,7 @@ struct Task_control_block
     // `blk`'s prerequisites first (recursively), then, once its prerequisites are met
     // and it hasn't started, run its body inline. `execute` claims via `run_state`, so a
     // worker and a retractor never both run a body; non-retractable prerequisites
-    // (pipe tasks, externally-triggered `Signal`s) are left to complete on their own.
+    // (async accesses, externally-triggered `Signal`s) are left to complete on their own.
     static void retract(const Task_ptr& blk)
     {
         if (!blk->flags.retractable || blk->ready.load(std::memory_order_acquire))
@@ -639,7 +639,7 @@ struct Task_control_block
     static void retract_or_wait(const Task_ptr& blk)
     {
         retract(blk);
-        // Worker-less mode: the awaited work (a pipe job, a released successor) may be
+        // Worker-less mode: the awaited work (an async access, a released successor) may be
         // queued on THIS thread's serial trampoline behind the current frame -- run it
         // before parking, or nothing ever would. No-op otherwise.
         drain_serial_pending();

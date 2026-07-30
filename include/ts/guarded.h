@@ -383,8 +383,8 @@ public:
         pipe_.debug_name = name.literal;
     }
 
-    // Identity matters (it is the access key); waits out pending jobs so the
-    // pipe outlives its last task.
+    // Identity matters (it is the access key); waits out pending accesses so the
+    // object outlives its last one.
     ~Guarded()
     {
 #if TS_SAFETY_CHECKS
@@ -415,7 +415,7 @@ public:
     // the rvalue-bindability probe. Both accept a trailing `Cancellation_token`, and take
     // `Access_options` = `{token, priority}` (no `run_inline`: the verb IS the mode).
     //
-    //   access(fn) -- opportunistic: runs `fn` on the CALLING thread when the pipe is free right
+    //   access(fn) -- opportunistic: runs `fn` on the CALLING thread when the object is free right
     //                 now (no scheduling), otherwise enqueues. Best for short functors. Because it
     //                 may run inline it can briefly block the caller and stacks its access scope,
     //                 so prefer `async` for anything non-trivial inside a graph node.
@@ -667,7 +667,7 @@ auto async_build_tagged(Access_options opts, std::index_sequence<I...> seq, Fn&&
 // generic ones -- but remain for those preferring explicit declaration at the call site, and
 // as the escape hatch for an `auto&&` parameter that must write. The tag wins over the
 // parameter spelling; an over-declared write (write tag, `const T&` parameter) is legal
-// conservative serialization. (Named `as_*` to avoid colliding with the coroutine pipe guards
+// conservative serialization. (Named `as_*` to avoid colliding with the coroutine access guards
 // `ts::read_only`/`ts::read_write` in coroutine_support.h.)
 template<typename T>
 detail::Access_arg<T, Access::read_only> as_read_only(Guarded<T>& g) { return { &g }; }
@@ -739,6 +739,6 @@ auto access(Fn&& fn, Objs&&... objs)
 }
 
 // `ts::launch` / `ts::nested` (bare scheduler tasks) live in task.h now — they dispatch
-// through the `submit_ready` bridge and need no pipe, so they belong with the task core.
+// through the `submit_ready` bridge and touch no `Guarded`, so they belong with the task core.
 
 } // namespace ts

@@ -16,9 +16,9 @@ namespace ts
 // per-recorder storage (no grant on the target, contention-free between recorders),
 // and one `commit` applies everything under a single write access. Readers of the
 // target between stage and commit see none of the staged writes; after it, all of
-// them -- the stable-snapshot contract. The pipe stays the only arbitration
-// mechanism: the commit IS an ordinary write (an `async` job or a graph node's
-// declared write access); staging itself needs no synchronization with anyone.
+// them -- the stable-snapshot contract. Access to the target stays the only
+// arbitration mechanism: the commit IS an ordinary write (an `async` job or a graph
+// node's declared write access); staging itself needs no synchronization with anyone.
 //
 // Ordering: FIFO within a recorder (semantic -- build on it); cross-recorder
 // order is arbitrary (never build semantics on it) but deterministic given a
@@ -31,11 +31,12 @@ namespace ts
 // in journal.h, shared with `Versioned<T>`. See docs/command-buffer-design.md.
 
 // The command buffer: binds to a `Guarded<T>` for its lifetime. `recorder()` mints
-// producer handles; `commit_async()` applies everything as one pipe write job;
-// `commit()` applies to the bound object under an access grant the caller already
-// holds (a graph node's declared write, or inside a `target.async` write body) --
-// no second pipe round-trip. Lifetime contract: sync the task `commit_async` returns
-// before destroying the Deferred (the pending pipe job uses this object); violating
+// producer handles; `commit_async()` applies everything as one async write on the
+// target; `commit()` applies to the bound object under an access grant the caller
+// already holds (a graph node's declared write, or inside a `target.async` write
+// body) -- without a second access acquisition. Lifetime contract: sync the task
+// `commit_async` returns before destroying the Deferred (the pending write still
+// references this object); violating
 // it is fatal under `TS_SAFETY_CHECKS`. Must also outlive any outstanding `Recorder`.
 template<typename T>
 class Deferred
@@ -50,9 +51,9 @@ public:
     // intended (e.g. teardown mid-frame).
     ~Deferred()
     {
-        // Pipe writes are FIFO, so the last-enqueued commit settling means no
-        // pending pipe job references this Deferred; the destructor then has
-        // nothing to wait for (unrelated jobs on the target's pipe are `~Guarded`'s
+        // Writes on the target are FIFO, so the last-submitted commit settling means
+        // no pending write still references this Deferred; the destructor then has
+        // nothing to wait for (unrelated accesses on the target are `~Guarded`'s
         // business). An unsettled commit is a contract violation: surface it hard
         // rather than block silently -- a long-parking destructor goes unnoticed
         // and usually marks a bug worth fixing.
@@ -72,7 +73,8 @@ public:
                   "returned task before destruction");
 #endif
             // Shipping safety net: the job dereferences this Deferred when it runs;
-            // outwait the pipe so it cannot run against a destroyed one.
+            // outwait the target's pending accesses so it cannot run against a
+            // destroyed one.
             detail::Guarded_access::pipe(*target_).wait_until_idle();
         }
 #if TS_SAFETY_CHECKS
@@ -115,16 +117,16 @@ public:
             cmd(*t);
     }
 
-    // Apply as an ordinary pipe write job: one acquisition amortized over the whole
-    // batch. The cut happens when the job RUNS (pipe FIFO position), so it captures
-    // everything staged before the write actually happens. Returns the completion;
-    // sync it before destroying the Deferred (see the destructor). Callable
-    // concurrently (producers may fire-and-forget); the lock spans enqueue + store
-    // so `last_commit_` is the pipe-LAST commit -- store order alone would let an
-    // earlier job's handle overwrite a later one's, and the destructor's settled
-    // check would then miss a still-pending job. Uncontended in single-committer
-    // use; the enqueue inside the lock cannot re-enter (a commit body never calls
-    // `commit_async`).
+    // Apply as an ordinary async write on the target: one access acquisition amortized
+    // over the whole batch. The cut happens when the write RUNS (its turn in the
+    // target's write order), so it captures everything staged before the write actually
+    // happens. Returns the completion; sync it before destroying the Deferred (see the
+    // destructor). Callable concurrently (producers may fire-and-forget); the lock spans
+    // submit + store so `last_commit_` is the last commit in submission order -- store
+    // order alone would let an earlier write's handle overwrite a later one's, and the
+    // destructor's settled check would then miss a still-pending write. Uncontended in
+    // single-committer use; the submit inside the lock cannot re-enter (a commit body
+    // never calls `commit_async`).
     Task<void> commit_async(Access_options opts = {})
     {
         std::lock_guard lock(commit_mutex_);

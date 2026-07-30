@@ -46,11 +46,11 @@ enum class Access { read_only, read_write };
 // design: a task touches a handful of instances, so an inline array + linear
 // scan beats a hash set. Identity of an instance is its address.
 //
-// An entry may carry a GRANT-VALIDITY source: a pointer to the object's pipe
+// An entry may carry a GRANT-VALIDITY source: a pointer to the object's
 // `write_epoch` plus the value captured when the grant was declared. The epoch has
 // seqlock-style parity -- bumped at every write-grant acquire and release (and by +2 on a
 // graph write handoff) -- so "epoch unchanged" means the grant window this entry was
-// declared under is still the pipe's current one: a write holder's window is still open,
+// declared under is still the object's current one: a write holder's window is still open,
 // or no writer has acquired since a read grant was captured. A snapshot copy of the
 // context (`snapshot_access`, grant inheritance) carries the captured values with it, so
 // a task that outlives the access scope it inherited from fails the comparison and faults
@@ -73,8 +73,8 @@ public:
 
 #if TS_SAFETY_CHECKS
     // Whether any entry's grant was declared under the given epoch source (i.e. this
-    // context holds a grant on that pipe). Consumed by the blocking-sync diagnostic,
-    // which compares a sync target's pipe against the caller's held pipes; entries
+    // context holds a grant on that object). Consumed by the blocking-sync diagnostic,
+    // which compares a sync target against the caller's held grant sources; entries
     // without a source never match.
     bool holds_epoch(const std::atomic<std::uint64_t>* epoch) const noexcept
     {
