@@ -194,6 +194,24 @@ IDs — when an item is done, mark it, don't renumber.
        a prerequisite chain," and delivers writer retraction as a side effect — reader
        retraction not.
 
+   15. `[ ]` **(P1, author 2026-07) Audit the two access routes (sync/async): defaults, low-level
+       launches, zero-cost.** A systematic review of how a two-way data access is performed across
+       the whole surface: `access` (opportunistic-inline) vs `async` (always-scheduled), and the
+       same choice for coroutine `co_await` accesses, with three goals. (a) Review the DEFAULTS,
+       especially for coroutines: is the default route (inline-when-free vs schedule) the right one
+       at each entry, and consistent across single-object / multi-object / graph / coroutine access?
+       Coroutine defaults are the least-examined and most likely wrong. (b) Minimise task launches
+       at LOWER levels of abstraction: the design stance is that parallelism concentrates at the
+       HIGHER levels (the frame graph, `parallel_for` over real work), so a low-level access that
+       silently spawns a scheduled task where an inline body would serve is a cost with no
+       parallelism win. Find and cut those, and consider stating this as a design principle
+       (design.md / the CLAUDE.md principles list). (c) Drive `access` and inline dispatch toward a
+       zero-cost abstraction: where the object is free, an `access` / awaited access should approach
+       the cost of a direct call. Subsumes and should be done WITH 1.1 (zero-alloc inline `access`)
+       and 6.1 (inline-when-free for awaited accesses); pairs with 10.11. Deliverable first: a
+       route-by-route table (entry x default x inline-eligibility x alloc/dispatch cost) before
+       changing anything.
+
 2. **Static task graph**
    1. `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.
    2. `[ ]` **(P2, raised within-band) Ambiguity detection** — `compile({.ambiguity = Warn|Error|Ignore})` determinism diagnostic; needs edge provenance; feeds profiler-guided reorder. **Research validation (2026-07, [research-static-vs-dynamic.md](research-static-vs-dynamic.md)):** ordering ambiguity is the top user-facing failure of access-derived schedules — Bevy shipped exactly this diagnostic (`ambiguity_detection`) after its stageless rework because users hit nondeterministic system order in practice. **PARKED (author, 2026-07).** Full analysis in [ordering-ambiguity.md](ordering-ambiguity.md): our declaration-index orientation is deterministic, so we lack Bevy's per-frame-nondeterminism bug class — the residual is *hidden, unratified* orientation (a refactor that swaps two `add_node` lines silently flips gameplay). The proposed feature (conflict provenance + a fragile-orientation lint + a commutativity annotation feeding the optimizer) is rescoped as optimizer infrastructure, not a safety feature — but the annotation-cost question (pairwise = combinatorial; object-level = the mitigation, unproven) is unresolved. Do nothing until real usage data (start with the tiebreak-only pair count on `game_frame`). Provenance itself is still needed by 2.4/2.5 and the DOT dump regardless.
@@ -350,6 +368,15 @@ IDs — when an item is done, mark it, don't renumber.
         M attribution (reuse the `trace_owner` seam), per-feature microbench ladder over
         the ~194 ns floor, wake-latency histogram (idle split: no-work vs
         parked-while-work-available).
+    11. `[ ]` **(P2, docs/samples, author 2026-07) Lead users to coroutines.** Review every sample
+        (game_frame, physics, blackboard, and the renderer-pattern samples from 10.3) and identify
+        places where a coroutine (`co_await ts::read_only`/`read_write`, awaited accesses,
+        suspension across a dependency) would read cleaner than the current `then` / `when_all` /
+        continuation shape, then convert or add a coroutine variant wherever it genuinely improves
+        clarity, so the sample set actively demonstrates coroutines instead of treating them as an
+        advanced afterthought. Goal: coroutines become a first-class, encouraged style in the
+        samples and in the guide's disclosure order (10.7), not a footnote. Pairs with 1.15: cleaner
+        high-level coroutine code is the intended alternative to low-level task launches.
 
 ---
 
