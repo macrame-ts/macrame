@@ -1132,8 +1132,10 @@ void dump_game_frame_dot(const char* path)
 namespace
 {
 
+#if TS_PROFILING
 // The SVG path for a described run: the description, spaces stripped, becomes a
-// suffix before the extension ("baseline" -> "..._baseline.svg").
+// suffix before the extension ("baseline" -> "..._baseline.svg"). Only the traced
+// path uses it, so it is compiled out with the trace (TS_PROFILING=0).
 std::string described_SVG_path(const char* base, const char* description)
 {
     std::string path = base;
@@ -1148,6 +1150,7 @@ std::string described_SVG_path(const char* base, const char* description)
     }
     return path;
 }
+#endif
 
 // One traced variant on the current scheduler: build the variant's graph on a
 // fresh World, attach a fresh trace, run, write the described SVG.
