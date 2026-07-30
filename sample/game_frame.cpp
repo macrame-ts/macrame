@@ -7,14 +7,20 @@
 //     hand-tuning. This already runs wide -- the point is that honest
 //     single-writer decomposition gets you most of the way for free.
 //
-//   Frame_variant::optimised -- the same frame after reading its own trace. An
-//     `optimise()` section (after construction, before compile) applies the
-//     levers the visualization makes obvious: staging the draw producers so they
-//     stop serialising, pinning the critical spine inline so unrelated queued
-//     work can't wedge between its nodes, and nudging a long off-path node off
-//     the critical path. Structural choices that must change a node's access
-//     (plain draw writes vs `Deferred` staging) branch at construction on the
-//     variant; pure scheduling levers live in `optimise()`.
+//   Frame_variant::optimised -- the same frame after reading its own trace. The
+//     frame is critical-path bound: only shortening the serial sim spine moves
+//     the makespan, and pure scheduling levers (edges, inline) cannot shorten a
+//     genuine dependency chain. The levers, tagged L1-L4 at their branch points:
+//       L1  AI reads LAST frame's gameplay snapshot (`Versioned`) -- deletes the
+//           trio->AI edges, the critical-path cut
+//       L2  parallelise the fattest critical bars (combat, ik_post, UI layout)
+//           -- body-level splits
+//       L3  `Deferred` draw staging -- producers stage grant-free and go wide;
+//           submit commits (utilization, not makespan)
+//       L4  cloth reads LAST frame's transforms -- off the post-flip tail, fills
+//           cores once the spine is short
+//     Choices that change a node's access (L1, L3, L4) branch at construction on
+//     `opt`; the body-level splits (L2) branch inside the system bodies.
 //
 // What the layers show:
 //   - `Static_task_graph` -- nodes over guarded stores; every edge derived from
@@ -80,8 +86,8 @@ float time_scale = 1.0f;
 // to warrant more than the machine default when starved; retune freely.
 constexpr int variant_workers = 6;
 
-// --- instrumentation --------------------------------------------------------------
-
+// Instrumentation counters, reported by the entry points (declared up here
+// because the submit node's body records `drawn`).
 std::atomic<int> nav_active{ 0 };
 std::atomic<int> nav_peak{ 0 };
 std::atomic<int> nav_early{ 0 };
@@ -89,35 +95,6 @@ std::atomic<int> streamed{ 0 };
 std::atomic<int> batches{ 0 };
 std::atomic<long long> drawn{ 0 };
 std::atomic<int> hud_snapshots{ 0 };
-
-void update_max(std::atomic<int>& max, int value)
-{
-    int prev = max.load();
-    while (value > prev && !max.compare_exchange_weak(prev, value)) {}
-}
-
-void reset_stats()
-{
-    nav_active.store(0);
-    nav_peak.store(0);
-    nav_early.store(0);
-    streamed.store(0);
-    batches.store(0);
-    drawn.store(0);
-    hud_snapshots.store(0);
-}
-
-// Mock a system's CPU cost: spin-wait for the budget. Precise (unlike
-// `sleep_for`, which rounds sub-ms waits up to the ~15 ms Windows timer tick)
-// and, like real compute, it occupies the worker for the duration so graph
-// parallelism is measurable.
-void spin(double ms)
-{
-    auto target = std::chrono::duration<double, std::milli>(ms * time_scale);
-    auto start = std::chrono::steady_clock::now();
-    while (std::chrono::steady_clock::now() - start < target)
-        std::this_thread::yield();
-}
 
 // --- the stores -------------------------------------------------------------------
 
@@ -129,23 +106,9 @@ class Float_store
 public:
     explicit Float_store(int entities) : data_(entities, 0.0f) {}
 
-    int size() const
-    {
-        TS_CHECK_ACCESS();
-        return static_cast<int>(data_.size());
-    }
-
-    float get(int i) const
-    {
-        TS_CHECK_ACCESS();
-        return data_[i];
-    }
-
-    void set(int i, float v)
-    {
-        TS_CHECK_ACCESS();
-        data_[i] = v;
-    }
+    int size() const { TS_CHECK_ACCESS(); return static_cast<int>(data_.size()); }
+    float get(int i) const { TS_CHECK_ACCESS(); return data_[i]; }
+    void set(int i, float v) { TS_CHECK_ACCESS(); data_[i] = v; }
 
 private:
     std::vector<float> data_;
@@ -156,23 +119,9 @@ private:
 class Transforms
 {
 public:
-    void apply(const std::vector<float>& batch)
-    {
-        TS_CHECK_ACCESS();
-        data_ = batch;
-    }
-
-    int size() const
-    {
-        TS_CHECK_ACCESS();
-        return static_cast<int>(data_.size());
-    }
-
-    float get(int i) const
-    {
-        TS_CHECK_ACCESS();
-        return data_[i];
-    }
+    void apply(const std::vector<float>& batch) { TS_CHECK_ACCESS(); data_ = batch; }
+    int size() const { TS_CHECK_ACCESS(); return static_cast<int>(data_.size()); }
+    float get(int i) const { TS_CHECK_ACCESS(); return data_[i]; }
 
 private:
     std::vector<float> data_;
@@ -192,23 +141,9 @@ using Gameplay = Transforms;
 class Draw_lists
 {
 public:
-    void push_batch(int commands)
-    {
-        TS_CHECK_ACCESS();
-        pending_ += commands;
-    }
-
-    int count() const
-    {
-        TS_CHECK_ACCESS();
-        return pending_;
-    }
-
-    void clear()
-    {
-        TS_CHECK_ACCESS();
-        pending_ = 0;
-    }
+    void push_batch(int commands) { TS_CHECK_ACCESS(); pending_ += commands; }
+    int count() const { TS_CHECK_ACCESS(); return pending_; }
+    void clear() { TS_CHECK_ACCESS(); pending_ = 0; }
 
 private:
     int pending_ = 0;
@@ -258,56 +193,41 @@ using Debug_out = Float_store;
 // readers after see this frame); the draw queue is `Deferred` (optimised
 // producers stage, submit applies) with a plain `Guarded` front the baseline
 // producers write directly.
+// An aggregate: construct as `World world{ entities };`. `entity_count` is the sole
+// initialised member; every store self-initialises from it via NSDMI (which is why
+// the count must be declared first) and self-names for the trace.
 struct World
 {
-    explicit World(int n)
-        : skeletons{ ts::Named{"skeletons"}, n }, nav_mesh{ ts::Named{"nav_mesh"}, n }
-        , renderables{ ts::Named{"renderables"}, n }, asset_source{ ts::Named{"asset_source"}, n }
-        , input{ ts::Named{"input"}, n }, camera{ ts::Named{"camera"}, n }
-        , net{ ts::Named{"net"}, n }, script_events{ ts::Named{"script_events"}, n }
-        , assets{ ts::Named{"assets"}, n }, nav_tiles{ ts::Named{"nav_tiles"}, n }
-        , combat{ ts::Named{"combat"}, n }, economy{ ts::Named{"economy"}, n }
-        , quests{ ts::Named{"quests"}, n }, paths{ ts::Named{"paths"}, n }
-        , intents{ ts::Named{"intents"}, n }, anim_pose{ ts::Named{"anim_pose"}, n }
-        , local_xf{ ts::Named{"local_xf"}, n }, skin_matrices{ ts::Named{"skin_matrices"}, n }
-        , velocities{ ts::Named{"velocities"}, n }, broad_pairs{ ts::Named{"broad_pairs"}, n }
-        , contacts{ ts::Named{"contacts"}, n }, bodies{ ts::Named{"bodies"}, n }
-        , visibility{ ts::Named{"visibility"}, n }, vis_final{ ts::Named{"vis_final"}, n }
-        , shadow_map{ ts::Named{"shadow_map"}, n }, cloth{ ts::Named{"cloth"}, n }
-        , particles{ ts::Named{"particles"}, n }, audio_out{ ts::Named{"audio_out"}, n }
-        , vfx{ ts::Named{"vfx"}, n }, UI{ ts::Named{"UI"}, n }
-        , replication{ ts::Named{"replication"}, n }, stats{ ts::Named{"stats"}, n }
-        , gc{ ts::Named{"gc"}, n }, debug_out{ ts::Named{"debug_out"}, n }
-    {}
+    int entity_count;
 
     // read-only static inputs (no system writes them this frame)
-    ts::Guarded<Skeletons> skeletons;
-    ts::Guarded<Nav_mesh> nav_mesh;
-    ts::Guarded<Renderables> renderables;
-    ts::Guarded<Asset_source> asset_source;
+    ts::Guarded<Skeletons> skeletons{ ts::Named{"skeletons"}, entity_count };
+    ts::Guarded<Nav_mesh> nav_mesh{ ts::Named{"nav_mesh"}, entity_count };
+    ts::Guarded<Renderables> renderables{ ts::Named{"renderables"}, entity_count };
+    ts::Guarded<Asset_source> asset_source{ ts::Named{"asset_source"}, entity_count };
 
     // single-writer outputs (writer named by the type)
-    ts::Guarded<Input> input;
-    ts::Guarded<Camera> camera;
-    ts::Guarded<Net> net;
-    ts::Guarded<Script_events> script_events;
-    ts::Guarded<Assets> assets;
-    ts::Guarded<Nav_tiles> nav_tiles;
-    ts::Guarded<Combat> combat;
-    ts::Guarded<Economy> economy;
-    ts::Guarded<Quests> quests;
-    ts::Guarded<Paths> paths;
-    ts::Guarded<Intents> intents;
-    ts::Guarded<Anim_pose> anim_pose;
-    ts::Guarded<Local_xf> local_xf;
-    ts::Guarded<Skin_matrices> skin_matrices;
-    ts::Guarded<Velocities> velocities;
-    ts::Guarded<Broad_pairs> broad_pairs;
-    ts::Guarded<Contacts> contacts;
-    ts::Guarded<Bodies> bodies;
-    ts::Guarded<Visibility> visibility;
-    ts::Guarded<Vis_final> vis_final;
-    ts::Guarded<Shadow_map> shadow_map;
+    ts::Guarded<Input> input{ ts::Named{"input"}, entity_count };
+    ts::Guarded<Camera> camera{ ts::Named{"camera"}, entity_count };
+    ts::Guarded<Net> net{ ts::Named{"net"}, entity_count };
+    ts::Guarded<Script_events> script_events{ ts::Named{"script_events"}, entity_count };
+    ts::Guarded<Assets> assets{ ts::Named{"assets"}, entity_count };
+    ts::Guarded<Nav_tiles> nav_tiles{ ts::Named{"nav_tiles"}, entity_count };
+    ts::Guarded<Combat> combat{ ts::Named{"combat"}, entity_count };
+    ts::Guarded<Economy> economy{ ts::Named{"economy"}, entity_count };
+    ts::Guarded<Quests> quests{ ts::Named{"quests"}, entity_count };
+    ts::Guarded<Paths> paths{ ts::Named{"paths"}, entity_count };
+    ts::Guarded<Intents> intents{ ts::Named{"intents"}, entity_count };
+    ts::Guarded<Anim_pose> anim_pose{ ts::Named{"anim_pose"}, entity_count };
+    ts::Guarded<Local_xf> local_xf{ ts::Named{"local_xf"}, entity_count };
+    ts::Guarded<Skin_matrices> skin_matrices{ ts::Named{"skin_matrices"}, entity_count };
+    ts::Guarded<Velocities> velocities{ ts::Named{"velocities"}, entity_count };
+    ts::Guarded<Broad_pairs> broad_pairs{ ts::Named{"broad_pairs"}, entity_count };
+    ts::Guarded<Contacts> contacts{ ts::Named{"contacts"}, entity_count };
+    ts::Guarded<Bodies> bodies{ ts::Named{"bodies"}, entity_count };
+    ts::Guarded<Visibility> visibility{ ts::Named{"visibility"}, entity_count };
+    ts::Guarded<Vis_final> vis_final{ ts::Named{"vis_final"}, entity_count };
+    ts::Guarded<Shadow_map> shadow_map{ ts::Named{"shadow_map"}, entity_count };
 
     // the published transforms: staged by propagation, flipped by the publish node
     ts::Versioned<Transforms> transforms{ ts::Named{"transforms"} };
@@ -317,23 +237,380 @@ struct World
     // perception). Unused in the baseline (empty, no stages -- harmless).
     ts::Versioned<Gameplay> gameplay{ ts::Named{"gameplay"} };
 
-    ts::Guarded<Cloth> cloth;
-    ts::Guarded<Particles> particles;
-    ts::Guarded<Audio_out> audio_out;
-    ts::Guarded<Vfx> vfx;
-    ts::Guarded<UI> UI;
-    ts::Guarded<Replication> replication;
-    ts::Guarded<Stats> stats;
-    ts::Guarded<GC> gc;
-    ts::Guarded<Debug_out> debug_out;
+    ts::Guarded<Cloth> cloth{ ts::Named{"cloth"}, entity_count };
+    ts::Guarded<Particles> particles{ ts::Named{"particles"}, entity_count };
+    ts::Guarded<Audio_out> audio_out{ ts::Named{"audio_out"}, entity_count };
+    ts::Guarded<Vfx> vfx{ ts::Named{"vfx"}, entity_count };
+    ts::Guarded<UI> UI{ ts::Named{"UI"}, entity_count };
+    ts::Guarded<Replication> replication{ ts::Named{"replication"}, entity_count };
+    ts::Guarded<Stats> stats{ ts::Named{"stats"}, entity_count };
+    ts::Guarded<GC> gc{ ts::Named{"gc"}, entity_count };
+    ts::Guarded<Debug_out> debug_out{ ts::Named{"debug_out"}, entity_count };
 
     // the render queue: baseline producers write it directly, optimised producers
     // stage into `draw_staged` and submit applies the batch
     ts::Guarded<Draw_lists> draw_lists{ ts::Named{"draw_lists"} };
-    ts::Deferred<Draw_lists> draw_staged{ draw_lists };
+    ts::Deferred<Draw_lists> draw_staged{ draw_lists };   // references an earlier member -- fine
 };
 
-// --- shared helpers ---------------------------------------------------------------
+// --- system budgets (ms at scale 1.0) ---------------------------------------------
+// Single source of truth: the tick_* bodies burn these and `serial_budget_ms` sums
+// them. Grouped by pipeline stage.
+namespace budget
+{
+// frame head + streaming + navmesh rebuild
+constexpr double input = 0.1, camera = 0.1, networking = 0.5, scripting = 0.6, streaming = 1.5, navmesh_rebuild = 0.6;
+// gameplay trio
+constexpr double combat = 0.8, economy = 0.7, quests = 0.7;
+// navigation + AI (the snapshot is optimised-only, outside the baseline serial budget)
+constexpr double navigation = 2.5, AI = 1.5, gameplay_snapshot = 0.1;
+// animation chain
+constexpr double anim_graph = 2.5, ik_post = 0.8, skinning = 1.0;
+// physics pipeline
+constexpr double broadphase = 0.8, narrowphase = 1.5, solver = 2.8, finalize = 0.4;
+// transform propagation
+constexpr double propagation = 1.0;
+// render pipeline
+constexpr double frustum_cull = 0.9, occlusion_cull = 0.9, shadow = 1.0, cmd_record = 3.0, submit = 0.8;
+// post-flip reader + audio/vfx
+constexpr double cloth = 2.0, audio = 1.6, vfx = 0.6;
+// draw producers
+constexpr double particles = 2.0, UI = 1.5;
+// terminal leaves
+constexpr double replication = 0.4, stats = 0.3, gc = 1.0, debug_overlay = 0.2;
+} // namespace budget
+
+// --- the systems: index -----------------------------------------------------------
+// Free functions with typed parameters -- the const-ness IS the access declaration
+// the graph reads. Implementations follow `build_frame_graph`; this index is the
+// frame's table of contents.
+
+// frame head
+void tick_input(Input&);
+void tick_camera(const Input&, Camera&);
+void tick_networking(const Input&, Net&);
+void tick_scripting(const Input&, const Net&, Script_events&);
+void tick_streaming(ts::Guarded<Asset_source>&, const Input&, Assets&);
+void tick_navmesh_rebuild(const Input&, Nav_tiles&);
+// gameplay trio (combat splits per-entity when `parallel`)
+void tick_combat(const Transforms& prev_xf, const Input&, const Net&, const Script_events&, Combat&, bool parallel);
+void tick_economy(const Transforms& prev_xf, const Input&, const Net&, const Script_events&, Economy&);
+void tick_quests(const Transforms& prev_xf, const Input&, const Net&, const Script_events&, Quests&);
+// navigation + AI (baseline reads this frame's trio; optimised reads last frame's snapshot)
+void tick_navigation(const Nav_mesh&, const Nav_tiles&, const Transforms& prev_xf, Paths&);
+void tick_AI(ts::Guarded<Nav_mesh>&, const Transforms& prev_xf, const Paths&, const Combat&, const Economy&,
+    const Quests&, Intents&);
+void tick_AI_prev(ts::Guarded<Nav_mesh>&, const Transforms& prev_xf, const Paths&, const Gameplay& prev_gameplay,
+    Intents&);
+void tick_gameplay_snapshot(const Combat&, const Economy&, const Quests&, ts::Recorder<Gameplay>&);
+// animation chain (ik_post splits per-character when `parallel`)
+void tick_anim_graph(const Skeletons&, const Intents&, Anim_pose&);
+void tick_ik_post(const Anim_pose&, Local_xf&, bool parallel);
+void tick_skinning(const Local_xf&, Skin_matrices&);
+// physics pipeline
+void tick_broadphase(const Bodies&, Broad_pairs&);
+void tick_narrowphase(const Broad_pairs&, Contacts&);
+void tick_solver(const Contacts&, const Combat&, Velocities&);
+void tick_finalize(const Velocities&, Bodies&);
+// transform propagation (stages this frame's transforms; the flip publishes)
+void tick_propagation(const Local_xf&, const Bodies&, const Velocities&, ts::Recorder<Transforms>&);
+// render pipeline (reads LAST frame's transforms)
+void tick_frustum_cull(const Transforms& prev_xf, const Camera&, const Renderables&, Visibility&);
+void tick_occlusion_cull(const Transforms& prev_xf, const Visibility&, Vis_final&);
+void tick_shadow(const Transforms& prev_xf, const Skeletons&, Shadow_map&);
+// draw producers (return the batch size for the queue; see the add_* helpers)
+int tick_cmd_record(const Vis_final&, const Shadow_map&, const Renderables&);
+int tick_particles(const Transforms& prev_xf, Particles&);
+int tick_UI(const Quests&, UI&, bool parallel);
+// post-flip reader + leaves
+void tick_cloth(const Transforms& xf, Cloth&);
+void tick_audio(const Transforms& prev_xf, Audio_out&);
+void tick_vfx(const Transforms& prev_xf, const Particles&, Vfx&);
+void tick_replication(const Combat&, const Economy&, const Quests&, const Intents&, Replication&);
+void tick_stats(const Combat&, const Economy&, const Bodies&, const Visibility&, Stats&);
+void tick_gc(const Assets&, const Renderables&, const Particles&, GC&);
+void tick_debug_overlay(const Economy&, const Transforms&);
+
+// cost/read helpers used by the builder's inline bodies (definitions below)
+void spin(double ms);
+void read_all(const Float_store&);
+void read_all(const Transforms&);
+void parallel_cost(double total_ms);
+
+// draw-producer node builders: the baseline/optimised access shapes differ, so each
+// picks a shape on `opt` (definitions below build_frame_graph)
+ts::Graph_node add_cmd_record(ts::Static_task_graph&, World&, bool opt);
+ts::Graph_node add_particles(ts::Static_task_graph&, World&, bool opt);
+ts::Graph_node add_UI(ts::Static_task_graph&, World&, bool opt);
+ts::Graph_node add_submit(ts::Static_task_graph&, World&, bool opt);
+
+// navigation + AI node builders (extracted so build_frame_graph stays a node list). AI
+// picks its inputs on `opt` -- last frame's snapshot (optimised) vs this frame's trio.
+ts::Graph_node add_navigation(ts::Static_task_graph&, World&);
+ts::Graph_node add_AI(ts::Static_task_graph&, World&, bool opt);
+
+// --- the frame graph --------------------------------------------------------------
+
+// Build the frame. Construction is shared; `opt` branches the few nodes whose access
+// differs (draw producers, AI's inputs, cloth's version) and parameterises the two
+// body-level splits (combat, ik_post).
+ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, const char* DOT_path = nullptr)
+{
+    const bool opt = variant == Frame_variant::optimised;
+    ts::Static_task_graph graph;
+
+    // Priorities model importance, not measured wins, and are IDENTICAL in both
+    // variants -- compilation ignores them (they only order ready tasks in the
+    // scheduler's queues): `low` on the deferrable terminal leaves, `high` on the
+    // longest pole and the present deadline.
+
+    // Frame head.
+    graph.add_node("input", &tick_input, world.input);
+    graph.add_node("camera", &tick_camera, world.input, world.camera);
+    graph.add_node("networking", &tick_networking, world.input, world.net);
+    graph.add_node("scripting", &tick_scripting, world.input, world.net, world.script_events);
+    graph.add_node("streaming",
+        [&world](const Input& in, Assets& a) { tick_streaming(world.asset_source, in, a); }, world.input, world.assets);
+    graph.add_node("navmesh_rebuild", &tick_navmesh_rebuild, world.input, world.nav_tiles);
+
+    // Gameplay trio: shared inputs, disjoint outputs -> runs in parallel. Combat is
+    // parallelised in the optimised variant (a critical bar); economy/quests stay serial.
+    graph.add_node("combat",   // L2: per-entity split when opt
+        [opt](const Transforms& xf, const Input& in, const Net& net, const Script_events& ev, Combat& c)
+        { tick_combat(xf, in, net, ev, c, opt); },
+        world.transforms.state(), world.input, world.net, world.script_events, world.combat);
+    graph.add_node("economy", &tick_economy, world.transforms.state(), world.input, world.net, world.script_events, world.economy);
+    graph.add_node("quests", &tick_quests, world.transforms.state(), world.input, world.net, world.script_events, world.quests);
+
+    // Navigation + AI. Baseline AI reads THIS frame's trio (the trio binds AI on the
+    // critical path); optimised reads last frame's gameplay snapshot instead, deleting
+    // the trio->AI edges so AI starts as soon as its paths are ready -- the flagship cut.
+    add_navigation(graph, world);
+    add_AI(graph, world, opt);
+
+    // Gameplay snapshot + flip (optimised only): pack this frame's trio into the
+    // versioned gameplay store and publish it for NEXT frame's AI. AI (above) reads
+    // the PREVIOUS version, so the flip orders after it; nothing this frame waits on
+    // the snapshot.
+    if (opt)   // L1: publish the snapshot next frame's AI reads
+    {
+        auto gp_snapshot = graph.add_node("gameplay_snapshot",
+            [rec = world.gameplay.recorder()](const Combat& c, const Economy& e, const Quests& q) mutable
+            { tick_gameplay_snapshot(c, e, q, rec); },
+            world.combat, world.economy, world.quests);
+        graph.add_node("gameplay_flip", ts::publish_body(world.gameplay), world.gameplay.state()).after(gp_snapshot);
+    }
+
+    // Animation chain.
+    graph.add_node("anim_graph", &tick_anim_graph, world.skeletons, world.intents, world.anim_pose);
+    graph.add_node("ik_post", [opt](const Anim_pose& pose, Local_xf& lx) { tick_ik_post(pose, lx, opt); },   // L2
+        world.anim_pose, world.local_xf);
+    graph.add_node("skinning", &tick_skinning, world.local_xf, world.skin_matrices);
+
+    // Physics pipeline.
+    graph.add_node("broadphase", &tick_broadphase, world.bodies, world.broad_pairs);
+    graph.add_node("narrowphase", &tick_narrowphase, world.broad_pairs, world.contacts);
+    graph.add_node("solver", &tick_solver, world.contacts, world.combat, world.velocities).priority(ts::Priority::high);
+    graph.add_node("finalize", &tick_finalize, world.velocities, world.bodies);
+
+    // Propagation: this frame's transforms from animation + physics, staged grant-free
+    // (the physics->propagation edge derives from two conflicts: bodies + velocities).
+    auto propagation = graph.add_node("propagation",
+        [rec = world.transforms.recorder()](const Local_xf& lx, const Bodies& b, const Velocities& v) mutable
+        { tick_propagation(lx, b, v, rec); },
+        world.local_xf, world.bodies, world.velocities);
+
+    // Render pipeline -- declared BEFORE the flip, so it reads LAST frame's transforms
+    // and overlaps this frame's simulation.
+    graph.add_node("frustum_cull", &tick_frustum_cull, world.transforms.state(), world.camera, world.renderables, world.visibility);
+    graph.add_node("occlusion_cull", &tick_occlusion_cull, world.transforms.state(), world.visibility, world.vis_final);
+    graph.add_node("shadow", &tick_shadow, world.transforms.state(), world.skeletons, world.shadow_map);
+    auto cmd_record = add_cmd_record(graph, world, opt);
+    auto particles = add_particles(graph, world, opt);
+    auto UI_node = add_UI(graph, world, opt);
+    auto submit = add_submit(graph, world, opt);
+    submit.priority(ts::Priority::high);
+    // Baseline: submit reads the queue the producers wrote -> conflict edges order it
+    // after them. Optimised: staging holds no grant on the queue, so the ordering is
+    // intent, declared explicitly.
+    if (opt)   // L3: staged producers hold no grant; order by intent
+        submit.after(cmd_record, particles, UI_node);
+
+    // Off-path leaves.
+    graph.add_node("audio", &tick_audio, world.transforms.state(), world.audio_out).priority(ts::Priority::low);
+    graph.add_node("vfx", &tick_vfx, world.transforms.state(), world.particles, world.vfx);
+    graph.add_node("replication", &tick_replication, world.combat, world.economy, world.quests, world.intents, world.replication);
+    graph.add_node("stats", &tick_stats, world.combat, world.economy, world.bodies, world.visibility, world.stats);
+    graph.add_node("gc", &tick_gc, world.assets, world.renderables, world.particles, world.gc);
+    graph.add_node("debug_overlay",   // bare generic lambda: modes probed
+        [](const auto& economy, const auto& xf) { tick_debug_overlay(economy, xf); },
+        world.economy, world.transforms.state()).priority(ts::Priority::low);
+
+    // The flip publishes this frame's transforms. Cloth's version is a lever: the
+    // baseline reads the FRESH version (declared after the flip -> the frame's tail
+    // node); the optimised variant reads LAST frame's (declared before, like audio) --
+    // one frame of cloth latency is invisible, and cloth fills the idle capacity the
+    // shortened spine leaves. Structural (the version is set by declaration order vs
+    // the flip).
+    if (opt)   // L4: cloth on last frame's transforms
+        graph.add_node("cloth", &tick_cloth, world.transforms.state(), world.cloth);
+    auto flip = graph.add_node("flip", ts::publish_body(world.transforms), world.transforms.state());
+    flip.after(propagation);
+    if (!opt)
+        graph.add_node("cloth", &tick_cloth, world.transforms.state(), world.cloth).after(flip);
+
+    graph.compile(DOT_path);
+    return graph;
+}
+
+// --- the draw-producer node builders ----------------------------------------------
+// The two shapes differ in access, so each branches on `opt`. Baseline writes
+// `draw_lists` directly (a write grant -> the producers serialise on the queue);
+// optimised stages into `draw_staged` grant-free (L3: they go wide, submit applies
+// the batch). The system logic is in the tick_* functions; these only pick the shape.
+
+// Command recording: the heavy render producer (batches draw calls from the visible
+// set + shadows).
+// Navigation: paths for this frame against the nav service + baked tiles, reading last
+// frame's transforms. One node, identical in both variants -- extracted so the builder
+// reads as a flat node list.
+ts::Graph_node add_navigation(ts::Static_task_graph& graph, World& world)
+{
+    return graph.add_node("navigation", &tick_navigation, world.nav_mesh, world.nav_tiles, world.transforms.state(), world.paths);
+}
+
+// AI: nav-query core + intents, reading either this frame's gameplay trio (baseline) or last
+// frame's published gameplay snapshot (optimised). The snapshot read deletes the trio->AI
+// edges -- the flagship critical-path cut -- so AI runs as soon as its paths are ready. Both
+// shapes are thin wrappers over tick_AI / tick_AI_prev.
+ts::Graph_node add_AI(ts::Static_task_graph& graph, World& world, bool opt)
+{
+    if (opt)
+    {
+        return graph.add_node("AI",   // L1: snapshot AI
+            [&world](const Transforms& xf, const Paths& p, const Gameplay& gp, Intents& i)
+            { tick_AI_prev(world.nav_mesh, xf, p, gp, i); },
+            world.transforms.state(), world.paths, world.gameplay.state(), world.intents);
+    }
+    return graph.add_node("AI",
+        [&world](const Transforms& xf, const Paths& p, const Combat& c, const Economy& e, const Quests& q, Intents& i)
+        { tick_AI(world.nav_mesh, xf, p, c, e, q, i); },
+        world.transforms.state(), world.paths, world.combat, world.economy, world.quests, world.intents);
+}
+
+ts::Graph_node add_cmd_record(ts::Static_task_graph& graph, World& world, bool opt)
+{
+    if (!opt)
+    {
+        return graph.add_node("cmd_record",
+            [](const Vis_final& vis, const Shadow_map& shadows, const Renderables& r, Draw_lists& draws)
+            { draws.push_batch(tick_cmd_record(vis, shadows, r)); },
+            world.vis_final, world.shadow_map, world.renderables, world.draw_lists);
+    }
+    return graph.add_node("cmd_record",   // L3: stage grant-free
+        [rec = world.draw_staged.recorder()](const Vis_final& vis, const Shadow_map& shadows, const Renderables& r) mutable
+        {
+            int n = tick_cmd_record(vis, shadows, r);
+            rec.stage([n](Draw_lists& d) { d.push_batch(n); });
+        },
+        world.vis_final, world.shadow_map, world.renderables);
+}
+
+ts::Graph_node add_particles(ts::Static_task_graph& graph, World& world, bool opt)
+{
+    if (!opt)
+    {
+        return graph.add_node("particles",
+            [](const Transforms& prev_xf, Particles& p, Draw_lists& draws)
+            { draws.push_batch(tick_particles(prev_xf, p)); },
+            world.transforms.state(), world.particles, world.draw_lists);
+    }
+    return graph.add_node("particles",   // L3: stage grant-free
+        [rec = world.draw_staged.recorder()](const Transforms& prev_xf, Particles& p) mutable
+        {
+            int n = tick_particles(prev_xf, p);
+            rec.stage([n](Draw_lists& d) { d.push_batch(n); });
+        },
+        world.transforms.state(), world.particles);
+}
+
+// UI is a double lever: the baseline lays widgets out serially AND writes the queue
+// directly; the optimised variant lays out in parallel AND stages grant-free.
+ts::Graph_node add_UI(ts::Static_task_graph& graph, World& world, bool opt)
+{
+    if (!opt)
+    {
+        return graph.add_node("UI",
+            [](const Quests& quests, UI& u, Draw_lists& draws) { draws.push_batch(tick_UI(quests, u, false)); },
+            world.quests, world.UI, world.draw_lists);
+    }
+    return graph.add_node("UI",   // L3: stage grant-free; L2: parallel layout
+        [rec = world.draw_staged.recorder()](const Quests& quests, UI& u) mutable
+        {
+            int n = tick_UI(quests, u, true);
+            rec.stage([n](Draw_lists& d) { d.push_batch(n); });
+        },
+        world.quests, world.UI);
+}
+
+// Submit: consumes the draw queue. Baseline just reads the directly-written counts;
+// optimised commits the staged batch under its own grant.
+ts::Graph_node add_submit(ts::Static_task_graph& graph, World& world, bool opt)
+{
+    if (!opt)
+    {
+        return graph.add_node("submit",
+            [](const Transforms& prev_xf, Draw_lists& dl)
+            {
+                read_all(prev_xf);
+                drawn.fetch_add(dl.count(), std::memory_order_relaxed);
+                parallel_cost(budget::submit);
+                dl.clear();
+            },
+            world.transforms.state(), world.draw_lists);
+    }
+    return graph.add_node("submit",
+        [&world](const Transforms& prev_xf, Draw_lists& dl)
+        {
+            read_all(prev_xf);
+            world.draw_staged.commit();
+            drawn.fetch_add(dl.count(), std::memory_order_relaxed);
+            parallel_cost(budget::submit);
+            dl.clear();
+        },
+        world.transforms.state(), world.draw_lists);
+}
+
+// --- cost mocking + shared helpers ------------------------------------------------
+
+void update_max(std::atomic<int>& max, int value)
+{
+    int prev = max.load();
+    while (value > prev && !max.compare_exchange_weak(prev, value)) {}
+}
+
+void reset_stats()
+{
+    nav_active.store(0);
+    nav_peak.store(0);
+    nav_early.store(0);
+    streamed.store(0);
+    batches.store(0);
+    drawn.store(0);
+    hud_snapshots.store(0);
+}
+
+// Mock a system's CPU cost: spin-wait for the budget. Precise (unlike
+// `sleep_for`, which rounds sub-ms waits up to the ~15 ms Windows timer tick)
+// and, like real compute, it occupies the worker for the duration so graph
+// parallelism is measurable.
+void spin(double ms)
+{
+    auto target = std::chrono::duration<double, std::milli>(ms * time_scale);
+    auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < target)
+        std::this_thread::yield();
+}
 
 void fill(Float_store& s, float v)
 {
@@ -379,52 +656,46 @@ void parallel_fill(Float_store& out, float v, double total_ms)
 
 void parallel_cost(double total_ms)
 {
-    ts::parallel_for(cost_slices, [total_ms](int)
-    {
-        spin(total_ms / cost_slices);
-    });
+    ts::parallel_for(cost_slices, [total_ms](int) { spin(total_ms / cost_slices); });
 }
 
-// --- the systems ------------------------------------------------------------------
-// Free functions with typed parameters: the const-ness is the access
-// declaration the graph reads. Budgets (ms @ scale 1.0) in comments.
+// --- the systems: implementations -------------------------------------------------
 
 // Frame head ----
 
-void tick_input(Input& input)                                                     // 0.1
+void tick_input(Input& input)
 {
     fill(input, 1.0f);
-    spin(0.1);
+    spin(budget::input);
 }
 
-void tick_camera(const Input& input, Camera& camera)                              // 0.1
+void tick_camera(const Input& input, Camera& camera)
 {
     read_all(input);
     fill(camera, 1.0f);
-    spin(0.1);
+    spin(budget::camera);
 }
 
-void tick_networking(const Input& input, Net& net)                                // 0.5
+void tick_networking(const Input& input, Net& net)
 {
     read_all(input);
     fill(net, 1.0f);
-    spin(0.5);
+    spin(budget::networking);
 }
 
 // Gameplay scripting / VM tick: dispatches this frame's gameplay events. A real
 // engine burns real time here; the trio reads its output.
-void tick_scripting(const Input& input, const Net& net, Script_events& events)    // 0.6
+void tick_scripting(const Input& input, const Net& net, Script_events& events)
 {
     read_all(input);
     read_all(net);
     fill(events, 1.0f);
-    spin(0.6);
+    spin(budget::scripting);
 }
 
 // Streaming: async loads from the read-only source, overlapping the node's own
 // decompression cost. Fire-and-forget; handles dropped, chain stays alive.
-void tick_streaming(ts::Guarded<Asset_source>& asset_source,
-                    const Input& input, Assets& assets)                           // 1.5
+void tick_streaming(ts::Guarded<Asset_source>& asset_source, const Input& input, Assets& assets)
 {
     read_all(input);
     fill(assets, 1.0f);
@@ -445,70 +716,71 @@ void tick_streaming(ts::Guarded<Asset_source>& asset_source,
         batches.fetch_add(1, std::memory_order_relaxed);
     });
 
-    spin(1.5);
+    spin(budget::streaming);
 }
 
 // A background nav-mesh tile rebuild: streams and bakes navigation tiles into its
 // own store, which navigation reads. An independent writer (fed by input) --
 // off the critical path, but its output feeds navigation.
-void tick_navmesh_rebuild(const Input& input, Nav_tiles& tiles)                   // 0.6
+void tick_navmesh_rebuild(const Input& input, Nav_tiles& tiles)
 {
     read_all(input);
     fill(tiles, 1.0f);
-    spin(0.6);
+    spin(budget::navmesh_rebuild);
 }
 
 // Gameplay trio: shares inputs (last frame's transforms, input, net, script
 // events), owns disjoint outputs -> runs in parallel.
-// Combat runs a threat/damage pass per entity. The baseline runs it serially;
-// the optimised variant parallelises it across entities -- the trace shows
-// combat as one of the two fattest bars on the critical path, so a per-entity
-// split is the obvious cut. `parallel` picks the shape.
-void tick_combat(const Transforms& prev_xf, const Input& input, const Net& net,
-                 const Script_events& events, Combat& combat, bool parallel)       // 0.8
+// Combat runs a threat/damage pass per entity. The baseline runs it serially; the
+// optimised variant parallelises it across entities -- the trace shows combat as
+// one of the two fattest bars on the critical path, so a per-entity split is the
+// obvious cut. `parallel` picks the shape.
+void tick_combat(const Transforms& prev_xf, const Input& input, const Net& net, const Script_events& events,
+    Combat& combat, bool parallel)
 {
     read_all(prev_xf);
     read_all(input);
     read_all(net);
     read_all(events);
-    if (parallel)
-        parallel_fill(combat, 1.0f, 0.8);
+    if (parallel)   // L2
+    {
+        parallel_fill(combat, 1.0f, budget::combat);
+    }
     else
     {
         fill(combat, 1.0f);
-        spin(0.8);
+        spin(budget::combat);
     }
 }
 
-void tick_economy(const Transforms& prev_xf, const Input& input, const Net& net,
-                  const Script_events& events, Economy& economy)                  // 0.7
+void tick_economy(const Transforms& prev_xf, const Input& input, const Net& net, const Script_events& events,
+    Economy& economy)
 {
     read_all(prev_xf);
     read_all(input);
     read_all(net);
     read_all(events);
     fill(economy, 1.0f);
-    spin(0.7);
+    spin(budget::economy);
 }
 
-void tick_quests(const Transforms& prev_xf, const Input& input, const Net& net,
-                 const Script_events& events, Quests& quests)                     // 0.7
+void tick_quests(const Transforms& prev_xf, const Input& input, const Net& net, const Script_events& events,
+    Quests& quests)
 {
     read_all(prev_xf);
     read_all(input);
     read_all(net);
     read_all(events);
     fill(quests, 1.0f);
-    spin(0.7);
+    spin(budget::quests);
 }
 
-void tick_navigation(const Nav_mesh& nav_mesh, const Nav_tiles& tiles,
-                     const Transforms& prev_xf, Paths& paths)                     // 2.5
+void tick_navigation(const Nav_mesh& nav_mesh, const Nav_tiles& tiles, const Transforms& prev_xf, Paths& paths)
 {
     read_all(nav_mesh);
     read_all(tiles);
     read_all(prev_xf);
-    parallel_fill(paths, 1.0f, 2.5);
+    parallel_fill(paths, 1.0f, budget::navigation);
 }
 
 // AI's nav-query core, shared by both variants: per-agent path queries against
@@ -516,7 +788,7 @@ void tick_navigation(const Nav_mesh& nav_mesh, const Nav_tiles& tiles,
 // overlapping AI's own logic. Speculative: each query runs a longer budget than
 // AI needs and AI cancels the batch once done (cooperative early-out via the
 // trailing token). Writes this frame's intents.
-void ai_nav_and_intents(ts::Guarded<Nav_mesh>& nav_service, Intents& intents)     // 1.5
+void ai_nav_and_intents(ts::Guarded<Nav_mesh>& nav_service, Intents& intents)
 {
     ts::Cancellation_source nav_cancel;
     constexpr int queries = 6;
@@ -526,8 +798,8 @@ void ai_nav_and_intents(ts::Guarded<Nav_mesh>& nav_service, Intents& intents)   
             update_max(nav_peak, nav_active.fetch_add(1) + 1);
             bool bailed = false;
             auto start = std::chrono::steady_clock::now();
-            auto budget = std::chrono::duration<double, std::milli>(2.0 * time_scale);
-            while (std::chrono::steady_clock::now() - start < budget)
+            auto query_budget = std::chrono::duration<double, std::milli>(2.0 * time_scale);
+            while (std::chrono::steady_clock::now() - start < query_budget)
             {
                 if (tok.is_cancel_requested()) { bailed = true; break; }
                 std::this_thread::yield();
@@ -539,7 +811,7 @@ void ai_nav_and_intents(ts::Guarded<Nav_mesh>& nav_service, Intents& intents)   
             return v;
         }, { .token = nav_cancel.token() });
 
-    parallel_cost(1.5);
+    parallel_cost(budget::AI);
     nav_cancel.request_cancel();
     fill(intents, 1.0f);
 }
@@ -547,9 +819,8 @@ void ai_nav_and_intents(ts::Guarded<Nav_mesh>& nav_service, Intents& intents)   
 // Baseline AI: reads THIS frame's trio outputs -- so the trio binds AI on the
 // critical path (the trace shows exactly this). The optimised variant reads last
 // frame's gameplay snapshot instead (tick_AI_prev), deleting the trio->AI edges.
-void tick_AI(ts::Guarded<Nav_mesh>& nav_service,
-             const Transforms& prev_xf, const Paths& paths, const Combat& combat,
-             const Economy& economy, const Quests& quests, Intents& intents)      // 1.5
+void tick_AI(ts::Guarded<Nav_mesh>& nav_service, const Transforms& prev_xf, const Paths& paths, const Combat& combat,
+    const Economy& economy, const Quests& quests, Intents& intents)
 {
     read_all(prev_xf);
     read_all(paths);
@@ -563,9 +834,8 @@ void tick_AI(ts::Guarded<Nav_mesh>& nav_service,
 // the end of the previous frame) in place of this frame's trio. One frame of AI
 // latency is standard, and it lets AI start as soon as its paths are ready
 // instead of waiting for the gameplay trio -- the flagship critical-path cut.
-void tick_AI_prev(ts::Guarded<Nav_mesh>& nav_service,
-                  const Transforms& prev_xf, const Paths& paths,
-                  const Gameplay& prev_gameplay, Intents& intents)                // 1.5
+void tick_AI_prev(ts::Guarded<Nav_mesh>& nav_service, const Transforms& prev_xf, const Paths& paths,
+    const Gameplay& prev_gameplay, Intents& intents)
 {
     read_all(prev_xf);
     read_all(paths);
@@ -576,456 +846,242 @@ void tick_AI_prev(ts::Guarded<Nav_mesh>& nav_service,
 // Gameplay snapshot: packs this frame's trio results into the versioned gameplay
 // store for next frame's AI. Off the critical path (nothing this frame waits on
 // it -- it feeds the NEXT frame via the published version). Optimised only.
-void tick_gameplay_snapshot(const Combat& combat, const Economy& economy,
-                            const Quests& quests, ts::Recorder<Gameplay>& rec)     // 0.1
+void tick_gameplay_snapshot(const Combat& combat, const Economy& economy, const Quests& quests,
+    ts::Recorder<Gameplay>& rec)
 {
     read_all(combat);
     read_all(economy);
     read_all(quests);
     std::vector<float> batch(static_cast<std::size_t>(combat.size()), 1.0f);
-    spin(0.1);   // packing the snapshot
-    rec.stage([batch = std::move(batch)](Gameplay& g) { g.apply(batch); });
+    spin(budget::gameplay_snapshot);   // packing the snapshot
+    rec.stage([batch = std::move(batch)](Gameplay& gameplay) { gameplay.apply(batch); });
 }
 
 // Animation chain: graph eval -> IK/post -> skinning.
-void tick_anim_graph(const Skeletons& skeletons, const Intents& intents,
-                     Anim_pose& anim_pose)                                        // 2.5
+void tick_anim_graph(const Skeletons& skeletons, const Intents& intents, Anim_pose& anim_pose)
 {
     read_all(skeletons);
     read_all(intents);
-    parallel_fill(anim_pose, 1.0f, 2.5);
+    parallel_fill(anim_pose, 1.0f, budget::anim_graph);
 }
 
 // IK / post: refines the pose into the final local transforms. IK is per
 // character -- embarrassingly parallel across characters -- so the baseline's
 // serial pass is a critical-path bar the optimised variant splits. Writes
 // local_xf = 2.0 (half of the deterministic transform output).
-void tick_ik_post(const Anim_pose& anim_pose, Local_xf& local_xf, bool parallel)  // 0.8
+void tick_ik_post(const Anim_pose& anim_pose, Local_xf& local_xf, bool parallel)
 {
     read_all(anim_pose);
-    if (parallel)
-        parallel_fill(local_xf, 2.0f, 0.8);
+    if (parallel)   // L2
+    {
+        parallel_fill(local_xf, 2.0f, budget::ik_post);
+    }
     else
     {
         fill(local_xf, 2.0f);
-        spin(0.8);
+        spin(budget::ik_post);
     }
 }
 
 // Skinning: matrix palette from the final pose, consumed by next frame's render.
-void tick_skinning(const Local_xf& local_xf, Skin_matrices& skin)                 // 1.0
+void tick_skinning(const Local_xf& local_xf, Skin_matrices& skin)
 {
     read_all(local_xf);
-    parallel_fill(skin, 1.0f, 1.0);
+    parallel_fill(skin, 1.0f, budget::skinning);
 }
 
 // Physics pipeline: broadphase -> narrowphase -> solver -> finalize. Broadphase
 // reads body positions (last frame's, before finalize rewrites them this frame);
 // the solver integrates velocities; finalize integrates positions. Finalize
 // writes bodies = 3.0 (the other half of the deterministic transform output).
-void tick_broadphase(const Bodies& bodies, Broad_pairs& pairs)                    // 0.8
+void tick_broadphase(const Bodies& bodies, Broad_pairs& pairs)
 {
     read_all(bodies);
-    parallel_fill(pairs, 1.0f, 0.8);
+    parallel_fill(pairs, 1.0f, budget::broadphase);
 }
 
-void tick_narrowphase(const Broad_pairs& pairs, Contacts& contacts)              // 1.5
+void tick_narrowphase(const Broad_pairs& pairs, Contacts& contacts)
 {
     read_all(pairs);
-    parallel_fill(contacts, 1.0f, 1.5);
+    parallel_fill(contacts, 1.0f, budget::narrowphase);
 }
 
-void tick_solver(const Contacts& contacts, const Combat& combat,
-                 Velocities& velocities)                                          // 2.8
+void tick_solver(const Contacts& contacts, const Combat& combat, Velocities& velocities)
 {
     read_all(contacts);
     read_all(combat);
-    parallel_fill(velocities, 1.0f, 2.8);
+    parallel_fill(velocities, 1.0f, budget::solver);
 }
 
-void tick_finalize(const Velocities& velocities, Bodies& bodies)                  // 0.4
+void tick_finalize(const Velocities& velocities, Bodies& bodies)
 {
     read_all(velocities);
-    parallel_fill(bodies, 3.0f, 0.4);
+    parallel_fill(bodies, 3.0f, budget::finalize);
+}
+
+// Propagation: velocity-aware interpolation of this frame's transforms from
+// animation (local_xf) + physics (bodies), staged into the versioned store; the
+// flip node publishes the batch.
+void tick_propagation(const Local_xf& local_xf, const Bodies& bodies, const Velocities& velocities,
+    ts::Recorder<Transforms>& rec)
+{
+    read_all(velocities);
+    std::vector<float> out(static_cast<std::size_t>(local_xf.size()));
+    for (int i = 0, n = local_xf.size(); i < n; ++i)
+        out[static_cast<std::size_t>(i)] = local_xf.get(i) + bodies.get(i);
+    parallel_cost(budget::propagation);
+    rec.stage([batch = std::move(out)](Transforms& t) { t.apply(batch); });
 }
 
 // Render pipeline: consumes LAST frame's transforms (declared before the flip),
 // so it overlaps this frame's simulation -- the render thread with one frame of
 // latency. Its own working stores (visibility, shadows) are this-frame.
-void tick_frustum_cull(const Transforms& prev_xf, const Camera& camera,
-                       const Renderables& renderables, Visibility& visibility)    // 0.9
+void tick_frustum_cull(const Transforms& prev_xf, const Camera& camera, const Renderables& renderables,
+    Visibility& visibility)
 {
     read_all(prev_xf);
     read_all(camera);
     read_all(renderables);
-    parallel_fill(visibility, 1.0f, 0.9);
+    parallel_fill(visibility, 1.0f, budget::frustum_cull);
 }
 
-void tick_occlusion_cull(const Transforms& prev_xf, const Visibility& visibility,
-                         Vis_final& vis_final)                                    // 0.9
+void tick_occlusion_cull(const Transforms& prev_xf, const Visibility& visibility, Vis_final& vis_final)
 {
     read_all(prev_xf);
     read_all(visibility);
-    parallel_fill(vis_final, 1.0f, 0.9);
+    parallel_fill(vis_final, 1.0f, budget::occlusion_cull);
 }
 
-void tick_shadow(const Transforms& prev_xf, const Skeletons& skeletons,
-                 Shadow_map& shadow_map)                                          // 1.0
+void tick_shadow(const Transforms& prev_xf, const Skeletons& skeletons, Shadow_map& shadow_map)
 {
     read_all(prev_xf);
     read_all(skeletons);
-    parallel_fill(shadow_map, 1.0f, 1.0);
+    parallel_fill(shadow_map, 1.0f, budget::shadow);
 }
 
-// Post-flip readers of the FRESH version. Cloth simulates on this frame's
-// transforms.
-void tick_cloth(const Transforms& xf, Cloth& cloth)                               // 2.0
+// Command recording: batches draw calls from the visible set + shadows; returns
+// the batch size for the queue (pushed or staged by the add_cmd_record shapes).
+int tick_cmd_record(const Vis_final& vis, const Shadow_map& shadows, const Renderables& renderables)
+{
+    read_all(vis);
+    read_all(shadows);
+    read_all(renderables);
+    parallel_cost(budget::cmd_record);
+    return vis.size();
+}
+
+int tick_particles(const Transforms& prev_xf, Particles& particles)
+{
+    read_all(prev_xf);
+    parallel_fill(particles, 1.0f, budget::particles);
+    return particles.size() / 4;
+}
+
+// UI layout: serial in the baseline (a critical bar), per-widget parallel in the
+// optimised variant.
+int tick_UI(const Quests& quests, UI& u, bool parallel)
+{
+    read_all(quests);
+    if (parallel)   // L2
+    {
+        parallel_fill(u, 1.0f, budget::UI);
+    }
+    else
+    {
+        fill(u, 1.0f);
+        spin(budget::UI);
+    }
+    return u.size() / 10;
+}
+
+// Post-flip reader of the FRESH version. Cloth simulates on this frame's
+// transforms (the baseline; the optimised variant declares it pre-flip).
+void tick_cloth(const Transforms& xf, Cloth& cloth)
 {
     read_all(xf);
-    parallel_fill(cloth, 1.0f, 2.0);
+    parallel_fill(cloth, 1.0f, budget::cloth);
 }
 
 // Audio mixes off LAST frame's transforms (declared before the flip): one frame
 // of positional latency is inaudible, and the serial mixer runs from t=0.
-void tick_audio(const Transforms& prev_xf, Audio_out& audio_out)                  // 1.6
+void tick_audio(const Transforms& prev_xf, Audio_out& audio_out)
 {
     read_all(prev_xf);
     fill(audio_out, 1.0f);
-    spin(1.6);   // deliberately serial: a single-threaded mixer is realistic
+    spin(budget::audio);   // deliberately serial: a single-threaded mixer is realistic
 }
 
-void tick_vfx(const Transforms& prev_xf, const Particles& particles, Vfx& vfx)    // 0.6
+void tick_vfx(const Transforms& prev_xf, const Particles& particles, Vfx& vfx)
 {
     read_all(prev_xf);
     read_all(particles);
     fill(vfx, 1.0f);
-    spin(0.6);
+    spin(budget::vfx);
 }
 
 // Replication snapshot: reads the gameplay + AI outputs, packs a network
 // snapshot. Terminal, multi-read.
-void tick_replication(const Combat& combat, const Economy& economy,
-                      const Quests& quests, const Intents& intents, Replication& rep)  // 0.4
+void tick_replication(const Combat& combat, const Economy& economy, const Quests& quests, const Intents& intents,
+    Replication& rep)
 {
     read_all(combat);
     read_all(economy);
     read_all(quests);
     read_all(intents);
     fill(rep, 1.0f);
-    spin(0.4);
+    spin(budget::replication);
 }
 
 // End-of-frame stats: reads across many systems for the telemetry overlay.
 // Terminal.
-void tick_stats(const Combat& combat, const Economy& economy, const Bodies& bodies,
-                const Visibility& visibility, Stats& stats)                       // 0.3
+void tick_stats(const Combat& combat, const Economy& economy, const Bodies& bodies, const Visibility& visibility,
+    Stats& stats)
 {
     read_all(combat);
     read_all(economy);
     read_all(bodies);
     read_all(visibility);
     fill(stats, 1.0f);
-    spin(0.3);
+    spin(budget::stats);
 }
 
-// Memory / GC tick: independent background bookkeeping.
-void tick_gc(GC& gc)                                                              // 1.0
+// Memory / GC tick: an incremental collector pass. It scans the frame's allocation-heavy
+// resource stores (streamed assets, renderables, spawned particles) to account live memory,
+// then does its own bookkeeping. Reading them makes it a terminal consumer like
+// stats/replication -- off the critical path, but wired into the frame it collects rather
+// than a floating island writing a store no one reads.
+void tick_gc(const Assets& assets, const Renderables& renderables, const Particles& particles, GC& gc)
 {
-    parallel_fill(gc, 1.0f, 1.0);
+    read_all(assets);
+    read_all(renderables);
+    read_all(particles);
+    parallel_fill(gc, 1.0f, budget::gc);
 }
 
-// --- the frame graph --------------------------------------------------------------
+// Debug overlay: reads a gameplay store and the transforms for an on-screen HUD. The node
+// declares it as a bare generic lambda (`const auto&`), so the graph probes the access mode
+// from rvalue-bindability rather than a typed signature -- the one such node in the frame.
+void tick_debug_overlay(const Economy& economy, const Transforms& xf)
+{
+    read_all(economy);
+    read_all(xf);
+    spin(budget::debug_overlay);
+}
 
+// The whole frame run serially -- the baseline node set (the optimised-only
+// snapshot/flip are excluded). Both variants' spin budgets are identical.
 double serial_budget_ms()
 {
-    return 0.1 + 0.1 + 0.5 + 0.6 + 1.5 + 0.6           // head + streaming + rebuild
-         + 0.8 + 0.7 + 0.7                              // trio
-         + 2.5 + 1.5                                    // nav + AI
-         + 2.5 + 0.8 + 1.0                              // anim chain
-         + 0.8 + 1.5 + 2.8 + 0.4                        // physics
-         + 1.0                                          // propagation
-         + 0.9 + 0.9 + 1.0 + 3.0 + 0.8                  // render (frustum,occl,shadow,cmd,submit)
-         + 2.0 + 1.6 + 0.6                              // cloth, audio, vfx
-         + 2.0 + 1.5                                    // particles, UI (draw producers)
-         + 0.4 + 0.3 + 1.0 + 0.2;                       // replication, stats, gc, debug
-}
-
-// Draw producers: the two shapes differ in access, so they branch on the variant
-// at construction. Baseline writes `draw_lists` directly (a write grant -> the
-// producers serialise on the queue); optimised stages into `draw_staged`
-// grant-free (-> they go wide, submit applies the batch).
-
-// Command recording: the heavy render producer (batches draw calls from the
-// visible set + shadows).
-ts::Graph_node add_cmd_record(ts::Static_task_graph& g, World& w, Frame_variant v)  // 3.0
-{
-    if (v == Frame_variant::baseline)
-        return g.add_node("cmd_record",
-            [](const Vis_final& vis, const Shadow_map& shadows, const Renderables& r,
-               Draw_lists& draws)
-            {
-                read_all(vis);
-                read_all(shadows);
-                read_all(r);
-                parallel_cost(3.0);
-                draws.push_batch(vis.size());
-            }, w.vis_final, w.shadow_map, w.renderables, w.draw_lists);
-
-    return g.add_node("cmd_record",
-        [rec = w.draw_staged.recorder()](const Vis_final& vis, const Shadow_map& shadows,
-                                         const Renderables& r) mutable
-        {
-            read_all(vis);
-            read_all(shadows);
-            read_all(r);
-            parallel_cost(3.0);
-            rec.stage([n = vis.size()](Draw_lists& d) { d.push_batch(n); });
-        }, w.vis_final, w.shadow_map, w.renderables);
-}
-
-ts::Graph_node add_particles(ts::Static_task_graph& g, World& w, Frame_variant v)   // 2.0
-{
-    if (v == Frame_variant::baseline)
-        return g.add_node("particles",
-            [](const Transforms& prev_xf, Particles& p, Draw_lists& draws)
-            {
-                read_all(prev_xf);
-                parallel_fill(p, 1.0f, 2.0);
-                draws.push_batch(p.size() / 4);
-            }, w.transforms.state(), w.particles, w.draw_lists);
-
-    return g.add_node("particles",
-        [rec = w.draw_staged.recorder()](const Transforms& prev_xf, Particles& p) mutable
-        {
-            read_all(prev_xf);
-            parallel_fill(p, 1.0f, 2.0);
-            rec.stage([n = p.size() / 4](Draw_lists& d) { d.push_batch(n); });
-        }, w.transforms.state(), w.particles);
-}
-
-ts::Graph_node add_UI(ts::Static_task_graph& g, World& w, Frame_variant v)          // 1.5
-{
-    // Baseline: writes the queue directly (serialises with the other producers)
-    // and lays out the UI serially -- a 1.5 ms bar the trace flags as critical
-    // (submit waits on it). Optimised: stages grant-free AND lays out widgets in
-    // parallel.
-    if (v == Frame_variant::baseline)
-        return g.add_node("UI",
-            [](const Quests& quests, UI& u, Draw_lists& draws)
-            {
-                read_all(quests);
-                fill(u, 1.0f);
-                spin(1.5);
-                draws.push_batch(u.size() / 10);
-            }, w.quests, w.UI, w.draw_lists);
-
-    return g.add_node("UI",
-        [rec = w.draw_staged.recorder()](const Quests& quests, UI& u) mutable
-        {
-            read_all(quests);
-            parallel_fill(u, 1.0f, 1.5);
-            rec.stage([n = u.size() / 10](Draw_lists& d) { d.push_batch(n); });
-        }, w.quests, w.UI);
-}
-
-// Submit: consumes the draw queue. Baseline just reads the directly-written
-// counts; optimised commits the staged batch under its own grant.
-ts::Graph_node add_submit(ts::Static_task_graph& g, World& w, Frame_variant v)      // 0.8
-{
-    if (v == Frame_variant::baseline)
-        return g.add_node("submit",
-            [](const Transforms& prev_xf, Draw_lists& dl)
-            {
-                read_all(prev_xf);
-                drawn.fetch_add(dl.count(), std::memory_order_relaxed);
-                parallel_cost(0.8);
-                dl.clear();
-            }, w.transforms.state(), w.draw_lists);
-
-    return g.add_node("submit",
-        [&w](const Transforms& prev_xf, Draw_lists& dl)
-        {
-            read_all(prev_xf);
-            w.draw_staged.commit();
-            drawn.fetch_add(dl.count(), std::memory_order_relaxed);
-            parallel_cost(0.8);
-            dl.clear();
-        }, w.transforms.state(), w.draw_lists);
-}
-
-// Build the frame. Construction is identical for both variants except the draw
-// producers' access shape (baseline write / optimised stage), handled in the
-// add_* helpers above. The optimised variant then runs `optimise()` -- pure
-// scheduling levers (edges, inline) applied after construction, before compile.
-ts::Static_task_graph build_frame_graph(World& w, Frame_variant variant,
-                                        const char* DOT_path = nullptr)
-{
-    ts::Static_task_graph g;
-
-    // Priorities model importance, not measured wins, and are IDENTICAL in both
-    // variants -- graph compilation ignores them (they only order ready tasks in
-    // the scheduler's queues), so they are kept for their visualization, not used
-    // as an optimization lever. `low` on the deferrable terminal leaves, `high`
-    // on the longest pole and the present deadline.
-
-    // Frame head.
-    auto input = g.add_node("input", &tick_input, w.input);
-    g.add_node("camera", &tick_camera, w.input, w.camera);
-    g.add_node("networking", &tick_networking, w.input, w.net);
-    auto scripting = g.add_node("scripting", &tick_scripting, w.input, w.net, w.script_events);
-    g.add_node("streaming", [&w](const Input& in, Assets& assets)
-    {
-        tick_streaming(w.asset_source, in, assets);
-    }, w.input, w.assets);
-    g.add_node("navmesh_rebuild", &tick_navmesh_rebuild, w.input, w.nav_tiles);
-
-    // Gameplay trio. Combat is parallelised in the optimised variant (a critical
-    // bar); economy/quests stay serial (off the critical path -- no point).
-    const bool opt = variant == Frame_variant::optimised;
-    auto combat = g.add_node("combat",
-        [opt](const Transforms& prev_xf, const Input& in, const Net& net,
-              const Script_events& ev, Combat& c)
-        {
-            tick_combat(prev_xf, in, net, ev, c, opt);
-        }, w.transforms.state(), w.input, w.net, w.script_events, w.combat);
-    g.add_node("economy", &tick_economy,
-        w.transforms.state(), w.input, w.net, w.script_events, w.economy);
-    g.add_node("quests", &tick_quests,
-        w.transforms.state(), w.input, w.net, w.script_events, w.quests);
-
-    // AI. Baseline reads THIS frame's trio (so the trio binds AI on the critical
-    // path); optimised reads last frame's gameplay snapshot instead, deleting the
-    // trio->AI edges so AI starts as soon as its paths are ready.
-    g.add_node("navigation", &tick_navigation, w.nav_mesh, w.nav_tiles, w.transforms.state(), w.paths);
-    ts::Graph_node ai;
-    if (opt)
-        ai = g.add_node("AI", [&w](const Transforms& prev_xf, const Paths& paths,
-                                   const Gameplay& prev_gp, Intents& intents)
-        {
-            tick_AI_prev(w.nav_mesh, prev_xf, paths, prev_gp, intents);
-        }, w.transforms.state(), w.paths, w.gameplay.state(), w.intents);
-    else
-        ai = g.add_node("AI", [&w](const Transforms& prev_xf, const Paths& paths,
-                                   const Combat& c, const Economy& e, const Quests& q,
-                                   Intents& intents)
-        {
-            tick_AI(w.nav_mesh, prev_xf, paths, c, e, q, intents);
-        }, w.transforms.state(), w.paths, w.combat, w.economy, w.quests, w.intents);
-
-    // Gameplay snapshot + publish (optimised only): pack this frame's trio into
-    // the versioned gameplay store and flip it for NEXT frame's AI. The snapshot
-    // reads the trio (this frame) and is off the critical path; AI (declared
-    // above) reads the PREVIOUS version, so the flip is ordered after it.
-    if (opt)
-    {
-        auto gp_snapshot = g.add_node("gameplay_snapshot",
-            [rec = w.gameplay.recorder()](const Combat& c, const Economy& e, const Quests& q) mutable
-            {
-                tick_gameplay_snapshot(c, e, q, rec);
-            }, w.combat, w.economy, w.quests);
-        auto gp_flip = g.add_node("gameplay_flip", ts::publish_body(w.gameplay), w.gameplay.state());
-        gp_flip.after(gp_snapshot);
-    }
-
-    // Animation chain.
-    auto anim_graph = g.add_node("anim_graph", &tick_anim_graph, w.skeletons, w.intents, w.anim_pose);
-    auto ik_post = g.add_node("ik_post",
-        [opt](const Anim_pose& pose, Local_xf& lx) { tick_ik_post(pose, lx, opt); },
-        w.anim_pose, w.local_xf);
-    g.add_node("skinning", &tick_skinning, w.local_xf, w.skin_matrices);
-
-    // Physics pipeline.
-    g.add_node("broadphase", &tick_broadphase, w.bodies, w.broad_pairs);
-    g.add_node("narrowphase", &tick_narrowphase, w.broad_pairs, w.contacts);
-    g.add_node("solver", &tick_solver, w.contacts, w.combat, w.velocities)
-        .priority(ts::Priority::high);
-    g.add_node("finalize", &tick_finalize, w.velocities, w.bodies);
-
-    // Propagation: this frame's transforms from animation + physics, staged
-    // grant-free (velocity-aware interpolation reads velocities too, so the
-    // physics->propagation edge derives from two conflicts).
-    auto propagation = g.add_node("propagation",
-        [rec = w.transforms.recorder()](const Local_xf& local_xf, const Bodies& bodies,
-                                        const Velocities& velocities) mutable
-        {
-            read_all(velocities);
-            std::vector<float> out(static_cast<std::size_t>(local_xf.size()));
-            for (int i = 0, n = local_xf.size(); i < n; ++i)
-                out[static_cast<std::size_t>(i)] = local_xf.get(i) + bodies.get(i);
-            parallel_cost(1.0);
-            rec.stage([batch = std::move(out)](Transforms& t) { t.apply(batch); });
-        },
-        w.local_xf, w.bodies, w.velocities);
-
-    // Render pipeline -- declared BEFORE the flip, so it reads LAST frame's
-    // transforms and overlaps this frame's simulation.
-    g.add_node("frustum_cull", &tick_frustum_cull,
-        w.transforms.state(), w.camera, w.renderables, w.visibility);
-    g.add_node("occlusion_cull", &tick_occlusion_cull,
-        w.transforms.state(), w.visibility, w.vis_final);
-    g.add_node("shadow", &tick_shadow, w.transforms.state(), w.skeletons, w.shadow_map);
-    auto cmd_record = add_cmd_record(g, w, variant);
-    auto particles = add_particles(g, w, variant);
-    auto UI_node = add_UI(g, w, variant);
-    auto submit = add_submit(g, w, variant);
-    submit.priority(ts::Priority::high);
-    // Baseline: submit reads the queue the producers wrote -> conflict edges order
-    // it after them. Optimised: staging holds no grant on the queue, so the
-    // ordering is intent, declared explicitly.
-    if (variant == Frame_variant::optimised)
-        submit.after(cmd_record).after(particles).after(UI_node);
-
-    // Off-path leaves.
-    g.add_node("audio", &tick_audio, w.transforms.state(), w.audio_out)
-        .priority(ts::Priority::low);
-    g.add_node("vfx", &tick_vfx, w.transforms.state(), w.particles, w.vfx);
-    g.add_node("replication", &tick_replication,
-        w.combat, w.economy, w.quests, w.intents, w.replication);
-    g.add_node("stats", &tick_stats, w.combat, w.economy, w.bodies, w.visibility, w.stats);
-    g.add_node("gc", &tick_gc, w.gc);
-    g.add_node("debug_overlay", [](const auto& economy, const auto& xf)   // 0.2
-    {
-        read_all(economy);
-        read_all(xf);
-        spin(0.2);
-    }, w.economy, w.transforms.state()).priority(ts::Priority::low);
-
-    // Cloth: a version-choice lever. The baseline reads the FRESH transforms
-    // (post-flip), so it sits alone on the tail -- the last node in the frame.
-    // The optimised variant reads LAST frame's transforms (declared before the
-    // flip, like audio): one frame of cloth latency is invisible, and the node
-    // runs alongside the (now short) spine instead of after it. This only pays
-    // once the spine has been shortened enough to leave idle capacity for cloth
-    // to fill -- on the un-optimised spine the same move was neutral (cloth just
-    // competed with the critical chain). Structural (the version is set by
-    // declaration order vs the flip), so it branches here.
-    ts::Graph_node cloth;
-    if (variant == Frame_variant::optimised)
-        cloth = g.add_node("cloth", &tick_cloth, w.transforms.state(), w.cloth);
-
-    auto flip = g.add_node("flip", ts::publish_body(w.transforms), w.transforms.state());
-    flip.after(propagation);
-
-    if (variant == Frame_variant::baseline)
-    {
-        cloth = g.add_node("cloth", &tick_cloth, w.transforms.state(), w.cloth);
-        cloth.after(flip);
-    }
-
-    // --- the optimisation section -----------------------------------------------
-    // The optimised variant's levers, applied after construction. The two that
-    // move the makespan are the per-node splits (combat, ik_post -- branched in
-    // their bodies above), because the frame is critical-path bound: the trace
-    // shows the makespan set by the serial sim spine, so ONLY shortening that
-    // chain helps. The draw-staging lever (Deferred, in the add_* helpers)
-    // improves utilization but not makespan -- it frees cores the critical path
-    // wasn't using. Pure scheduling levers (edges/inline) cannot shorten a
-    // genuine dependency chain and are deliberately absent here.
-    (void)input; (void)scripting; (void)combat; (void)ai;
-    (void)anim_graph; (void)ik_post; (void)propagation;
-
-    g.compile(DOT_path);
-    return g;
+    return budget::input + budget::camera + budget::networking + budget::scripting + budget::streaming
+         + budget::navmesh_rebuild + budget::combat + budget::economy + budget::quests
+         + budget::navigation + budget::AI
+         + budget::anim_graph + budget::ik_post + budget::skinning
+         + budget::broadphase + budget::narrowphase + budget::solver + budget::finalize
+         + budget::propagation
+         + budget::frustum_cull + budget::occlusion_cull + budget::shadow + budget::cmd_record + budget::submit
+         + budget::cloth + budget::audio + budget::vfx
+         + budget::particles + budget::UI
+         + budget::replication + budget::stats + budget::gc + budget::debug_overlay;
 }
 
 } // namespace
@@ -1035,8 +1091,7 @@ ts::Static_task_graph build_frame_graph(World& w, Frame_variant variant,
 // Run `frames` frames at `scale`; returns the measured average ms/frame, the
 // serial budget at that scale, and entity 0's published transform (deterministic:
 // propagation wrote local_xf + bodies = 2 + 3 = 5).
-void game_frame_stats(int frames, float scale,
-                      double& avg_ms, double& serial_ms, float& transform0)
+void game_frame_stats(int frames, float scale, double& avg_ms, double& serial_ms, float& transform0)
 {
     constexpr int entities = 1000;
     time_scale = scale;
@@ -1064,10 +1119,7 @@ void game_frame_stats(int frames, float scale,
 
     avg_ms = total_ms / frames;
     serial_ms = serial_budget_ms() * scale;
-    transform0 = world.transforms.read([](const Transforms& t)
-    {
-        return t.size() > 0 ? t.get(0) : 0.0f;
-    }).sync();
+    transform0 = world.transforms.read([](const Transforms& t) { return t.size() > 0 ? t.get(0) : 0.0f; }).sync();
 }
 
 // Compile the frame graph and write its structure as Graphviz DOT (no frames run).
@@ -1097,10 +1149,10 @@ std::string described_SVG_path(const char* base, const char* description)
     return path;
 }
 
-// One traced variant on `scheduler`: build the variant's graph on a fresh World,
-// attach a fresh trace, run, write the described SVG.
-void trace_variant(int frames, Frame_variant variant,
-                   const char* base_SVG_path, const char* description, const char* DOT_path)
+// One traced variant on the current scheduler: build the variant's graph on a
+// fresh World, attach a fresh trace, run, write the described SVG.
+void trace_variant(int frames, Frame_variant variant, const char* base_SVG_path, const char* description,
+    const char* DOT_path)
 {
     constexpr int entities = 1000;
     time_scale = 1.0f;
@@ -1121,8 +1173,7 @@ void trace_variant(int frames, Frame_variant variant,
     graph.set_trace(nullptr);
     std::string path = described_SVG_path(base_SVG_path, description);
     trace.write_SVG(path.c_str());
-    std::printf("[game_frame] %s: traced %lld runs -> %s\n",
-        description, trace.run_count(), path.c_str());
+    std::printf("[game_frame] %s: traced %lld runs -> %s\n", description, trace.run_count(), path.c_str());
 #else
     for (int f = 0; f < frames; ++f)
         graph.execute().sync();
