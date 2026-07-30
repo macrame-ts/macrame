@@ -67,6 +67,27 @@ public:
     Graph_node& after(const Graph_node& prerequisite);
     Graph_node& before(const Graph_node& successor);
 
+    // Variadic forms: `this` runs after EVERY listed prerequisite (before every listed
+    // successor) -- independent edges, not a chain among the arguments. So
+    // `submit.after(a, b, c)` declares that submit depends on a, b and c together,
+    // equivalently to `.after(a).after(b).after(c)` but without reading like a sequence.
+    template<typename... Nodes>
+        requires (sizeof...(Nodes) > 0) && (std::is_same_v<Nodes, Graph_node> && ...)
+    Graph_node& after(const Graph_node& prerequisite, const Nodes&... more)
+    {
+        after(prerequisite);
+        (after(more), ...);
+        return *this;
+    }
+    template<typename... Nodes>
+        requires (sizeof...(Nodes) > 0) && (std::is_same_v<Nodes, Graph_node> && ...)
+    Graph_node& before(const Graph_node& successor, const Nodes&... more)
+    {
+        before(successor);
+        (before(more), ...);
+        return *this;
+    }
+
     // Queue priority for this node when it is dispatched each run.
     Graph_node& priority(Priority p);
 

@@ -93,11 +93,13 @@ public:
     {
         TS_CHECK_ACCESS();
         for (Body& b : bodies_)
+        {
             if (b.id == id)
             {
                 b.vel = b.vel + dv;
                 return;
             }
+        }
     }
 
     void step(float dt)
@@ -429,7 +431,7 @@ Physics_stats run_physics_frames(int frames)
             out.stage([batch = w.extract_poses()](Pose_snapshot& s) { s.apply(batch); });
         },
         world);
-    sim.after(gameplay).after(spawner);   // this frame's inputs make this frame's step
+    sim.after(gameplay, spawner);   // this frame's inputs make this frame's step
 
     // The flip: the only write conflict on `poses`. `gameplay` (declared before
     // it) derives an edge in front of it; `camera` opts into freshness after it.
