@@ -259,6 +259,34 @@ void run_death_scenario(const char* name)
         rec.stage([](int& x) { ++x; });
         // destroyed with a staged unpublished command -> fatal (lost write)
     }
+    else if (std::strcmp(name, "versioned_dtor_inflight_publish") == 0)
+    {
+        // If the in-flight fatal regresses, the destructor parks on the blocked front
+        // instead of aborting; exit 0 after a bound so the parent's `expect_death`
+        // fails rather than hanging.
+        std::thread([]
+        {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            std::_Exit(0);
+        }).detach();
+
+        std::atomic<bool> release{ false };
+        {
+            ts::Versioned<int> v;
+            // A spinning reader holds the front, so the publish's swap (a write) cannot
+            // run and the returned task stays unsettled.
+            ts::Task<void> blocker = v.read([&release](const int&)
+            {
+                while (!release.load(std::memory_order_relaxed))
+                    std::this_thread::yield();
+            });
+            auto rec = v.recorder();
+            rec.stage([](int& x) { ++x; });
+            v.publish();   // swap queued behind the reader: returned task in flight
+            // v destroyed here with the publish unsettled -> fatal (before the
+            // staged-leftover check can fire)
+        }
+    }
     else if (std::strcmp(name, "versioned_divergence") == 0)
     {
         ts::Versioned<int> v;

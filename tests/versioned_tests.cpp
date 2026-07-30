@@ -324,6 +324,62 @@ void test_publish_sync_then_graph_flip()
     TS_CHECK(v.read([](const int& x) { return x; }).sync() == 2 * rounds);
 }
 
+// The LEGAL single-publisher direction (the fatal reverse is versioned_mixed_publish):
+// a dynamic fire-and-forget publish() arriving while a graph flip is still unresolved
+// CHAINS behind the flip -- no fatal -- and its write lands after the flip's version.
+void test_dynamic_publish_chains_behind_flip()
+{
+#if TS_SAFETY_CHECKS
+    long long ensure_base = ts::ensure_failure_count();
+#endif
+
+    ts::Versioned<int> v;
+    std::atomic<int> apply_count{ 0 };
+    std::atomic<bool> release{ false };
+
+    // The flip publishes version "100". The command also blocks its OWN resync (the
+    // second application) so the flip stays unresolved -- chain_ not-done -- giving a
+    // deterministic mid-flip window; phase 1 (first application) does not block.
+    {
+        auto rec = v.recorder();
+        rec.stage([&apply_count, &release](int& x)
+        {
+            x = 100;
+            if (apply_count.fetch_add(1, std::memory_order_acq_rel) == 1)
+            {
+                while (!release.load(std::memory_order_acquire))
+                    std::this_thread::yield();
+            }
+        });
+    }
+
+    ts::Static_task_graph g;
+    g.add_node(ts::publish_body(v), v.state());
+    g.compile();
+    g.execute().sync();   // flip runs phases 1-2 and installs its shadow_ready; its resync
+                          // is now blocked -> chain_ stays not-done
+
+    // In that window a dynamic publish must CHAIN behind the flip, not fatal.
+    ts::Task<void> dyn;
+    {
+        auto rec = v.recorder();
+        rec.stage([](int& x) { x += 7; });
+        dyn = v.publish();   // prev = the flip's (not-done) shadow_ready -> chains behind it
+    }
+
+    release.store(true, std::memory_order_release);   // let the flip's resync, then the dynamic, finish
+    dyn.sync();
+
+    int final = v.read([](const int& x) { return x; }).sync();
+    // 107 = flip set 100, then the chained dynamic added 7. A raced/reordered publish
+    // (dynamic before flip) would leave 100 (the flip overwriting the +7); a dropped
+    // write would leave 100 or 7. Only the correct chained order yields 107.
+    TS_CHECK(final == 107);
+#if TS_SAFETY_CHECKS
+    TS_CHECK(ts::ensure_failure_count() == ensure_base);   // legal path: no diagnostic fired
+#endif
+}
+
 void test_mixed_publish_race_is_fatal()
 {
     TS_CHECK(ts::test::expect_death("versioned_mixed_publish"));
@@ -342,6 +398,27 @@ void test_wrong_front_is_fatal()
 void test_drop_staged_is_fatal()
 {
     TS_CHECK(ts::test::expect_death("versioned_drop_staged"));
+}
+
+void test_dtor_inflight_publish_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("versioned_dtor_inflight_publish"));
+}
+
+// A synced publish followed by destruction is clean: no fatal, and the published
+// value is visible. (The resync tail may still be draining; the destructor waits it
+// out silently rather than faulting.)
+void test_synced_publish_then_destroy()
+{
+    int seen = -1;
+    {
+        ts::Versioned<int> v;
+        auto rec = v.recorder();
+        rec.stage([](int& x) { x = 7; });
+        v.publish().sync();
+        seen = v.read([](const int& x) { return x; }).sync();
+    }   // ~Versioned with the publish resolved -> no fatal
+    TS_CHECK(seen == 7);
 }
 
 } // namespace
@@ -364,8 +441,11 @@ void run_versioned_tests()
     run("versioned: concurrent readers during publishes", test_concurrent_readers_and_publishes);
     run("versioned: graph -- stale before flip, fresh after", test_graph_stale_then_fresh);
     run("versioned: synced publish then graph flip is legal", test_publish_sync_then_graph_flip);
+    run("versioned: dynamic publish chains behind an in-flight flip", test_dynamic_publish_chains_behind_flip);
     run("versioned: flip catching an unresolved publish is fatal", test_mixed_publish_race_is_fatal);
     run("versioned: nondeterministic replay is fatal", test_divergence_is_fatal);
     run("versioned: publish_into wrong instance is fatal", test_wrong_front_is_fatal);
     run("versioned: destroy with staged commands is fatal", test_drop_staged_is_fatal);
+    run("versioned: synced publish then destroy is clean", test_synced_publish_then_destroy);
+    run("versioned: destroy with a publish in flight is fatal", test_dtor_inflight_publish_is_fatal);
 }
