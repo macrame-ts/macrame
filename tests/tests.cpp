@@ -11,6 +11,7 @@
 #include "scheduler_tests.h"
 #include "access_tests.h"
 #include "guarded_tests.h"
+#include "pipe_tests.h"
 #include "task_tests.h"
 #include "graph_tests.h"
 #include "parallel_tests.h"
@@ -34,6 +35,7 @@ void run_all_tests()
     run_scheduler_tests();
     run_access_tests();
     run_guarded_tests();
+    run_pipe_tests();
     run_task_tests();
     run_graph_tests();
     run_parallel_tests();

@@ -49,6 +49,7 @@
     <ClCompile Include="tests\task_tests.cpp" />
     <ClCompile Include="tests\tests.cpp" />
     <ClCompile Include="tests\guarded_tests.cpp" />
+    <ClCompile Include="tests\pipe_tests.cpp" />
     <ClCompile Include="tests\deferred_tests.cpp" />
     <ClCompile Include="tests\versioned_tests.cpp" />
   </ItemGroup>
@@ -90,6 +91,7 @@
     <ClInclude Include="tests\tests.h" />
     <ClInclude Include="tests\test_util.h" />
     <ClInclude Include="tests\guarded_tests.h" />
+    <ClInclude Include="tests\pipe_tests.h" />
     <ClInclude Include="tests\deferred_tests.h" />
     <ClInclude Include="tests\versioned_tests.h" />
   </ItemGroup>
