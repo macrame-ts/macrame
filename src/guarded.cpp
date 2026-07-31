@@ -114,6 +114,8 @@ void submit_ready(Task_ptr block, std::uint64_t gen)
     global_scheduler().submit(&run_block_dispatch, block.release(), priority);
 }
 
+#if !TS_PIPE_TAIL   // ===== current mutex-guarded reader/writer deque pipe =====
+
 namespace
 {
 
@@ -291,6 +293,8 @@ void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode)
     release_and_redispatch(scheduler, pipe, mode);
 }
 
+#endif // !TS_PIPE_TAIL
+
 void multi_acquire(Ref_ptr<Multi_async_state> state, Task_ptr block, std::size_t pos)
 {
     if (pos == state->holds.size())
@@ -337,6 +341,7 @@ void blocking_sync_diagnose(const Task_control_block* blk) noexcept
 }
 #endif
 
+#if !TS_PIPE_TAIL
 bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_ptr& block)
 {
     {
@@ -367,6 +372,7 @@ bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_p
     release_and_redispatch(scheduler, pipe, mode);
     return true;
 }
+#endif // !TS_PIPE_TAIL
 
 } // namespace detail
 } // namespace ts
