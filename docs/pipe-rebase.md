@@ -231,6 +231,51 @@ not walk). B3 is the whole arrival — one exchange, no UAF. B13/B14 is the walk
 arrival close race (UE `Close`). The `TS_PIPE_RACE_DELAY` hooks go at B10/B13 and at the
 writer's `AddSubsequent` (5.1 W5) for the TSan campaign.
 
+#### 5.2B.1 How the head reader is identified (load-bearing — review this)
+
+A reader is the group **head** iff, at arrival, the predecessor it exchanged out (B3's
+`prev`) is a **writer or idle** (`0`); it is a **member** iff `prev` is a **reader**. This is
+a purely local decision, taken from the single `exchange` result — no shared "who's the
+head" state, no extra race:
+
+- `prev == 0` (idle pipe): R is the head; it runs immediately and walks (B4).
+- `prev` is a WRITER: R is the head; it starts when that writer completes (B5) or
+  immediately if the writer already completed (B6), then walks.
+- `prev` is a READER: R is a member; some earlier reader after the last writer is the head.
+  R just runs its body when the head's walk unlocks it — it never walks.
+
+Why it's race-free: head-ness depends only on the *mode* of R's immediate predecessor, which
+the tail exchange hands R atomically. It does NOT depend on whether `prev` is itself a head
+or a member, so there is no chain to consult. A member stores a one-bit `is_head = false`
+(set from `prev`'s mode at arrival); the dispatch path runs the walk prologue only when
+`is_head`. The head is thus exactly "the first reader after a writer (or at idle)", decided
+once, locally, at push time.
+
+Corner: two readers race to be first on an idle pipe. Exactly one wins the `exchange` that
+returns `0` (→ head); the other's `exchange` returns the first reader (→ member). The
+`exchange` linearizes it — never two heads, never zero.
+
+#### 5.2B.2 Inline-safety of the walk (no recursion — review this)
+
+The walk (B7–B16) and the member unlocks (B16) must be **iterative**, never recursive.
+Unlocking a member can dispatch it *inline* (a `run_inline` reader, or worker-less mode where
+`submit` runs at the call site). If the head unlocked members by recursively
+"unlock → the member runs → its completion unlocks the next", a long reader run would recurse
+one stack frame per member and overflow (the exact hazard the task layer already avoids for
+inline chains). So:
+
+- Pass 1 (B9–B14) only *reads* `subsequent` pointers and closes the chain end — it dispatches
+  nothing, so it cannot recurse. It is a bounded pointer-chase collecting the member list.
+- Pass 2 (B16) dispatches each member through the existing **bounded per-thread FIFO inline
+  trampoline** (`Task_control_block::dispatch_ready` / `inline_pending`, task.h): an inline
+  member is pushed and drained iteratively, not run nested inside the walk. So the head's
+  stack depth is O(1) regardless of group size, and a member that itself dispatches inline
+  work rides the same trampoline. The head runs its own body only after the walk hands the
+  members to the trampoline (or interleaves, but never nested under an unlock).
+
+This reuses the task layer's inline-chain solution verbatim; the walk must simply route every
+member unlock through `dispatch_ready` rather than calling `execute` directly.
+
 The TSan-critical race points:
 
 - **Design A only — join-vs-UAF (R1):** line A4's `fetch_add` on a possibly-freed sentinel
