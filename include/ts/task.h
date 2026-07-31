@@ -437,6 +437,10 @@ struct Task_control_block
         // the forward walk (§5.2B.1). Both set at push, read at dispatch. Spare bits, free.
         bool pipe_reader : 1 = false;
         bool pipe_head : 1 = false;
+        // A held reservation node (graph / multi-object `pipe_acquire`): admitted like a
+        // pipe task but does not run a body or advance the chain until an explicit
+        // `pipe_release`. Its admission fires the `on_acquired` callback (docs §6a).
+        bool pipe_reservation : 1 = false;
     };
     Flags flags;
     // -----------------------------------------------------------------------------------

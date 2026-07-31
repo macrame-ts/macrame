@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."
 CXX="${CXX:-clang++}"
 OUT="${TMPDIR:-/tmp}/ts_tsan"
 TIMEOUT="${TSAN_TIMEOUT:-180}"   # watchdog seconds; a deadlock fails fast, never hangs
-SRC="src/scheduler.cpp src/worker_thread.cpp src/guarded.cpp src/static_task_graph.cpp src/access.cpp src/fatal.cpp \
+SRC="src/scheduler.cpp src/worker_thread.cpp src/guarded.cpp src/pipe_tail.cpp src/static_task_graph.cpp src/access.cpp src/fatal.cpp \
      sample/game_frame.cpp sample/physics.cpp sample/blackboard.cpp tsan/tsan_main.cpp"
 
 # A previous run that deadlocked keeps the binary busy (a build can't overwrite a

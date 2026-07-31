@@ -65,6 +65,11 @@ struct Pipe
     // counts outstanding pipe tasks (barriers included) and drives `wait_until_idle` (§7).
     std::atomic<std::uintptr_t> tail{ 0 };
     std::atomic<std::uint32_t> task_count{ 0 };
+    // The currently-held reservation node (graph / multi-object `pipe_acquire`), so
+    // `pipe_release(mode)` can advance it without a handle. Single slot: while the head-walk
+    // is not yet landed every pipe task (reservations included) serializes, so at most one
+    // reservation is held at a time. Generalized to a set when reader groups land.
+    std::atomic<Task_control_block*> held{ nullptr };
 #else
     std::mutex mutex;
     std::condition_variable idle;
