@@ -78,7 +78,12 @@ struct Pipe
     // profiling; kept in all builds (one pointer).
     const char* debug_name = nullptr;
 
-    // Blocks until the pipe is fully drained and nothing is in flight.
+    // Blocks until the pipe is fully drained and nothing is in flight. Teardown-only
+    // (`~Guarded`). Safe against the completing job that signals it: the notify is done
+    // under `mutex` (`release_and_redispatch`), so this waiter cannot rewake and destroy
+    // the pipe until it re-acquires `mutex` after the signaler's notify returns -- no
+    // UE-`FPipe`-class refcounted drain event needed (that race is a lock-free-notify
+    // artifact). See `release_and_redispatch` and docs/pipe-drain-race-handoff.md.
     void wait_until_idle()
     {
         std::unique_lock lock(mutex);

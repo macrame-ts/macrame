@@ -147,10 +147,27 @@ void release_and_redispatch(Scheduler& scheduler, Pipe& pipe, Access mode)
 
         dispatch(pipe, admitted);
 
+        // Drain notify under the mutex -- the standard-blessed condition_variable teardown
+        // pattern ([thread.condition.condvar]: only the notify need happen-before the
+        // destruction). A `wait_until_idle` waiter cannot return from `idle.wait` until it
+        // re-acquires `mutex`, which the scope's unlock below hands off; by then
+        // `notify_all` has already returned, so the destroying waiter never races the
+        // notify. UE's `FPipe` needed a refcounted, keep-alive drain event
+        // (`EmptyEventRef` + a local copy taken before the last decrement -- their
+        // `// use-after-free territory!`) precisely because its `FEventCount::Notify` is
+        // lock-free/unlocked; notify-under-lock makes us structurally immune to that race.
+        // See docs/pipe-drain-race-handoff.md.
         if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
             pipe.idle.notify_all();
     }
-    submit_admitted(scheduler, pipe, admitted);
+    // The only post-unlock pipe touch. `dispatch` admits nothing exactly when the idle
+    // predicate above held (admitting sets `writer_active`/`active_readers`), so a notify
+    // implies `admitted` is empty -- and only a notify can release the destroying waiter.
+    // Guarding on non-empty therefore means we never even bind `pipe&` after the waiter
+    // could have freed it: whenever the pipe may be dead, `admitted` is empty and the call
+    // is skipped. When `admitted` is non-empty the pipe has in-flight work and stays alive.
+    if (!admitted.empty())
+        submit_admitted(scheduler, pipe, admitted);
 }
 
 // Trampoline for an admitted pipe job (one per mode, so the mode needs no storage): the

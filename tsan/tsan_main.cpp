@@ -128,6 +128,36 @@ void stress_inline_async()
     assert(final == threads * per / 2);
 }
 
+// Lifetime churn targeting the `wait_until_idle` drain: create/destroy `Guarded`s with
+// in-flight work from several threads, dropping every task handle so `~Guarded`'s drain
+// races the last job's completion + idle-notify. A reader/writer mix so the notify fires
+// from both release paths (a writer draining to empty, a last reader hitting
+// `active_readers == 0`), and the fast stack reuse across iterations gives TSan a hot
+// address to flag if a completing job touches the pipe after the drain releases the
+// destroyer. Mirrors the pipe-rebase `stress_pipe_lifetime` so the branches converge.
+void stress_pipe_lifetime()
+{
+    constexpr int threads = 4, iters = 4000, jobs = 12;
+    std::vector<std::jthread> ths;
+    for (int t = 0; t < threads; ++t)
+    {
+        ths.emplace_back([]
+        {
+            for (int i = 0; i < iters; ++i)
+            {
+                ts::Guarded<int> obj{ 0 };
+                for (int k = 0; k < jobs; ++k)
+                {
+                    if (k & 1)
+                        obj.async([](int& v) { ++v; });                 // writer
+                    else
+                        obj.async([](const int& v) { return v; });      // reader
+                }
+            }   // handles all dropped; ~Guarded drains, racing the last completion/notify
+        });
+    }
+}   // join
+
 // Many threads triggering one Signal concurrently while others wait / attach
 // continuations: idempotent `complete()` must fire exactly once with no race.
 void stress_signal()
@@ -1060,6 +1090,7 @@ int main()
     std::puts("tsan: scheduler stress");   stress_scheduler();
     std::puts("tsan: thread_safe stress");  stress_thread_safe();
     std::puts("tsan: inline async stress");  stress_inline_async();
+    std::puts("tsan: pipe lifetime stress"); stress_pipe_lifetime();
     std::puts("tsan: signal stress");       stress_signal();
     std::puts("tsan: when_all stress");      stress_when_all();
     std::puts("tsan: when_all cancel stress"); stress_when_all_cancel();
