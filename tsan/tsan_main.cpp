@@ -25,6 +25,7 @@ std::size_t physics_pose_hash(int frames);   // final snapshot hash after `frame
 #include "ts/deferred.h"
 #include "ts/versioned.h"
 #include "graph_trace.h"   // tools/: worker-side stamps + settle-side fold under TSan
+#include "test_util.h"     // tests/: the Rw_probe dual oracle (shared with the unit suite)
 
 #if defined(__cpp_impl_coroutine)
 #include "ts/coroutine_support.h"
@@ -126,6 +127,112 @@ void stress_inline_async()
     }   // join producers
     int final = obj.async([](const int& v) { return v; }).sync();   // FIFO drain
     assert(final == threads * per / 2);
+}
+
+// The pipe-rebase reader/writer marquee: N threads hammer ONE object with a randomized
+// read/write x async/access mix. `Rw_probe`'s unsynchronized payload is the TSan detector
+// -- any reader/writer overlap the pipe fails to prevent shows up as a race on it (the
+// probe's own atomics are synchronized, so they alone would hide it).
+void pipe_rw_producers(ts::Guarded<tests::Rw_probe>& probe, int threads, int per)
+{
+    std::vector<std::jthread> producers;
+    for (int t = 0; t < threads; ++t)
+    {
+        producers.emplace_back([&probe, t, per]
+        {
+            for (int k = 0; k < per; ++k)
+            {
+                std::uint32_t seed = static_cast<std::uint32_t>(t * 100003 + k);
+                bool write = (seed % 3) == 0;   // ~1/3 writes
+                bool inl = (seed % 2) == 0;     // half via access (may run inline)
+                if (write && inl)
+                    probe.access([seed](tests::Rw_probe& p) { p.observe_write(seed); });
+                else if (write)
+                    probe.async([seed](tests::Rw_probe& p) { p.observe_write(seed); });
+                else if (inl)
+                    probe.access([seed](const tests::Rw_probe& p) { p.observe_read(seed); });
+                else
+                    probe.async([seed](const tests::Rw_probe& p) { p.observe_read(seed); });
+            }
+        });
+    }
+}   // join
+
+void stress_pipe_rw()
+{
+    ts::Guarded<tests::Rw_probe> probe;
+    pipe_rw_producers(probe, 8, 3000);
+    bool bad = probe.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
+    assert(!bad);
+}
+
+// Same, worker-less: bodies run inline at submit, cross-thread pipe work migrates to the
+// releasing thread; the pipe still serializes. Exercises R7 (no mutex; inline-at-submit).
+void stress_pipe_rw_worker_less()
+{
+    ts::Scheduler_scope scope{ ts::Scheduler_config{ .single_threaded = true } };
+    ts::Guarded<tests::Rw_probe> probe;
+    pipe_rw_producers(probe, 4, 1500);
+    bool bad = probe.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
+    assert(!bad);
+}
+
+// Lifetime churn: create/destroy Guardeds with in-flight work from several threads -- the
+// destructor's drain races the last job's completion (wait_until_idle UAF) and blocks can
+// be freed by a completing predecessor mid-push (the push-UAF bracket).
+void stress_pipe_lifetime()
+{
+    std::vector<std::jthread> ths;
+    for (int t = 0; t < 4; ++t)
+    {
+        ths.emplace_back([]
+        {
+            for (int i = 0; i < 2000; ++i)
+            {
+                ts::Guarded<int> d{ 0 };
+                for (int k = 0; k < 8; ++k)
+                    d.async([](int& v) { ++v; });   // handle dropped; ~Guarded drains
+            }
+        });
+    }
+}   // join
+
+// Reservation coexistence: a graph run holding shared objects per-node while async hammers
+// the same objects -- the per-node acquire must exclude a writer node from any async and
+// let a reader node overlap an async read (the docs/task-internals.md §10 race). TSan on
+// the payload; the oracle also asserts the invariant.
+void stress_pipe_reservation()
+{
+    ts::Guarded<tests::Rw_probe> a, b;
+    ts::Static_task_graph g;
+    g.add_node([](tests::Rw_probe& p) { p.observe_write(1); }, a);        // writer on a
+    g.add_node([](const tests::Rw_probe& p) { p.observe_read(2); }, a);   // reader on a (ordered after)
+    g.add_node([](tests::Rw_probe& p) { p.observe_write(3); }, b);        // writer on b
+    g.compile();
+
+    std::atomic<bool> stop{ false };
+    std::vector<std::jthread> asyncs;
+    for (int t = 0; t < 3; ++t)
+    {
+        asyncs.emplace_back([&]
+        {
+            std::uint32_t s = 0;
+            while (!stop.load(std::memory_order_relaxed))
+            {
+                a.async([s](const tests::Rw_probe& p) { p.observe_read(s); });
+                b.async([s](tests::Rw_probe& p) { p.observe_write(s); });
+                ++s;
+            }
+        });
+    }
+    for (int r = 0; r < 200; ++r)
+        g.execute().sync();
+    stop.store(true, std::memory_order_relaxed);
+    asyncs.clear();   // join
+
+    bool bad = a.async([](const tests::Rw_probe& p) { return p.violated(); }).sync()
+             || b.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
+    assert(!bad);
 }
 
 // Many threads triggering one Signal concurrently while others wait / attach
@@ -1059,6 +1166,10 @@ int main()
 #endif
     std::puts("tsan: scheduler stress");   stress_scheduler();
     std::puts("tsan: thread_safe stress");  stress_thread_safe();
+    std::puts("tsan: pipe rw stress");       stress_pipe_rw();
+    std::puts("tsan: pipe rw worker-less");  stress_pipe_rw_worker_less();
+    std::puts("tsan: pipe lifetime stress"); stress_pipe_lifetime();
+    std::puts("tsan: pipe reservation stress"); stress_pipe_reservation();
     std::puts("tsan: inline async stress");  stress_inline_async();
     std::puts("tsan: signal stress");       stress_signal();
     std::puts("tsan: when_all stress");      stress_when_all();

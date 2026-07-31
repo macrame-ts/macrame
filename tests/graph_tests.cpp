@@ -884,6 +884,60 @@ void test_lifetime_registration_balance()
     // `a`/`b` destruct at scope end without a lifetime fatal = the balance held.
 }
 
+// --- E: reservations / graph handoff (pipe-rebase regression guard) --------
+
+bool probe_ok(ts::Guarded<tests::Rw_probe>& p)
+{
+    return p.async([](const tests::Rw_probe& r) { return !r.violated(); }).sync();
+}
+
+int probe_writes(ts::Guarded<tests::Rw_probe>& p)
+{
+    return p.async([](const tests::Rw_probe& r) { return r.writes(); }).sync();
+}
+
+// E1: a serial chain of writer nodes on one object -- each hands the object directly to
+// its successor (conflict edges order them; the handoff elides release + re-acquire). The
+// oracle must see no reader/writer overlap and every write applied, across re-runs.
+void test_writer_handoff_chain()
+{
+    ts::Guarded<tests::Rw_probe> probe;
+    ts::Static_task_graph g;
+    g.add_node([](tests::Rw_probe& p) { p.observe_write(1); }, probe);
+    g.add_node([](tests::Rw_probe& p) { p.observe_write(2); }, probe);
+    g.add_node([](tests::Rw_probe& p) { p.observe_write(3); }, probe);
+    g.compile();
+
+    g.execute().sync();
+    TS_CHECK(probe_ok(probe));
+    TS_CHECK(probe_writes(probe) == 3);
+
+    g.execute().sync();   // re-run: the handoff path is allocation-free and repeatable
+    TS_CHECK(probe_ok(probe));
+    TS_CHECK(probe_writes(probe) == 6);
+}
+
+// E2: a graph reader node and a concurrent async read on the SAME object overlap -- the
+// per-node mode-aware hold joins concurrent readers. The gate is met only if both were in
+// flight at once (the async reader blocks in arrive(), holding its reader slot, while the
+// node acquires the pipe as a second concurrent reader).
+void test_reader_node_overlaps_async()
+{
+    tests::Parallel_gate gate{ 2 };
+    ts::Guarded<int> x{ 5 };
+
+    ts::Task<int> a = x.async([&gate](const int& v) { gate.arrive(); return v; });
+
+    ts::Static_task_graph g;
+    g.add_node([&gate](const int& v) { gate.arrive(); (void)v; }, x);
+    g.compile();
+    ts::Task<void> run = g.execute();
+
+    a.sync();
+    run.sync();
+    TS_CHECK(gate.met());
+}
+
 } // namespace
 
 void run_graph_tests()
@@ -896,6 +950,8 @@ void run_graph_tests()
     run("probed generic readers overlap", test_probed_generic_readers_overlap);
     run("explicit ordering", test_explicit_ordering);
     run("independent parallel", test_independent_parallel);
+    run("writer handoff chain", test_writer_handoff_chain);
+    run("reader node overlaps async", test_reader_node_overlaps_async);
     run("re-run counts", test_re_run_counts);
     run("empty graph", test_empty_graph);
     run("single node", test_single_node);

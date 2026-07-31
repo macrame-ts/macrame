@@ -200,11 +200,19 @@ Each entry: id, `[bb]`/`[wb]`, one line of WHAT, one line of HOW.
 - **H3** `[bb]` blocking sync worker-less drains serial pending. *How:* no deadlock.
 
 ### I. Deferred/Versioned ordering (`deferred_tests`/`versioned_tests`) — R8
-- **I1** `[bb]` commit_async ordering. *How:* concurrent stage+commit; "are my writes
-  done" via the write-push handle; the pre-fix lost write must be impossible by
-  construction. TSan.
-- **I2** `[bb]` publish phase-3 as an edge. *How:* readers overlap the resync, the next
-  writer/flip waits behind it; existing suite passes unchanged + one ordering assert.
+The existing suites already cover this black-box and are the regression guard as-is:
+`deferred: commit under an async write grant` / `straggler rides the next commit` /
+`concurrent staging`, and `versioned: reader overlaps the resync` / `concurrent readers
+during publishes` / `chained publishes apply exactly once`, plus `stress_deferred` /
+`stress_versioned` under TSan. No new Wave-1 tests are needed; the rebase must keep these
+green.
+- **I1** `[bb]` (covered) commit_async ordering — `deferred: straggler rides the next
+  commit` + `stress_deferred`.
+- **I2** `[bb]` (covered) publish phase-3 as an edge — `versioned: reader overlaps the
+  resync` + `versioned: concurrent readers during publishes`.
+
+Note: the `commit_mutex_` removal + `last_write()` exposure is a Wave-2 / follow-up change
+(§R8 in pipe-rebase.md §11); its new-API test lands then.
 
 ### J. Priority + cancellation on the pipe (`pipe_tests`)
 - **J1** `[bb]` priority. *How:* piped jobs dispatch at their priority but pipe order is
