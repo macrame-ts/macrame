@@ -394,6 +394,13 @@ struct Task_control_block
     //     always 0 and the slot is free to carry the pipe instead; plain store under the pipe
     //     mutex -- the monotonic-gen scheme above never touches pipe blocks, disjoint path).
     std::atomic<std::uint64_t> dispatch_arg{ 0 };
+    // Pipe chain successor (design-B pipe, docs/pipe-rebase.md §5.2B). The single
+    // arrival-order successor a pipe task links onto its predecessor (UE `FPipe`'s subsequent,
+    // one per task); the head reader's walk traverses it. `pipe_closed` (a sentinel, not a
+    // real block) means the task has completed or the walk closed its slot -- no more
+    // subsequents accepted. Null for a non-pipe task. Manipulated only by the pipe
+    // (`src/guarded.cpp`); the block machinery never touches it.
+    std::atomic<Task_control_block*> pipe_next{ nullptr };
     Cancellation_token token;          // checked by `execute` before running the body
 
     // --- one-byte cluster --------------------------------------------------------------
@@ -425,6 +432,11 @@ struct Task_control_block
         // creation). A spare bit consumed by the blocking-sync diagnostic; written only
         // under `TS_SAFETY_CHECKS`.
         bool pipe_job : 1 = false;
+        // Design-B pipe (docs/pipe-rebase.md §5.2B): `pipe_reader` = this pipe task is a
+        // reader (else a writer); `pipe_head` = a reader that is its group's HEAD and runs
+        // the forward walk (§5.2B.1). Both set at push, read at dispatch. Spare bits, free.
+        bool pipe_reader : 1 = false;
+        bool pipe_head : 1 = false;
     };
     Flags flags;
     // -----------------------------------------------------------------------------------
@@ -713,6 +725,13 @@ auto make_block()
         return std::pair{ Task_ptr(&wrapper->core), wrapper };
     }
 }
+
+// Sentinel stored in `Task_control_block::pipe_next` to mark a pipe task's successor slot
+// CLOSED: the task completed, or the head reader's walk closed the chain end. A
+// `compare_exchange` of `pipe_next` from null fails against it, telling a would-be linker
+// its predecessor is gone -- it must run now / head a new group (design-B pipe,
+// docs/pipe-rebase.md §5.2B). Not a real block; never dereferenced.
+inline Task_control_block* const pipe_closed = reinterpret_cast<Task_control_block*>(std::uintptr_t{ 1 });
 
 // The task currently executing on this thread (for nested-task attachment). A
 // shared_ptr so a nested child can register the parent as its successor and keep it
