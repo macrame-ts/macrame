@@ -319,6 +319,11 @@ Revisit both when a real need appears.
 
 1. Consolidate design (this doc) + baseline the reader-heavy contention benchmark (R10 —
    prove non-regression; the gate override is architectural, so baseline, don't gate).
+   **Baseline recorded** (`bench_pipe_contention`, 22 hw threads all on one pipe —
+   machine-specific, track the ratio not the absolute): 100% rd 1.25 M/s (798 ns/op),
+   90% rd 0.93 M/s (1069 ns/op), 50% rd 0.85 M/s (1179 ns/op). The single-mutex ceiling
+   under 22 producers is what the tail must hold or beat; the uncontended `ts_write`
+   (1062 ns/op) / `ts_read` (1035 ns/op) numbers are the not-to-regress floor.
 2. **Writer chain first** — implement the tail + writer arrival/clear + `wait_until_idle`,
    validate with WRITE-ONLY workloads (the UE-exact core; de-risks ref-transfer/lifetime
    before reader-join). TSan.
