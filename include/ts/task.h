@@ -401,6 +401,13 @@ struct Task_control_block
     // subsequents accepted. Null for a non-pipe task. Manipulated only by the pipe
     // (`src/guarded.cpp`); the block machinery never touches it.
     std::atomic<Task_control_block*> pipe_next{ nullptr };
+    // Reader-group terminator (design-B walk, §5.2B): for a reader that the head walk placed
+    // in a group of >= 2, the barrier / writer every group reader decrements on completion;
+    // when it reaches zero the terminator advances (releasing the next writer). Null for a
+    // writer, a reservation, or a LONE reader -- a lone reader has no terminator and advances
+    // serially like a writer, which is the R5 elision (no barrier allocated). Set by the walk
+    // before it dispatches the member; read at the member's completion.
+    std::atomic<Task_control_block*> pipe_terminator{ nullptr };
     Cancellation_token token;          // checked by `execute` before running the body
 
     // --- one-byte cluster --------------------------------------------------------------
