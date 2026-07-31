@@ -17,6 +17,14 @@
 #include <utility>
 #include <vector>
 
+// Pipe implementation selector (docs/pipe-rebase.md). 0 (default) = the mutex-guarded
+// reader/writer deque; 1 = the lock-free tail chain (design B: writers chain FPipe-style,
+// reader groups via the head-reader walk). A dev flag during the rebase so the same tests
+// + TSan validate the new pipe before the default flips; removed once the rebase lands.
+#ifndef TS_PIPE_TAIL
+#define TS_PIPE_TAIL 0
+#endif
+
 namespace ts
 {
 
@@ -50,11 +58,20 @@ struct Job
 // in parallel. Non-blocking: callers never wait; admission is completion-driven.
 struct Pipe
 {
+#if TS_PIPE_TAIL
+    // Design-B tail chain (docs/pipe-rebase.md §4-5). `tail` is a tagged pointer: an aligned
+    // `Task_control_block*` with bit 0 = 1 for a reader head/group, 0 for a writer; the whole
+    // word 0 = idle. Single-word atomic exchange/CAS is the linearization point. `task_count`
+    // counts outstanding pipe tasks (barriers included) and drives `wait_until_idle` (§7).
+    std::atomic<std::uintptr_t> tail{ 0 };
+    std::atomic<std::uint32_t> task_count{ 0 };
+#else
     std::mutex mutex;
     std::condition_variable idle;
     std::deque<Job> jobs;
     int active_readers = 0;
     bool writer_active = false;
+#endif
 #if TS_SAFETY_CHECKS
     // Grant-window epoch for the harness's stale-inherited-grant check (see
     // `Access_context`). Seqlock-style parity: bumped at every write-grant acquire and
@@ -81,11 +98,19 @@ struct Pipe
     // Blocks until the pipe is fully drained and nothing is in flight.
     void wait_until_idle()
     {
+#if TS_PIPE_TAIL
+        // Teardown-only waiter (§7): spin-yield on the atomic count. No event/CV to free out
+        // from under the last signaler -- its `task_count` decrement to zero is its final pipe
+        // touch, and this waiter frees the pipe only after observing zero.
+        while (task_count.load(std::memory_order_acquire) != 0)
+            std::this_thread::yield();
+#else
         std::unique_lock lock(mutex);
         idle.wait(lock, [this]
         {
             return jobs.empty() && active_readers == 0 && !writer_active;
         });
+#endif
     }
 };
 
