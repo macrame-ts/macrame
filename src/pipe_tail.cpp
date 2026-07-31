@@ -218,7 +218,12 @@ bool pipe_push(Pipe& pipe, Task_control_block* raw, bool reader, bool dispatch_o
 
     Task_control_block* prev = tail_block(prev_word);
     bool prev_reader = (prev_word & reader_bit) != 0;
-    raw->prerequisites.push_back(Task_ptr(prev, Adopt_ref{}));   // adopt prev's tail ref, set before linking
+    // Every field a worker reads at dispatch (the `Flags` byte, the backward link) MUST be
+    // set BEFORE the linking CAS makes `raw` reachable -- once linked, `prev`'s completion can
+    // dispatch `raw` and `run_pipe_block` reads its flags. The CAS's release publishes them.
+    // Head iff the immediate predecessor is a writer; a follower of a reader is a member.
+    raw->flags.pipe_head = reader && !prev_reader;
+    raw->prerequisites.push_back(Task_ptr(prev, Adopt_ref{}));   // adopt prev's tail ref
 
     // Link after `prev`, following its `pipe_next` chain past any barrier/straggler.
     Task_control_block* at = prev;
@@ -228,15 +233,13 @@ bool pipe_push(Pipe& pipe, Task_control_block* raw, bool reader, bool dispatch_o
         if (at->pipe_next.compare_exchange_strong(expected, raw,
                 std::memory_order_acq_rel, std::memory_order_acquire))
         {
-            // Linked: whoever completes `at` dispatches us. Head iff the immediate predecessor
-            // (`prev`) is a writer; a follower of a reader is a member walked by the head.
-            raw->flags.pipe_head = reader && !prev_reader;
-            return false;
+            return false;   // linked; whoever completes `at` dispatches us
         }
         Task_control_block* nxt = at->pipe_next.load(std::memory_order_acquire);
         if (nxt == pipe_closed)
         {
-            // `at` already completed -> run now; we head a new group.
+            // `at` already completed -> run now; we head a new group. Safe to overwrite the
+            // flag here: `raw` is not reachable/dispatchable until the `pipe_submit` below.
             raw->flags.pipe_head = reader;
             if (dispatch_on_admit)
                 pipe_submit(raw);
