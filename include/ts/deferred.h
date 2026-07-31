@@ -12,32 +12,44 @@
 namespace ts
 {
 
-// Deferred mutation of a `Guarded<T>`: producers `stage()` closures into private
-// per-recorder storage (no grant on the target, contention-free between recorders),
-// and one `commit` applies everything under a single write access. Readers of the
-// target between stage and commit see none of the staged writes; after it, all of
-// them -- the stable-snapshot contract. Access to the target stays the only
-// arbitration mechanism: the commit IS an ordinary write (an `async` job or a graph
-// node's declared write access); staging itself needs no synchronization with anyone.
+// `Deferred<T>` -- a command buffer over a `Guarded<T>`: producers record writes now, one
+// commit applies them later. Also known as a deferred-write / write-behind / staging
+// buffer (UE's `ENQUEUE_RENDER_COMMAND` / RHI command list is the same idea). Many
+// producers `stage()` closures into a private journal -- grant-free, contending with
+// neither each other nor readers -- and a single commit then replays the whole batch as
+// one write to the bound object. Readers between stage and commit see none of the staged
+// writes; after it, all of them.
 //
-// Ordering: FIFO within a recorder (semantic -- build on it); cross-recorder
-// order is arbitrary (never build semantics on it) but deterministic given a
-// deterministic mint/destroy sequence, so runs are reproducible -- see the
-// contract note in journal.h. If a particular recorder's commands must make a
-// particular commit, order the producer before the commit (graph edge /
-// `after`); commands staged after a commit's cut ride the next one.
+// Access control is `Guarded`'s: the commit is an ordinary write, staging touches nothing
+// shared. Two commit forms:
+//   - `commit_async()` -- acquires the write itself and applies the batch async (returns a
+//     task to sync); the fire-and-forget form.
+//   - `commit()` -- applies under a write grant the caller already holds (a graph node's
+//     declared write, or inside a `target.async` write body); no second acquisition.
 //
-// The staging machinery (`detail::Journal`, `Recorder`, `Parallel_recorder`) lives
-// in journal.h, shared with `Versioned<T>`. See docs/command-buffer-design.md.
-
-// The command buffer: binds to a `Guarded<T>` for its lifetime. `recorder()` mints
-// producer handles; `commit_async()` applies everything as one async write on the
-// target; `commit()` applies to the bound object under an access grant the caller
-// already holds (a graph node's declared write, or inside a `target.async` write
-// body) -- without a second access acquisition. Lifetime contract: sync the task
-// `commit_async` returns before destroying the Deferred (the pending write still
-// references this object); violating
-// it is fatal under `TS_SAFETY_CHECKS`. Must also outlive any outstanding `Recorder`.
+// Use (dynamic tasks):
+//   ts::Guarded<Draw_list> queue;                     // the target
+//   ts::Deferred<Draw_list> dl{ queue };              // a command buffer over it
+//   auto rec = dl.recorder();
+//   rec.stage([cmd](Draw_list& q){ q.push(cmd); });   // record now, grant-free (many producers)
+//   dl.commit_async();                                // apply the batch as one write
+// In a graph, a node that already holds the target's write grant calls `commit()`; order
+// producers before the commit (a graph edge / `after`).
+//
+// Contract:
+//  - Ordering: intra-recorder FIFO is semantic (build on it); cross-recorder order is
+//    arbitrary -- never build semantics on it -- but deterministic given a deterministic
+//    mint/destroy sequence, so runs are reproducible (see journal.h). Commands staged
+//    after a commit's cut ride the next commit.
+//  - Sync the task `commit_async()` returns before destroying the `Deferred` (the pending
+//    write still references it) -- violating it is fatal. Leftover staged-but-uncommitted
+//    commands at destruction are fatal lost writes (`discard()` drops them). Must outlive
+//    any outstanding `Recorder`.
+//
+// The staging machinery (`detail::Journal`, `Recorder`, `Parallel_recorder`) is shared
+// with `Versioned<T>`: reach for `Versioned<T>` when readers need a stable snapshot of the
+// whole state across a cycle (double buffering), `Deferred<T>` when you just want to batch
+// writes and apply them at a chosen point. See `docs/command-buffer-design.md`.
 template<typename T>
 class Deferred
 {
