@@ -18,7 +18,9 @@ struct Static_task_graph::Run_state
 {
     explicit Run_state(size_t node_count)
         : remaining_deps(node_count)
+#if !TS_PIPE_TAIL
         , preheld(node_count)
+#endif
         , stamps(node_count)
     {}
 
@@ -26,7 +28,9 @@ struct Static_task_graph::Run_state
     Scheduler* scheduler = nullptr;
     Cancellation_token token;
     std::vector<std::atomic<int>> remaining_deps;        // per node: unmet data prerequisites
+#if !TS_PIPE_TAIL
     std::vector<std::atomic<std::uint64_t>> preheld;     // per node: bitmask of pipe_indices positions handed from a predecessor (skip acquire)
+#endif
     std::atomic<int> remaining_nodes{ 0 };
     detail::Task_ptr done;
     tools::Trace_stamps stamps;
@@ -238,6 +242,34 @@ void Static_task_graph::compile(const char* DOT_path)
         nodes_[i].block = detail::Task_ptr(&wrapper->core);
     }
 
+#if TS_PIPE_TAIL
+    // Bind every node's pipe links into one slab (tail pipe): the node's `pipe_indices`
+    // are ascending over the address-sorted `distinct_pipes_`, so link order is canonical.
+    // Bound once here, re-armed each execute(); the blocks' `pipe_links` point into the
+    // slab (stable across a graph move -- the unique_ptr's buffer moves by ownership).
+    {
+        std::size_t total = 0;
+        for (const Node& n : nodes_)
+            total += n.pipe_indices.size();
+        node_links_ = std::make_unique<detail::Pipe_link[]>(total);
+        std::size_t offset = 0;
+        for (Node& n : nodes_)
+        {
+            n.block->pipe_links = (n.pipe_indices.empty()) ? nullptr : &node_links_[offset];
+            for (std::size_t k = 0; k < n.pipe_indices.size(); ++k)
+            {
+                detail::Pipe_link& l = node_links_[offset + k];
+                l.owner = n.block.get();
+                l.pipe = distinct_pipes_[n.pipe_indices[k]];
+                l.index = static_cast<std::uint8_t>(k);
+                l.mode = n.pipe_modes[k];
+            }
+            n.block->pipe_count = static_cast<std::uint8_t>(n.pipe_indices.size());
+            offset += n.pipe_indices.size();
+        }
+    }
+#endif
+
     // Reused per-run state: values are reset each execute(), vector capacity persists, so
     // a run allocates only its completion handle (`done`). Rebuilt here since node/pipe
     // counts can change between compiles.
@@ -291,15 +323,33 @@ void Static_task_graph::detect_cycles() const
         ts::fatal("Static_task_graph has a cycle");
 }
 
-// A node has become data-ready (all data prerequisites met). Acquire the objects it
-// touches, in canonical order, holding each -- then run. Called exactly once per node (the
-// single remaining_deps 0-transition, or a root at kickoff), so acquisition starts once.
+// A node has become data-ready (all data prerequisites met). Called exactly once per node
+// (the single remaining_deps 0-transition, or a root at kickoff).
+#if TS_PIPE_TAIL
+// Tail pipe: the node's pipe turns are its remaining `num_locks` (seeded to `pipe_count`
+// at re-arm); entering line 0 starts the sequential canonical cascade, and the last turn's
+// release dispatches the node through the standard `dispatch_ready` (queue at the node's
+// priority, or the inline trampoline for a `set_inline` node). An object-free node
+// dispatches directly.
+void Static_task_graph::on_data_ready(Run_state& run, int index)
+{
+    run.stamps.mark_ready(index);
+    Node& node = run.graph->nodes_[index];
+    if (node.block->pipe_count == 0)
+        detail::Task_control_block::dispatch_ready(node.block, node.block->generation());
+    else
+        detail::pipe_enter_first(node.block.get());
+}
+#else
+// Acquire the objects it touches, in canonical order, holding each -- then run.
 void Static_task_graph::on_data_ready(Run_state& run, int index)
 {
     run.stamps.mark_ready(index);
     acquire_next(run, index, 0, /*synchronous*/ true);
 }
+#endif
 
+#if !TS_PIPE_TAIL
 // Acquire the node's `pos`-th object (in ascending pipe-index / canonical order), mode-aware
 // and holding it; when it is held, advance to the next; when all are held, run the node.
 // Sequential + canonical order makes multi-object acquire deadlock-free (a node never holds
@@ -363,6 +413,7 @@ void Static_task_graph::node_trampoline(void* node)
     auto* n = static_cast<Node*>(node);
     n->block->execute(n->block, n->block->generation());
 }
+#endif // !TS_PIPE_TAIL
 
 // The node block's `execute`. Mirrors `Executable::run`, but reaches the body via
 // graph+index (no stored body) and completes via the block's `on_complete` hook: it
@@ -411,9 +462,16 @@ void Static_task_graph::run_graph_node(const detail::Task_ptr& block, std::uint6
 void Static_task_graph::graph_node_completed(detail::Task_control_block* block)
 {
     auto* self = reinterpret_cast<Graph_node_block*>(block);
+#if TS_PIPE_TAIL
+    // The settle-must-advance-links contract (the graph is the second pipe-task creation
+    // site next to `make_piped_executable`): retire this node's line entries FIRST, so a
+    // successor going data-ready below enters lines the node no longer holds.
+    detail::advance_pipe_links(block);
+#endif
     node_complete(*self->graph->run_, self->index);
 }
 
+#if !TS_PIPE_TAIL
 // The ready successor to hand object `pi` to (see the header): exactly one ready successor
 // accesses `pi`, and in mode `m`.
 int Static_task_graph::handoff_target(Run_state& run, const std::vector<int>& ready, int pi, Access m)
@@ -452,6 +510,7 @@ void Static_task_graph::mark_preheld(Run_state& run, int node_index, int pi)
         }
     }
 }
+#endif // !TS_PIPE_TAIL
 
 void Static_task_graph::node_complete(Run_state& run, int index)
 {
@@ -470,13 +529,16 @@ void Static_task_graph::node_complete(Run_state& run, int index)
             ready.push_back(successor);
     }
 
+#if !TS_PIPE_TAIL
     // Phase 2: hand off or release each object this node held. HANDOFF (skip release + skip
     // the successor's re-acquire) when exactly one ready successor takes the object in the
     // SAME mode -- the pipe state is then already correct for it, so a release + re-acquire
     // round-trip is pure waste. The handed object stays held across the edge (no gap), which
     // is fine: the successor runs immediately (it just went ready). Otherwise RELEASE (freeing
     // the object for async / a later node -- the gap-freeing). Runs post-completion
-    // (after any nested sub-work).
+    // (after any nested sub-work). (The tail pipe has no phase 2: the node's line entries
+    // were retired by `advance_pipe_links` before this ran, and the hand-off IS the line's
+    // FIFO -- a successor's link queued behind this node's gets its turn at the retire.)
     for (size_t k = 0; k < node.pipe_indices.size(); ++k)
     {
         int pi = node.pipe_indices[k];
@@ -500,6 +562,7 @@ void Static_task_graph::node_complete(Run_state& run, int index)
             detail::pipe_release(*run.scheduler, *run.graph->distinct_pipes_[pi], m);
         }
     }
+#endif // !TS_PIPE_TAIL
 
     // Phase 3: trigger the ready successors (they acquire their objects, skipping any handed
     // to them).
@@ -554,7 +617,9 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     for (size_t i = 0; i < nodes_.size(); ++i)
     {
         run.remaining_deps[i].store(nodes_[i].indegree, std::memory_order_relaxed);
+#if !TS_PIPE_TAIL
         run.preheld[i].store(0, std::memory_order_relaxed);   // no handoffs yet this run
+#endif
 
         // Re-arm the node's task block for this run (its successors/prerequisites/
         // continuations are never populated -- graph edges use remaining_deps, completion
@@ -567,7 +632,25 @@ Task<void> Static_task_graph::execute(Execution_options opts)
         b.cancelled = false;
         b.prereq_cancelled.store(false, std::memory_order_relaxed);
         b.ready.store(false, std::memory_order_relaxed);
+#if TS_PIPE_TAIL
+        // The node's pipe turns are its pre-execution locks (entered at data-ready); re-arm
+        // the links for this run. The prior run's advances left `next` at `link_closed` and
+        // `prev_owner` null; roles/heads are re-decided per run.
+        b.num_locks.store(b.pipe_count, std::memory_order_relaxed);
+        b.pipes_entered = 0;
+        for (std::uint8_t k = 0; k < b.pipe_count; ++k)
+        {
+            detail::Pipe_link& l = b.pipe_links[k];
+            l.next.store(detail::link_open, std::memory_order_relaxed);
+            l.prev_owner = nullptr;
+            l.group_target.store(nullptr, std::memory_order_relaxed);
+            l.gate.store(0, std::memory_order_relaxed);
+            l.join_pin.store(0, std::memory_order_relaxed);
+            l.role.store(detail::Link_role::serial, std::memory_order_relaxed);
+        }
+#else
         b.num_locks.store(0, std::memory_order_relaxed);
+#endif
         b.token = token;
         b.flags.priority = nodes_[i].priority;          // pick up any Graph_node::priority set since last run
         b.flags.run_inline = nodes_[i].inline_dispatch; // so dispatch_ready takes the inline path for an inline node

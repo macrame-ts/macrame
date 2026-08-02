@@ -10,6 +10,6 @@ if [ ! -x "$OUT" ]; then
     sample/game_frame.cpp sample/physics.cpp sample/blackboard.cpp tsan/tsan_main.cpp -o "$OUT" || { echo BUILD_FAIL; exit 1; }
 fi
 SYM="$(command -v llvm-symbolizer || true)"
-TSAN_OPTIONS="halt_on_error=1 external_symbolizer_path=$SYM" timeout 100 "$OUT" > "$HOME/tsp.log" 2>&1
+TSAN_OPTIONS="halt_on_error=1 external_symbolizer_path=$SYM" timeout 1200 "$OUT" > "$HOME/tsp.log" 2>&1
 echo "EXIT=$?"
 grep -nE 'tsan:|WARNING: ThreadSanitizer|SUMMARY|Read of size|Write of size|heap block of' "$HOME/tsp.log" | head -45

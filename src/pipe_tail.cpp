@@ -1,13 +1,18 @@
-// Design-B tail-chain pipe (docs/pipe-rebase.md §4-5). Selected by TS_PIPE_TAIL=1; the
-// current mutex-guarded deque pipe lives in guarded.cpp under `#if !TS_PIPE_TAIL`.
+// The tail-chain pipe (docs/pipe-rebase.md §4-6). Selected by TS_PIPE_TAIL=1; the
+// mutex-guarded deque pipe lives in guarded.cpp under `#if !TS_PIPE_TAIL`.
 //
-// Writers chain FPipe-style on an atomic tagged tail. A reader is admitted the same way, but
-// the group HEAD (its predecessor is a writer or idle, §5.2B.1) runs a forward WALK when it
-// starts: it collects the contiguous run of following readers, dispatches them to run
-// concurrently, and points them all at a terminator (the next writer, or a freshly installed
-// barrier) that each reader decrements on completion -- the next writer runs only once the
-// whole group has drained. A LONE reader (the walk finds no follower) installs no barrier and
-// advances serially, which is the R5 elision.
+// Every pipe-accessing task is an ordinary dynamic task whose pipe turns are `num_locks`
+// prerequisites; what sits in a pipe's line is the task's embedded `Pipe_link` for that
+// pipe (one successor slot per line membership). Lines are chained through the links'
+// tagged `next` words off an atomic per-pipe tail; a link's turn releases one lock on its
+// owner (`link_turn`), the owner's settle retires all its links (`advance_pipe_links`).
+//
+// Reader concurrency is a RUN: the front reader arms itself as the run's head (gate = 1,
+// joinable) and walks the already-chained readers behind it (their turns fire together);
+// a reader arriving while the run is ACTIVE joins it lazily (`try_join`) -- its turn fires
+// immediately, overlapping the run -- with the run retiring at the gate's zero transition.
+// The next writer (or a reader that missed the join window) waits serially and is
+// dispatched by the run's retire. No pipe operation allocates.
 
 #include "ts/guarded.h"
 #include "ts/scheduler.h"
@@ -17,7 +22,6 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
-#include <vector>
 
 namespace ts
 {
@@ -26,290 +30,420 @@ namespace detail
 namespace
 {
 
-constexpr std::uintptr_t reader_bit = 1;
+// The pipe tail is a tagged `Pipe_link*`: bit 0 = 1 for a reader entry (so a pusher can
+// classify its predecessor from the exchanged word alone), whole word 0 = idle. The `next`
+// words use the sentinels from pipe_link.h. All tagging lives in these helpers.
+constexpr std::uintptr_t tail_reader_bit = 1;
 
-std::uintptr_t pack(Task_control_block* block, bool reader)
+std::uintptr_t pack_tail(const Pipe_link* l)
 {
-    return reinterpret_cast<std::uintptr_t>(block) | (reader ? reader_bit : 0);
+    return reinterpret_cast<std::uintptr_t>(l) | (l->mode == Access::read_only ? tail_reader_bit : 0);
 }
-Task_control_block* tail_block(std::uintptr_t word)
+Pipe_link* tail_link(std::uintptr_t word)
 {
-    return reinterpret_cast<Task_control_block*>(word & ~reader_bit);
-}
-
-Pipe& pipe_of(Task_control_block* block)
-{
-    return *reinterpret_cast<Pipe*>(
-        static_cast<std::uintptr_t>(block->dispatch_arg.load(std::memory_order_acquire)));
+    return reinterpret_cast<Pipe_link*>(word & ~tail_reader_bit);
 }
 
-bool is_reader_task(Task_control_block* b)   // an async reader eligible to join a group
+void link_turn(Pipe_link& l);
+
+#if TS_SAFETY_CHECKS
+// Write-grant epoch (seqlock parity, see `Pipe::write_epoch`): +1 when a writer link's
+// turn arrives (window opens, count goes odd), +1 at its advance (closes, even). Readers
+// never bump. The old graph-handoff `+2` elision is gone -- a handed-over line is now an
+// ordinary retire + turn pair, so parity is maintained by construction.
+void epoch_bump(Pipe& pipe)
 {
-    return b->flags.pipe_reader && !b->flags.pipe_reservation;
+    pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);
 }
+#endif
 
-void run_pipe_block(void* data);
-void pipe_advance(Pipe& pipe, Task_control_block* self);
-
-// Dispatch a ready pipe block: hand a fresh ref to the scheduler queue; `run_pipe_block`
-// adopts it back.
-void pipe_submit(Task_control_block* block)
+// Lazily join reader `j` to the ACTIVE run its chain predecessor `p` belongs to, firing
+// `j`'s turn immediately (the reader-concurrency core: without this, a reader arriving
+// after the front reader's turn would serialize). Returns false when there is nothing to
+// join -- `p` is a writer, not yet turned, departed, or the run is already retiring -- and
+// `j` waits for its serial turn from the run's retire.
+//
+// Safety, hop by hop: `p`'s allocation is pinned by `j`'s custody ref (taken at the tail
+// exchange). `p.join_pin` (0 -> 1) freezes `p`'s departure for the protocol's duration and
+// its acquire syncs with `p`'s role/target publication (a joined `p` releases the pin
+// AFTER publishing them). The head is reachable while `p` has not departed (`p` holds a
+// head ref -- walk- or join-granted -- released only at its departure, which the pin
+// blocks). The gate's conditional increment commits the join: once it succeeds the run
+// cannot retire before `j` departs, which also makes `j`'s retire-point extension visible
+// to the final departer (`j`'s `group_target` store precedes `j`'s own gate decrement).
+bool try_join(Pipe_link& p, Pipe_link& j)
 {
-    intrusive_inc(block);
-    global_scheduler().submit(&run_pipe_block, block, static_cast<Priority>(block->flags.priority));
-}
+    if (p.mode != Access::read_only || j.mode != Access::read_only)
+        return false;
 
-// A reader group's terminator reached zero (all its readers drained). A writer terminator
-// runs its body (its own completion advances the pipe); a barrier terminator has no body, so
-// it advances directly here and then settles (releasing its backward ref).
-void dispatch_terminator(Pipe& pipe, Task_control_block* term)
-{
-    if (term->execute != nullptr)
+    std::uint8_t pin = 0;
+    if (!p.join_pin.compare_exchange_strong(pin, 1, std::memory_order_acq_rel, std::memory_order_acquire))
+        return false;   // departed (2) -- the retire will dispatch us serially
+
+    Pipe_link* head = nullptr;
+    switch (p.role.load(std::memory_order_acquire))
     {
-        pipe_submit(term);   // a writer -> run it
-        return;
+    case Link_role::head:   head = &p; break;
+    case Link_role::member: head = p.group_target.load(std::memory_order_acquire); break;
+    case Link_role::serial: break;   // not yet turned (the walk will absorb us) -- no join
     }
-    Task_ptr keep(term);     // barrier: hold across advance + settle (advance may drop the tail ref)
-    pipe_advance(pipe, term);
-    term->complete();        // settle: releases the backward prerequisite ref, retires the barrier
-}
-
-// Advance the pipe past `self` (completed or released). A GROUPED reader (its walk set a
-// terminator) just decrements that terminator -- it never touches the tail or its own
-// successor, the walk owns those. Everything else (a writer, a barrier, or a LONE reader)
-// dispatches its single chain successor and clears the tail if still ours.
-void pipe_advance(Pipe& pipe, Task_control_block* self)
-{
-    Task_control_block* term = self->pipe_terminator.load(std::memory_order_acquire);
-    if (term != nullptr)   // grouped reader
+    if (head == nullptr)
     {
-        pipe.task_count.fetch_sub(1, std::memory_order_release);
-        if (term->num_locks.fetch_sub(1, std::memory_order_acq_rel) == 1)
-            dispatch_terminator(pipe, term);
-        return;
+        p.join_pin.store(0, std::memory_order_release);
+        return false;
     }
 
-    Task_control_block* succ = self->pipe_next.exchange(pipe_closed, std::memory_order_acq_rel);
-    if (succ != nullptr && succ != pipe_closed)
-        pipe_submit(succ);   // was linked and waiting -> run it now
-
-    std::uintptr_t expected = pack(self, self->flags.pipe_reader);
-    if (pipe.tail.compare_exchange_strong(expected, 0,
-            std::memory_order_acq_rel, std::memory_order_relaxed))
-    {
-        intrusive_dec(self);   // still the tail -> release its tail ref (idle now)
-    }
-    // else: a later pusher exchanged `self` out and adopted its tail ref as a prerequisite.
-
-    pipe.task_count.fetch_sub(1, std::memory_order_release);   // drain (§7); last touch of the pipe
-}
-
-// The head reader's forward walk (§5.2B). Collects the contiguous run of async readers after
-// `head`, sets up a terminator, points every group reader at it, and dispatches the members
-// to run concurrently. Iterative -- pass 1 only reads pointers (no dispatch, no recursion),
-// pass 2 dispatches through the scheduler (inline members ride the block's own trampoline).
-void walk_group(Pipe& pipe, Task_control_block* head)
-{
-    std::vector<Task_control_block*> members;   // followers (head excluded; it runs its own body)
-    Task_control_block* last = head;
-    Task_control_block* terminator = nullptr;
-
+    // Commit: conditionally increment the run's gate; 0 means the run is retiring.
+    std::uint32_t g = head->gate.load(std::memory_order_acquire);
     for (;;)
     {
-        Task_control_block* nxt = last->pipe_next.load(std::memory_order_acquire);
-        if (nxt != nullptr && nxt != pipe_closed && is_reader_task(nxt))
+        if (g == 0)
         {
-            members.push_back(nxt);   // a follower reader -> a member
-            last = nxt;
-            continue;
+            p.join_pin.store(0, std::memory_order_release);
+            return false;
         }
-        if (nxt != nullptr && nxt != pipe_closed)
-        {
-            terminator = nxt;   // a writer (or a reservation) already chained -> the terminator
+        if (head->gate.compare_exchange_weak(g, g + 1, std::memory_order_acq_rel, std::memory_order_acquire))
             break;
-        }
-        // nxt == null: chain end. A lone reader (no members) installs NO barrier and advances
-        // serially -- the R5 elision. Otherwise install a barrier and try to close the end.
-        if (members.empty())
-            return;   // lone reader: leave `head` serial (pipe_terminator stays null)
-
-        Task_ptr barrier = make_bare_block();       // ref 1 becomes the barrier's tail ref
-        Task_control_block* g = barrier.get();
-        g->flags.pipe_job = true;
-        g->dispatch_arg.store(
-            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&pipe)), std::memory_order_relaxed);
-        Task_control_block* expected = nullptr;
-        if (!last->pipe_next.compare_exchange_strong(expected, g,
-                std::memory_order_acq_rel, std::memory_order_acquire))
-        {
-            continue;   // a late reader/writer linked after `last` -> re-read and include it
-        }
-        // Barrier installed. Keep `last` alive as the barrier's backward link, and advance the
-        // tail to the barrier so the barrier (not a group reader) manages tail clearing.
-        barrier.release();                           // hand ref 1 to the tail
-        pipe.task_count.fetch_add(1, std::memory_order_relaxed);
-        g->prerequisites.push_back(Task_ptr(last, Adopt_ref{}));   // adopt last's tail ref
-        std::uintptr_t last_word = pack(last, true);
-        pipe.tail.compare_exchange_strong(last_word, pack(g, false),
-                std::memory_order_acq_rel, std::memory_order_relaxed);
-        // If that CAS failed a straggler moved the tail past `last`; it linked after `g`
-        // (its push follows `last->pipe_next == g`), so the tail correctly names the straggler.
-        terminator = g;
-        break;
     }
 
-    int n = 1 + static_cast<int>(members.size());              // head + members
-    terminator->num_locks.store(n, std::memory_order_relaxed);   // reader gate
+    intrusive_inc(head->owner);   // the joiner's ref on the head (released at departure)
+    // Publish j's own group fields BEFORE the pin release (the next joiner reads them
+    // through its pin-acquire on j), and extend the run's retire point to j -- j is the
+    // chain's newest entry (the tail handed its predecessor to j), so the run now ends here.
+    j.group_target.store(head, std::memory_order_relaxed);
+    j.role.store(Link_role::member, std::memory_order_release);
+    head->group_target.store(&j, std::memory_order_release);
+    p.join_pin.store(0, std::memory_order_release);
 
-    // Pass 2: point head + members at the terminator, then dispatch the members. `head` is
-    // already running (it runs its own body after this returns).
-    head->pipe_terminator.store(terminator, std::memory_order_release);
-    for (Task_control_block* m : members)
-    {
-        m->pipe_terminator.store(terminator, std::memory_order_release);
-        pipe_submit(m);   // dispatch the member (concurrent with the head)
-    }
+    link_turn(j);   // the joined turn: fires now, overlapping the run
+    return true;
 }
 
-// `on_complete` hook (fires at settle, after the body): advance the pipe.
-void pipe_on_complete(Task_control_block* self)
+// Enter `l` into its pipe's line: the line's ref, the tail exchange (the linearization
+// point), then an immediate turn (idle line / retired predecessor), a lazy join of an
+// active reader run, or a CAS onto the predecessor's `next` slot to wait serially.
+void pipe_enter_link(Pipe_link& l)
 {
-    pipe_advance(pipe_of(self), self);
-}
-
-// Trampoline for an admitted pipe block. A reservation fires `on_acquired` and HOLDS. A
-// reader HEAD runs the group walk first. Then the body runs; settle fires `pipe_on_complete`.
-void run_pipe_block(void* data)
-{
-    Task_ptr block(static_cast<Task_control_block*>(data), Adopt_ref{});
-
-    if (block->flags.pipe_reservation)
-    {
-        Pipe& pipe = pipe_of(block.get());
-        pipe.held.store(block.get(), std::memory_order_release);
-        if (block->result_ptr)
-            (*static_cast<std::move_only_function<void()>*>(block->result_ptr))();
-        return;   // held; `pipe_release` advances + retires it
-    }
-
-    if (block->flags.pipe_reader && block->flags.pipe_head)
-        walk_group(pipe_of(block.get()), block.get());
-
-    block->execute(block, /*gen*/ 0);   // Executable::run -> body -> complete -> settle -> on_complete
-}
-
-// Shared push: exchange the tail, link after the predecessor (or run now if idle / the
-// predecessor already completed). `raw` must ALREADY carry a dedicated tail ref. The
-// exchanged-out predecessor's tail ref transfers into our `prerequisites`. Returns whether we
-// were admitted synchronously (idle / prev done). Follows past a barrier the walk may have
-// installed at the predecessor's slot.
-bool pipe_push(Pipe& pipe, Task_control_block* raw, bool reader, bool dispatch_on_admit)
-{
+    Pipe& pipe = *l.pipe;
+    l.owner->pipes_entered = static_cast<std::uint8_t>(l.index + 1);   // settle advances [0, entered)
     pipe.task_count.fetch_add(1, std::memory_order_relaxed);
+    intrusive_inc(l.owner);   // the line's ref on this entry (custody chain, §5.2B.6)
 
-    std::uintptr_t prev_word = pipe.tail.exchange(pack(raw, reader), std::memory_order_acq_rel);
+    std::uintptr_t prev_word = pipe.tail.exchange(pack_tail(&l), std::memory_order_acq_rel);
     if (prev_word == 0)
     {
-        raw->flags.pipe_head = reader;   // idle -> a reader is its group's head
-        if (dispatch_on_admit)
-            pipe_submit(raw);
-        return true;
+        link_turn(l);   // idle line: the turn fires on the pushing thread
+        return;
     }
 
-    Task_control_block* prev = tail_block(prev_word);
-    bool prev_reader = (prev_word & reader_bit) != 0;
-    // Every field a worker reads at dispatch (the `Flags` byte, the backward link) MUST be
-    // set BEFORE the linking CAS makes `raw` reachable -- once linked, `prev`'s completion can
-    // dispatch `raw` and `run_pipe_block` reads its flags. The CAS's release publishes them.
-    // Head iff the immediate predecessor is a writer; a follower of a reader is a member.
-    raw->flags.pipe_head = reader && !prev_reader;
-    raw->prerequisites.push_back(Task_ptr(prev, Adopt_ref{}));   // adopt prev's tail ref
+    Pipe_link& prev = *tail_link(prev_word);
+    Task_control_block* prev_owner = prev.owner;
+    // The exchanged-out predecessor's line ref transfers to us; released at our advance.
+    l.prev_owner = prev_owner;
+    // The PUSHING THREAD's own pin on the predecessor, distinct from the custody ref
+    // above: the moment the link-CAS below succeeds, the predecessor's retire (on another
+    // thread) can dispatch OUR turn, run and settle our owner, and release the custody
+    // ref -- freeing `prev`'s allocation while this thread is still inside `try_join`
+    // reading it. Taken while the transferred ref is still unambiguously ours (pre-CAS),
+    // dropped through the LOCAL once this thread is done touching `prev` (after the CAS,
+    // `l` itself may already be settling -- touch neither `l` nor `prev` again).
+    intrusive_inc(prev_owner);
 
-    // Link after `prev`, following its `pipe_next` chain past any barrier/straggler.
-    Task_control_block* at = prev;
     for (;;)
     {
-        Task_control_block* expected = nullptr;
-        if (at->pipe_next.compare_exchange_strong(expected, raw,
+        std::uintptr_t cur = prev.next.load(std::memory_order_acquire);
+        if (cur == link_closed)
+        {
+            intrusive_dec(prev_owner);   // drop the pusher's pin (custody ref remains)
+            link_turn(l);   // predecessor already retired: the line is ours
+            return;
+        }
+        if (cur != link_open)
+        {
+            // A real link in the predecessor's slot is impossible: only the unique
+            // tail-exchanger of `prev` links there, and that is us.
+            ts::fatal("pipe: foreign link in the predecessor's successor slot");
+        }
+        TS_PIPE_RACE_DELAY(push_link);
+        if (prev.next.compare_exchange_weak(cur, reinterpret_cast<std::uintptr_t>(&l),
                 std::memory_order_acq_rel, std::memory_order_acquire))
         {
-            return false;   // linked; whoever completes `at` dispatches us
+            // Chained. If the predecessor belongs to an ACTIVE reader run, join it -- the
+            // turn fires inside; otherwise the predecessor's retire dispatches us.
+            try_join(prev, l);
+            intrusive_dec(prev_owner);   // drop the pusher's pin (custody ref remains)
+            return;
         }
-        Task_control_block* nxt = at->pipe_next.load(std::memory_order_acquire);
-        if (nxt == pipe_closed)
-        {
-            // `at` already completed -> run now; we head a new group. Safe to overwrite the
-            // flag here: `raw` is not reachable/dispatchable until the `pipe_submit` below.
-            raw->flags.pipe_head = reader;
-            if (dispatch_on_admit)
-                pipe_submit(raw);
-            return true;
-        }
-        at = nxt;   // a barrier / straggler occupies the slot -> follow to the real end
+        // The slot changed under us (spurious failure or a concurrent close) -- re-read.
     }
+}
+
+// The front reader's walk: arm this link as the run's head, then fire the turns of the
+// readers already chained behind it. Allocation-free -- two passes over the chain itself.
+// Late arrivals are covered by `try_join` (during and after the walk); a reader that
+// slips into the chain between the passes at worst waits serially for the run's retire.
+void walk_group(Pipe_link& head)
+{
+    // Arm FIRST: a joiner may arrive the moment the gate goes nonzero, and the walked
+    // members below depart through these fields.
+    head.group_target.store(&head, std::memory_order_relaxed);
+    head.role.store(Link_role::head, std::memory_order_release);
+    head.gate.store(1, std::memory_order_release);
+
+    // Pass 1: measure the contiguous reader run chained behind the head.
+    Pipe_link* last = &head;
+    std::uint32_t members = 0;
+    for (;;)
+    {
+        std::uintptr_t nx = last->next.load(std::memory_order_acquire);
+        if (!is_link_word(nx) || link_of(nx)->mode != Access::read_only)
+            break;   // chain end, or a writer's link (waits for the run's retire)
+        last = link_of(nx);
+        ++members;
+    }
+    if (members == 0)
+        return;   // lone (so far) -- joiners may still attach through the armed gate
+
+    // Account the members before any of their turns can depart, and extend the retire
+    // point to the run's newest link.
+    head.gate.fetch_add(members, std::memory_order_acq_rel);
+    head.group_target.store(last, std::memory_order_release);
+
+    // Pass 2: re-traverse and fire the member turns. Grab-next before dispatching (a
+    // dispatched member may settle immediately but never touches its own `next`; the run
+    // cannot retire during the walk -- the head's own departure is pending).
+    Pipe_link* m = link_of(head.next.load(std::memory_order_acquire));
+    for (;;)
+    {
+        Pipe_link* nxt = (m == last) ? nullptr : link_of(m->next.load(std::memory_order_acquire));
+        m->group_target.store(&head, std::memory_order_relaxed);
+        m->role.store(Link_role::member, std::memory_order_release);
+        intrusive_inc(head.owner);   // the member's ref on the head (released at departure)
+        link_turn(*m);
+        if (m == last)
+            break;
+        m = nxt;
+    }
+}
+
+// A link's turn: its line granted this entry. Pins the owner for the whole turn, opens
+// the write window, arms/walks a reader run, enters the owner's next line (the sequential
+// canonical cascade), and releases one `num_locks` lock -- the last turn's release
+// dispatches the body via the standard `dispatch_ready`.
+void link_turn(Pipe_link& l)
+{
+    // Pin the owner (and with it `l`, which lives in its allocation) FIRST: a walked or
+    // joined member can run and settle on another worker while this turn still executes,
+    // and its departure can release the last refs on this owner.
+    Task_ptr keep(l.owner);
+#if TS_SAFETY_CHECKS
+    if (l.mode == Access::read_write)
+        epoch_bump(*l.pipe);   // write window opens
+#endif
+    if (l.mode == Access::read_only && l.role.load(std::memory_order_acquire) != Link_role::member)
+        walk_group(l);   // front reader: become the run's (joinable) head
+    if (static_cast<std::uint8_t>(l.index + 1) < l.owner->pipe_count)
+        pipe_enter_link(l.owner->pipe_links[l.index + 1]);
+    Task_control_block::release(keep);
+}
+
+// Retire a link, handing its line over: close the successor slot, clear the tail if this
+// entry is still it (dropping the line's ref; a failed CAS means a pusher adopted the ref
+// into its custody chain), and LAST dispatch the waiting successor's turn. Order is
+// load-bearing: once the successor's turn fires, its owner can run, settle, and release
+// the custody ref on `l.owner` -- freeing the allocation `l` lives in -- so every touch of
+// `l` must happen before the dispatch; only captured locals after.
+void chain_retire(Pipe_link& l)
+{
+    Pipe& pipe = *l.pipe;
+    std::uintptr_t self_word = pack_tail(&l);
+    Task_control_block* owner = l.owner;
+    std::uintptr_t nx = l.next.exchange(link_closed, std::memory_order_acq_rel);
+    std::uintptr_t expected = self_word;
+    if (pipe.tail.compare_exchange_strong(expected, 0,
+            std::memory_order_acq_rel, std::memory_order_relaxed))
+        intrusive_dec(owner);   // no successor ever pushed (a pushed one moves the tail first)
+    if (is_link_word(nx))
+        link_turn(*link_of(nx));
+}
+
+// A run participant's owner settled: depart the head's gate; the last one out retires the
+// run at its newest link (`head.group_target`). The head is pinned by the departing
+// member's head ref (or, for the head itself, by its own settle path), released only
+// after the retire.
+void group_depart(Pipe_link& head, Pipe_link& departing)
+{
+    Task_control_block* head_owner = (&departing == &head) ? nullptr : head.owner;
+    if (head.gate.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        chain_retire(*head.group_target.load(std::memory_order_acquire));
+    if (head_owner != nullptr)
+        intrusive_dec(head_owner);
+}
+
+// Retire one entered link at its owner's settle. Exactly once per entered link; the
+// `task_count` decrement is the LAST pipe touch (§7 drain discipline -- the waiter may
+// free the pipe the instant the count hits zero).
+void link_advance(Pipe_link& l)
+{
+    Pipe& pipe = *l.pipe;
+#if TS_SAFETY_CHECKS
+    if (l.mode == Access::read_write)
+        epoch_bump(pipe);   // write window closes
+#endif
+    if (l.mode == Access::read_only)
+    {
+        // Close this link to joiners, waiting out one mid-protocol (its pin hold is a few
+        // atomic ops). Joins through OTHER run members remain possible until the gate's
+        // zero transition -- which this departure may be the one to cause.
+        std::uint8_t pin = 0;
+        while (!l.join_pin.compare_exchange_weak(pin, 2, std::memory_order_acq_rel, std::memory_order_acquire))
+            pin = 0;
+    }
+    switch (l.role.load(std::memory_order_acquire))
+    {
+    case Link_role::serial:
+        chain_retire(l);
+        break;
+    case Link_role::head:
+        group_depart(l, l);
+        break;
+    case Link_role::member:
+        group_depart(*l.group_target.load(std::memory_order_acquire), l);
+        break;
+    }
+    if (l.prev_owner != nullptr)
+    {
+        intrusive_dec(l.prev_owner);   // custody chain: release the predecessor (§5.2B.6)
+        l.prev_owner = nullptr;
+    }
+    pipe.task_count.fetch_sub(1, std::memory_order_release);
+}
+
+// The hold node behind `pipe_acquire`/`pipe_release` (the coroutine guards): a bodyless
+// block + one link + the grant callback. Its `execute` fires at the link's turn WITHOUT
+// completing -- the hold lasts until `pipe_release` settles it (the settle advances the
+// link, releasing the line). The one pipe path that allocates, and the only remaining
+// held-grant entity; everything else advances at its own settle.
+struct Acquire_node
+{
+    Task_control_block core;
+    Pipe_link link;
+    std::move_only_function<void()> on_acquired;
+    // Turn-vs-caller handshake: 0 initial, 1 turn fired, 2 caller went deferred. Whoever
+    // arrives second owns the callback decision (turn second -> invoke; caller second ->
+    // report "granted in-call", callback never runs).
+    std::atomic<int> state{ 0 };
+};
+
+void acquire_node_run(const Task_ptr& c, std::uint64_t gen)
+{
+    if (!c->claim(gen))
+        return;
+    auto* node = reinterpret_cast<Acquire_node*>(c.get());
+    if (node->state.exchange(1, std::memory_order_acq_rel) == 2)
+        node->on_acquired();
+    // Deliberately not completing: the grant is held until `pipe_release`.
 }
 
 } // namespace
 
-void pipe_enqueue(Scheduler&, Pipe& pipe, Access mode, Task_ptr block, Priority priority)
+void advance_pipe_links(Task_control_block* blk)
 {
-    Task_control_block* raw = block.get();
-    raw->flags.pipe_job = true;
-    raw->flags.pipe_reader = (mode == Access::read_only);
-    raw->flags.priority = priority;
-    raw->on_complete = &pipe_on_complete;
-    raw->dispatch_arg.store(
-        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&pipe)), std::memory_order_relaxed);
-
-    intrusive_inc(raw);   // dedicated tail ref (the caller's Task<R> handle keeps its own)
-    pipe_push(pipe, raw, mode == Access::read_only, /*dispatch_on_admit*/ true);
+    for (std::uint8_t i = 0; i < blk->pipes_entered; ++i)
+        link_advance(blk->pipe_links[i]);
 }
 
-bool pipe_acquire(Scheduler&, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired)
+void pipe_links_on_complete(Task_control_block* blk)
 {
-    Task_ptr node = make_bare_block();
-    Task_control_block* raw = node.get();
-    raw->flags.pipe_job = true;
-    raw->flags.pipe_reader = (mode == Access::read_only);
-    raw->flags.pipe_reservation = true;
-    raw->dispatch_arg.store(
-        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&pipe)), std::memory_order_relaxed);
+    advance_pipe_links(blk);
+}
 
-    auto* cb = new std::move_only_function<void()>(std::move(on_acquired));
-    raw->result_ptr = cb;
+void pipe_enter_first(Task_control_block* blk)
+{
+    pipe_enter_link(blk->pipe_links[0]);
+}
 
-    node.release();   // `make_bare_block`'s ref becomes the node's dedicated tail ref
-    bool admitted = pipe_push(pipe, raw, mode == Access::read_only, /*dispatch_on_admit*/ false);
+bool pipe_acquire(Scheduler&, Pipe& pipe, Access mode,
+                  std::move_only_function<void()> on_acquired, void*& hold)
+{
+    auto* node = new Acquire_node();
+    node->core.destroy = [](Task_control_block* c) { delete reinterpret_cast<Acquire_node*>(c); };
+    node->core.execute = &acquire_node_run;
+    node->core.on_complete = &pipe_links_on_complete;   // settle (at release) advances the link
+    node->core.flags.run_inline = true;                 // a free line grants on this thread, in-call
+    node->core.pipe_links = &node->link;
+    node->core.num_locks.store(1, std::memory_order_relaxed);   // the turn
+    node->on_acquired = std::move(on_acquired);
+    node->link.owner = &node->core;
+    node->link.pipe = &pipe;
+    node->link.mode = mode;
+    node->core.pipe_count = 1;
 
-    if (admitted)
+    Task_ptr keep(&node->core);   // refcount 0 -> 1; becomes the hold's ref
+    pipe_enter_first(&node->core);
+    hold = keep.release();
+    return node->state.exchange(2, std::memory_order_acq_rel) == 1;   // 1: turn already fired in-call
+}
+
+void pipe_release(Scheduler&, Pipe&, Access, void* hold)
+{
+    Task_ptr node(static_cast<Task_control_block*>(hold), Adopt_ref{});
+    node->complete();   // settle -> on_complete -> the link advances, the line moves on
+}
+
+bool pipe_try_inline(Scheduler&, Pipe& pipe, Access mode, const Task_ptr& block)
+{
+    // The `access` fast path: claim an IDLE line outright and run the body on the calling
+    // thread. Any traffic at all falls back to the normal enter. An inline reader arms
+    // itself as a joinable head first, so concurrent readers overlap it like any run.
+    Pipe_link& l = block->pipe_links[0];
+    std::uintptr_t expected = 0;
+    if (!pipe.tail.compare_exchange_strong(expected, pack_tail(&l),
+            std::memory_order_acq_rel, std::memory_order_relaxed))
+        return false;
+
+    block->pipes_entered = 1;
+    pipe.task_count.fetch_add(1, std::memory_order_relaxed);
+    intrusive_inc(block.get());   // the line's ref, as in `pipe_enter_link`
+    if (mode == Access::read_only)
     {
-        pipe.held.store(raw, std::memory_order_release);
-        delete cb;                 // synchronous acquire: on_acquired is not called
-        raw->result_ptr = nullptr;
-        return true;
+        l.group_target.store(&l, std::memory_order_relaxed);
+        l.role.store(Link_role::head, std::memory_order_release);
+        l.gate.store(1, std::memory_order_release);
     }
-    return false;   // deferred: prev's advance dispatches `raw` -> run_pipe_block fires the callback
+#if TS_SAFETY_CHECKS
+    else
+        epoch_bump(pipe);         // write window opens (closed by the advance at settle)
+#endif
+    block->execute(block, /*gen*/ 0);   // body inline on the caller; settle advances the link
+    return true;
 }
 
-void pipe_release(Scheduler&, Pipe& pipe, Access)
+#if TS_SAFETY_CHECKS
+// The `retract_or_wait` diagnostic (declared in task.h; the mutex-pipe variant lives in
+// guarded.cpp): sharp same-object message when the wait target is a pipe task holding a
+// line this scope's grant covers -- that shape deadlocks. The links carry the pipe
+// identities, so multi-object jobs get the sharp match too (the mutex pipe could not).
+void blocking_sync_diagnose(const Task_control_block* blk) noexcept
 {
-    Task_control_block* held = pipe.held.exchange(nullptr, std::memory_order_acq_rel);
-    if (held == nullptr)
-        return;
-    Task_ptr keep(held);   // hold alive across advance + settle
-    if (held->result_ptr)
+    if (current_access != nullptr)
     {
-        delete static_cast<std::move_only_function<void()>*>(held->result_ptr);
-        held->result_ptr = nullptr;
+        for (std::uint8_t i = 0; i < blk->pipe_count; ++i)
+        {
+            const Pipe_link& l = blk->pipe_links[i];
+            if (l.pipe != nullptr && current_access->holds_epoch(&l.pipe->write_epoch))
+            {
+                TS_ENSURE(false, "sync() on an access to an object this scope already holds -- "
+                    "this deadlocks; use then/when_all or nested tasks");
+                return;
+            }
+        }
     }
-    pipe_advance(pipe, held);
-    held->complete();      // settle: releases the backward prerequisite ref, retires the node
+    TS_ENSURE(false, "blocking sync() on non-retractable work inside an access scope -- "
+        "occupies a worker and risks deadlock; prefer continuations (then/when_all) or "
+        "nested tasks");
 }
-
-bool pipe_try_inline(Scheduler&, Pipe&, Access, const Task_ptr&)
-{
-    return false;   // inline fast path is a follow-up (stage 5)
-}
+#endif
 
 } // namespace detail
 } // namespace ts

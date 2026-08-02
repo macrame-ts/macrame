@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ts/access.h"
+#include "ts/detail/pipe_link.h"
 #include "ts/scheduler.h"
 #include "ts/task.h"
 
@@ -59,17 +60,12 @@ struct Job
 struct Pipe
 {
 #if TS_PIPE_TAIL
-    // Design-B tail chain (docs/pipe-rebase.md §4-5). `tail` is a tagged pointer: an aligned
-    // `Task_control_block*` with bit 0 = 1 for a reader head/group, 0 for a writer; the whole
-    // word 0 = idle. Single-word atomic exchange/CAS is the linearization point. `task_count`
-    // counts outstanding pipe tasks (barriers included) and drives `wait_until_idle` (§7).
+    // The tail chain (docs/pipe-rebase.md §4-5): `tail` is a tagged pointer -- an aligned
+    // `Pipe_link*` with bit 0 = 1 for a reader entry, 0 for a writer; the whole word 0 =
+    // idle. The single-word atomic exchange is the line's linearization point. `task_count`
+    // counts outstanding entries and drives `wait_until_idle` (§7).
     std::atomic<std::uintptr_t> tail{ 0 };
     std::atomic<std::uint32_t> task_count{ 0 };
-    // The currently-held reservation node (graph / multi-object `pipe_acquire`), so
-    // `pipe_release(mode)` can advance it without a handle. Single slot: while the head-walk
-    // is not yet landed every pipe task (reservations included) serializes, so at most one
-    // reservation is held at a time. Generalized to a set when reader groups land.
-    std::atomic<Task_control_block*> held{ nullptr };
 #else
     std::mutex mutex;
     std::condition_variable idle;
@@ -132,6 +128,30 @@ inline const std::atomic<std::uint64_t>* pipe_epoch([[maybe_unused]] const Pipe&
 #endif
 }
 
+#if TS_PIPE_TAIL
+
+// Advance every entered link of a settled pipe task (defined in pipe_tail.cpp). The
+// settle-must-advance-links contract: every pipe-task creation site must route its settle
+// through this -- `make_piped_executable` installs it as `on_complete`; the graph's
+// `graph_node_completed` calls it first. A missed call wedges the affected lines.
+void advance_pipe_links(Task_control_block* blk);
+
+// `on_complete` hook form of the above, for tasks whose settle needs nothing else.
+void pipe_links_on_complete(Task_control_block* blk);
+
+// Acquire a pipe as a held grant in `mode` (the coroutine guards' primitive -- everything
+// else rides links on its own block). Allocates a small hold node whose single link enters
+// the line like any task's; `hold` receives its handle. Returns true if the turn was
+// granted during the call (no callback will fire); false if deferred -- `on_acquired`
+// fires once when the line drains to it, possibly on another thread.
+bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode,
+                  std::move_only_function<void()> on_acquired, void*& hold);
+
+// Release a `pipe_acquire` hold: settles the hold node, advancing its line.
+void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode, void* hold);
+
+#else
+
 // Enqueue `block` as a pipe job in `mode`; when admitted (reader/writer rules, FIFO) it is
 // dispatched to the scheduler as a raw block trampoline (`block->execute`, gen 0 -- pipe
 // blocks are never reset) and the pipe is released when the body returns. Allocation-free.
@@ -149,6 +169,8 @@ bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_
 
 // Release a hold taken by `pipe_acquire` in `mode`; admits queued jobs.
 void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode);
+
+#endif // TS_PIPE_TAIL
 
 // Extracts the parameter type list of a callable's `operator()` (or a function pointer).
 // Non-generic lambdas / functors / function pointers only; generic `auto&` params aren't
@@ -262,6 +284,58 @@ constexpr Access accessor_mode()
     }
 }
 
+#if TS_PIPE_TAIL
+
+// An executable pipe task: the `Executable` wrapper plus its embedded per-line links --
+// ONE allocation for block + result + body + links (docs/pipe-rebase.md §5.2B). `exec` is
+// the first member and `Executable::core` its first, so the intrusive handle aliases the
+// whole wrapper as usual.
+template<typename Body, typename R, std::size_t N>
+struct Piped_executable
+{
+    Executable<Body, R> exec;
+    Pipe_link links[N];
+
+    explicit Piped_executable(Body b)
+        : exec(std::move(b))
+    {}
+};
+
+// Build a pipe task with capacity for `N` links (bind them with `bind_pipe_link`, then set
+// `num_locks` to the bound count and enter). Installs `pipe_links_on_complete` -- the
+// settle-must-advance-links contract's factory half (the graph's node blocks are the other
+// creation site; see `graph_node_completed`).
+template<typename R, std::size_t N, typename Body>
+Task_ptr make_piped_executable(Body&& body, Cancellation_token token)
+{
+    using Exec = Executable<std::decay_t<Body>, R>;
+    using Wrapper = Piped_executable<std::decay_t<Body>, R, N>;
+    auto* w = new Wrapper(std::forward<Body>(body));
+    Task_control_block& core = w->exec.core;
+    core.destroy = [](Task_control_block* c) { delete reinterpret_cast<Wrapper*>(c); };
+    core.execute = &Exec::run;
+    core.on_complete = &pipe_links_on_complete;
+    core.token = std::move(token);
+    core.pipe_links = w->links;
+    return Task_ptr(&core);   // refcount 0 -> 1, owns the wrapper
+}
+
+// Bind the block's next link to (pipe, mode). Canonical order is the CALLER's contract:
+// links must be bound in ascending pipe-address order (single-object trivially; the
+// multi-object builder sorts; the graph's `pipe_indices` are ascending over the
+// address-sorted `distinct_pipes_`).
+inline void bind_pipe_link(Task_control_block* core, std::uint8_t index, Pipe& pipe, Access mode)
+{
+    Pipe_link& l = core->pipe_links[index];
+    l.owner = core;
+    l.pipe = &pipe;
+    l.index = index;
+    l.mode = mode;
+    core->pipe_count = static_cast<std::uint8_t>(index + 1);
+}
+
+#else
+
 // The pipes a multi-object async acquired (canonical / pipe-address order, deduped
 // write-wins), released at the task's completion.
 struct Multi_async_state : Ref_counted<Multi_async_state>
@@ -276,6 +350,8 @@ struct Multi_async_state : Ref_counted<Multi_async_state>
 // the same order the graph uses (`distinct_pipes_` is address-sorted), so nodes and
 // multi-object asyncs can't deadlock against each other.
 void multi_acquire(Ref_ptr<Multi_async_state> state, Task_ptr block, std::size_t pos);
+
+#endif // TS_PIPE_TAIL
 
 // Try to run a job INLINE on the calling thread instead of enqueuing it (the `access` verb's
 // fast path). Admissible only when the pipe is immediately free for this mode -- no queued jobs
@@ -515,7 +591,7 @@ private:
                     Access_scope scope(ctx);
                     return fn(*inst, tok);
                 };
-                return detail::make_executable<R>(std::move(body), opts.token);
+                return make_access_block<R>(std::move(body), opts.token);
             }
             else
             {
@@ -526,10 +602,20 @@ private:
                     Access_scope scope(ctx);
                     return fn(*inst);
                 };
-                return detail::make_executable<R>(std::move(body), opts.token);
+                return make_access_block<R>(std::move(body), opts.token);
             }
         }();
         core->flags.priority = opts.priority;
+#if TS_PIPE_TAIL
+        detail::bind_pipe_link(core.get(), 0, pipe_, mode);
+        core->num_locks.store(1, std::memory_order_relaxed);   // the one pipe turn
+        // Inline fast path (`access`): claim an idle line and run on this thread; otherwise
+        // (or for `async`) enter the line -- the turn's release dispatches the body.
+        if (try_inline && detail::pipe_try_inline(global_scheduler(), pipe_, mode, core))
+            return Task<R>(core);
+        detail::pipe_enter_first(core.get());
+        return Task<R>(core);
+#else
 #if TS_SAFETY_CHECKS
         // Stamp the pipe identity for the blocking-sync diagnostic. Sound to set at
         // creation: the admission path (`submit_admitted`) stores the same value, nothing
@@ -548,6 +634,19 @@ private:
             return Task<R>(core);
         detail::pipe_enqueue(global_scheduler(), pipe_, mode, core, opts.priority);
         return Task<R>(core);
+#endif // TS_PIPE_TAIL
+    }
+
+    // The per-flag block factory for a single-object access: a `Piped_executable` with one
+    // embedded link (tail pipe) or a plain `Executable` (mutex pipe).
+    template<typename R, typename Body>
+    static detail::Task_ptr make_access_block(Body&& body, Cancellation_token token)
+    {
+#if TS_PIPE_TAIL
+        return detail::make_piped_executable<R, 1>(std::forward<Body>(body), std::move(token));
+#else
+        return detail::make_executable<R>(std::forward<Body>(body), std::move(token));
+#endif
     }
 
     T instance_;
@@ -593,6 +692,7 @@ template<typename A> inline constexpr bool is_guarded_v = is_guarded<std::remove
 template<typename A>
 concept Object_arg = is_guarded_v<A> || is_access_arg_v<A>;
 
+#if !TS_PIPE_TAIL
 // Shared tail for the multi-object builders: given the already-built `block` and this call's
 // per-object (pipe, mode) arrays, dedup write-wins into the canonical (ascending pipe-address)
 // acquire order, attach the release, and kick off `multi_acquire`. Identical for the deduced and
@@ -624,6 +724,7 @@ Task<R> async_dispatch(Task_ptr block, Pipe* const* pipes, const Access* modes, 
     multi_acquire(std::move(state), std::move(block), 0);
     return result;
 }
+#endif // !TS_PIPE_TAIL
 
 // The one multi-object builder: `fn(...)` under an `Access_context` declaring every object at
 // its (compile-time) `Modes...`, gated on holding all their pipes. Read positions are invoked
@@ -644,12 +745,47 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
         Access_scope scope(ctx);
         return fn(mode_ref<Modes>(std::get<I>(instances))...);
     };
-    auto block = make_executable<R>(std::move(body), std::move(opts.token));
-    block->flags.priority = opts.priority;
-
     Pipe* pipes[] = { &Guarded_access::pipe(objs)... };
     Access modes[] = { Modes... };
+#if TS_PIPE_TAIL
+    auto block = make_piped_executable<R, sizeof...(Ts)>(std::move(body), std::move(opts.token));
+    block->flags.priority = opts.priority;
+    // Dedup write-wins + insertion-sort by pipe address (canonical order), in place -- the
+    // pack is small, and this replaces the old per-call `std::map`.
+    std::size_t n = 0;
+    for (std::size_t k = 0; k < sizeof...(Ts); ++k)
+    {
+        Pipe* pk = pipes[k];
+        Access mk = modes[k];
+        std::size_t i = 0;
+        while (i < n && pipes[i] < pk)
+            ++i;
+        if (i < n && pipes[i] == pk)
+        {
+            if (mk == Access::read_write)
+                modes[i] = Access::read_write;   // write wins on a repeated object
+            continue;
+        }
+        for (std::size_t j = n; j > i; --j)
+        {
+            pipes[j] = pipes[j - 1];
+            modes[j] = modes[j - 1];
+        }
+        pipes[i] = pk;
+        modes[i] = mk;
+        ++n;
+    }
+    for (std::size_t i = 0; i < n; ++i)
+        bind_pipe_link(block.get(), static_cast<std::uint8_t>(i), *pipes[i], modes[i]);
+    block->num_locks.store(static_cast<std::uint32_t>(n), std::memory_order_relaxed);
+    Task<R> result(block);
+    pipe_enter_first(block.get());   // turns cascade canonically; the last release dispatches
+    return result;
+#else
+    auto block = make_executable<R>(std::move(body), std::move(opts.token));
+    block->flags.priority = opts.priority;
     return async_dispatch<R>(std::move(block), pipes, modes, sizeof...(Ts));
+#endif // TS_PIPE_TAIL
 }
 
 // Deduced path (bare args, introspectable functor): modes from the functor's parameter

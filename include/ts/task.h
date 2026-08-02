@@ -327,6 +327,17 @@ private:
 // time; see `release` and `dispatch_arg` for the TOCTOU this closes.
 void submit_ready(Task_ptr block, std::uint64_t gen);
 
+// A task's per-line pipe entry (tail pipe; full definition in ts/detail/pipe_link.h).
+struct Pipe_link;
+
+// Enter the task's first pipe line (defined in the pipe layer, like `submit_ready` -- a
+// scheduler-free seam). Called when the pipe turns are the only unmet locks: by
+// `release()` when the count drops to `pipe_count` (a task with ordinary prerequisites),
+// or directly by a creation site with none (`async`, a data-ready graph node). The
+// remaining lines are entered by the sequential canonical cascade as earlier turns arrive
+// (docs/pipe-rebase.md §5.2B.2).
+void pipe_enter_first(Task_control_block* blk);
+
 // --- Task control block ----------------------------------------------------
 //
 // The refcounted completion/dependency core behind a `Task<R>` handle. FULLY
@@ -394,20 +405,16 @@ struct Task_control_block
     //     always 0 and the slot is free to carry the pipe instead; plain store under the pipe
     //     mutex -- the monotonic-gen scheme above never touches pipe blocks, disjoint path).
     std::atomic<std::uint64_t> dispatch_arg{ 0 };
-    // Pipe chain successor (design-B pipe, docs/pipe-rebase.md §5.2B). The single
-    // arrival-order successor a pipe task links onto its predecessor (UE `FPipe`'s subsequent,
-    // one per task); the head reader's walk traverses it. `pipe_closed` (a sentinel, not a
-    // real block) means the task has completed or the walk closed its slot -- no more
-    // subsequents accepted. Null for a non-pipe task. Manipulated only by the pipe
-    // (`src/guarded.cpp`); the block machinery never touches it.
-    std::atomic<Task_control_block*> pipe_next{ nullptr };
-    // Reader-group terminator (design-B walk, §5.2B): for a reader that the head walk placed
-    // in a group of >= 2, the barrier / writer every group reader decrements on completion;
-    // when it reaches zero the terminator advances (releasing the next writer). Null for a
-    // writer, a reservation, or a LONE reader -- a lone reader has no terminator and advances
-    // serially like a writer, which is the R5 elision (no barrier allocated). Set by the walk
-    // before it dispatches the member; read at the member's completion.
-    std::atomic<Task_control_block*> pipe_terminator{ nullptr };
+    // The task's pipe entries (tail pipe, docs/pipe-rebase.md §5.2B): an array of
+    // `pipe_count` per-line links embedded in the owning allocation (`Piped_executable`,
+    // an `Acquire_node`, or the graph's per-node slab), in canonical (ascending
+    // pipe-address) order. Null / 0 for a non-pipe task. `pipe_count` doubles as the
+    // `release()` trigger threshold (pipes are entered when it is the only remaining
+    // lock count -- §5.5 pipes-entered-last); `pipes_entered` is the cascade's progress,
+    // and settle advances exactly links `[0, pipes_entered)`. Both byte fields are
+    // written single-threaded (creation / the sequential cascade) and published by the
+    // atomics around them.
+    Pipe_link* pipe_links = nullptr;
     Cancellation_token token;          // checked by `execute` before running the body
 
     // --- one-byte cluster --------------------------------------------------------------
@@ -427,6 +434,9 @@ struct Task_control_block
     std::atomic<bool> prereq_cancelled{ false };
     bool completed = false;            // mutex-only
     bool cancelled = false;            // mutex-only
+    // Pipe fields (see `pipe_links`): entry count / trigger threshold, and cascade progress.
+    std::uint8_t pipe_count = 0;
+    std::uint8_t pipes_entered = 0;
     // Static dispatch properties, packed into one byte (all set at creation, never
     // mutated once the block is shared, so non-atomic is race-free). `priority` and
     // `run_inline` are read together at dispatch; `retractable` in the retraction guard.
@@ -435,19 +445,11 @@ struct Task_control_block
         Priority priority : 2 = Priority::normal;   // queue position when dispatched
         bool retractable : 1 = false;               // safe to run inline from a waiter (no pipe/access binding)
         bool run_inline : 1 = false;                // dispatch on the settling thread, not the queue
-        // Single-object pipe job: `dispatch_arg` carries the owning `Pipe*` (stamped at
-        // creation). A spare bit consumed by the blocking-sync diagnostic; written only
-        // under `TS_SAFETY_CHECKS`.
+        // Single-object pipe job of the MUTEX pipe: `dispatch_arg` carries the owning
+        // `Pipe*` (stamped at creation). A spare bit consumed by the blocking-sync
+        // diagnostic; written only under `TS_SAFETY_CHECKS`. The tail pipe
+        // (`TS_PIPE_TAIL`) identifies pipe tasks by `pipe_links` instead.
         bool pipe_job : 1 = false;
-        // Design-B pipe (docs/pipe-rebase.md §5.2B): `pipe_reader` = this pipe task is a
-        // reader (else a writer); `pipe_head` = a reader that is its group's HEAD and runs
-        // the forward walk (§5.2B.1). Both set at push, read at dispatch. Spare bits, free.
-        bool pipe_reader : 1 = false;
-        bool pipe_head : 1 = false;
-        // A held reservation node (graph / multi-object `pipe_acquire`): admitted like a
-        // pipe task but does not run a body or advance the chain until an explicit
-        // `pipe_release`. Its admission fires the `on_acquired` callback (docs §6a).
-        bool pipe_reservation : 1 = false;
     };
     Flags flags;
     // -----------------------------------------------------------------------------------
@@ -506,9 +508,16 @@ struct Task_control_block
         std::uint32_t now = blk->num_locks.fetch_sub(1, std::memory_order_acq_rel) - 1;
         TS_FORENSIC(blk.get(), E_release, now, prereq_cancelled ? 1 : 0);
         if (now == 0)
-            dispatch_ready(blk, gen);     // pre-execution: prerequisites met -> queue, or run inline
+            dispatch_ready(blk, gen);     // pre-execution: all locks (incl. pipe turns) met
         else if (now == execution_flag)
             blk->complete();              // post-execution: nested done -> complete (`gen` unused)
+        else if (now == blk->pipe_count)
+            pipe_enter_first(blk.get());  // only pipe locks left -> enter line 0 (§5.5 pipes last)
+        // The pipe branch is exact: pre-execution counts decrease monotonically (the
+        // prerequisite set is frozen at launch), so `pipe_count` is crossed once, by exactly
+        // one releaser (`fetch_sub` values are unique); a `pipe_count == 0` task takes the
+        // `now == 0` dispatch instead, and post-execution counts sit above `execution_flag`,
+        // far from any `pipe_count`.
     }
 
     // Per-thread FIFO trampoline for inline tasks: a ready inline task runs on THIS thread
@@ -736,13 +745,6 @@ auto make_block()
         return std::pair{ Task_ptr(&wrapper->core), wrapper };
     }
 }
-
-// Sentinel stored in `Task_control_block::pipe_next` to mark a pipe task's successor slot
-// CLOSED: the task completed, or the head reader's walk closed the chain end. A
-// `compare_exchange` of `pipe_next` from null fails against it, telling a would-be linker
-// its predecessor is gone -- it must run now / head a new group (design-B pipe,
-// docs/pipe-rebase.md §5.2B). Not a real block; never dereferenced.
-inline Task_control_block* const pipe_closed = reinterpret_cast<Task_control_block*>(std::uintptr_t{ 1 });
 
 // The task currently executing on this thread (for nested-task attachment). A
 // shared_ptr so a nested child can register the parent as its successor and keep it

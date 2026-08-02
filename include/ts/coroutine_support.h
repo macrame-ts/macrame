@@ -262,10 +262,11 @@ template<typename T, Access Mode>
 class Pipe_guard
 {
 public:
-    Pipe_guard(Scheduler& scheduler, Pipe& pipe, T* obj)
+    Pipe_guard(Scheduler& scheduler, Pipe& pipe, T* obj, void* hold)
         : scheduler_(scheduler)
         , pipe_(pipe)
         , obj_(obj)
+        , hold_(hold)
     {
         if (current_access)
             ctx_ = *current_access;   // extend the coroutine's existing grant, don't replace it
@@ -279,7 +280,13 @@ public:
     {
         current_access = prev_;
         --pipe_guard_depth;
-        pipe_release(scheduler_, pipe_, Mode);   // admit queued jobs / the next guard
+        // Admit queued jobs / the next guard. The tail pipe releases through the hold
+        // handle `pipe_acquire` returned; the mutex pipe by mode.
+#if TS_PIPE_TAIL
+        pipe_release(scheduler_, pipe_, Mode, hold_);
+#else
+        pipe_release(scheduler_, pipe_, Mode);
+#endif
     }
 
     Pipe_guard(const Pipe_guard&) = delete;
@@ -305,6 +312,7 @@ private:
     Scheduler& scheduler_;
     Pipe& pipe_;
     T* obj_;
+    void* hold_ = nullptr;   // the tail pipe's acquire handle (unused by the mutex pipe)
     Access_context ctx_;
     const Access_context* prev_ = nullptr;
 };
@@ -332,12 +340,16 @@ struct Pipe_guard_awaiter
     {
         // Try to acquire now; `pipe_acquire` returns true (held, no callback) or false (deferred,
         // `on_acquired` fires once when the pipe drains to us, possibly on another thread).
-        bool acquired = pipe_acquire(scheduler_, pipe_, Mode,
-            [this, h]
-            {
-                if (state_.exchange(1, std::memory_order_acq_rel) == 2)
-                    schedule_resume(h);   // re-install grant + resume (via the bounded trampoline)
-            });
+        auto on_acquired = [this, h]
+        {
+            if (state_.exchange(1, std::memory_order_acq_rel) == 2)
+                schedule_resume(h);   // re-install grant + resume (via the bounded trampoline)
+        };
+#if TS_PIPE_TAIL
+        bool acquired = pipe_acquire(scheduler_, pipe_, Mode, std::move(on_acquired), hold_);
+#else
+        bool acquired = pipe_acquire(scheduler_, pipe_, Mode, std::move(on_acquired));
+#endif
         if (acquired)
             return false;   // held now -> don't suspend; `await_resume` builds the guard
 
@@ -353,12 +365,13 @@ struct Pipe_guard_awaiter
 
     Pipe_guard<T, Mode> await_resume() noexcept
     {
-        return Pipe_guard<T, Mode>(scheduler_, pipe_, obj_);   // prvalue -> elided into the local
+        return Pipe_guard<T, Mode>(scheduler_, pipe_, obj_, hold_);   // prvalue -> elided into the local
     }
 
     Scheduler& scheduler_;
     Pipe& pipe_;
     T* obj_;
+    void* hold_ = nullptr;   // the tail pipe's acquire handle, threaded into the guard
     std::atomic<int> state_{ 0 };
 };
 

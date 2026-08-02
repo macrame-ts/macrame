@@ -293,8 +293,6 @@ void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode)
     release_and_redispatch(scheduler, pipe, mode);
 }
 
-#endif // !TS_PIPE_TAIL
-
 void multi_acquire(Ref_ptr<Multi_async_state> state, Task_ptr block, std::size_t pos)
 {
     if (pos == state->holds.size())
@@ -312,6 +310,14 @@ void multi_acquire(Ref_ptr<Multi_async_state> state, Task_ptr block, std::size_t
 
     if (acquired)
         multi_acquire(std::move(state), std::move(block), pos + 1);
+}
+
+// The tail pipe defines this in pipe_tail.cpp; the mutex pipe never reaches the
+// `release()` branch that calls it (`pipe_count` is always 0 here), but the symbol must
+// link in every configuration.
+void pipe_enter_first(Task_control_block*)
+{
+    ts::fatal("pipe_enter_first without TS_PIPE_TAIL (a pipe_count was set on the mutex pipe)");
 }
 
 #if TS_SAFETY_CHECKS
@@ -341,7 +347,6 @@ void blocking_sync_diagnose(const Task_control_block* blk) noexcept
 }
 #endif
 
-#if !TS_PIPE_TAIL
 bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_ptr& block)
 {
     {
