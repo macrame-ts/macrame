@@ -461,9 +461,24 @@ cancellation, worker-less all ride the standard machinery. Priced by `bench_pipe
    respected across lines (per-line FIFO holds; no starvation); (c) held-line idling —
    the already-held P1 turn blocks P1's line for the whole downstream wait (inherent to
    exclusive multi-holds, not to the cascade). Mitigating fact: these are exactly today's
-   `multi_acquire` semantics, so v1 is behavior-neutral. The follow-up — parallel
-   registration under a small multi-push ordering lock (in-line orders made globally
-   consistent, so no cycles) — is evidence-gated.
+   `multi_acquire` semantics, so v1 is behavior-neutral.
+
+   **Parallel registration with per-pipe push-locks (designed follow-up, evidence-gated).**
+   At the `pipe_count` trigger, instead of the sequential cascade: acquire each involved
+   pipe's push-lock in canonical (address) order, push all n links, release all.
+   Consistency argument: two tasks sharing >= 2 pipes contend on those pipes' push-locks,
+   so their registration transactions serialize and in-line orders can never invert (the
+   deadlock mechanism); ordered lock acquisition makes the locks themselves cycle-free.
+   Single-object pushes never take the lock (one shared line cannot form an inversion), so
+   the hot path stays lock-free. Fixes: waits overlap (latency = max over lines, not sum)
+   and FIFO positions reflect request time. Does NOT fix held-line idling (holding k turns
+   while awaiting the rest is inherent to all-or-nothing acquisition; only shortened).
+   Price: n short spin-lock pairs per multi-access, one lock byte per `Pipe`, and a second
+   deadlock-freedom argument (serialized transactions instead of ordered acquisition). The
+   upgrade is localized to the registration step (`pipe_enter_first` + the cascade in
+   `link_turn`); links/advance/walk/trigger untouched — deferring costs nothing
+   architecturally. Gate: a contended multi-object async latency fixture showing the
+   sequential sum-of-waits actually biting.
 2. **Tagged words** (`open`/`closed`/`group_end`/pointer in `next`; the reader bit in
    `tail`) — concentrated behind named constants and helpers, used nowhere else.
 3. **The graph keeps `remaining_deps`** — two counting systems until the full
