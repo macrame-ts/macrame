@@ -911,6 +911,15 @@ void test_death_reset_unsettled()
     TS_CHECK(ts::test::expect_death("reset_unsettled"));   // reset() before the task settled
 }
 
+#if TS_SAFETY_CHECKS
+// Prerequisites are frozen at launch: `after()` on a launched, un-reset builder is fatal
+// (the edge could race the dispatch and be silently ignored).
+void test_death_after_post_launch()
+{
+    TS_CHECK(ts::test::expect_death("after_post_launch"));
+}
+#endif
+
 // --- K: nested tasks -------------------------------------------------------
 
 // A nested task launched inside a parent's body gates the parent's completion.
@@ -1038,6 +1047,9 @@ void run_task_tests()
     run("reuse task with prereq", test_reuse_prereq);
     run("signal reset", test_signal_reset);
     run("death: reset unsettled", test_death_reset_unsettled);
+#if TS_SAFETY_CHECKS
+    run("death: after post launch", test_death_after_post_launch);
+#endif
     run("nested gates parent", test_nested_gates_parent);
     run("nested multiple", test_nested_multiple);
     run("add nested existing", test_add_nested_existing);

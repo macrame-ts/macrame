@@ -973,7 +973,19 @@ inline void add_prerequisite(const Task_ptr& prereq, const Task_ptr& succ)
     std::scoped_lock lock(prereq->mutex);
     if (!prereq->completed)
     {
-        succ->num_locks.fetch_add(1, std::memory_order_relaxed);
+        [[maybe_unused]] std::uint32_t prev = succ->num_locks.fetch_add(1, std::memory_order_relaxed);
+#if TS_SAFETY_CHECKS
+        // The prerequisite set is FROZEN at launch (docs/task-internals.md §4): every legal
+        // caller holds a standing lock on `succ` here (the builder's "not launched" lock, a
+        // `then`'s "not attached" lock), so `prev == 0` means `succ` was already launched --
+        // its dispatch can race this lock and the ordering would be silently dropped (the
+        // body claims and runs regardless; see `Executable::run`). A count above
+        // `execution_flag` means `succ` is already RUNNING (only nested-task locks may be
+        // added then, via `add_nested`, never this). Both are misuse; fatal here at the
+        // cause instead of a silent ordering violation.
+        if (prev == 0 || prev >= Task_control_block::execution_flag)
+            ts::fatal("add_prerequisite on a launched task -- the prerequisite set is frozen at launch()");
+#endif
         prereq->successors.push_back(succ);
         succ->prerequisites.push_back(prereq);   // backward link, for deep retraction
     }
@@ -1219,10 +1231,18 @@ template<typename R>
 class Task_builder
 {
 public:
-    // Run after each prerequisite settles. Call before `launch()` (each run).
+    // Run after each prerequisite settles. Call before `launch()` (each run): the
+    // prerequisite set is frozen at launch -- an `after()` on a launched, un-reset builder
+    // is fatal under `TS_SAFETY_CHECKS` (the added edge could race the dispatch and be
+    // silently ignored; see `add_prerequisite`).
     template<typename... Ps>
     Task_builder& after(const Task<Ps>&... prerequisites)
     {
+#if TS_SAFETY_CHECKS
+        if (launched_)
+            ts::fatal("Task_builder::after() after launch() -- prerequisites are frozen at "
+                "launch; reset() first (reuse) or wire them before launching");
+#endif
         (detail::add_prerequisite(detail::core_of(prerequisites), core_), ...);
         return *this;
     }
@@ -1260,6 +1280,9 @@ public:
 
     Task<R> launch()
     {
+#if TS_SAFETY_CHECKS
+        launched_ = true;
+#endif
         detail::Task_control_block::release(core_);   // remove the launch lock
         return Task<R>(core_);
     }
@@ -1277,6 +1300,9 @@ public:
     {
         core_->reset();
         core_->num_locks.store(1, std::memory_order_relaxed);   // the "not launched" lock
+#if TS_SAFETY_CHECKS
+        launched_ = false;   // prerequisites may be wired for the next run
+#endif
         return *this;
     }
 
@@ -1296,6 +1322,11 @@ private:
     {}
 
     detail::Task_ptr core_;
+#if TS_SAFETY_CHECKS
+    // Launched-and-not-reset: guards `after()` (prerequisites frozen at launch). Safety-only
+    // state, fully gated per the convention (no shipping bytes for the harness).
+    bool launched_ = false;
+#endif
 };
 
 // Configure a standalone task (body + prerequisites) to launch later. `fn` takes no

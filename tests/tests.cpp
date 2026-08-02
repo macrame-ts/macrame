@@ -196,6 +196,15 @@ void run_death_scenario(const char* name)
         auto t = ts::task([] { return 1; });   // built, not launched -> not settled
         t.reset();   // reset before the task has settled -> fatal
     }
+#if TS_SAFETY_CHECKS
+    else if (std::strcmp(name, "after_post_launch") == 0)
+    {
+        ts::Signal gate;
+        auto t = ts::task([] { return 1; });
+        t.launch();
+        t.after(gate);   // prerequisites are frozen at launch -> fatal
+    }
+#endif
     else if (std::strcmp(name, "deferred_drop_staged") == 0)
     {
         ts::Guarded<int> target{ 0 };

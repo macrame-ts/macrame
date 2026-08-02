@@ -300,6 +300,11 @@ auto ready = ts::task([] { finish_boot(); })
 prerequisite has settled. If a prerequisite was *cancelled*, the dependent is
 cancelled too (cancellation propagates forward; §4.5).
 
+Prerequisites are frozen at `launch()`: calling `after()` on an already-launched
+builder is an error (fatal under safety checks) — the late edge could race the
+dispatch and be silently ignored. Wire all prerequisites first, or `reset()` a
+reusable task before re-wiring for its next run.
+
 ### 4.3 Getting results: `sync()` and `take()`
 
 `sync()` blocks until the task settles and returns the result **by

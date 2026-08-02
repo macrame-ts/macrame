@@ -178,6 +178,19 @@ nested completes : n = --num_locks; if n == execution_flag -> Close()
   `Close` the parent before the body finishes.
 - Above `execution_flag`, the count is outstanding nested tasks; the last one to
   hit `execution_flag` closes the parent.
+- **The prerequisite set is frozen at launch — enforced (2026-08,
+  `TS_SAFETY_CHECKS`).** "(Created only)" above is a hard invariant, not a
+  convention: a prerequisite added after launch can race the dispatch and be
+  silently ignored (the body claims and runs regardless — the ordering is
+  dropped, no crash), and it would break any scheme that keys off the count
+  crossing a threshold (the pipe rebase's `pipe_count` trigger). Two layers
+  fatal on misuse: `Task_builder::after()` on a launched, un-reset builder
+  (a `launched_` flag, cleared by `reset()`), and `add_prerequisite` itself
+  when the successor holds no standing lock (`prev == 0` on the increment —
+  every legal caller holds the "not launched"/"not attached" lock) or is
+  already executing (`prev >= execution_flag`; only `add_nested` may add
+  locks then). Death test: `after_post_launch`. The sanctioned late
+  additions remain nested-task locks (above the flag, during the body).
 
 (Pipe serialization is handled separately by `Guarded`'s reader/writer pipe,
 not this counter; ordering-via-pipe is out of scope here.)
