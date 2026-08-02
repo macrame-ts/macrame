@@ -205,147 +205,280 @@ A14       else: goto retry
 Line A4 is the R1 UAF (§4.3.A): it requires a hazard pointer or a packed-count tail to be
 safe. This is why B is preferred.
 
-### 5.2B Reader arrival — chain + head-walk (recommended)
+### 5.2B Reader arrival — chain + head-walk, realized as `Pipe_link` (IMPLEMENTED)
 
+The implemented form. Every pipe-accessing task is an **ordinary dynamic task** whose
+readiness includes its pipe turns as `num_locks` prerequisites; what physically sits in a
+pipe's line is a small embedded **`Pipe_link`** per (task, object) — because a line entry
+needs its own successor slot, and a block has one. All pipe storage is sized at creation:
+no allocation on any pipe hot path.
+
+#### 5.2B.0 The `Pipe_link` (`include/ts/detail/pipe_link.h`)
+
+```cpp
+enum class Link_role : std::uint8_t { serial, head, member };   // set by the walk; serial default
+
+struct alignas(8) Pipe_link
+{
+    std::atomic<std::uintptr_t> next{ 0 };   // this line's successor: open / closed / group_end / Pipe_link*
+    Task_control_block* owner;               // the task this entry admits
+    Pipe* pipe;                              // the line this entry sits in
+    Task_control_block* prev_owner;          // custody chain: owned ref on the predecessor (see 5.2B.5)
+    Pipe_link* group_target;                 // head: the group's LAST link; member: the group's head
+    std::atomic<std::uint32_t> gate{ 0 };    // head only: group countdown (members + head)
+    std::uint8_t index;                      // position in owner's link array (drives the cascade)
+    Access mode;                             // reader / writer in this line
+    bool is_head;                            // reader that walks at its turn (set at push, 5.2B.1)
+    Link_role role;                          // interpretation of gate/group_target
+};
 ```
-B1  Arrival (any reader R, identical to a writer's push):
-B2    AddRef(R)
-B3    prev = tail.exchange(pack(R, READER))     // exchange only -- NO load-then-inc, no UAF
-B4    if prev == 0: mark R the head; submit R ready   // idle pipe -> R is the group head
-B5    elif AddSubsequent(prev, R): edge R after prev   // linked; R starts when prev unlocks it
-B6    else: prev already completed -> R is a new head; submit R ready
 
-B7  Head-reader walk (runs when a reader that is a group HEAD gets the grant):
-B8    n = 1; last = self
-B9    loop:                                     // pass 1: find extent, close the chain
-B10     nxt = last.subsequent                   // read BEFORE any unlock (grab-next)
-B11     if nxt is a READER (and linked): last = nxt; n += 1; continue
-B12     if nxt is a WRITER W: terminator = W; break
-B13     if nxt == null: if CAS_close(last.subsequent): terminator = install G(lock=n); break
-B14                     else: nxt = last.subsequent; continue   // a late reader linked; re-read
-B15   set each group reader's unlock-target to `terminator`; set terminator.lock = n
-B16   pass 2: unlock self..last in order (each may now run; grab-next already done in pass 1)
+`next` is a tagged word: `0` = open (no successor yet), `1` = closed (retired — a late
+pusher runs immediately), `2` = group_end (a closed reader group ends here — a late pusher
+links on and HEADS a new group), else an aligned `Pipe_link*`. The block gains
+`Pipe_link* pipe_links` + `std::uint8_t pipe_count` + `std::uint8_t pipes_entered`
+(replacing the earlier per-block `pipe_next`/`pipe_terminator`). Links live in the one
+allocation that already exists: a `Piped_executable<Body, R, N>` wrapper for `async`
+(N = pack size, compile-time), the graph's per-node slab for nodes (allocated at
+`compile()`, re-armed per run).
+
+**Compaction pass (review after the first running version):** check every field is
+actually required and how the layout can be compacted — the `owner` redundancy across a
+task's links, `gate`/`group_target` width (a union candidate), `index`/`mode`/flags
+packing, and the per-link `pipe` pointer vs deriving it. Deliberately NOT done up front;
+correctness and readability first.
+
+#### 5.2B.1 Turn = prerequisite (the `pipe_count` trigger)
+
+`num_locks` at launch = 1 (launch) + O (ordinary prereqs) + P (pipes); the block stores
+`pipe_count = P`. `release()` grows one branch:
+
+```cpp
+if (now == 0)                       dispatch_ready(blk, gen);   // all locks (incl. turns) met
+else if (now == execution_flag)     blk->complete();            // post-execution: nested done
+else if (now == blk->pipe_count)    pipe_enter_first(blk);      // only pipe locks left -> enter line 0
 ```
-Only a **head** reader walks (a reader unlocked *by* the walk is a member, flagged, and does
-not walk). B3 is the whole arrival — one exchange, no UAF. B13/B14 is the walk-vs-late-
-arrival close race (UE `Close`). The `TS_PIPE_RACE_DELAY` hooks go at B10/B13 and at the
-writer's `AddSubsequent` (5.1 W5) for the TSan campaign.
 
-#### 5.2B.1 How the head reader is identified (load-bearing — review this)
+`fetch_sub` return values are unique, so exactly one release crosses `pipe_count` — no
+claim, no flag; a `pipe_count == 0` task never reaches the third branch (`now > 0` there).
+Note: the review-chat compression that folded the `now == 0` dispatch into the
+`now == pipe_count` branch was wrong for pipe tasks (a task counting P turns down to 0
+would never dispatch); the implemented three-branch form above is the corrected version.
+Callers with no ordinary prerequisites (`async`, graph nodes at data-ready) skip the
+trigger and call `pipe_enter_first` directly with `num_locks` pre-set to P.
 
-A reader is the group **head** iff, at arrival, the predecessor it exchanged out (B3's
-`prev`) is a **writer or idle** (`0`); it is a **member** iff `prev` is a **reader**. This is
-a purely local decision, taken from the single `exchange` result — no shared "who's the
-head" state, no extra race:
+#### 5.2B.2 The cascade (`link_turn`)
 
-- `prev == 0` (idle pipe): R is the head; it runs immediately and walks (B4).
-- `prev` is a WRITER: R is the head; it starts when that writer completes (B5) or
-  immediately if the writer already completed (B6), then walks.
-- `prev` is a READER: R is a member; some earlier reader after the last writer is the head.
-  R just runs its body when the head's walk unlocks it — it never walks.
+A link's turn arrives (its line predecessor retired, or the line was free at push):
 
-Why it's race-free: head-ness depends only on the *mode* of R's immediate predecessor, which
-the tail exchange hands R atomically. It does NOT depend on whether `prev` is itself a head
-or a member, so there is no chain to consult. A member stores a one-bit `is_head = false`
-(set from `prev`'s mode at arrival); the dispatch path runs the walk prologue only when
-`is_head`. The head is thus exactly "the first reader after a writer (or at idle)", decided
-once, locally, at push time.
+```cpp
+void link_turn(Pipe_link& l)
+{
+    if (l.mode == Access::read_write)  epoch_open(*l.pipe);    // TS_SAFETY_CHECKS
+    else if (l.is_head)                walk_group(l);          // form the reader group (5.2B.4)
+    Task_ptr keep(l.owner);
+    if (l.index + 1 < l.owner->pipe_count)
+        pipe_enter_link(l.owner->pipe_links[l.index + 1]);     // sequential canonical cascade
+    Task_control_block::release(keep);                         // the pipe-turn prerequisite
+}
+```
 
-Corner: two readers race to be first on an idle pipe. Exactly one wins the `exchange` that
-returns `0` (→ head); the other's `exchange` returns the first reader (→ member). The
-`exchange` linearizes it — never two heads, never zero.
+Holding turn k while waiting only for later-canonical turns — no cycle can form (ordered
+acquisition), and §5.5 guarantees no ordinary prerequisite is ever waited on while a turn
+is held. Nested `link_turn` depth via an idle next line is bounded by `pipe_count`.
 
-#### 5.2B.2 Inline-safety of the walk (no recursion — review this)
+#### 5.2B.3 Head identification (unchanged, now per-link)
 
-The walk (B7–B16) and the member unlocks (B16) must be **iterative**, never recursive.
-Unlocking a member can dispatch it *inline* (a `run_inline` reader, or worker-less mode where
-`submit` runs at the call site). If the head unlocked members by recursively
-"unlock → the member runs → its completion unlocks the next", a long reader run would recurse
-one stack frame per member and overflow (the exact hazard the task layer already avoids for
-inline chains). So:
+A reader link is the group **head** iff the predecessor it exchanged out of the tail is a
+writer or idle (`0`); it is a member iff the predecessor is a reader. Purely local, from
+the single exchange result (the tail word carries the reader bit). One addition: a pusher
+whose link-CAS lands on `group_end` (a closed group's end) KNOWS its group predecessor is
+a finished group and upgrades itself to head — stragglers form a fresh group instead of
+serializing.
 
-- Pass 1 (B9–B14) only *reads* `subsequent` pointers and closes the chain end — it dispatches
-  nothing, so it cannot recurse. It is a bounded pointer-chase collecting the member list.
-- Pass 2 (B16) dispatches each member through the existing **bounded per-thread FIFO inline
-  trampoline** (`Task_control_block::dispatch_ready` / `inline_pending`, task.h): an inline
-  member is pushed and drained iteratively, not run nested inside the walk. So the head's
-  stack depth is O(1) regardless of group size, and a member that itself dispatches inline
-  work rides the same trampoline. The head runs its own body only after the walk hands the
-  members to the trampoline (or interleaves, but never nested under an unlock).
+#### 5.2B.4 The walk — allocation-free
 
-This reuses the task layer's inline-chain solution verbatim; the walk must simply route every
-member unlock through `dispatch_ready` rather than calling `execute` directly.
+No barrier block, no member vector. The group's state lives on the **head's link**:
 
-The TSan-critical race points:
+- **Pass 1** follows `next` over consecutive reader links, counting. Ends at: a writer's
+  link (stays chained — it needs no gate; its turn is simply not dispatched until the
+  group retires), or open chain end — then CAS `open -> group_end` closes the group
+  (a lost CAS means a late reader linked; re-read and absorb). A lone reader (`n == 1`
+  with open end) returns untouched — serial advance, zero group cost (R5).
+- The head's link is armed: `role = head`, `gate = n` (members + head), `group_target =
+  last`. Each member: `role = member`, `group_target = &head`, plus an owned ref on the
+  head's owner (keeps the gate alive however member settle order interleaves).
+- **Pass 2** re-traverses head→last dispatching each member's `link_turn` (their owners'
+  turn prerequisites release; owners run when fully ready). Grab-next before dispatch;
+  the gate cannot reach 0 during pass 2 (the head's own departure is pending), so the
+  traversed links are stable.
 
-- **Design A only — join-vs-UAF (R1):** line A4's `fetch_add` on a possibly-freed sentinel
-  (§4.3.A). The blocker that makes A expensive.
-- **Design B — walk-vs-late-arrival:** B13/B14, the walker closing the chain end while a
-  reader is mid-`AddSubsequent`. UE `Close` semantics; the late reader becomes a new head.
-- **Design B — terminator install race:** the walker's `CAS_close`/`install G` (B13)
-  racing a writer's `AddSubsequent` (W5): whoever wins the `last.subsequent` CAS decides
-  whether the writer chains behind `G` or is found directly by the walker.
-- **Both — last-decrement / drain (R6):** §7.
+#### 5.2B.5 Advance — my settle retires my lines
 
-The race-delay hooks (`TS_PIPE_RACE_DELAY`, no-op in normal builds) sit at B10/B13 (design
-B) or `join_after_add` (design A) and at the writer's `AddSubsequent` for the TSan campaign
-(pipe-rebase-tests §3.3).
+Settle (after nested tasks — the §8 invariant holds structurally) advances every entered
+link; there is no `pipe_release` and no externally-completed entity anywhere:
 
-### 5.3 Completion
+```cpp
+void advance_pipe_links(Task_control_block* blk)      // called by the pipe task's settle hook
+{
+    for (std::uint8_t i = 0; i < blk->pipes_entered; ++i)
+        link_advance(blk->pipe_links[i]);
+}
 
-- A reader finishing: `num_locks.fetch_sub(1)` on the group barrier / representative
-  (design B: the barrier `G` or the retargeted terminator; design A: the sentinel). When
-  the count reaches its base, the barrier settles → releases the next writer → the writer
-  runs.
-- A writer finishing: `settle` → releases its single subsequent (the next head reader or
-  writer), UE-style. Then `tail.compare_exchange(self -> 0)` if it is still the tail (pipe
-  now idle); else the next pusher already took the tail (ref transferred).
-- `TaskCount` decrement (every task, at its completion) drives `wait_until_idle` (§7).
+void link_advance(Pipe_link& l)                        // exactly once per entered link
+{
+    if (l.mode == Access::read_write) epoch_close(*l.pipe);
+    switch (l.role)
+    {
+    case Link_role::serial:  chain_retire(l); break;
+    case Link_role::head:    group_depart(l, l); break;              // my own gate
+    case Link_role::member:  group_depart(*l.group_target, l); break; // the head's gate
+    }
+    release prev_owner custody ref;                    // 5.2B.6
+    l.pipe->task_count.fetch_sub(1, release);          // LAST pipe touch (drain discipline, §7)
+}
+```
+
+`group_depart(head, departing)` decrements `head.gate`; the last one out calls
+`chain_retire(*head.group_target)` — retiring the group at its LAST link. `chain_retire`
+is the serial hand-off: exchange `next -> closed` (a waiting successor's turn fires;
+`group_end`/open mean none), then CAS the tail from this link to idle (dropping the line's
+ref) if still ours. Intermediate group links are never touched again.
+
+#### 5.2B.6 Lifetime — the custody chain (corrects the reviewed "dec after CAS")
+
+The review chat proposed releasing the exchanged-out predecessor's ref immediately after
+the link-CAS resolves. That is a use-after-free: a mid-chain entry whose successor has
+already pushed (and dec'd it) is kept alive by nothing but the user's droppable handle
+while it waits for its turn — and the walk touches member links whose owners may hold no
+other refs. The implemented scheme is the stage-3a custody chain, per link:
+
+- push: `intrusive_inc(l.owner)` — the line's ref on this entry;
+- the tail exchange TRANSFERS the predecessor's line ref to the pusher, stored as
+  `l.prev_owner` and released at `l`'s advance — so every queued entry is kept alive by
+  its successor, anchored by the tail's ref on the newest entry;
+- `chain_retire`'s successful tail-clear CAS releases the entry's own line ref; a failed
+  CAS means a successor adopted it.
+- group members additionally hold a walk-granted ref on the head's owner (dropped at
+  depart), because the custody chain releases in settle order, not chain order, and the
+  gate lives on the head.
+
+#### 5.2B.7 Inline safety (unchanged argument)
+
+Pass 1 dispatches nothing; pass 2 and `chain_retire` dispatch turns, which only
+`release()` — the body dispatch at count 0 goes through `dispatch_ready`, whose bounded
+per-thread trampoline covers inline tasks, and worker-less submit-executes ride the serial
+trampoline. The head's stack depth is O(1) in group size; a cascade nests at most
+`pipe_count` frames.
+
+The TSan-critical race points: walk-close vs late-join (`open -> group_end` CAS), the
+straggler's `group_end -> me` CAS vs group retirement (`group_end -> closed`), and the
+drain last-decrement (§7). `TS_PIPE_RACE_DELAY` hooks sit at the walk close and the push
+link-CAS.
+
+### 5.5 Pipes are entered last (invariant)
+
+A task enters a pipe's line only when its pipe turns are its only unmet locks: the
+`pipe_count` trigger fires after every ordinary prerequisite resolved, and the
+prerequisite set is frozen at launch (enforced — `Task_builder::after()` post-launch and
+`add_prerequisite` on an unlocked/running successor are fatal under `TS_SAFETY_CHECKS`).
+Consequences: an entry in a line waits only on line turns (never an ordinary edge — the
+deadlock the alternative allows: hold a turn, wait on a prerequisite that is queued behind
+that very turn), and pipe FIFO is readiness-ordered for prerequisite-carrying tasks (UE's
+documented caveat; today's pipe jobs are all prerequisite-free, so their FIFO stays
+call-ordered).
+
+### 5.3 Completion (summary)
+
+A task's settle advances every entered link (5.2B.5): serial links hand the line to their
+successor's turn; group members depart the head's gate, the last one out retiring the
+group at its last link. The tail-clear CAS (this link -> idle) drops the line's ref when
+no successor superseded it. `task_count` decrements once per link, as the advance's last
+pipe touch, and drives `wait_until_idle` (§7).
 
 ### 5.4 Why this is deadlock-free and correctly ordered
 
-Ordering is the chain on the tail (each task edges on its predecessor); within a reader
-group, readers share the head's start gate and run concurrently; the next writer waits on
-the group barrier / terminator. FIFO-by-arrival is the tail exchange order (UE's
-guarantee). No lock is held across dispatch — a completing block releases edges outside any
-pipe lock, so a worker-less inline chain rides the bounded trampoline (R7), and `access`
-inline never stacks under a lock.
+Ordering is the chain on the tail (each entry after its predecessor); within a reader
+group, readers' turns fire together at the head's turn and the next entry waits on the
+group gate. FIFO-by-arrival is the tail exchange order per line; §5.5 confines a queued
+entry's waits to later-canonical turns, and the sequential cascade acquires lines in one
+global (address) order — the classic ordered-acquisition argument, now covering graph
+nodes and multi-object `async` uniformly because they ARE the same mechanism. No lock is
+held across dispatch; inline and worker-less chains ride the existing bounded trampolines.
 
-## 6. R2 — reservations / graph, and a simplification
+## 6. R2 — reservations dissolved: multi-object `async` and graph nodes ride the links
 
-The graph and multi-object `async` use `pipe_acquire` (held, mode-aware, sync-or-deferred)
-+ `pipe_release` (explicit) + the direct node→node handoff (`preheld`, `write_epoch += 2`).
-On the tail model a **reservation is a group representative whose completion is deferred to
-an explicit `pipe_release`** instead of body-return — otherwise identical. So:
+The reservation concept (`pipe_acquire` hold + explicit `pipe_release`) is DELETED, not
+reimplemented. Both former users become ordinary tasks with N links:
 
-- `pipe_acquire(mode, on_acquired)` = attach a held representative (a reader joins/forms a
-  reader group; a writer chains). Return true if it is immediately at the head (idle-
-  compatible tail), else false and fire `on_acquired` when its start gate opens.
-- `pipe_release(mode)` = settle the held representative (SNZI depart for a reader; writer
-  settle), advancing the chain.
+- **Multi-object `ts::async(fn, objs...)`**: the builder dedups (write-wins) and sorts the
+  (pipe, mode) set by pipe address at build time — the canonical order — into a
+  `Piped_executable<Body, R, N>` (N = pack size; one allocation as before, now including
+  the links). `num_locks = n`, `pipe_enter_first`, done: turns cascade, the body runs
+  under the full `Access_context` when the last turn releases, settle advances all links.
+  `Multi_async_state`, `multi_acquire`, and the per-call `std::map` are deleted.
+- **Graph nodes**: per-node links in a graph-owned slab, bound at `compile()` (the node's
+  `pipe_indices` are ascending over the address-sorted `distinct_pipes_`, so link order is
+  canonical), re-armed per run — re-runs stay allocation-free. Data prerequisites keep
+  `remaining_deps` (v1 scope cut); `on_data_ready` seeds `num_locks = pipe_count` and
+  calls `pipe_enter_first` (or dispatches directly for object-free nodes). The node block's
+  settle hook (`graph_node_completed`) advances the links first, then runs the graph
+  bookkeeping. Deleted: `acquire_next`'s pipe path, `pipe_acquire`/`pipe_release`,
+  `preheld`/`handoff_target`/`mark_preheld`, `Pipe::held`.
+- **The node→node handoff is now just FIFO**: a successor node's link is queued right
+  behind the predecessor's in the shared line; the predecessor's retire dispatches its
+  turn directly. No `preheld` mask, no `write_epoch += 2` elision — every write window
+  opens at the writer link's turn and closes at its advance (parity preserved).
+- **Reader-node ∥ async-reader overlap** is automatic: both are reader links, grouped by
+  the walk like any others. **Gap-freeing** is automatic: a node's links exist in a line
+  only from data-ready to settle.
 
-**Two implementation paths:**
+The settle-must-advance-links contract concerns only library-internal code (users cannot
+create pipe tasks except via the two factories); it is stated in comments at both creation
+sites (the `async` factory and `graph_node_completed`) rather than tracked as a risk.
 
-- **(a) Minimal (v1).** Keep the seam signatures and the graph's explicit
-  acquire/handoff/preheld logic exactly; reimplement `pipe_acquire`/`pipe_release` as
-  held representatives on the tail. The handoff stays explicit (skip release + re-acquire,
-  bump `write_epoch += 2`). The graph is UNTOUCHED behind the seam — the handoff mandate.
+### 6.1 Memory / perf accounting
 
-- **(b) Ambitious (follow-up this rebase ENABLES).** The explicit per-node
-  acquire/release/handoff/preheld machinery largely DISSOLVES: a serial X-chain of writer
-  nodes A→B→C naturally forms a writer chain on X's tail (each edges on the previous), so
-  the "handoff" (B skips re-acquiring X because it is already the head after A) is the
-  natural edge chain — no `preheld` mask. Gap-freeing (async slips in when a node releases)
-  is automatic (the tail is free between representatives). Reader-node ∥ async-reader
-  overlap is automatic (both are reader-representatives on the tail). This is the
-  graph/`when_all` rebase onto `num_locks` already on the roadmap (task-internals "open
-  items"); folding it in couples the graph scheduling to the pipe tail (canonical-order
-  push for multi-object deadlock-freedom must be preserved). Deliberately DEFERRED — v1
-  proves the core behind the seam; (b) is a separate PR.
+| | before (mutex pipe) | after (links) |
+|---|---|---|
+| single-object async | block + mutex/deque `Job` | block + 1 embedded link (0 extra allocs) |
+| multi-object async (n) | block + `Multi_async_state` + map + n deque Jobs + closures | block + n embedded links (**one** alloc total) |
+| graph node per run | 0–n reservation closures when contended | **0** (links re-armed in slab) |
+| reader group | mutex bookkeeping | **0** (no barrier, no member vector) |
+| ops per access (uncontended) | 2 mutex lock/unlock + deque ops | a handful of relaxed/acq-rel atomics |
 
-Recommendation: v1 = (a). Note (b) as the marquee simplification the rebase unlocks; the
-E-tests (writer handoff, reader-node ∥ async, node ∥ async no-race) are the regression
-guard for either path.
+One deliberate cost: dispatch goes through `release`/`dispatch_ready` (one extra
+`fetch_sub` vs a direct submit), buying a single uniform path — priority, inline,
+cancellation, worker-less all ride the standard machinery. Priced by `bench_pipe_contention`
+(§13.1).
+
+### 6.2 Known compromises
+
+1. **Sequential cascade latency.** Line k+1 is entered only at turn k, so: (a) waits SUM
+   instead of overlapping — the task waits out P1's line, then P2's from that moment;
+   parallel registration would wait max, not sum; (b) late FIFO positions — the position
+   in line k+1 reflects turn-k time, not request time, so global request order is not
+   respected across lines (per-line FIFO holds; no starvation); (c) held-line idling —
+   the already-held P1 turn blocks P1's line for the whole downstream wait (inherent to
+   exclusive multi-holds, not to the cascade). Mitigating fact: these are exactly today's
+   `multi_acquire` semantics, so v1 is behavior-neutral. The follow-up — parallel
+   registration under a small multi-push ordering lock (in-line orders made globally
+   consistent, so no cycles) — is evidence-gated.
+2. **Tagged words** (`open`/`closed`/`group_end`/pointer in `next`; the reader bit in
+   `tail`) — concentrated behind named constants and helpers, used nowhere else.
+3. **The graph keeps `remaining_deps`** — two counting systems until the full
+   graph-on-`num_locks` rebase (which this design makes mechanical).
+4. **Residual straggler serialization** — a reader linking onto a still-open run the walk
+   just passed is absorbed by the re-read loop or serialized (never lost); the `group_end`
+   case upgrades to a new head.
+5. **Cancelled tasks still take their turns** (today's semantics); the skip-lines
+   optimization interacts with `pipes_entered` accounting and is deferred.
+6. **Priority never jumps a line** — see the pipe-rebase addendum under TODO D6 (master):
+   the pipe instantiation of priority propagation gets re-expressed on the chain when D6
+   lands.
+7. **Inline nodes on contended objects** now run on whichever thread releases the last
+   turn (previously deferred to the queue when any acquire was contended) — still a
+   documented-nondeterministic thread; noted, not user-visible as a contract change.
 
 ## 7. R6 — `wait_until_idle`
 
@@ -398,22 +531,21 @@ is the waiter.
 
 ## 9. R9 — push-UAF bracket
 
-Registering a new block as an edge on the previous tail lets the previous block complete,
-release the new block, run it, and FREE it before the enqueue returns (UE:
-`// Use-after-free territory, do not touch any of the task's properties here`). Our
-`pipe_enqueue` (and the acquire/reader-join paths) must bracket the push in an `AddRef` /
-`Release` on the pushed block, exactly as UE's `TryUnlock` does. Test G3.
+Entering a line lets the predecessor retire, dispatch the new entry's turn, run and settle
+its owner, and FREE it before the push returns (UE: `// Use-after-free territory`). The
+push path holds its own ref on the entered owner across the whole operation (the caller's
+handle or the line ref taken before the exchange), and the custody chain (5.2B.6) keeps
+every queued predecessor alive. Test G3.
 
-## 10. The seam
+## 10. The seam (narrowed by design)
 
-Preserved verbatim so nothing else in the library changes during the core swap:
-`pipe_enqueue(scheduler, pipe, mode, block, priority)`,
-`pipe_acquire(scheduler, pipe, mode, on_acquired) -> bool`,
-`pipe_release(scheduler, pipe, mode)`,
-`pipe_try_inline(scheduler, pipe, mode, block) -> bool`,
-`Pipe::wait_until_idle()`. `pipe_epoch(pipe)` (the harness grant-epoch source) stays.
-`Deferred`/`Versioned` gain access to the tail-as-last-write handle (§11), which lets the
-`commit_mutex_` go (follow-up), but their public API is untouched.
+Surviving: `Pipe::wait_until_idle()`, `pipe_epoch(pipe)`, `pipe_try_inline` (single-object
+`access` fast path). DELETED flag-on: `pipe_enqueue` as a generic entry (the `async`
+factory binds links and calls `pipe_enter_first`), and `pipe_acquire`/`pipe_release`
+entirely (§6 — reservations dissolved; the graph talks to the pipe only through links).
+The mutex-pipe versions remain under `!TS_PIPE_TAIL` until the default flips.
+`Deferred`/`Versioned` are untouched (they use `Guarded::async`/`access`); the
+tail-as-last-write handle (§11) stays a follow-up.
 
 ## 11. R8 — Deferred/Versioned ordering (follow-up)
 
@@ -462,17 +594,14 @@ crux; race-dense, Windows has no TSan (WSL only), so the hooks + high-iteration 
 the load. The head-walk's O(n) is a latency skew for large groups (rare). The reservation
 path (§6) is a second consumer of the tail and most of the risk after the reader protocol.
 
-## 14. Open questions (for review)
+## 14. Open questions — RESOLVED (2026-08)
 
-1. **§4.3 reader design — A (arrival-join sentinel) vs B (chain + head-walk).** B is
-   recommended: it structurally avoids the R1 load-then-inc UAF (readers only `exchange`,
-   like writers), trading it for a head-reader O(n) walk over UE-proven `AddSubsequent`/
-   `Close` primitives. A needs hazard pointers or a packed-count tail to make line A4 safe.
-   *Author's raw idea = B; analysis says nothing serious against it.* **Decision pending —
-   prototype B first?**
-2. §4.4 elision — under B this is trivial (a lone reader is a group of one, no barrier until
-   a writer arrives, no special case). Confirmed; rides on Q1.
-3. §6 — v1 = (a) minimal (graph untouched behind the seam); (b) is the follow-up. Confirmed.
+1. §4.3 reader design: **B chosen** (author's chain + head-walk), realized as `Pipe_link`
+   (§5.2B) after the further unification round: pipe turns as `num_locks` prerequisites
+   (author's counter scheme), links embedded (author's no-dynamic-alloc requirement).
+2. §4.4 elision: free under the link walk (`n == 1` returns untouched).
+3. §6: superseded — not (a) behind-the-seam, but the full dissolution (§6), because the
+   link model made (b)'s simplification the EASIER path, not the harder one.
 
 Sources: [SNZI (PODC'07)](https://dl.acm.org/doi/10.1145/1281100.1281106) ·
 [Scalable Reader-Writer Locks (SPAA'09)](https://people.csail.mit.edu/mareko/spaa09-scalablerwlocks.pdf) ·
