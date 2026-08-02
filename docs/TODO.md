@@ -325,6 +325,8 @@ IDs — when an item is done, mark it, don't renumber.
    4. `[ ]` **(P2)** Shrink `Task_control_block` — `completed`/`cancelled`→bits; a futex wait primitive roughly halves the 288 B block (ties to platform layer).
    5. `[ ]` **(P3)** Multi-object `async` `std::map`→sorted `vector`.
    6. `[ ]` **(P2)** Opt-in scoped bump arena (auto for `parallel_for`/graph-run, per-frame opt-in); rebase `journal.h` staging onto it.
+   7. `[ ]` **(P1, author 2026-08) Review `continuations`; fold into `successors` (then-as-normal-task) + intrusive edge storage.** `Task_control_block::continuations` (type-erased `move_only_function` callbacks fired at settle) is a THIRD dependency mechanism next to `successors`/`prerequisites` — it predates the `then` rebase and doesn't feel right. Target: `then` launches a normal task everywhere (it already is a real block with the producer as a `num_locks` prerequisite — audit the remaining `attach()` users: `when_all`'s join, multi-async release, `Deferred`/`Versioned` internals) so `continuations` folds into `successors` and the block loses one of its three vectors. Pair with the storage fix (supersedes half of 4.3): a dependent knows its edge count at wiring time, so embed the edge nodes in the DEPENDENT's allocation and thread the producer's successor list intrusively through them (producer holds one head pointer, allocates nothing) — `successors` can never be a fixed array on the producer (fan-in is unbounded), which is exactly why the storage must live dependent-side. Nested-task edges stay dynamic by nature (data-dependent fan-out, count unknowable at allocation). The pipe rebase (1.14, branch `pipe-rebase`) already makes pipe-turn prerequisites vector-free (embedded `Pipe_link`s + the `pipe_count` trigger; no `successors`/`prerequisites` traffic); this item does the same for ordinary edges. Touches `then`/`when_all`/`settle`/retraction — its own project, after the pipe rebase lands.
+   8. `[ ]` **(P2, author 2026-08) Cache-line alignment audit across components.** A systematic pass over every hot shared structure for cache-line placement: separate fields written by different threads onto distinct lines (`alignas(std::hardware_destructive_interference_size)` where warranted), keep fields read/written together on one line, and check array elements for false sharing between adjacent entries. Inventory to cover: `Task_control_block` (the size-ordered cluster is packing-motivated, not sharing-motivated — e.g. `num_locks` (contended decrements) shares a line with `refcount`; check whether that pairing helps or hurts), the rebased `Pipe` (`tail` and `task_count` are both cross-thread hot — same line = every push invalidates every drain check), `Pipe_link` arrays (adjacent links of one task live on one line; different lines' traffic collides — measure before padding, links are per-task not global), scheduler queues/deques (Chase-Lev top/bottom, MPMC slots; `Busy_slot`/`Bucket_row` are already padded — verify the rest), journal slots, `Event_count`. Measure with the existing benchmarks (contention series + R10 pipe fixture) — padding trades memory for isolation, so each change needs a number, not a vibe.
 
 5. **Fork-join / parallel_for**
    1. `[ ]` **(P2) Intra-system entity interactions** — ship the primitive menu: `parallel_gather_apply` (mailbox), `parallel_for_colored` + `Interaction_coloring`, `Accumulator` (commutative), `Union_find` helper, + triage docs. Open author questions. [§D5]
@@ -534,6 +536,15 @@ chains** (donate at launch, bounded, opt-in on the consumer). Caveat: unbounded 
 the high queue and starves background → opt-in/bounded, per-workload. Not OS thread priority
 (syscall cost, permission-gated; a fixed per-pool QoS-background attribute is the only legit
 OS-priority use → platform layer).
+**Pipe-rebase addendum (2026-08):** the tail-chain pipe (1.14, branch `pipe-rebase`) makes
+pipe order strictly FIFO by construction — a task's priority applies at dispatch (queue
+placement once its turn arrives) but never jumps the line, so a high-priority task queued
+behind a long low-priority body waits out the body. That is today's semantics too, but the
+pipe instantiation above ("dispatch head at `max(own, queued-behind)`") must be re-expressed
+on the chain when this item lands: the "head" is now the running link's owner, and propagation
+= walking `next` links backward-in-priority to raise the owner's dispatch priority at its
+turn. Review the interaction then; the chain makes the walk cheap (the links are right there)
+but the raise must happen before the owner's `dispatch_ready` reads `flags.priority`.
 
 ### D7. Senders (P2300)
 Lazy typed sender + receiver + `connect`→op-state (stack-allocatable) + `start`; algorithms fold
