@@ -169,6 +169,41 @@ fatal enforces), never gate a node/run on cross-frame work (nested is gone, so t
 is unexpressible), captures own their data, carry a token. Sugar TODOs: Signal-from-OS
 helper (6.6), per-frame gate idiom (6.7), low-priority resumption default (doc).
 
+### 4.8 Nested graph runs (author-revised: lend, don't fatal)
+
+`co_await inner.execute()` from a node is supported. An **awaited** inner run is strictly
+contained in the outer node's grant window (the outer body is suspended for its duration),
+so overlapping objects are **lent**, not re-acquired: at the call, intersect the inner
+graph's compiled access set with the caller's `Access_context`; every overlap whose held
+mode covers the inner mode (write covers read+write, read covers read) is marked lent for
+the run. Lent objects skip the inner nodes' pipe cascades (a per-run lent-mask); inner
+conflict edges still order inner nodes among themselves on the lent object; inner contexts
+carry the outer's epoch (the inheritance model), so the harness stays live. Recursion
+works by construction (a grand-inner intersects against its caller's context, which
+already holds the lent entries). The pipe never sees the lend — external asyncs queue
+behind the outer's hold exactly as today.
+
+Fatals (each with a companion test):
+1. **Mode-incompatible overlap** — outer holds read, inner contains a writer: a read
+   grant cannot cover a write and upgrading would re-acquire (the deadlock). Restructure:
+   outer declares write, or hoist the writer out of the sub-graph.
+2. **Lending with a non-quiet scope** — unjoined `ts::nested` children (or a second
+   scope-joined run) could race the lent-to inner graph on the same object, both
+   "validly". Rule: a lending `execute()` requires `co_await ts::join_nested()` first
+   (runtime check: implicit-scope count is zero). Conservative; relaxations live on the
+   §10 queue.
+3. **`execute()` while a run is in flight** (same graph) — explicit fatal (the in-flight
+   state already exists for the destructor check).
+
+Un-awaited inner runs are safe **by construction**: the default is auto-join of the
+caller's implicit scope (node completion gates on the run; nothing can float); an explicit
+detach opts out and structurally receives no lends and no inherited context (cross-frame
+rules apply; a detached run overlapping the caller's holds simply queues behind them —
+legal, nondeterministic timing, documented). `writer_owner` stays the outer node under a
+lend, so `commit()` from an inner node hits the existing inherited-grant fatal — same
+contract as scope children. The declared "parameter grants" form (an inner graph asserting
+it expects a lend) demotes to optional future sugar for shipped library sub-graphs.
+
 ## 5. Performance workstream (the price and its payment)
 
 1. **Frame/block fusion first** (TODO 6.2, promoted to the critical path): one allocation
@@ -264,6 +299,31 @@ Not blockers; to be worked through while the stages land:
 5. **Library without static graphs** — the coroutine-first story for users who never
    build a graph: what the pure-dynamic usage model looks like (access verbs + scopes +
    pipes only), what guarantees weaken, what the guide should say.
+
+## 11. Post-initial-implementation action list (author, 2026-08)
+
+Queued behind the §7 stages; numbers reference the nested-graphs review discussion.
+
+1. **Nested graph runs v1** (§4.8): the lend protocol (intersection + lent-mask +
+   epoch-carrying contexts), auto-scope-join default + explicit detach, and the three
+   fatals with companions (mode-incompatible overlap; non-quiet-scope lend; execute
+   while in flight — the last also fixes the currently-unguarded concurrent `execute()`
+   on one graph).
+2. **(3.3) Worker-less nested runs** — inline execution through the serial trampoline;
+   depth bounded by nesting; dedicated test.
+3. **(3.4) Cancellation composition** — the documented pattern: pass the outer node's
+   token into `inner.execute({.token})`; test that outer cancellation drains the inner
+   run.
+4. **(3.5) Trace attribution across nesting** — the inner graph traces its own nodes;
+   audit the outer node's owner-attributed true-busy so inner work is not double-counted
+   in the outer trace's fold.
+5. **(4) Concurrent shared-object graphs validation** — §10 scenario 2 predates the
+   evolved pipe; with per-node admission + globally canonical acquisition it should now
+   be deadlock-free. Dedicated stress (two graphs, overlapping objects, concurrent runs,
+   Rw_probe oracle + TSan); if it holds, relax the task-internals contract line to
+   "safe, nondeterministic cross-graph ordering".
+6. **Parameter-grants sugar** (§4.8 tail) — the declared expects-a-lend form for shipped
+   library sub-graphs; compile-time intent check only, no new mechanism.
 - **Allocation regression window** between stages 3 and the fusion landing — fusion is
   stage 1 for exactly this reason.
 - **MSVC/clang-cl coroutine codegen** — measure early (stage 1 microbench), not assume.
