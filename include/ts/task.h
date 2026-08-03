@@ -306,32 +306,22 @@ struct Task_control_block
     // Unlike a continuation it is NOT consumed, so a reused block (e.g. a re-armed graph
     // node) keeps it across runs -- an alloc-free completion hook. Null for most tasks.
     void (*on_complete)(Task_control_block*) = nullptr;
-    // One-runner claim + reuse generation fused into ONE atomic, so a stale dispatch and
-    // a concurrent `reset()` can't be observed out of order (two separate atomics could,
-    // letting a stale dispatch see the old generation but the new unclaimed state and
-    // wrongly run). Bits [63:1] = generation (bumped by `reset`), bit [0] = body claimed.
-    // A dispatch captures the generation it was queued for and calls `claim(gen)`: exactly
-    // one caller (worker or retractor) wins per generation; a dispatch left stale by a
-    // `reset` (retraction queues a duplicate the reset would otherwise let re-run the
-    // body) fails the CAS and skips.
+    // One-runner claim + re-arm generation fused into ONE atomic. Bits [63:1] =
+    // generation (bumped by `reset` -- `Signal::reset`, the graph's per-run re-arm),
+    // bit [0] = body claimed. A dispatch captures the generation it was queued for and
+    // calls `claim(gen)`. Every run has exactly ONE dispatch (`fetch_sub` values are
+    // unique, so one releaser crosses zero), consumed before the run settles, and
+    // `reset` requires a settled run -- so a claim can never legitimately fail; the CAS
+    // is a machinery-bug detector (fatal under `TS_SAFETY_CHECKS`, skip in shipping),
+    // not a dedup mechanism.
     std::atomic<std::uint64_t> run_state{ 0 };
     // Per-dispatch argument, published by the dispatcher right before handing the block to the
-    // scheduler queue (release; the trampoline's load is the acquire) so the payload need not
-    // ride in the 16-byte `Task_entry` (the work-stealing deque stores those as
-    // `std::atomic<Task_entry>`, lock-free only at two words). Interpreted by the MATCHING
-    // trampoline, so the meanings can't mix:
-    //   - `run_block_dispatch` (bare-scheduler dispatch, `submit_ready`): the reuse GENERATION,
-    //     captured by the releaser BEFORE its `num_locks` decrement (see `release` -- reading it
-    //     after the decrement was a TOCTOU: a releaser delayed past the retract+reset of the run
-    //     it released would stamp the NEXT generation, whose claim then succeeded with
-    //     prerequisites still unmet) and published with a MONOTONIC-MAX CAS (a delayed releaser
-    //     must not regress the slot below a newer round's publish -- that would orphan the newer
-    //     round's dispatch and hang a non-retracting waiter). Every value in the slot is
-    //     therefore a generation whose run genuinely released to zero, so a stale entry reads
-    //     either its own generation (claim fails after a reset) or a newer READY one (safe
-    //     early run; `claim` de-dups) -- `claim` stays the correctness gate.
-    // Pipe tasks dispatch through the same trampoline at generation 0 (their blocks are
-    // never `reset`), so the slot's meaning is uniform.
+    // scheduler queue (release store; the trampoline's load is the acquire) so the payload need
+    // not ride in the 16-byte `Task_entry` (the work-stealing deque stores those as
+    // `std::atomic<Task_entry>`, lock-free only at two words). Carries the generation the
+    // releaser captured at/before its `num_locks` decrement (see `release`). Pipe tasks
+    // dispatch through the same trampoline at generation 0 (their blocks are never `reset`),
+    // so the slot's meaning is uniform.
     std::atomic<std::uint64_t> dispatch_arg{ 0 };
     // The task's pipe entries (docs/pipe-rebase.md §0.2): an array of `pipe_count` links
     // embedded in the owning allocation (`Piped_executable` or the graph's per-node slab),
@@ -381,20 +371,25 @@ struct Task_control_block
     std::vector<Task_ptr> prerequisites;   // backward links, for deep retraction
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
-    // This block's current reuse generation — the high bits of `run_state`, above the
-    // claim bit (`run_state >> 1`). Bumped by `reset()` on each reuse. A dispatch captures
-    // this value and passes it to `claim(gen)`; if `reset` bumped it in the meantime, that
-    // dispatch is stale (a leftover from the prior run) and its claim CAS fails. See
-    // `run_state` / `claim`.
+    // This block's current re-arm generation — the high bits of `run_state`, above the
+    // claim bit (`run_state >> 1`). Bumped by `reset()` on each re-arm. A dispatch
+    // captures this value and passes it to `claim(gen)`. See `run_state`.
     std::uint64_t generation() const noexcept { return run_state.load(std::memory_order_relaxed) >> 1; }
 
-    // Claim the body for `gen`; true if this caller should run it. Fails if already
-    // claimed (another runner) or if `gen` is no longer current (re-armed by `reset`).
+    // Claim the body for `gen`; true if this caller should run it. One dispatch per run
+    // and re-arm only after settle mean failure is impossible in a correct program (see
+    // `run_state`) -- a failed CAS here is a duplicate or stale dispatch, i.e. a
+    // machinery bug: fatal under `TS_SAFETY_CHECKS`, degrade to a skip in shipping.
     bool claim(std::uint64_t gen) noexcept
     {
         std::uint64_t expected = gen << 1;
-        return run_state.compare_exchange_strong(
+        const bool ok = run_state.compare_exchange_strong(
             expected, (gen << 1) | 1u, std::memory_order_acq_rel, std::memory_order_relaxed);
+#if TS_SAFETY_CHECKS
+        if (!ok)
+            ts::fatal("Task_control_block::claim failed -- duplicate or stale dispatch (machinery bug)");
+#endif
+        return ok;
     }
 
     void complete() { settle(false); }
@@ -489,10 +484,10 @@ struct Task_control_block
             succs = std::move(successors);
             prereqs = std::move(prerequisites);
             // Read `result_ptr` for the continuations HERE, under the lock -- not after the
-            // notify below. Otherwise a reusable task's `sync()` (woken by the notify) can
-            // `reset()` + relaunch and the new run overwrites `result_ptr` while this settle
-            // tail still reads it (a data race the reuse stress hits under TSan). The moved-out
-            // `conts`/`succs` are local, so firing them after the notify is fine.
+            // notify below. Otherwise a re-armable block's waiter (woken by the notify) can
+            // `reset()` + re-run and the new run overwrites `result_ptr` while this settle
+            // tail still reads it (a data race under TSan). The moved-out `conts`/`succs`
+            // are local, so firing them after the notify is fine.
             r = cancel_ ? nullptr : result_ptr;
         }
         done_cv.notify_all();   // `completed` set under the lock above: no lost wakeup
@@ -523,10 +518,10 @@ struct Task_control_block
         done_cv.wait(lock, [this] { return completed; });
     }
 
-    // Re-arm this settled block for another run (reuse — see `Task_builder::reset` /
-    // `Signal::reset`). `successors`/`prerequisites`/`continuations` were drained by
-    // `settle`, and the result storage is overwritten by the next run's body, so only
-    // the completion scalars reset here. Leaves `num_locks` at 0 (the caller re-applies
+    // Re-arm this settled block for another run (`Signal::reset`, the graph's per-run
+    // re-arm). `successors`/`prerequisites`/`continuations` were drained by `settle`,
+    // and the result storage is overwritten by the next run's body, so only the
+    // completion scalars reset here. Leaves `num_locks` at 0 (the caller re-applies
     // any launch lock). Precondition: settled and quiescent — one run in flight, prior
     // result consumed; the `ready` gate rejects re-arming a task that has not settled.
     void reset()
@@ -712,7 +707,7 @@ struct Executable
     static void run(const Task_ptr& c, std::uint64_t gen)
     {
         if (!c->claim(gen))
-            return;   // claimed by another runner, or stale after a reset
+            return;   // machinery bug (fatal under TS_SAFETY_CHECKS); skip in shipping
 
         auto* self = reinterpret_cast<Executable*>(c.get());
         if (c->token.is_cancel_requested() || c->prereq_cancelled.load(std::memory_order_acquire))
@@ -894,8 +889,8 @@ public:
 
     // Blocks until the task settles and returns its result **by `const&`** (non-consuming):
     // any number of readers may `sync()` the same task (returns `const R&` for a value task,
-    // `void` for a void one). The reference is valid while a handle (this `Task`, or the
-    // `Task_builder` / another copy) keeps the block alive; `T r = t.sync()` copies within the
+    // `void` for a void one). The reference is valid while a handle (this `Task` or
+    // another copy) keeps the block alive; `T r = t.sync()` copies within the
     // full-expression and is always safe. To *move* the result out (ownership handoff, or a
     // move-only `R`) use `take()`. For a value task, fatal if it was cancelled (no result) —
     // check `is_cancelled()` first; a cancelled `void` sync() simply returns.

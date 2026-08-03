@@ -68,7 +68,7 @@ void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closur
 }
 
 // Trampoline for a queued block dispatch: the block travels as the entry's `data_` (its ref
-// adopted from the queue), the reuse generation via the block's `dispatch_arg`. No heap
+// adopted from the queue), the generation via the block's `dispatch_arg`. No heap
 // closure -- the block IS the payload -- so a bare task dispatch allocates nothing beyond its
 // own block (killing the per-dispatch `submit_closure` alloc that hit every queued task).
 static void run_block_dispatch(void* data)
@@ -76,8 +76,8 @@ static void run_block_dispatch(void* data)
     Task_ptr block(static_cast<Task_control_block*>(data), Adopt_ref{});   // adopt the queued ref
     std::uint64_t gen = block->dispatch_arg.load(std::memory_order_acquire);
     if (block->execute)
-        block->execute(block, gen);              // claims `gen` internally (dedup + stale-skip)
-    else if (block->claim(gen))                  // bodyless: claim so a stale/duplicate no-ops
+        block->execute(block, gen);              // claims `gen` internally
+    else if (block->claim(gen))                  // bodyless: claim guards against machinery bugs
         block->complete();
 }   // `block` decrements here -> releases the ref the queue held
 
@@ -86,26 +86,12 @@ static void run_block_dispatch(void* data)
 //
 // `gen` was captured by the RELEASER at/before the `num_locks` decrement that hit zero (see
 // `release`), so it names the run that actually became ready -- it is never re-read here.
-// Re-reading `generation()` at this point was the premature-dispatch TOCTOU: a releaser
-// preempted between its decrement and this call can wake AFTER the run it released was
-// retracted, consumed, and re-armed -- the re-read stamped the NEXT generation, whose claim
-// then succeeded while that round's prerequisites were still unmet (captured live by
-// tsan/reuse_hunt.sh: 112/400 iterations on a plain 2-core-pinned build).
+// One dispatch per run and re-arm only after settle (see `run_state`) mean the slot holds
+// at most one live value at a time, so a plain release store publishes it.
 void submit_ready(Task_ptr block, std::uint64_t gen)
 {
     Priority priority = block->flags.priority;
-    // Publish `gen` with a MONOTONIC-MAX CAS, not a plain store: the same delayed releaser
-    // must not regress `dispatch_arg` below a newer round's publish (that would orphan the
-    // newer round's dispatch -- both entries would fail `claim`, and a non-retracting waiter
-    // would hang). Generations only increase, so max is sound; the loop is per-dispatch
-    // (cold) and virtually always uncontended. Invariant: every value in `dispatch_arg` is a
-    // generation whose run genuinely released to zero, so a popped entry reads either its own
-    // gen (claim fails after a reset) or a newer READY one (safe early run; claim de-dups).
-    std::uint64_t cur = block->dispatch_arg.load(std::memory_order_relaxed);
-    while (cur < gen && !block->dispatch_arg.compare_exchange_weak(
-               cur, gen, std::memory_order_release, std::memory_order_relaxed))
-    {
-    }
+    block->dispatch_arg.store(gen, std::memory_order_release);
     // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
     global_scheduler().submit(&run_block_dispatch, block.release(), priority);
 }
