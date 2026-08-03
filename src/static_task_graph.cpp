@@ -641,11 +641,17 @@ Task<void> Static_task_graph::execute(Execution_options opts)
         for (std::uint8_t k = 0; k < b.pipe_count; ++k)
         {
             detail::Pipe_link& l = b.pipe_links[k];
-            l.next.store(detail::link_open, std::memory_order_relaxed);
+            // Bump the reuse tenure FIRST (§5.2B.8): the slot reopens under the new
+            // tenure's word, so a pusher that straddled this re-arm fails its slot CAS
+            // (and the tail's era bits catch it even earlier).
+            std::uint32_t tenure = l.tenure.load(std::memory_order_relaxed) + 1;
+            l.tenure.store(tenure, std::memory_order_relaxed);
+            l.next.store(detail::link_open_word(tenure), std::memory_order_relaxed);
             l.prev_owner = nullptr;
             l.group_target.store(nullptr, std::memory_order_relaxed);
             l.gate.store(0, std::memory_order_relaxed);
             l.join_pin.store(0, std::memory_order_relaxed);
+            l.turn_claim.store(0, std::memory_order_relaxed);
             l.role.store(detail::Link_role::serial, std::memory_order_relaxed);
         }
 #else

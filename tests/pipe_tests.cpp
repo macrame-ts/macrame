@@ -1,10 +1,14 @@
 #include "pipe_tests.h"
 #include "ts/guarded.h"
 #include "ts/scheduler.h"
+#include "ts/static_task_graph.h"
 #include "harness.h"
 #include "test_util.h"
 
 #include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <thread>
 #include <vector>
 
@@ -291,6 +295,125 @@ void test_worker_less_deep_chain()
     TS_CHECK(read_int(d) == n);
 }
 
+// E5-shape hammer (the tsan `stress_pipe_reservation` shape, natively): repeated graph
+// runs over shared objects while spinning threads fire async reads/writes at the same
+// objects. Guards the graph-links + reader-run + join interplay under real contention;
+// completion of every run and async (no hang, no invariant break) is the assertion.
+void test_graph_async_hammer()
+{
+    ts::Guarded<Rw_probe> a, b;
+    ts::Static_task_graph g;
+    g.add_node([](Rw_probe& p) { p.observe_write(1); }, a);
+    g.add_node([](const Rw_probe& p) { p.observe_read(2); }, a);
+    g.add_node([](Rw_probe& p) { p.observe_write(3); }, b);
+    g.compile();
+
+    std::atomic<bool> stop{ false };
+    std::vector<std::thread> hammers;
+    for (int t = 0; t < 3; ++t)
+    {
+        hammers.emplace_back([&a, &b, &stop, t]
+        {
+            std::uint32_t s = static_cast<std::uint32_t>(t) * 7919u;
+            while (!stop.load(std::memory_order_relaxed))
+            {
+                a.async([s](const Rw_probe& p) { p.observe_read(s); });
+                b.async([s](Rw_probe& p) { p.observe_write(s); });
+                ++s;
+            }
+        });
+    }
+#if TS_PIPE_TAIL
+    // TEMP DIAGNOSTIC: bounded sync + state dump on hang (revert after the hang is fixed).
+    // Tail-only fields, so the whole diagnostic (and the bounded-sync loop using it) is
+    // gated; the flag-off build runs the plain loop below.
+    auto dump_link = [](const char* tag, ts::detail::Pipe_link* l)
+    {
+        std::printf("    %s link=%p: mode=%d role=%d gate=%u next=%p tenure=%u claim=%d pin=%d idx=%d",
+            tag, static_cast<void*>(l), static_cast<int>(l->mode), static_cast<int>(l->role.load()),
+            l->gate.load(), reinterpret_cast<void*>(l->next.load()), l->tenure.load(),
+            static_cast<int>(l->turn_claim.load()), static_cast<int>(l->join_pin.load()),
+            static_cast<int>(l->index));
+        if (l->owner)
+            std::printf(" | owner=%p locks=%08x entered=%d pcount=%d ready=%d",
+                static_cast<void*>(l->owner), l->owner->num_locks.load(),
+                static_cast<int>(l->owner->pipes_entered), static_cast<int>(l->owner->pipe_count),
+                static_cast<int>(l->owner->ready.load()));
+        std::printf("\n");
+    };
+    auto dump_pipe = [&dump_link](const char* name, ts::detail::Pipe& p)
+    {
+        std::uintptr_t tw = p.tail.load();
+        std::printf("  pipe %s: tail=%p count=%u\n", name, reinterpret_cast<void*>(tw), p.task_count.load());
+        if (tw == 0)
+            return;
+        // Walk the custody chain backward to the FRONT of the line (each link's
+        // `prev_owner` names its predecessor's block; find that block's link on this
+        // pipe). The front region of a stuck line is quiescent, so this is safe enough
+        // for a post-mortem dump.
+        auto* l = reinterpret_cast<ts::detail::Pipe_link*>(tw & ~static_cast<std::uintptr_t>(63));
+        long depth = 0;
+        while (depth < 50000000)
+        {
+            ts::detail::Task_control_block* prev = l->prev_owner;
+            if (prev == nullptr)
+                break;
+            ts::detail::Pipe_link* pl = nullptr;
+            for (std::uint8_t k = 0; k < prev->pipe_count; ++k)
+            {
+                if (prev->pipe_links[k].pipe == &p)
+                {
+                    pl = &prev->pipe_links[k];
+                    break;
+                }
+            }
+            if (pl == nullptr)
+                break;
+            l = pl;
+            ++depth;
+        }
+        std::printf("    depth-from-tail=%ld\n", depth);
+        dump_link("front", l);
+        // And the front's forward chain, a few hops.
+        for (int hop = 0; hop < 3; ++hop)
+        {
+            std::uintptr_t nx = l->next.load();
+            if (nx == 0 || (nx & 3) != 0)
+            {
+                std::printf("    next-word=%p\n", reinterpret_cast<void*>(nx));
+                break;
+            }
+            l = reinterpret_cast<ts::detail::Pipe_link*>(nx);
+            dump_link("fwd", l);
+        }
+    };
+    for (int r = 0; r < 60; ++r)
+    {
+        ts::Task<void> run = g.execute();
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+        while (!run.is_done() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        if (!run.is_done())
+        {
+            std::printf("HAMMER HANG at run %d\n", r);
+            dump_pipe("a", ts::detail::Guarded_access::pipe(a));
+            dump_pipe("b", ts::detail::Guarded_access::pipe(b));
+            std::fflush(stdout);
+            std::_Exit(3);
+        }
+    }
+#else
+    for (int r = 0; r < 60; ++r)
+        g.execute().sync();
+#endif
+    stop.store(true, std::memory_order_relaxed);
+    for (auto& h : hammers)
+        h.join();
+
+    TS_CHECK(!probe_violated(a));
+    TS_CHECK(!probe_violated(b));
+}
+
 // --- J: priority ----------------------------------------------------------
 
 // J1: pipe order is not reordered by priority -- a low-priority write followed by a
@@ -318,6 +441,7 @@ void run_pipe_tests()
     run("last decrement lifetime", test_last_decrement_lifetime);
     run("push uaf churn", test_push_uaf_churn);
     run("cancelled writer advances", test_cancelled_writer_advances);
+    run("graph async hammer", test_graph_async_hammer);
     run("worker-less deterministic", test_worker_less_deterministic);
     run("worker-less deep chain", test_worker_less_deep_chain);
     run("priority does not reorder", test_priority_does_not_reorder);

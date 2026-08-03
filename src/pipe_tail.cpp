@@ -30,18 +30,25 @@ namespace detail
 namespace
 {
 
-// The pipe tail is a tagged `Pipe_link*`: bit 0 = 1 for a reader entry (so a pusher can
-// classify its predecessor from the exchanged word alone), whole word 0 = idle. The `next`
-// words use the sentinels from pipe_link.h. All tagging lives in these helpers.
+// The pipe tail is a tagged `Pipe_link*` (links are 64-aligned -> 6 low bits): bit 0 = 1
+// for a reader entry (a pusher classifies its predecessor from the exchanged word alone),
+// bits 1-5 = the link's tenure mod 32 at push time (the reuse-era stamp, §5.2B.8), whole
+// word 0 = idle. All tagging lives in these helpers.
 constexpr std::uintptr_t tail_reader_bit = 1;
+constexpr std::uintptr_t tail_tag_mask = 63;
 
 std::uintptr_t pack_tail(const Pipe_link* l)
 {
-    return reinterpret_cast<std::uintptr_t>(l) | (l->mode == Access::read_only ? tail_reader_bit : 0);
+    std::uintptr_t era = (l->tenure.load(std::memory_order_relaxed) & 31u) << 1;
+    return reinterpret_cast<std::uintptr_t>(l) | era | (l->mode == Access::read_only ? tail_reader_bit : 0);
 }
 Pipe_link* tail_link(std::uintptr_t word)
 {
-    return reinterpret_cast<Pipe_link*>(word & ~tail_reader_bit);
+    return reinterpret_cast<Pipe_link*>(word & ~tail_tag_mask);
+}
+std::uint32_t tail_era(std::uintptr_t word)
+{
+    return static_cast<std::uint32_t>((word >> 1) & 31u);
 }
 
 void link_turn(Pipe_link& l);
@@ -93,7 +100,7 @@ bool try_join(Pipe_link& p, Pipe_link& j)
         return false;
     }
 
-    // Commit: conditionally increment the run's gate; 0 means the run is retiring.
+    // Commit half 1: conditionally increment the run's gate; 0 means the run is retiring.
     std::uint32_t g = head->gate.load(std::memory_order_acquire);
     for (;;)
     {
@@ -106,13 +113,28 @@ bool try_join(Pipe_link& p, Pipe_link& j)
             break;
     }
 
+    // Commit half 2: claim j's turn. The head's walk may be claiming j concurrently (j
+    // chained behind a link the walk is traversing); exactly one source may fire the turn
+    // and account the gate unit. Losing means the walk has j: return our spare gate unit
+    // (safe -- the walk's unit for j is outstanding, so the gate cannot hit zero here).
+    std::uint8_t claim = 0;
+    if (!j.turn_claim.compare_exchange_strong(claim, 1, std::memory_order_acq_rel, std::memory_order_acquire))
+    {
+        head->gate.fetch_sub(1, std::memory_order_acq_rel);
+        p.join_pin.store(0, std::memory_order_release);
+        return false;   // the walk fires our turn
+    }
+
     intrusive_inc(head->owner);   // the joiner's ref on the head (released at departure)
-    // Publish j's own group fields BEFORE the pin release (the next joiner reads them
-    // through its pin-acquire on j), and extend the run's retire point to j -- j is the
-    // chain's newest entry (the tail handed its predecessor to j), so the run now ends here.
+    // ORDER INVARIANT (retire-point monotonicity): extend the run's retire point to j
+    // BEFORE publishing j as a member. Any later extender first observes membership
+    // (role acquire), so its own extension is coherence-later -- the retire point can only
+    // move forward along the chain. The reverse order let an extension through j land
+    // before this one, REGRESSING the retire point: the run then retired at a stale link,
+    // and the true chain end's successors never got their turns (a permanent line wedge).
     j.group_target.store(head, std::memory_order_relaxed);
-    j.role.store(Link_role::member, std::memory_order_release);
     head->group_target.store(&j, std::memory_order_release);
+    j.role.store(Link_role::member, std::memory_order_release);
     p.join_pin.store(0, std::memory_order_release);
 
     link_turn(j);   // the joined turn: fires now, overlapping the run
@@ -149,19 +171,34 @@ void pipe_enter_link(Pipe_link& l)
     // `l` itself may already be settling -- touch neither `l` nor `prev` again).
     intrusive_inc(prev_owner);
 
+    // Reuse-era gate (§5.2B.8): the exchange stamped the tenure the predecessor had when
+    // it was pushed; a mismatch with its CURRENT tenure means we straddled a re-arm --
+    // the tenure we queued behind has provably retired, so the line is ours now. (The
+    // current tenure is stable for a same-era pusher: re-arm requires run quiescence.)
+    std::uint32_t prev_tenure = prev.tenure.load(std::memory_order_acquire);
+    if ((prev_tenure & 31u) != tail_era(prev_word))
+    {
+        intrusive_dec(prev_owner);   // drop the pusher's pin (custody ref remains)
+        link_turn(l);
+        return;
+    }
+    const std::uintptr_t expected_open = link_open_word(prev_tenure);
+
     for (;;)
     {
         std::uintptr_t cur = prev.next.load(std::memory_order_acquire);
-        if (cur == link_closed)
+        if (cur == link_closed || (cur != expected_open && (cur & 3) == 1))
         {
+            // Retired -- or an open word of ANOTHER tenure (we straddled a re-arm after
+            // the era gate; the same staleness, caught by the full-width tenure).
             intrusive_dec(prev_owner);   // drop the pusher's pin (custody ref remains)
-            link_turn(l);   // predecessor already retired: the line is ours
+            link_turn(l);   // the line is ours
             return;
         }
-        if (cur != link_open)
+        if (cur != expected_open)
         {
-            // A real link in the predecessor's slot is impossible: only the unique
-            // tail-exchanger of `prev` links there, and that is us.
+            // A real link in a CURRENT-tenure predecessor's slot is impossible: only the
+            // unique tail-exchanger of `prev` links there, and that is us.
             ts::fatal("pipe: foreign link in the predecessor's successor slot");
         }
         TS_PIPE_RACE_DELAY(push_link);
@@ -178,51 +215,42 @@ void pipe_enter_link(Pipe_link& l)
     }
 }
 
-// The front reader's walk: arm this link as the run's head, then fire the turns of the
-// readers already chained behind it. Allocation-free -- two passes over the chain itself.
-// Late arrivals are covered by `try_join` (during and after the walk); a reader that
-// slips into the chain between the passes at worst waits serially for the run's retire.
+// The front reader's walk: arm this link as the run's (joinable) head, then claim and
+// fire the turns of the readers chained behind it, one at a time. Allocation-free -- a
+// single pass over the chain. Every claimed member's gate unit is added BEFORE its turn
+// fires (the gate cannot drain during the walk anyway: the head's own departure is
+// pending). The walk STOPS at the first claim it loses -- that link joined on its own,
+// which means it is turned and everything beyond is join territory; a reader that misses
+// both paths waits serially and is dispatched by the run's retire.
 void walk_group(Pipe_link& head)
 {
-    // Arm FIRST: a joiner may arrive the moment the gate goes nonzero, and the walked
-    // members below depart through these fields.
+    // Arm FIRST: a joiner may arrive the moment the gate goes nonzero.
     head.group_target.store(&head, std::memory_order_relaxed);
     head.role.store(Link_role::head, std::memory_order_release);
     head.gate.store(1, std::memory_order_release);
 
-    // Pass 1: measure the contiguous reader run chained behind the head.
-    Pipe_link* last = &head;
-    std::uint32_t members = 0;
+    Pipe_link* m = &head;
     for (;;)
     {
-        std::uintptr_t nx = last->next.load(std::memory_order_acquire);
+        std::uintptr_t nx = m->next.load(std::memory_order_acquire);
         if (!is_link_word(nx) || link_of(nx)->mode != Access::read_only)
-            break;   // chain end, or a writer's link (waits for the run's retire)
-        last = link_of(nx);
-        ++members;
-    }
-    if (members == 0)
-        return;   // lone (so far) -- joiners may still attach through the armed gate
+            return;   // chain end, or a writer's link (dispatched by the run's retire)
+        m = link_of(nx);
 
-    // Account the members before any of their turns can depart, and extend the retire
-    // point to the run's newest link.
-    head.gate.fetch_add(members, std::memory_order_acq_rel);
-    head.group_target.store(last, std::memory_order_release);
+        std::uint8_t claim = 0;
+        if (!m->turn_claim.compare_exchange_strong(claim, 1, std::memory_order_acq_rel, std::memory_order_acquire))
+            return;   // `m` joined on its own -- turned already; the join chain owns the rest
 
-    // Pass 2: re-traverse and fire the member turns. Grab-next before dispatching (a
-    // dispatched member may settle immediately but never touches its own `next`; the run
-    // cannot retire during the walk -- the head's own departure is pending).
-    Pipe_link* m = link_of(head.next.load(std::memory_order_acquire));
-    for (;;)
-    {
-        Pipe_link* nxt = (m == last) ? nullptr : link_of(m->next.load(std::memory_order_acquire));
+        head.gate.fetch_add(1, std::memory_order_acq_rel);            // m's unit, before m's turn
+        // Retire point BEFORE membership -- the same order invariant as `try_join` (a
+        // joiner through `m` must observe the point at `m` before extending past it).
         m->group_target.store(&head, std::memory_order_relaxed);
+        head.group_target.store(m, std::memory_order_release);
         m->role.store(Link_role::member, std::memory_order_release);
         intrusive_inc(head.owner);   // the member's ref on the head (released at departure)
         link_turn(*m);
-        if (m == last)
-            break;
-        m = nxt;
+        // Reading m->next after m's turn is safe: a member's departure never touches its
+        // own `next`, and the run cannot retire while the head's departure is pending.
     }
 }
 

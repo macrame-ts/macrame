@@ -376,6 +376,38 @@ straggler's `group_end -> me` CAS vs group retirement (`group_end -> closed`), a
 drain last-decrement (§7). `TS_PIPE_RACE_DELAY` hooks sit at the walk close and the push
 link-CAS.
 
+#### 5.2B.8 Link reuse across graph runs — the tenure/era ABA (implemented fix)
+
+The graph re-arms its links per run; an out-of-band async pusher can straddle the
+re-arm: it exchanges the tail in tenure g (getting the node's link as predecessor),
+stalls, and completes its slot-CAS against the RE-OPENED slot of tenure g+1 — linking
+into the wrong tenure. The new node meanwhile chained behind the pusher's stale tail
+position, closing a wait cycle: a reliable native deadlock (~60% per suite run in the
+`graph async hammer` test). One-shot async links cannot hit this (no reuse).
+
+Two-layer fix, both keyed on a per-link `tenure` counter bumped at re-arm:
+
+1. **Era bits in the tail word** — the pusher's staleness is decided by ONE atomic: the
+   tail exchange. `Pipe_link` is alignas(64) (also kills false sharing between slab
+   neighbours), freeing 6 low bits: bit 0 = reader tag, bits 1–5 = the link's tenure
+   mod 32 at push time. After the exchange the pusher compares the word's era against
+   the predecessor's current tenure: a mismatch means the predecessor tenure it queued
+   behind has provably retired — run immediately (the custody adoption stays balanced:
+   the old tenure's line ref transferred at the exchange and is released at the
+   pusher's advance, exactly as the retired-predecessor branch).
+2. **Tenure in the `next` open word** — `open(tenure) = (tenure << 2) | 1`, so a slot
+   CAS from a stale read fails against the re-armed word regardless of timing; any
+   unexpected slot value (closed, other-tenure open, foreign link) resolves to
+   run-now when the era check said stale, and remains the invariant fatal when it
+   said current.
+
+Residual (documented, accepted): the era is mod 32, so a pusher preempted across an
+exact multiple of 32 re-arms of the same link, waking inside the reopened window, could
+still mis-link — that requires 32 complete graph runs (with their `sync()` barriers)
+inside one preempted push. The full-width tenure in the open word narrows it further to
+that pusher also CASing a stale-read word. Comparable to accepted non-wrap assumptions
+elsewhere; revisit only if a 128-bit tail (DWCAS) ever becomes warranted.
+
 ### 5.5 Pipes are entered last (invariant)
 
 A task enters a pipe's line only when its pipe turns are its only unmet locks: the
