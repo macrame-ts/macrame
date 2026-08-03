@@ -671,10 +671,49 @@ inline void intrusive_inc(Task_control_block* p) noexcept
 {
     p->refcount.fetch_add(1, std::memory_order_relaxed);
 }
+// Bounded destruction trampoline. A block's destruction can release references to other
+// blocks (a fused coroutine frame owns its `Task` parameters and promise state; a builder
+// chain's blocks reference their prerequisites), so a deep chain destroyed recursively --
+// dec -> destroy -> member dec -> destroy -> ... -- overflows the stack (a 50k-deep await
+// cascade did, under TSan). The last release pushes instead, and the outermost drain
+// destroys iteratively (O(1) stack); the vector retains capacity, so the steady state
+// allocates nothing.
+// Trivially-destructible on purpose: releases can run during thread/process teardown
+// (scheduler drain, TLS destructors), after a non-trivial thread-local's destructor would
+// already have run -- a `std::vector` here crashed at exit under TSan. The small buffer is
+// deliberately leaked at thread exit.
+struct Destroy_queue
+{
+    Task_control_block** items = nullptr;
+    std::size_t size = 0;
+    std::size_t cap = 0;
+    bool draining = false;
+};
+inline thread_local Destroy_queue destroy_queue;
+
 inline void intrusive_dec(Task_control_block* p) noexcept
 {
-    if (p->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1)
-        p->destroy(p);
+    if (p->refcount.fetch_sub(1, std::memory_order_acq_rel) != 1)
+        return;
+    Destroy_queue& q = destroy_queue;
+    if (q.size == q.cap)
+    {
+        std::size_t new_cap = q.cap == 0 ? 16 : q.cap * 2;
+        auto** grown = new Task_control_block*[new_cap];
+        for (std::size_t i = 0; i < q.size; ++i)
+            grown[i] = q.items[i];
+        delete[] q.items;
+        q.items = grown;
+        q.cap = new_cap;
+    }
+    q.items[q.size++] = p;
+    if (q.draining)
+        return;   // the active drain on this thread destroys it -- don't recurse
+    q.draining = true;
+    for (std::size_t head = 0; head < q.size; ++head)
+        q.items[head]->destroy(q.items[head]);   // may push more
+    q.size = 0;   // buffer retained
+    q.draining = false;
 }
 
 // Result storage composed around the monomorphic block. `core` is the FIRST member so

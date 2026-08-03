@@ -1,4 +1,5 @@
 #include "integration_tests.h"
+#include "ts/coroutine_support.h"
 #include "ts/guarded.h"
 #include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
@@ -35,8 +36,9 @@ int read_value(ts::Guarded<int>& d)
     return d.async([](const int& v) { return v; }).sync();
 }
 
-// `then()` chained off the graph's `execute()` completion handle.
-void test_then_off_graph_completion()
+// The graph's completion handle awaited from a coroutine -- the coroutine-first spelling
+// of the old `then`-off-`execute()` chain.
+void test_await_graph_completion()
 {
     ts::Guarded<int> a{ 0 };
     ts::Static_task_graph g;
@@ -44,21 +46,28 @@ void test_then_off_graph_completion()
     g.compile();
 
     std::atomic<bool> after{ false };
-    g.execute().then([&after] { after.store(true); }).sync();
+    [](ts::Static_task_graph& graph, std::atomic<bool>& flag) -> ts::Task<void>
+    {
+        co_await graph.execute();
+        flag.store(true);
+    }(g, after).sync();
 
     TS_CHECK(after.load());
     TS_CHECK(read_value(a) == 5);
 }
 
-// `when_all` over async results, feeding a value into a graph run.
-void test_when_all_into_graph()
+// Joining async results into a graph run -- the coroutine-first spelling of the old
+// `when_all(...).then(...)` join: the accesses run concurrently (eager), sequential awaits
+// complete when the last does.
+void test_await_join_into_graph()
 {
     ts::Guarded<int> a{ 2 }, b{ 3 };
-    int sum = ts::when_all(
-            a.async([](const int& v) { return v; }),
-            b.async([](const int& v) { return v; }))
-        .then([](std::tuple<int, int>& r) { return std::get<0>(r) + std::get<1>(r); })
-        .sync();
+    int sum = [](ts::Guarded<int>& ga, ts::Guarded<int>& gb) -> ts::Task<int>
+    {
+        ts::Task<int> ra = ga.async([](const int& v) { return v; });
+        ts::Task<int> rb = gb.async([](const int& v) { return v; });
+        co_return co_await ra + co_await rb;
+    }(a, b).sync();
 
     ts::Guarded<int> c{ 0 };
     ts::Static_task_graph g;
@@ -800,8 +809,8 @@ void test_parallel_for_in_node_no_reports()
 void run_integration_tests()
 {
     std::printf("\n[integration] tests\n");
-    run("then off graph completion", test_then_off_graph_completion);
-    run("when_all into graph", test_when_all_into_graph);
+    run("await graph completion", test_await_graph_completion);
+    run("await join into graph", test_await_join_into_graph);
     run("graph then dynamic", test_graph_then_dynamic);
     run("graph/async no overlap (during)", test_graph_async_no_overlap_during);
     run("graph/async no overlap (before)", test_async_before_graph_no_overlap);

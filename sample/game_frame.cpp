@@ -52,6 +52,7 @@
 #include "ts/deferred.h"
 #include "ts/guarded.h"
 #include "ts/parallel_for.h"
+#include "ts/coroutine_support.h"
 #include "ts/static_task_graph.h"
 #include "ts/task.h"
 #include "ts/versioned.h"
@@ -700,21 +701,24 @@ void tick_streaming(ts::Guarded<Asset_source>& asset_source, const Input& input,
     read_all(input);
     fill(assets, 1.0f);
 
-    auto load = [](const Asset_source& src) { spin(0.2); return src.size() > 0 ? src.get(0) : 1.0f; };
-    auto process = [](float) { streamed.fetch_add(1, std::memory_order_relaxed); };
-
-    ts::Task<float> a = asset_source.async(load);
-    ts::Task<float> b = asset_source.async(load);
-    ts::Task<float> c = asset_source.async(load);
-    ts::Task<float> d = asset_source.async(load);
-    a.then(process);
-    b.then(process);
-    c.then(process);
-    d.then(process);
-    ts::when_all(a, b, c, d).then([](std::tuple<float, float, float, float>&)
+    // Coroutine-first: the four loads fire eagerly and run concurrently; the coroutine
+    // processes each as it is awaited and counts the batch after the last -- the linear
+    // spelling of the old then/when_all chain. Created fire-and-forget (the returned handle
+    // is dropped): the frame owns itself until it completes, possibly after this node -- it
+    // touches only the pipe API and atomics, so no inherited grant can go stale.
+    [](ts::Guarded<Asset_source>& src) -> ts::Task<void>
     {
+        auto load = [](const Asset_source& s) { spin(0.2); return s.size() > 0 ? s.get(0) : 1.0f; };
+        ts::Task<float> a = src.async(load);
+        ts::Task<float> b = src.async(load);
+        ts::Task<float> c = src.async(load);
+        ts::Task<float> d = src.async(load);
+        co_await a; streamed.fetch_add(1, std::memory_order_relaxed);
+        co_await b; streamed.fetch_add(1, std::memory_order_relaxed);
+        co_await c; streamed.fetch_add(1, std::memory_order_relaxed);
+        co_await d; streamed.fetch_add(1, std::memory_order_relaxed);
         batches.fetch_add(1, std::memory_order_relaxed);
-    });
+    }(asset_source);
 
     spin(budget::streaming);
 }
@@ -1230,7 +1234,7 @@ void run_game_frame_sample(int frames, float scale)
         avg_ms, serial_ms, workers, ideal_ms, 100.0 * ideal_ms / avg_ms);
     std::printf("  peak %d concurrent nav queries, %d early-outed on cancel\n",
         nav_peak.load(), nav_early.load());
-    std::printf("  streamed %d assets via then, %d batches via when_all\n",
+    std::printf("  streamed %d assets, %d batches via a fire-and-forget coroutine\n",
         streamed.load(), batches.load());
     std::printf("  %lld draw commands staged/written by producers, applied by submit\n",
         drawn.load());
