@@ -63,7 +63,9 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
 - [ ] Set the GitHub description + topics (discoverability).
 - [ ] Confirm Actions runs on the public repo and the README badges render for anonymous viewers.
 - [ ] Optional: branch protection on `master` (require CI green to merge).
-- [ ] Tag `v0.1.0` and cut a GitHub release.
+- [ ] Tag `v0.2.0` and cut a GitHub release. (0.1.0 was never tagged; the coroutine-first
+      and pipe transformations landed on top of it, so the first release is 0.2.0 —
+      see [CHANGELOG.md](../CHANGELOG.md).)
 
 ## Trailing (fine to do in the open)
 

@@ -57,7 +57,8 @@ death tests), documented, and CI-gated.
   offenders are gone with the verbs themselves; re-baseline `mem_profile` on the coroutine
   shapes (10.14 territory).
 - **Build / public-prep** — MIT license, whole lib in `ts::`, CMake + presets, CI
-  (MSVC / clang-cl / Linux-TSan), Shipping config (`TS_SAFETY_CHECKS=0`), v0.1.0,
+  (MSVC / clang-cl / Linux-TSan), Shipping config (`TS_SAFETY_CHECKS=0`), v0.2.0
+  (+ [CHANGELOG.md](../CHANGELOG.md); 0.1.0 was never tagged),
   `ts.h` umbrella, `.clang-format`, `CONTRIBUTING` + issue/PR templates.
 
 ---
