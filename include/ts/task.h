@@ -27,9 +27,9 @@ namespace ts
 template<typename R> class Task;
 
 // Cooperative cancellation. A `Cancellation_source` owns the request flag; hand its
-// `token()` to `async`/`then`/`Static_task_graph::execute`. Cancellation is checked
+// `token()` to `async`/`launch`/`Static_task_graph::execute`. Cancellation is checked
 // when a task/node is about to run (not-yet-started work is skipped) and propagates
-// down continuations and graph successors as a completion state (see `is_cancelled`).
+// down awaiting coroutines and graph successors as a completion state (see `is_cancelled`).
 // A default-constructed token is never cancelled. For a *push* notification (wake work
 // that blocks rather than polls) register a `Cancel_callback` on the token.
 class Cancel_callback;
@@ -350,7 +350,7 @@ void pipe_enter_first(Task_control_block* blk, Task_ptr* record = nullptr);
 // cancellation to their own subsequent. `settle()` is idempotent — the first settle
 // wins (so a bodyless block can be triggered; see `Signal`). Result-consumption contract:
 // `sync()` returns `const R&` (non-consuming), so any number of readers (`sync()` twice,
-// `sync()` + `then`, N waiters) share one immutable-after-settle result; `take()` is the
+// several awaiters, N waiters) share one immutable-after-settle result; `take()` is the
 // single destructive move (ownership handoff / move-only R). At most one mover, and last.
 struct Task_control_block
 {
@@ -424,8 +424,7 @@ struct Task_control_block
     // cluster's padding absorbs it -- so they stay plain bools; simpler, no under-lock RMW.)
     std::atomic<bool> ready{ false };
     // Set when a PREREQUISITE settled cancelled (`release` propagates the settle's cancel
-    // state). A result-consuming dependent (`then`) has no result to read, and an
-    // ordering dependent (`after`) inherits the cancellation for consistency, so
+    // state): a dependent (a graph successor) inherits the cancellation, so
     // `Executable::run` cancels instead of running the body. Harmless if set on a task
     // already executing (a cancelled nested child): the flag is only read at execution
     // start. Reset by `reset()` / graph re-arm.
@@ -480,11 +479,11 @@ struct Task_control_block
 
     // A prerequisite or nested task settled. Decrement `blk`'s lock count and, when the
     // last lock drops, dispatch it (prerequisites met) or complete it (nested done).
-    // `prereq_cancelled` carries whether the settling prerequisite was *cancelled*: a
-    // dependent (`then`/`after`) then cancels instead of running (checked at execution
-    // start). Non-prerequisite releases (the "not launched"/"not attached" lock) pass
-    // false. Nesting is ordering-only, so a cancelled nested child sets the flag harmlessly
-    // (the parent is already executing; the flag is only read before the body).
+    // `prereq_cancelled` carries whether the settling prerequisite was *cancelled*: the
+    // dependent (a graph successor) then cancels instead of running (checked at execution
+    // start). Non-prerequisite releases pass false. Nesting is ordering-only, so a
+    // cancelled nested child sets the flag harmlessly (the parent is already executing;
+    // the flag is only read before the body).
     static void release(const Task_ptr& blk, bool prereq_cancelled = false)
     {
         if (prereq_cancelled)
@@ -961,54 +960,6 @@ auto with_inherited_access(Fn&& fn)
     }
 }
 
-// --- apply-style continuation detection -----------------------------------
-//
-// A `then` off a tuple-valued task may take the tuple by reference (`then([](tuple&
-// t){...})`) or, apply-style, its elements unpacked (`then([](A& a, B& b){...})`). Any
-// continuation shape may also opt into a trailing `Cancellation_token` (body-level
-// early-out, like every other task body), so each detection comes in a plain and a
-// token-taking flavor.
-
-template<typename> inline constexpr bool is_tuple_v = false;
-template<typename... Ts> inline constexpr bool is_tuple_v<std::tuple<Ts...>> = true;
-
-// Invocable with the tuple's elements unpacked (`fn(Ts&...)`), plain or + a trailing token.
-template<typename Fn, typename Tuple> struct Apply_invocable : std::false_type {};
-template<typename Fn, typename... Ts>
-struct Apply_invocable<Fn, std::tuple<Ts...>> : std::bool_constant<std::is_invocable_v<Fn, Ts&...>> {};
-
-template<typename Fn, typename Tuple> struct Apply_invocable_tok : std::false_type {};
-template<typename Fn, typename... Ts>
-struct Apply_invocable_tok<Fn, std::tuple<Ts...>>
-    : std::bool_constant<std::is_invocable_v<Fn, Ts&..., const Cancellation_token&>> {};
-
-// The producer's result taken as a whole (`fn(R&)`), plain or + a trailing token.
-template<typename Fn, typename R>
-inline constexpr bool takes_whole_v =
-    std::is_invocable_v<Fn, R&> || std::is_invocable_v<Fn, R&, const Cancellation_token&>;
-
-// `then(fn)` unpacks when the producer is a tuple, `fn` does NOT take the tuple by
-// reference (either arity), but it IS invocable with the tuple's elements (either arity).
-template<typename Fn, typename R>
-inline constexpr bool use_apply_v =
-    is_tuple_v<R> && !takes_whole_v<Fn, R>
-    && (Apply_invocable<Fn, R>::value || Apply_invocable_tok<Fn, R>::value);
-
-template<typename Fn, typename Tuple, bool WithToken> struct Apply_result;
-template<typename Fn, typename... Ts>
-struct Apply_result<Fn, std::tuple<Ts...>, false> { using type = std::invoke_result_t<Fn, Ts&...>; };
-template<typename Fn, typename... Ts>
-struct Apply_result<Fn, std::tuple<Ts...>, true>
-{ using type = std::invoke_result_t<Fn, Ts&..., const Cancellation_token&>; };
-
-// `invoke_result_t<Fn, Args...>`, optionally with a trailing token appended. A struct (not
-// `conditional_t`) so only the selected arity is instantiated — the other would be
-// ill-formed when `fn` accepts just one of them.
-template<typename Fn, bool WithToken, typename... Args> struct Invoke_result_tok
-{ using type = std::invoke_result_t<Fn, Args...>; };
-template<typename Fn, typename... Args> struct Invoke_result_tok<Fn, true, Args...>
-{ using type = std::invoke_result_t<Fn, Args..., const Cancellation_token&>; };
-
 // The control block behind a `Task` handle (used to wire prerequisites).
 template<typename R>
 Task_ptr core_of(const Task<R>& t) noexcept;
@@ -1070,28 +1021,11 @@ inline void add_prerequisite(const Task_ptr& prereq, const Task_ptr& succ)
 
 } // namespace detail
 
-// Dispatch options for a queued task body — a `then` continuation or a `Guarded` access
-// (`access`/`async`). An aggregate, so it takes designated initializers at the call site:
-// `t.then(fn, {.priority = Priority::high})`, `obj.access(fn, {.token = tok})`. `token` makes
-// the body skippable before it runs (and, if the body declares a trailing `Cancellation_token`,
-// is forwarded to it for a mid-run early-out). `run_inline` (used by `then`) runs the
-// continuation on the thread that settles the producer instead of queueing it — same trade-offs
-// as `Task_builder::set_inline`. Used by `then` and the task-builder path.
-struct Task_options
-{
-    Cancellation_token token = {};
-    Priority priority = Priority::normal;
-    bool run_inline = false;
-};
-
 // Options for a `Guarded` access (`access` / `async`, single- and multi-object). Deliberately
-// WITHOUT `run_inline`: the verb chooses inline-vs-enqueued (`access` runs inline when the queue
-// is free via `pipe_try_inline`; `async` always enqueues), so a `run_inline` field here would be
-// silently ignored — splitting the type makes passing it a compile error instead. `token` makes
-// the body skippable before it runs (and is forwarded to a trailing-`Cancellation_token` body for
-// a mid-run early-out); `priority` sets the queue position when enqueued.
-// TODO(code-review): revisit whether Access_options and Task_options should stay separate or share
-// a base once the review reaches the Guarded surface — the split is the conservative choice for now.
+// WITHOUT a run-inline knob: the verb chooses inline-vs-enqueued (`access` runs inline when the
+// queue is free via `pipe_try_inline`; `async` always enqueues). `token` makes the body skippable
+// before it runs (and is forwarded to a trailing-`Cancellation_token` body for a mid-run
+// early-out); `priority` sets the queue position when enqueued.
 struct Access_options
 {
     Cancellation_token token = {};
@@ -1109,8 +1043,9 @@ struct Launch_options
     Priority priority = Priority::normal;
 };
 
-// Handle to an async result. `sync()` blocks for the result (call once; may retract + run
-// the task inline); `then()` chains a continuation that runs when this task completes.
+// Handle to an async result. `co_await` it from a coroutine task (the sanctioned
+// composition — see coroutine_support.h); `sync()` blocks for the result from a blue
+// (non-task) thread.
 template<typename R>
 class Task
 {
@@ -1140,10 +1075,9 @@ public:
     // full-expression and is always safe. To *move* the result out (ownership handoff, or a
     // move-only `R`) use `take()`. For a value task, fatal if it was cancelled (no result) —
     // check `is_cancelled()` first; a cancelled `void` sync() simply returns.
-    // NOTE: `sync()` waits for THIS task to settle, not for its downstream `then` continuations
-    // — `settle()` fires continuations AFTER waking waiters (`notify_all`), so a continuation may
-    // still be running (or not yet started) when `sync()` returns. To wait for a continuation,
-    // `sync()` the `Task` that `then()` returns.
+    // NOTE: `sync()` waits for THIS task to settle, not for work attached downstream —
+    // `settle()` fires internal continuations AFTER waking waiters (`notify_all`), so an
+    // attached callback may still be running (or not yet started) when `sync()` returns.
     decltype(auto) sync()
     {
         detail::Task_control_block::retract_or_wait(core_);
@@ -1170,77 +1104,6 @@ public:
         return std::move(*static_cast<R*>(core_->result_ptr));
     }
 
-    // Chains a continuation. Runs `fn` when this task completes; if this task is
-    // cancelled (or `token` is cancelled when the continuation fires), `fn` is skipped
-    // and the cancellation propagates to the returned task. For a non-void producer
-    // `fn` receives the result by reference (or, for a tuple, apply-style); for void
-    // it takes no argument.
-    // The continuation `fn` may declare a trailing `Cancellation_token` in any of its
-    // shapes (void / whole-result / apply-style) to poll for cancellation mid-run; the
-    // token forwarded is the continuation's own (`opts.token`, checked at dispatch too).
-    template<typename Fn>
-    auto then(Fn&& fn, Task_options opts = {})
-    {
-        if constexpr (std::is_void_v<R>)
-        {
-            constexpr bool tok = detail::takes_token_v<std::decay_t<Fn>>;
-            if constexpr (!tok && !std::is_invocable_v<std::decay_t<Fn>&>)
-                static_assert(detail::always_false<Fn>,
-                    "then: a continuation off a Task<void> takes no arguments, "
-                    "optionally a trailing Cancellation_token");
-            else
-            {
-                using R2 = detail::Task_result_t<Fn>;
-                return chain<R2>([fn = std::forward<Fn>(fn)](void*, const Cancellation_token& t) mutable -> R2
-                {
-                    if constexpr (tok) return fn(t);
-                    else return fn();
-                }, std::move(opts));
-            }
-        }
-        else if constexpr (detail::use_apply_v<Fn, R>)
-        {
-            constexpr bool tok = detail::Apply_invocable_tok<std::decay_t<Fn>, R>::value
-                                 && !detail::Apply_invocable<std::decay_t<Fn>, R>::value;
-            using R2 = typename detail::Apply_result<std::decay_t<Fn>, R, tok>::type;
-            return chain<R2>([fn = std::forward<Fn>(fn)](void* r, const Cancellation_token& t) mutable -> R2
-            {
-                if constexpr (tok)
-                    return std::apply([&fn, &t](auto&... xs) -> R2 { return fn(xs..., t); }, *static_cast<R*>(r));
-                else
-                    return std::apply(fn, *static_cast<R*>(r));
-            }, std::move(opts));
-        }
-        else
-        {
-            // Gate before `Invoke_result_tok` instantiates: a wrong shape otherwise
-            // cascades through the trait (and, for a tuple producer, adds a misleading
-            // tuple-to-element conversion error).
-            constexpr bool whole = std::is_invocable_v<std::decay_t<Fn>&, R&>
-                                   || std::is_invocable_v<std::decay_t<Fn>&, R&, const Cancellation_token&>;
-            if constexpr (!whole && detail::is_tuple_v<R>)
-                static_assert(detail::always_false<Fn>,
-                    "then: a continuation off a when_all join must take the result tuple by "
-                    "reference or its elements unpacked, either optionally with a trailing "
-                    "Cancellation_token");
-            else if constexpr (!whole)
-                static_assert(detail::always_false<Fn>,
-                    "then: a continuation off a Task<R> must accept the result (R&), "
-                    "optionally with a trailing Cancellation_token");
-            else
-            {
-                constexpr bool tok = std::is_invocable_v<std::decay_t<Fn>&, R&, const Cancellation_token&>
-                                     && !std::is_invocable_v<std::decay_t<Fn>&, R&>;
-                using R2 = typename detail::Invoke_result_tok<std::decay_t<Fn>&, tok, R&>::type;
-                return chain<R2>([fn = std::forward<Fn>(fn)](void* r, const Cancellation_token& t) mutable -> R2
-                {
-                    if constexpr (tok) return fn(*static_cast<R*>(r), t);
-                    else return fn(*static_cast<R*>(r));
-                }, std::move(opts));
-            }
-        }
-    }
-
 protected:
     detail::Task_control_block* control() const noexcept { return core_.get(); }
 
@@ -1249,33 +1112,6 @@ private:
     friend detail::Task_ptr detail::core_of(const Task<R2>&) noexcept;
     template<typename R2>
     friend Task<R2> detail::task_from_core(detail::Task_ptr) noexcept;
-
-    // A continuation is a PROPER scheduled task (an `Executable`), not an inline callback:
-    // its body runs `produce(producer's result)`, dispatched through the normal prerequisite
-    // path when the producer settles -- queued by default (so the scheduler can slot
-    // higher-priority work between a task and its continuation), inline opt-in. The producer
-    // is a real `num_locks` prerequisite (so a blocking wait / retraction doesn't run this
-    // task before the result exists, and `prerequisites` makes it deep-retractable). A
-    // *cancelled* producer still dispatches us (cancellation propagates via
-    // `prereq_cancelled`), and since there is then no result to consume, `Executable::run`
-    // cancels this task instead of running the body. `produce` takes the producer's
-    // `result_ptr` (null for a void producer); the producer stays alive as our prerequisite.
-    template<typename R2, typename Produce>
-    Task<R2> chain(Produce produce, Task_options opts)
-    {
-        auto producer = core_;
-        auto next = detail::make_executable<R2>(
-            [producer, produce = std::move(produce)](const Cancellation_token& tok) mutable -> R2
-            { return produce(producer->result_ptr, tok); },
-            std::move(opts.token));
-        next->flags.retractable = true;
-        next->flags.priority = opts.priority;
-        next->flags.run_inline = opts.run_inline;
-        next->num_locks.store(1, std::memory_order_relaxed);   // "not attached" lock
-        detail::add_prerequisite(producer, next);              // wait for the producer to settle
-        detail::Task_control_block::release(next);             // drop the lock -> dispatch when ready
-        return Task<R2>(std::move(next));
-    }
 
     detail::Task_ptr core_;
 };
@@ -1621,13 +1457,11 @@ Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
 // A manually-completed synchronization point: a bodyless `Task<void>` (no work is
 // scheduled or executed) that you `trigger()` by hand. It is both producer and
 // consumer in one handle — the consumer side is inherited from `Task<void>`
-// (`get`/`wait`, `is_done`, `then`), the producer side is `trigger()`. Copyable;
+// (`co_await` / `sync`, `is_done`), the producer side is `trigger()`. Copyable;
 // copies share one control block. Used as a done-signal, a barrier / pipeline-phase
 // gate, or an inter-task signal (the integrated equivalent of a manual-reset event
 // / a promise+future fused). `trigger()` is idempotent (first call wins), so it is
-// safe to trigger from multiple threads or more than once. As with any `Task`, `sync()`
-// returns when the signal is triggered — it does NOT wait for `then` continuations (they
-// fire after the waiter is woken); `sync()` the `Task` a `then()` returns to await one.
+// safe to trigger from multiple threads or more than once.
 class Signal : public Task<void>
 {
 public:

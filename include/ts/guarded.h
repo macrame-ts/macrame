@@ -364,9 +364,9 @@ using Accessor_result_t = typename Accessor_result<Fn, T, M>::type;
 } // namespace detail
 
 // `Guarded::access`/`async` and the multi-object `ts::access`/`ts::async` take `Access_options`
-// (defined in task.h) = `{token, priority}`. There is deliberately no `run_inline` field -- the
+// (defined in task.h) = `{token, priority}`. There is deliberately no run-inline knob -- the
 // verb chooses inline vs enqueued (`access` inline-when-free, `async` always enqueued), so the
-// impossible option can't be passed. (`then`/task builders use `Task_options`, which has it.)
+// impossible option can't be passed.
 
 // The only sanctioned way to touch a `T` across threads. You never receive a bare `T&`; you
 // hand a functor to `access()` (opportunistic -- inline when free) or `async()` (always
