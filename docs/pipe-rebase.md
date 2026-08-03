@@ -7,6 +7,125 @@ and the `FPipe` note in task-systems-comparison.md into one design. Companion:
 
 The tests are labelled R1..R10 to match the concern labels here.
 
+## 0. OUTCOME (2026-08, author decision): the evolved mutex pipe
+
+The lock-free tail chain (§4–§5 below) was implemented, stress-tested, and **retired**.
+This section is the design of record going forward; §4–§5 stay as the engineering record
+of what was tried and why it was withdrawn. The two goals that now drive the work:
+
+1. **(important) Collapse `Deferred::commit()` / `commit_async()` into one auto-dispatching
+   `commit()`** — needs only an always-on grant-ownership answer ("does `current_task`
+   hold this pipe's write grant?"), which never required the rebase.
+2. **Simplify/optimize the pipe internals, in particular multi-object access.**
+
+### 0.1 Why the chain was retired (the evidence)
+
+- **Perf: the mutex was never the bottleneck.** The R10 gate came back negative: 22
+  producers on ONE pipe measured 798 ns/op vs ~1050 ns/op uncontended — per-object mutexes
+  with nanosecond holds barely degrade under contention. The lock-free half of the rebase
+  fails its own perf gate.
+- **Every serial (UE-verbatim) piece worked immediately; every reader-group piece burned.**
+  Four distinct protocol bugs in the reader-run/join machinery (walk double-claim, three
+  custody/lifetime UAFs, claim-without-fire — the last still open at retirement), plus the
+  tenure/era ABA that exists only because the chain is lock-free. Late reader join is a
+  counter problem; a counter under a lock is one line, a lock-free counter + FIFO + group
+  close kept re-deriving research problems.
+- **The author's semantic constraint** — reader N's completion must not depend on earlier
+  readers — is native to counter admission and fought by every chained-completion scheme.
+- The genuinely valuable inventions were all task-side and survive: **pipe turns as
+  `num_locks` prerequisites** (the `pipe_count` trigger in `release()`), **pipes entered
+  last** (§5.5), **frozen-at-launch** enforcement, **embedded per-line storage** (one
+  allocation, zero closures), the test/TSan/bench net.
+
+### 0.2 The design: one mutex per pipe, rebuilt internals
+
+```cpp
+struct Pipe
+{
+    std::mutex mutex;
+    Pipe_link* head = nullptr;                 // intrusive FIFO of embedded links
+    Pipe_link* tail = nullptr;                 //   (Job / std::deque / closures: deleted)
+    int active_readers = 0;                    // late reader join = ++active_readers
+    bool writer_active = false;
+    Task_control_block* writer_owner = nullptr;   // ALWAYS-ON (goal 1): the block holding
+                                                  // the write grant; set/cleared/handed
+                                                  // off under `mutex`
+    Task_ptr last_write;                       // newest write's block: Deferred's ordering
+                                               // handle; `commit_mutex_` dies
+    std::condition_variable idle;              // drain (verdict: safe as-is, notify under lock)
+    // write_epoch / graph_refs / debug_name as today (TS_SAFETY_CHECKS gating unchanged)
+};
+```
+
+- **`Pipe_link` slims to a queue node**: `next` (plain pointer — the queue is
+  mutex-guarded), `owner`, `pipe`, `mode`, `index`, `priority`. Deleted: `role`, `gate`,
+  `group_target`, `join_pin`, `turn_claim`, `tenure`, `prev_owner`, the tagged-word
+  encodings, alignas(64) (re-evaluate under TODO 4.8 with measurements). Storage stays
+  embedded: single-object tasks carry one link in the wrapper, multi-object
+  `Piped_executable<Body, R, N>` carries N, graph nodes use the compile()-time slab —
+  the pipe hot path still allocates nothing.
+- **Admission** (under the mutex; submission/execution outside, as today): a granted turn
+  fires `release(link.owner)` — the `pipe_count`/`num_locks` trigger, unchanged. The last
+  turn dispatches through `dispatch_ready` (priority, inline, cancellation, worker-less
+  uniform). Reader/writer/FIFO rules identical to the current pipe. The queue holds one
+  ref on `owner` per queued link (taken at enqueue, released after the turn fires).
+- **Multi-object, unified (goal 2)**: one wrapper allocation with embedded `(pipe, mode)`
+  bindings; `num_locks = launch + ordinary + P`; at the `now == pipe_count` trigger, the
+  sequential canonical cascade enqueues link[0]; each admission fires `release(owner)` and
+  enqueues the next link; the last dispatches. This one path serves dynamic multi-object
+  `async` (deleting `Multi_async_state`, its `std::map`, and the `on_acquired` closures)
+  AND graph nodes (deleting `acquire_next`'s pipe walk, `preheld`, `handoff_target`,
+  `mark_preheld`; a node's cascade starts at data-ready). The explicit graph handoff goes
+  away: release + next admission happen in the same mutex pass, so the optimization it
+  bought is already structural; `write_epoch` parity is preserved by the normal
+  release/acquire bumps (+1 each, +2 total across a write→write boundary — same parity as
+  the old handoff's +2). `writer_owner` hand-off likewise becomes natural (release clears
+  it, the next admission sets it).
+- **Held grants** (`pipe_acquire`/`pipe_release`, mode-aware) remain the coroutine-guard
+  primitive, as on master. Reader holds join `active_readers`; writer holds set
+  `writer_owner`.
+- **Goal 1, the unified verb**: `Deferred::commit(opts = {})` —
+  1. `pipe.writer_owner == current_task.get()` → the caller already holds the write grant
+     (graph node / async write body): apply inline under it; return a pre-settled
+     `Task<void>` sentinel (one shared static settled block, no per-call allocation).
+  2. else, pipe front free for a writer → try-inline (apply on the caller, release), same
+     sentinel return.
+  3. else → enqueue as an ordinary pipe write (today's `commit_async` body); return its task.
+  `commit_async` is removed from the public API (goal 1 delivered). `last_write` is
+  maintained under the mutex at write enqueue, making the external `commit_mutex_`
+  unnecessary (delete it; the in-flight-at-destruction fatal keys off `last_write`'s
+  settled state). `Versioned::publish()` unification rides the same mechanism later —
+  out of scope for this pass.
+- **Non-goals of this pass**: writer retraction (parked, R4 — pipe order is still not
+  prerequisite edges; a writers-only chain behind the mutex admission remains possible
+  later), the atomic reader fast path (a compatible future optimization: pack
+  `{reader_count, writer_active, queue_nonempty}` into one word and CAS-admit readers on
+  quiet pipes, falling back to the mutex), standalone public `Pipe`, `publish()`
+  unification.
+
+### 0.3 What carries over from the chain work
+
+Landed and kept regardless of pipe core: the `release()` trigger branch + `pipe_count` /
+`pipes_entered` block fields, pipes-entered-last, the frozen-at-launch enforcement (+ death
+test), the embedded-storage wrappers, the R10 benchmark + baseline, the whole pipe test
+suite and TSan stages (implementation-independent), and the OOM-bounded hammer fixtures.
+Deleted with the chain: `pipe_tail.cpp`, the `TS_PIPE_TAIL` flag, the tagged tail word,
+tenure/era, the reader-run five-field protocol, the hammer test's tail-only diagnostic.
+
+### 0.4 Sequencing and acceptance
+
+1. Goal 1 first on the current mutex core: `writer_owner` + `last_write` + unified
+   `commit()` (+ guide/design doc updates — public API change).
+2. Internals swap: intrusive link queue + trigger admission + unified multi-object
+   (async, then graph). Same seam, same tests.
+3. Retire `TS_PIPE_TAIL` + `pipe_tail.cpp` + chain-only fields/tests; CLAUDE.md pipe
+   paragraphs updated at merge.
+
+Acceptance per step: full suite 0 failures both configs that exist at that step; Shipping
+compiles; the 10× graph-async-hammer loop clean (it must become boring — there is no
+lock-free protocol left to race); full WSL TSan campaign clean; R10 bench non-regression
+vs the recorded baseline.
+
 ## 1. Goal and non-goal
 
 Replace the mutex-guarded reader/writer deque (`detail::Pipe`, `src/guarded.cpp`) with a
@@ -78,7 +197,7 @@ A **reader group** = a SNZI read indicator (a sentinel block whose `num_locks` a
 The single-counter indicator is fine for per-object pipes (low fan-in); SNZI's tree
 variant is a future scale lever if a hot object ever needs it.
 
-## 4. The model
+## 4. The model — RETIRED (see §0; kept as the engineering record)
 
 ### 4.1 The tail
 
@@ -165,7 +284,7 @@ only the reader's own block. Under **A**, the first reader's block doubles as th
 join UAF. Either way the escape, if the race proves too sharp, is a pooled dedicated
 sentinel per group off the free-list (one alloc, simpler race).
 
-## 5. Protocols (the careful core)
+## 5. Protocols (the careful core) — RETIRED (see §0; kept as the engineering record)
 
 Pseudocode lines are numbered for reference.
 
