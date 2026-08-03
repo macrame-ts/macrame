@@ -394,8 +394,44 @@ IDs — when an item is done, mark it, don't renumber.
    3. `[ ]` **(P3)** Priority setter on the promise (it stores one; no config channel yet).
    4. `[x]` **DONE (2026-08, branch `pipe-rebase`) — coroutine-first transformation.** The shakeup: static graph + coroutines for everything dynamic; `then`/`when_all`/builder-`after`/retraction/reuse/inline-trampoline removed; `Task_scope` nursery + implicit per-frame scopes + coroutine graph nodes + awaitable access verb added; every illegal case a fatal with a companion how-to test. Design of record + staged plan: [coroutine-first.md](coroutine-first.md). Landed §7 stages 1–6; the remaining §11 action list is tracked as 6.9 below. Subsumed 6.1 (the awaitable access verb IS inline-when-free) and delivered 6.2 (frame/block fusion — the promise embeds the block, so a coroutine task is one allocation). Note the inline-dispatch trampoline was removed only from the DYNAMIC surface: `Graph_node::set_inline` and the `dispatch_ready`/`inline_pending` machinery survive as graph-internal.
    5. `[x]` **DONE (2026-08) — waits-for cycle detector** (`TS_SAFETY_CHECKS`). The suspended-ABBA deadlock (a task holding G1 suspends awaiting G2's turn while a G2-holder awaits G1) parks no thread — both frames suspended, all workers free, the run silently never completes; graph-invisible by definition (the accesses are undeclared). At suspension-on-a-pipe record edge {holder's grants -> awaited pipe} (the harness knows both), clear at resume, cycle-check on insert, fatal naming both tasks + both objects. Gates blessing doctrine case (c) (coroutine-first.md §2) in the guide.
-   6. `[ ]` **(P2) Signal-from-OS-completion helper** — register an OVERLAPPED / fd / fence, get a `Signal` (the 9.2 packaging question, now pulled by the first-class cross-frame pattern, coroutine-first.md §4.7).
-   7. `[ ]` **(P2) Per-frame gate idiom** — a reusable frame-start `Signal` (`co_await next_frame`) so resumed cross-frame tasks align to frame boundaries; thin utility over `Signal::reset` + a doc'd low-priority-resumption default.
+   6. `[ ]` **(P2, scoped 2026-08 — needs the platform layer, 3.6) Signal-from-OS-completion helper** — register an OVERLAPPED / fd / fence, get a `Signal` (the 9.2 packaging question, pulled by the first-class cross-frame pattern, coroutine-first.md §4.7).
+      **Design note (2026-08).** The bridge itself is already trivial and needs nothing new: a
+      `Signal` is a refcounted handle, so an OS callback captures one by value and calls
+      `trigger()` — that is the whole "get a `Signal`" story, and 6.7's `Frame_gate` now covers
+      the realignment half. What is NOT trivial, and what any packaged helper must answer, is
+      **who owns the waiting**. Three shapes, in increasing commitment:
+      (a) **Nothing** (today): the user registers the completion with the OS themselves and
+      calls `trigger()` from whatever callback context the OS gives them. Zero API, zero
+      portability surface; the user carries the caveat below.
+      (b) **A thin per-platform adapter** — `Signal signal_from(HANDLE overlapped_event)` /
+      `signal_from(int fd, events)` / a GPU-fence variant. Each needs a THREAD to do the
+      waiting (a `WaitForMultipleObjects` pool, an epoll loop), i.e. exactly the reactor the
+      library has deliberately not built (9.2), and it multiplies with every platform. Not
+      worth it until a real workload asks.
+      (c) **A reactor.** Explicitly rejected in 9.2 (Rayon/Tokio are separate pools by design).
+      **The caveat that matters regardless of shape**, and the reason this is not purely a
+      packaging question: `trigger()` releases awaiting frames on the TRIGGERING thread via the
+      resume trampoline. An OS completion callback (an APC, an IOCP worker, a driver callback)
+      is the worst possible place to run arbitrary user coroutines — it may be a restricted
+      context, and it is certainly not a place to run unbounded work. So an OS-triggered
+      `Signal` should hop: `ts::launch([s]() mutable { s.trigger(); })` from the callback, which
+      is one line and is exactly what `Frame_gate::open()` does for the same reason. **Action:
+      document (a) + the hop as the sanctioned idiom in the guide; revisit (b) only alongside
+      the platform layer (3.6), which is where the waiting threads would live.**
+   7. `[x]` **DONE (2026-08) — per-frame gate.** `ts::Frame_gate` (`frame_gate.h`, not in the
+      umbrella — include it): `co_await gate.next()` parks a task until the frame loop's next
+      `open()`. Shipped as a type rather than a documented `Signal::reset` idiom because the
+      hand-rolled version has two real hazards: a missed-wakeup window (a task reading the
+      signal just before a boundary can attach to a gate about to be re-armed) and
+      `Signal::reset`'s precondition that every waiter is already released (fatal otherwise).
+      The gate hands out the CURRENT frame's signal under a mutex and installs a fresh one at
+      `open()`, so a waiter always names a specific frame's gate and no re-arm race exists —
+      trading one bare block per frame, which is noise at frame scale (`Signal::reset` stays
+      available for the zero-alloc case). `open()` releases through the scheduler rather than
+      inline, at `Priority::low` by default (`set_release_priority` overrides): an inline
+      trigger would run every parked frame on the frame loop's own thread before `open()`
+      returned, stalling frame start by an unbounded amount — the low-priority-resumption
+      default this item asked for, made structural. 3 tests.
    8. `[ ]` **(P3, research — borrow from UE) Symmetric task switching for coroutine resumption.** UE's runnable signature is `FTask*(bool)` — a body/segment can RETURN the next task, which the worker loop runs immediately on the same thread with zero queue/eventcount interaction ("Continuations were not themselves dequeued from any queue"); `CallAndMove` relocates the delegate storage in one step, so no second alloc for the returned continuation. This is the natural shape for a coroutine `co_await` handing back "resume me here next" — cleaner than routing the resume through our thread-local inline trampoline (`dispatch_ready`/`inline_pending`, task.h), which already gives same-thread + stack-safe execution but via a push+drain rather than a direct return-and-run. Scope the borrow to the coroutine path (pairs with 6.2's frame/control-block fusion — a fused frame that returns its own next segment); NOT a rework of general dispatch, which stays framework-driven so a queued resumption still gets a priority and the scheduler can interleave. Verified against UE source (`FTask::ExecuteTask`, `FScheduler::ExecuteTask` loop). Prior art: [task-systems-comparison.md](task-systems-comparison.md) §UE.
       **Rescoped (2026-08, post-6.4):** the coroutine path now has its own equivalent — a
       bounded thread-local *resume trampoline* (`resume_pending`/`schedule_resume`,

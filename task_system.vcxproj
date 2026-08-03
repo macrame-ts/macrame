@@ -72,6 +72,7 @@
     <ClInclude Include="tools\trace_stamps.h" />
     <ClInclude Include="include\ts\task.h" />
     <ClInclude Include="include\ts\task_scope.h" />
+    <ClInclude Include="include\ts\frame_gate.h" />
     <ClInclude Include="include\ts\ts.h" />
     <ClInclude Include="include\ts\version.h" />
     <ClInclude Include="include\ts\guarded.h" />
