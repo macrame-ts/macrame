@@ -364,11 +364,16 @@ Queued behind the §7 stages; numbers reference the nested-graphs review discuss
 4. **(3.5) Trace attribution across nesting** — the inner graph traces its own nodes;
    audit the outer node's owner-attributed true-busy so inner work is not double-counted
    in the outer trace's fold.
-5. **(4) Concurrent shared-object graphs validation** — §10 scenario 2 predates the
-   evolved pipe; with per-node admission + globally canonical acquisition it should now
-   be deadlock-free. Dedicated stress (two graphs, overlapping objects, concurrent runs,
-   Rw_probe oracle + TSan); if it holds, relax the task-internals contract line to
-   "safe, nondeterministic cross-graph ordering".
+5. ~~**(4) Concurrent shared-object graphs validation**~~ — **DONE (2026-08): it holds.**
+   The old §10 scenario-2 line conflated two different things; the "not supported" cause
+   was the per-graph single-run `Run_state`, which says nothing about two DIFFERENT graphs.
+   With canonical pipe-address ordering over the same address-sorted objects, two graphs
+   cannot form a wait cycle, and the pipe serializes their conflicting nodes against each
+   other exactly as it does a node against an async. Validated with graphs declaring the
+   same objects in OPPOSITE order, run concurrently under an async hammer, with the
+   `Rw_probe` overlap oracle: bounded suite test + `stress_concurrent_graphs` under TSan.
+   task-internals §10 scenario 2 relaxed to "safe, nondeterministic cross-graph ordering",
+   and the same-graph case is now a fatal rather than silent corruption.
 6. **Parameter-grants sugar** (§4.8 tail) — the declared expects-a-lend form for shipped
    library sub-graphs; compile-time intent check only, no new mechanism.
 - **Allocation regression window** between stages 3 and the fusion landing — fusion is

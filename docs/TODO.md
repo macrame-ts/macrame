@@ -424,7 +424,16 @@ IDs — when an item is done, mark it, don't renumber.
       a fire-and-settle child), and the in-flight fatal is `TS_SAFETY_CHECKS`-gated like its
       siblings. 10 tests + 3 death scenarios + `stress_graph_nested_runs` under TSan;
       (b) `[x]` worker-less nested runs — DONE, no work needed (the serial trampoline already
-      handles it; test added); (c) cancellation
+      handles it; test added); (e) `[x]` **concurrent shared-object graphs — DONE (2026-08),
+      and it holds.** The old task-internals §10 scenario-2 line conflated two cases: the "not
+      supported" cause was the per-graph single-run `Run_state`, which says nothing about two
+      DIFFERENT graphs. Canonical pipe-address ordering over the same address-sorted objects
+      makes a cross-graph wait cycle impossible, and the pipe serializes two graphs'
+      conflicting nodes exactly as it does a node against an async. Validated with graphs
+      declaring the same objects in OPPOSITE order, run concurrently under an async hammer,
+      `Rw_probe` oracle: suite test + `stress_concurrent_graphs` under TSan. §10 scenario 2
+      relaxed to "safe, nondeterministic cross-graph ordering"; the same-GRAPH case is now a
+      fatal instead of silent `Run_state` corruption; (c) cancellation
       composition (pass the outer token into `inner.execute({.token})`, test that outer
       cancellation drains the inner run); (d) trace attribution across nesting (inner work must
       not double-count in the outer trace's fold); (e) concurrent shared-object graphs

@@ -421,6 +421,71 @@ void stress_graph_nested_runs()
     assert(!bad);
 }
 
+// Two DIFFERENT graphs over overlapping objects, run concurrently from separate threads,
+// while asyncs hammer the same objects (task-internals §10 scenario 2). Each graph's nodes
+// take their turns in canonical pipe-address order over the same address-sorted objects, and
+// the pipe serializes across graphs exactly as it does between a node and an async -- so
+// there should be no wait cycle and no reader/writer overlap. TSan on the probe payload; the
+// oracle asserts the invariant independently.
+void stress_concurrent_graphs()
+{
+    constexpr int rounds = 400;
+    ts::Guarded<tests::Rw_probe> a, b, c;
+
+    ts::Static_task_graph g1;
+    g1.add_node([](tests::Rw_probe& p) { p.observe_write(1); }, a);
+    g1.add_node([](const tests::Rw_probe& p, tests::Rw_probe& q) { p.observe_read(2); q.observe_write(3); }, b, c);
+    g1.compile();
+
+    ts::Static_task_graph g2;                    // opposite declaration order on the same objects
+    g2.add_node([](tests::Rw_probe& p) { p.observe_write(4); }, b);
+    g2.add_node([](tests::Rw_probe& p, const tests::Rw_probe& q) { p.observe_write(5); q.observe_read(6); }, a, b);
+    g2.compile();
+
+    std::atomic<bool> stop{ false };
+    std::vector<std::jthread> hammers;
+    for (int t = 0; t < 2; ++t)
+    {
+        hammers.emplace_back([&]
+        {
+            constexpr std::size_t window = 64;
+            std::deque<ts::Task<void>> inflight;
+            while (!stop.load(std::memory_order_relaxed))
+            {
+                while (inflight.size() >= window && !stop.load(std::memory_order_relaxed))
+                {
+                    if (inflight.front().is_done())
+                        inflight.pop_front();
+                    else
+                        std::this_thread::yield();
+                }
+                if (inflight.size() >= window)
+                    break;
+                inflight.push_back(a.async([](const tests::Rw_probe& p) { p.observe_read(7); }));
+                inflight.push_back(b.async([](tests::Rw_probe& p) { p.observe_write(8); }));
+            }
+        });
+    }
+
+    {
+        std::jthread second([&]
+        {
+            for (int i = 0; i < rounds; ++i)
+                g2.execute().sync();
+        });
+        for (int i = 0; i < rounds; ++i)
+            g1.execute().sync();
+    }   // join the graph drivers
+
+    stop.store(true, std::memory_order_relaxed);
+    hammers.clear();   // join
+
+    bool bad = a.async([](const tests::Rw_probe& p) { return p.violated(); }).sync()
+             || b.async([](const tests::Rw_probe& p) { return p.violated(); }).sync()
+             || c.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
+    assert(!bad);
+}
+
 ts::Task<int> launch_plus_one(int k)
 {
     co_return co_await ts::launch([k] { return k; }) + 1;
@@ -996,6 +1061,7 @@ int main()
     std::puts("tsan: coroutine deep cascade"); stress_coroutine_deep();
     std::puts("tsan: graph nested stress");  stress_graph_nested();
     std::puts("tsan: nested graph runs");    stress_graph_nested_runs();
+    std::puts("tsan: concurrent graphs");    stress_concurrent_graphs();
     std::puts("tsan: deferred stress");      stress_deferred();
     std::puts("tsan: versioned stress");     stress_versioned();
     std::puts("tsan: physics frames");       stress_physics();

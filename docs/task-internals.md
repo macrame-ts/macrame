@@ -516,18 +516,36 @@ ever matters, make the idle-pipe reserve lock-free rather than skipping it.
 
 Reservation + single-resource async closes the common race, but these remain sharp:
 
-1. **Blocking on a same-object async inside a node** → deadlock: the node holds the
-   object and `.sync()`s an async on it, which is queued behind that very hold. (Reinforces
-   "never block inside a node.")
-2. **Two runs over overlapping objects, concurrently** → not supported: the reused
-   `Run_state` is single-run (one `execute()` at a time), so a second concurrent run would
-   corrupt it. (Per-node acquire is canonical-order, so it would *not* deadlock — the block
-   is the shared run state, not the acquire order.)
-3. **Nested `execute()` on an object a node holds** → the inner run's node waits for the
-   object, held by the outer node that triggered the inner run → deadlock.
+1. **Blocking on a same-object async inside a node** → the node holds the object and
+   `.sync()`s an access queued behind that very hold. Still a deadlock shape, but no longer
+   silent: an in-task `sync()` on unsettled work is fatal in checked builds, with a sharp
+   same-object message when the target is on a pipe the caller's context holds. (Reinforces
+   "never block inside a node" — the rule is now enforced, not advised.)
+2. **Two runs of ONE graph, concurrently** → fatal (checked builds). The reused `Run_state`
+   is single-run, so a second `execute()` while one is in flight would corrupt it; the check
+   at `execute()` entry says so instead of letting it happen. Queued/pipelined runs are
+   roadmap (TODO 2.3).
+   **Two runs of DIFFERENT graphs over overlapping objects, concurrently → SUPPORTED
+   (validated 2026-08).** The old blanket "not supported" conflated this with the case above,
+   whose real cause is the per-graph run state, not the acquisition protocol. Each graph's
+   nodes take their pipe turns in canonical (pipe-address) order over the same address-sorted
+   objects, so no wait cycle can form, and the pipe serializes two graphs' conflicting nodes
+   against each other exactly as it serializes a node against an async — the graphs simply do
+   not know about each other. Validated with two graphs declaring the same objects in
+   *opposite* order, run concurrently while asyncs hammer the same objects, under the
+   `Rw_probe` overlap oracle and TSan (`stress_concurrent_graphs`), plus a bounded suite test.
+   Cross-graph *ordering* is of course nondeterministic — the schedule is whatever the pipes
+   admit — so this is "safe, not deterministic": do not build semantics on which graph's node
+   reaches a shared object first.
+3. **Nested `execute()` on an object a node holds** → **supported since 2026-08** via the
+   lend protocol (§4.8 of coroutine-first.md): the inner run does not re-acquire an object its
+   caller already holds a covering grant on, it inherits the exclusion. The residual failure
+   modes are fatals, not hangs — a caller holding read where the inner graph writes, and
+   lending while the caller has live scope children.
 4. **Incomplete access declaration** → a node touching `Y` but declaring only `X`
-   doesn't acquire `Y`; async to `Y` races the node's undeclared `Y` access. The
-   protection is only as complete as the declaration.
+   doesn't take a turn on `Y`; async to `Y` races the node's undeclared `Y` access. The
+   protection is only as complete as the declaration. (Unchanged, and the one item on this
+   list with no structural fix: it is the completeness hazard by definition.)
 5. **Escaped reference** → a raw pointer into `X` used with no `Access_context`
    bypasses both the acquire and the harness. The classic completeness hazard.
 6. **Ordering / latency (not races):** whether the graph observes a pre-run async's
@@ -616,9 +634,11 @@ TSan): the block settles exactly once, either way.
 - **Compile-time grouping:** schedule an object's accessors close together to shrink
   its hold window (fewer interior gaps), where the DAG allows — trades against
   parallelism / critical path, so profiling-guided.
-- Reservation follow-ups: cheaper idle-pipe reserve (lock-free flag vs mutex) if the
-  per-object mutex cost matters; detect nested/concurrent-run reservation deadlock
-  (§10 scenarios 2–3) instead of hanging.
+- Cheaper idle-pipe admission (a lock-free flag instead of the mutex) if the per-object
+  mutex cost ever shows up in a profile. The nested/concurrent-run half of this item is
+  **done** (2026-08): the nested case is supported via the lend, the same-graph concurrent
+  case is a fatal, and the different-graph concurrent case turned out to be safe all along
+  (§10 scenario 2/3) — nothing hangs any more.
 - **Fold graph scheduling onto the block's lock-counter** — graph nodes run as task
   blocks for execution/nesting/completion (§7.1), but scheduling still uses
   `remaining_deps` + the lazy reservation (`remaining_objects`) rather than
