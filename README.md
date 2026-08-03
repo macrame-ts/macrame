@@ -152,7 +152,7 @@ rec.stage([e](World& w) { w.apply_damage(e); });   // recorded, not applied yet
 auto hp = world.async([](const World& w) { return w.health_of(player); });
 
 // At a chosen point, the whole batch applies as one write, in a deterministic order:
-staged.commit_async().sync();
+staged.commit().sync();
 ```
 
 ### 4. Stable reads while the next version is built — `Versioned<T>`

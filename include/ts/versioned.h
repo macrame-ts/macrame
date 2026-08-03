@@ -41,39 +41,51 @@ enum class Resync
     overwrite,
 };
 
-// Versioned state: readers always see a stable published version while the next
-// one is being staged. Two replicas of `T` behind one `Guarded` front -- readers
-// take ordinary read access on `state()`; writes are `stage()`d grant-free into a
-// journal (see journal.h) and become visible atomically at `publish()`. The
-// front's address never changes (the swap exchanges the replicas' CONTENTS), so
-// graph declarations, readers' access, and the harness all work unmodified.
+// `Versioned<T>` -- double-buffered state with an atomic publish step: a coarse, batched
+// cousin of RCU / MVCC snapshot isolation. It keeps two copies of `T` behind one
+// `Guarded<T>` "front": readers always see the last published version -- a stable
+// snapshot, taken without locking the writer -- while a producer prepares the next.
+// Writes surface at the next `publish()`, not immediately: a one-version lag. You
+// typically publish once per update cycle (a frame, in a game loop) but may publish as
+// often as you version.
 //
-// A publish runs in three phases, and only the middle one holds the write grant:
-//   1. cut + apply the batch to the shadow -- grant-free (nobody can observe the
-//      shadow); readers of the current version run concurrently.
-//   2. swap the replicas' contents -- the ONLY work under the write grant (a
-//      move-swap; pointer exchanges for container-backed T).
-//   3. resync the shadow -- a READ access on the front: it overlaps every reader of
-//      the new version, and access FIFO holds the next writer (a later publish's
-//      swap, or a graph flip node's acquire) behind it. That read access is the
-//      shadow-ownership chain; consecutive publishes additionally chain phase 1
-//      after the previous resync internally.
-// (The graph-node form `publish_into` runs phases 1-2 under the node's grant --
-// edges order readers around the node anyway -- and still defers phase 3 to the read
-// access, which is admitted the moment the node releases.)
+// Producers `stage()` closures into a private journal (grant-free, no contention between
+// producers). `publish()` prepares the next version off to the side, then briefly takes
+// exclusive (write) access to the front to swap it in -- readers of the previous version
+// finish first, so the exclusive window is tiny. Access control is `Guarded`'s: readers
+// declare an ordinary read on the front (`state()`), so the harness and any
+// `Static_task_graph` treat it like a normal guarded object. (Swap/resync mechanics:
+// `docs/deferred-versioned-state.md`.)
 //
-// The contract in one line: no read-your-writes -- a version's outputs arrive as
-// the NEXT version. Readers wanting the fresh version order after the publish
-// (graph edge / `.after(publish_task)`).
+// Use (dynamic tasks):
+//   ts::Versioned<Transforms> tf;                    // double-buffered; owns both replicas
+//   ts::Guarded<Transforms>& front = tf.state();     // its front -- a Guarded readers access
+//   auto rec = tf.recorder();
+//   rec.stage([b = std::move(out)](Transforms& t){ t.apply(b); });  // stage next version
+//   tf.publish();                                    // fire-and-forget, or await it
+//   co_await tf.read([](const Transforms& t){ render(t); });        // read the current version
+// Composes with `Static_task_graph`: a `ts::publish_body(tf)` node is the flip; declaring a
+// read on the front before it reads the previous version, after it the fresh one.
 //
-// One publisher at a time, ENFORCED at flip entry (TS_SAFETY_CHECKS): a graph /
-// inline publish that catches a dynamic publish still unresolved is fatal --
-// access ordering cannot place a phase 1 that has not been submitted yet, so proceeding would
-// race the shadow apply. The legal patterns: dynamic publishes freely overlap
-// each other (they chain); a SYNCED dynamic publish followed by a run is safe
-// (sync() returning guarantees the resync's read access is submitted, which then orders
-// the flip behind it); a dynamic publish arriving mid-flip chains behind the
-// flip. Only fire-and-forget publish racing a flip is rejected.
+// Contract:
+//  - No read-your-writes: `read()` sees the last published version; staged writes appear
+//    only at the next `publish()`.
+//  - One publisher at a time -- sync the `publish()`, or order it before a run. A
+//    graph/inline publish that catches an unresolved dynamic one is fatal.
+//  - Under `replay` resync (the default) commands must be deterministic, so both copies
+//    converge. If yours can't be, set the policy to `copy` or `overwrite` (no
+//    re-execution, so no determinism needed). `set_divergence_check()` flags a mismatch
+//    in dev.
+//  - Sync the task `publish()` returns before destroying; leftover staged commands at
+//    destruction are fatal lost writes (`discard()` drops them).
+//
+// Not the right tool when you need a write visible in the same version, or when producing
+// the next version is heavy compute rather than a data delta -- then keep the machine in
+// one sealed `Guarded` and version its output extract instead (see `sample/physics.cpp`).
+//
+// Sibling `Deferred<T>` shares the same staging journal but applies to a single object
+// with no second replica or snapshot -- reach for `Deferred<T>` to batch writes and apply
+// them at a chosen point, `Versioned<T>` when readers need a stable snapshot across a cycle.
 template<typename T>
 class Versioned
 {

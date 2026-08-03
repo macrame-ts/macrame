@@ -176,22 +176,33 @@ void stress_pipe_rw_worker_less()
     assert(!bad);
 }
 
-// Lifetime churn: create/destroy Guardeds with in-flight work from several threads -- the
-// destructor's drain races the last job's completion (wait_until_idle UAF) and blocks can
-// be freed by a completing predecessor mid-push (the push-UAF bracket).
+// Lifetime churn targeting the `wait_until_idle` drain: create/destroy `Guarded`s with
+// in-flight work from several threads, dropping every task handle so the destructor's drain
+// races the last job's completion + idle-notify, and blocks can be freed by a completing
+// predecessor mid-push (the push-UAF bracket). A reader/writer mix so the notify fires from
+// both release paths (a writer draining to empty, a last reader hitting
+// `active_readers == 0`), and the fast stack reuse across iterations gives TSan a hot
+// address to flag if a completing job touches the pipe after the drain releases the
+// destroyer.
 void stress_pipe_lifetime()
 {
+    constexpr int threads = 4, iters = 2000, jobs = 12;
     std::vector<std::jthread> ths;
-    for (int t = 0; t < 4; ++t)
+    for (int t = 0; t < threads; ++t)
     {
         ths.emplace_back([]
         {
-            for (int i = 0; i < 2000; ++i)
+            for (int i = 0; i < iters; ++i)
             {
-                ts::Guarded<int> d{ 0 };
-                for (int k = 0; k < 8; ++k)
-                    d.async([](int& v) { ++v; });   // handle dropped; ~Guarded drains
-            }
+                ts::Guarded<int> obj{ 0 };
+                for (int k = 0; k < jobs; ++k)
+                {
+                    if (k & 1)
+                        obj.async([](int& v) { ++v; });                 // writer
+                    else
+                        obj.async([](const int& v) { return v; });      // reader
+                }
+            }   // handles all dropped; ~Guarded drains, racing the last completion/notify
         });
     }
 }   // join

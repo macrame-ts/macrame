@@ -706,6 +706,20 @@ later exposed (TODO 1.7). Also verify during the rewrite: the CURRENT CV-under-m
 (waiter wakes, `~Guarded` destroys the CV/mutex while the signaler is still inside
 `notify_all`) — the count-based drain cures it.
 
+**Verdict (verified on master, 2026-07-31; `b88ea85`).** That last suspicion is false, and the
+implemented pipe therefore KEPT the CV drain rather than switching to a spin-yield count. Our
+`notify_all` happens *under* `pipe.mutex`, the pattern [thread.condition.condvar] blesses: a
+`wait_until_idle` waiter cannot return from `idle.wait` (and so cannot destroy the pipe) until
+it re-acquires `mutex`, which the signaler hands off only after `notify_all` has returned. The
+UE race is a lock-free-notify artifact — their `FEventCount::Notify` is unlocked, which is why
+they need the refcounted keep-alive event (`EmptyEventRef` + a local copy taken before the last
+decrement, added in `95e9c0d` to close the UAF that the lock-free drain of `ca98382` introduced,
+along with `relaxed`→`release`/`acquire` on `TaskCount`). The residual lifetime nit master fixed
+there (a post-unlock call binding `Pipe&`) does not exist in the rewritten release path at all:
+`release_and_redispatch` fires the admission pass through `fire_granted(Granted&)`, which walks
+granted LINKS only and never names the pipe. Port UE's refcount discipline only if the drain
+notify ever becomes lock-free.
+
 ## 8. R3 — grant-ownership `writer_owner`
 
 An always-on `Pipe::writer_owner` (a `Task_control_block*`, or the block identity) naming

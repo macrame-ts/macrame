@@ -75,7 +75,12 @@ struct Pipe
     // lock-free by the ownership check. Identity only -- never dereferenced.
     std::atomic<Task_control_block*> writer_owner{ nullptr };
 
-    // Blocks until the pipe is fully drained and nothing is in flight.
+    // Blocks until the pipe is fully drained and nothing is in flight. Teardown-only
+    // (`~Guarded`). Safe against the completing job that signals it: the notify is done
+    // under `mutex` (`release_and_redispatch`), so this waiter cannot rewake and destroy
+    // the pipe until it re-acquires `mutex` after the signaler's notify returns -- no
+    // UE-`FPipe`-class refcounted drain event needed (that race is a lock-free-notify
+    // artifact). See `release_and_redispatch`.
     void wait_until_idle()
     {
         std::unique_lock lock(mutex);

@@ -250,9 +250,23 @@ void release_and_redispatch(Pipe& pipe, Access mode)
 
         collect_admissions(pipe, granted);
 
+        // Drain notify under the mutex -- the standard-blessed condition_variable teardown
+        // pattern ([thread.condition.condvar]: only the notify need happen-before the
+        // destruction). A `wait_until_idle` waiter cannot return from `idle.wait` until it
+        // re-acquires `mutex`, which the scope's unlock below hands off; by then
+        // `notify_all` has already returned, so the destroying waiter never races the
+        // notify. UE's `FPipe` needed a refcounted, keep-alive drain event
+        // (`EmptyEventRef` + a local copy taken before the last decrement -- their
+        // `// use-after-free territory!`) precisely because its `FEventCount::Notify` is
+        // lock-free/unlocked; notify-under-lock makes us structurally immune to that race.
         if (pipe.queue_head == nullptr && pipe.active_readers == 0 && !pipe.writer_active)
             pipe.idle.notify_all();
     }
+    // Post-unlock, and deliberately pipe-free: `fire_granted` walks the granted LINKS (each
+    // pinned by its owner's entry ref) and never binds `Pipe&`, so a waiter that the notify
+    // above released may destroy the pipe concurrently with no lifetime question at all.
+    // (A notify also implies nothing was granted -- any admission sets
+    // `writer_active`/`active_readers` -- so the two cases do not even overlap.)
     fire_granted(granted);
 }
 
