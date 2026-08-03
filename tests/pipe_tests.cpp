@@ -389,6 +389,20 @@ ts::detail::Task_control_block* owner_of(ts::Guarded<T>& obj)
     return ts::detail::Guarded_access::pipe(obj).writer_owner.load(std::memory_order_acquire);
 }
 
+// Ownership is cleared asynchronously with respect to a waiter: `sync()` returns once the
+// block settles, but the pipe release runs in the block's `on_complete`, at the very END of
+// settle -- after `done_cv.notify_all()` has already woken the waiter. So a `sync()`ing
+// thread can legitimately observe the still-set owner, and "the write grant was released"
+// has to be polled rather than read once. (That ordering is itself worth pinning: it is why
+// a caller must not infer pipe state from a task's completion.)
+template<typename T>
+bool owner_cleared(ts::Guarded<T>& obj)
+{
+    for (int spins = 0; spins < 1'000'000 && owner_of(obj) != nullptr; ++spins)
+        std::this_thread::yield();
+    return owner_of(obj) == nullptr;
+}
+
 // F1: a write body sees itself as the owner; outside any write window the owner is null.
 // The read case is the other half of the invariant -- a reader hold must NOT publish an
 // owner, or `commit()` would take its inline arm under a read grant.
@@ -405,7 +419,7 @@ void test_writer_owner_set_and_cleared()
     }).sync();
 
     TS_CHECK(matched.load());
-    TS_CHECK(owner_of(x) == nullptr);   // released with the write
+    TS_CHECK(owner_cleared(x));   // released with the write
 
     std::atomic<void*> during_read{ reinterpret_cast<void*>(1) };
     x.async([&x, &during_read](const int&) { during_read.store(owner_of(x)); }).sync();
@@ -439,7 +453,7 @@ void test_writer_owner_transfers_between_writes()
     TS_CHECK(self1.load() && self2.load());
     TS_CHECK(first.load() != nullptr && second.load() != nullptr);
     TS_CHECK(first.load() != second.load());   // the release cleared it; the next admission set it
-    TS_CHECK(owner_of(x) == nullptr);
+    TS_CHECK(owner_cleared(x));
 }
 
 // F3: the inline arms. An `access` on a free pipe runs on the CALLER's thread but is still a
@@ -455,7 +469,7 @@ void test_writer_owner_inline_and_reentrant()
     std::atomic<void*> inline_owner{ nullptr };
     x.access([&](int& v) { v = 1; inline_owner.store(owner_of(x)); }).sync();
     TS_CHECK(inline_owner.load() != nullptr);
-    TS_CHECK(owner_of(x) == nullptr);
+    TS_CHECK(owner_cleared(x));
 
     std::atomic<void*> outer{ nullptr }, inner{ nullptr }, after{ nullptr };
     std::atomic<bool> inner_ran{ false };
@@ -472,7 +486,7 @@ void test_writer_owner_inline_and_reentrant()
     TS_CHECK(outer.load() != nullptr);
     TS_CHECK(inner.load() == outer.load());   // ran under the outer grant, owner unchanged
     TS_CHECK(after.load() == outer.load());   // and the inner settle did not clear it
-    TS_CHECK(owner_of(x) == nullptr);
+    TS_CHECK(owner_cleared(x));
 }
 
 // F4: a multi-object write holds several pipes at once; each names the SAME block, and each
@@ -494,7 +508,7 @@ void test_writer_owner_multi_object()
 
     TS_CHECK(both_self.load());
     TS_CHECK(untouched.load() == nullptr);
-    TS_CHECK(owner_of(a) == nullptr && owner_of(b) == nullptr);
+    TS_CHECK(owner_cleared(a) && owner_cleared(b));
 }
 
 } // namespace
