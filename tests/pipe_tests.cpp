@@ -374,6 +374,129 @@ void test_priority_does_not_reorder()
     TS_CHECK(hi.sync() == 3);
 }
 
+// --- F: grant ownership (`Pipe::writer_owner`) ----------------------------
+//
+// White-box, because `writer_owner` is the one always-on piece of grant state and BEHAVIOR
+// keys off it: `Deferred::commit()` applies inline exactly when the caller is the holder,
+// and `Guarded::access` takes its reentrant arm on the same test. Those two verbs are
+// covered end-to-end elsewhere; these pin the invariant itself, so a regression is reported
+// here rather than as a mysterious extra write job or a deadlock.
+
+// The block currently holding this object's write grant, or null.
+template<typename T>
+ts::detail::Task_control_block* owner_of(ts::Guarded<T>& obj)
+{
+    return ts::detail::Guarded_access::pipe(obj).writer_owner.load(std::memory_order_acquire);
+}
+
+// F1: a write body sees itself as the owner; outside any write window the owner is null.
+// The read case is the other half of the invariant -- a reader hold must NOT publish an
+// owner, or `commit()` would take its inline arm under a read grant.
+void test_writer_owner_set_and_cleared()
+{
+    ts::Guarded<int> x{ 0 };
+    TS_CHECK(owner_of(x) == nullptr);
+
+    std::atomic<bool> matched{ false };
+    x.async([&x, &matched](int& v)
+    {
+        v = 1;
+        matched.store(owner_of(x) == ts::detail::current_task.get());
+    }).sync();
+
+    TS_CHECK(matched.load());
+    TS_CHECK(owner_of(x) == nullptr);   // released with the write
+
+    std::atomic<void*> during_read{ reinterpret_cast<void*>(1) };
+    x.async([&x, &during_read](const int&) { during_read.store(owner_of(x)); }).sync();
+    TS_CHECK(during_read.load() == nullptr);
+}
+
+// F2 (re-scoped for the evolved pipe -- the explicit graph write handoff this originally
+// tested is deleted): ownership transfers by release-then-admit. Two chained writes must
+// each name their OWN block, never the predecessor's and never null.
+void test_writer_owner_transfers_between_writes()
+{
+    ts::Guarded<int> x{ 0 };
+    std::atomic<void*> first{ nullptr }, second{ nullptr };
+    std::atomic<bool> self1{ false }, self2{ false };
+
+    ts::Task<void> a = x.async([&](int& v)
+    {
+        v += 1;
+        first.store(owner_of(x));
+        self1.store(owner_of(x) == ts::detail::current_task.get());
+    });
+    ts::Task<void> b = x.async([&](int& v)
+    {
+        v += 1;
+        second.store(owner_of(x));
+        self2.store(owner_of(x) == ts::detail::current_task.get());
+    });
+    a.sync();
+    b.sync();
+
+    TS_CHECK(self1.load() && self2.load());
+    TS_CHECK(first.load() != nullptr && second.load() != nullptr);
+    TS_CHECK(first.load() != second.load());   // the release cleared it; the next admission set it
+    TS_CHECK(owner_of(x) == nullptr);
+}
+
+// F3: the inline arms. An `access` on a free pipe runs on the CALLER's thread but is still a
+// real admission, so it publishes its own block as the owner for the body's duration. The
+// reentrant arm is the interesting half: an `access` from a task that already holds the
+// write grant runs under that grant and touches the pipe not at all, so the owner must stay
+// the OUTER block -- if it were republished (or cleared on the inner settle) `commit()`
+// would mis-dispatch for the rest of the outer body.
+void test_writer_owner_inline_and_reentrant()
+{
+    ts::Guarded<int> x{ 0 };
+
+    std::atomic<void*> inline_owner{ nullptr };
+    x.access([&](int& v) { v = 1; inline_owner.store(owner_of(x)); }).sync();
+    TS_CHECK(inline_owner.load() != nullptr);
+    TS_CHECK(owner_of(x) == nullptr);
+
+    std::atomic<void*> outer{ nullptr }, inner{ nullptr }, after{ nullptr };
+    std::atomic<bool> inner_ran{ false };
+    x.async([&](int& v)
+    {
+        outer.store(owner_of(x));
+        ts::Task<void> nested = x.access([&](int& w) { w += 1; inner_ran.store(true); inner.store(owner_of(x)); });
+        TS_CHECK(nested.is_done());   // reentrant: ran inline, in-call
+        after.store(owner_of(x));
+        v += 1;
+    }).sync();
+
+    TS_CHECK(inner_ran.load());
+    TS_CHECK(outer.load() != nullptr);
+    TS_CHECK(inner.load() == outer.load());   // ran under the outer grant, owner unchanged
+    TS_CHECK(after.load() == outer.load());   // and the inner settle did not clear it
+    TS_CHECK(owner_of(x) == nullptr);
+}
+
+// F4: a multi-object write holds several pipes at once; each names the SAME block, and each
+// is independent (a third object the task never touched stays unowned).
+void test_writer_owner_multi_object()
+{
+    ts::Guarded<int> a{ 0 }, b{ 0 }, c{ 0 };
+    std::atomic<bool> both_self{ false };
+    std::atomic<void*> untouched{ reinterpret_cast<void*>(1) };
+
+    ts::async([&](int& x, int& y)
+    {
+        x = 1;
+        y = 2;
+        ts::detail::Task_control_block* self = ts::detail::current_task.get();
+        both_self.store(owner_of(a) == self && owner_of(b) == self);
+        untouched.store(owner_of(c));
+    }, a, b).sync();
+
+    TS_CHECK(both_self.load());
+    TS_CHECK(untouched.load() == nullptr);
+    TS_CHECK(owner_of(a) == nullptr && owner_of(b) == nullptr);
+}
+
 } // namespace
 
 void run_pipe_tests()
@@ -393,4 +516,8 @@ void run_pipe_tests()
     run("worker-less deterministic", test_worker_less_deterministic);
     run("worker-less deep chain", test_worker_less_deep_chain);
     run("priority does not reorder", test_priority_does_not_reorder);
+    run("writer_owner set and cleared", test_writer_owner_set_and_cleared);
+    run("writer_owner transfers between writes", test_writer_owner_transfers_between_writes);
+    run("writer_owner inline + reentrant", test_writer_owner_inline_and_reentrant);
+    run("writer_owner multi-object", test_writer_owner_multi_object);
 }

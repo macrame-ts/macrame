@@ -169,17 +169,24 @@ Each entry: id, `[bb]`/`[wb]`, one line of WHAT, one line of HOW.
 - **E6** `[bb]` inline node dispatch across handoff. *How:* an inline node chain on one
   object trampolines correctly.
 
-### F. Grant-ownership `writer_owner` (`pipe_tests`) — R3, Wave 2 `[wb]`
-- **F1** owner set∥cleared. *How:* inside a write body `Pipe_probe` sees `writer_owner ==
-  current_task`; outside, `nullptr`.
-- **F2** owner transferred at handoff. *How:* the handoff successor's body sees itself as
-  owner (not the predecessor, not null).
-- **F3** owner under inline `access`. *How:* the caller runs the write inline; owner names
-  the inline block for its duration.
-- **F4** per-pipe owner under multi-object write. *How:* each held pipe names the same
-  holding block; independent per pipe.
-- *Note:* reentrant-`access` / auto-dispatch-verb behavioral tests belong to the Phase-5
-  verb PRs, not v1.
+### F. Grant-ownership `writer_owner` (`pipe_tests`) — R3, Wave 2 `[wb]` — **LANDED 2026-08**
+- **F1** owner set∥cleared. *How:* inside a write body the test reads `writer_owner ==
+  current_task`; outside, `nullptr`. *Landed as written*, plus the other half of the
+  invariant: a READER hold must publish NO owner, or `commit()` would take its inline arm
+  under a read grant.
+- **F2** ~~owner transferred at handoff~~ — **re-scoped**: the explicit graph write handoff
+  is deleted with the pipe rebase, so the successor case is release-then-admit. *Landed as:*
+  two chained writes each name their OWN block, never the predecessor's, never null.
+- **F3** owner under inline `access`. *Landed as written* (an `access` on a free pipe is a
+  real admission and publishes its own block), plus the REENTRANT arm, which is the sharper
+  case: an `access` from the grant holder runs under that grant and touches the pipe not at
+  all, so the owner must remain the OUTER block — republishing it, or clearing it on the
+  inner settle, would mis-dispatch `commit()` for the rest of the outer body.
+- **F4** per-pipe owner under multi-object write. *Landed as written*, plus an untouched
+  third object staying unowned (the per-pipe independence half).
+- *Note:* no `Pipe_probe` type was needed in the end — `Guarded_access::pipe()` plus a local
+  `owner_of()` helper reads the field directly. The auto-dispatch verb behavior these
+  invariants underpin is covered end-to-end in `deferred_tests`.
 
 ### G. Lifetime (`pipe_tests`) — R6, R9
 - **G1** `[bb]` destructor waits (strengthened). *How:* `Guarded` dropped immediately
