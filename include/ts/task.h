@@ -194,7 +194,7 @@ struct Task_control_block;
 
 // Intrusive strong-refcount ownership of a `Task_control_block`. The count + a `destroy`
 // thunk live IN the block (no separate control block), so a handle is ONE pointer (half a
-// `shared_ptr`) -- lighter in the successor/prerequisite/inline vectors and on every copy.
+// `shared_ptr`) -- lighter in the successor/inline vectors and on every copy.
 // The block's refcount starts at 0; the first `Task_ptr(&block)` brings it to 1. `inc`/`dec`
 // are defined below the block (they touch its members).
 void intrusive_inc(Task_control_block* p) noexcept;
@@ -286,7 +286,8 @@ struct Task_control_block
     // NOTE: members are ordered for size, not logic -- the sub-8-byte fields are clustered
     // (below the 8-byte block) so they share padding instead of each punching a hole between
     // pointers/atomics, and the two 32-bit atomics sit together to fill one 8-byte slot.
-    // sizeof shrank 336 -> 320 by this reorder alone (clang-cl x64). See docs/task-internals.md §2.
+    // sizeof shrank 336 -> 320 by this reorder alone, then 320 -> 280 when the coroutine-first
+    // deletions dropped the `prerequisites` vector (clang-cl x64). See docs/task-internals.md §2.
 
     // Intrusive strong refcount (see `Task_ptr`) + `num_locks`. Two 32-bit atomics packed
     // adjacent = one 8-byte slot, no padding. `refcount` starts at 0 (first `Task_ptr` -> 1).
@@ -367,8 +368,7 @@ struct Task_control_block
     std::mutex mutex;
     std::condition_variable done_cv;   // wakes N waiters (a `Signal` is a barrier)
 
-    std::vector<Task_ptr> successors;      // decremented on settle
-    std::vector<Task_ptr> prerequisites;   // backward links, for deep retraction
+    std::vector<Task_ptr> successors;      // released on settle (nested children -> parent)
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
     // This block's current re-arm generation — the high bits of `run_state`, above the
@@ -465,7 +465,6 @@ struct Task_control_block
     {
         std::vector<std::move_only_function<void(void*, bool)>> conts;
         std::vector<Task_ptr> succs;
-        std::vector<Task_ptr> prereqs;   // drop (no longer needed)
         void* r = nullptr;               // the result for continuations, captured under the lock
         {
             std::scoped_lock lock(mutex);
@@ -482,7 +481,6 @@ struct Task_control_block
             ready.store(true, std::memory_order_release);
             conts = std::move(continuations);
             succs = std::move(successors);
-            prereqs = std::move(prerequisites);
             // Read `result_ptr` for the continuations HERE, under the lock -- not after the
             // notify below. Otherwise a re-armable block's waiter (woken by the notify) can
             // `reset()` + re-run and the new run overwrites `result_ptr` while this settle
@@ -519,7 +517,7 @@ struct Task_control_block
     }
 
     // Re-arm this settled block for another run (`Signal::reset`, the graph's per-run
-    // re-arm). `successors`/`prerequisites`/`continuations` were drained by `settle`,
+    // re-arm). `successors`/`continuations` were drained by `settle`,
     // and the result storage is overwritten by the next run's body, so only the
     // completion scalars reset here. Leaves `num_locks` at 0 (the caller re-applies
     // any launch lock). Precondition: settled and quiescent — one run in flight, prior
@@ -547,8 +545,8 @@ inline void intrusive_inc(Task_control_block* p) noexcept
     p->refcount.fetch_add(1, std::memory_order_relaxed);
 }
 // Bounded destruction trampoline. A block's destruction can release references to other
-// blocks (a fused coroutine frame owns its `Task` parameters and promise state; a builder
-// chain's blocks reference their prerequisites), so a deep chain destroyed recursively --
+// blocks (a fused coroutine frame owns its `Task` parameters and promise state), so a
+// deep chain destroyed recursively --
 // dec -> destroy -> member dec -> destroy -> ... -- overflows the stack (a 50k-deep await
 // cascade did, under TSan). The last release pushes instead, and the outermost drain
 // destroys iteratively (O(1) stack); the vector retains capacity, so the steady state
@@ -830,7 +828,7 @@ auto with_inherited_access(Fn&& fn)
     }
 }
 
-// The control block behind a `Task` handle (used to wire prerequisites).
+// The control block behind a `Task` handle (for detail-layer wiring).
 template<typename R>
 Task_ptr core_of(const Task<R>& t) noexcept;
 
