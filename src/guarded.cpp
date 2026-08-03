@@ -1,9 +1,12 @@
 #include "ts/guarded.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace ts
 {
@@ -353,6 +356,127 @@ void pipe_release(Scheduler&, Pipe& pipe, Access mode)
 }
 
 #if TS_SAFETY_CHECKS
+// ===== waits-for cycle detector (docs/coroutine-first.md §2) ================================
+//
+// One process-wide registry of {held pipe -> awaited pipe} edges, recorded by the coroutine
+// awaiters at a genuine suspension on a pipe and cleared at resume. A cycle among the edges
+// is the suspended-ABBA deadlock; it is checked on every insert under the registry mutex,
+// so whichever awaiter inserts the closing edge sees the rest and faults. Cold path only
+// (a deferred acquire / a suspending await), so a mutex + vector + DFS is plenty.
+namespace
+{
+
+struct Waits_edge
+{
+    const Pipe* held;
+    const Pipe* awaited;
+    const void* ticket;                  // the recording awaiter (identity for clear)
+    const Task_control_block* waiter;    // the suspending task, for the diagnostic
+};
+
+std::mutex waits_mutex;
+std::vector<Waits_edge> waits_edges;
+
+// Recover the owning `Pipe` from an `Access_context` entry's epoch source (the entry
+// stores `&pipe->write_epoch`). Diagnostic-only pointer arithmetic, confined to this TU
+// where the layout is known; `offsetof` on `Pipe` is conditionally-supported (non-
+// standard-layout) and accepted by every toolchain we build on.
+const Pipe* pipe_from_epoch(const std::atomic<std::uint64_t>* epoch) noexcept
+{
+    return reinterpret_cast<const Pipe*>(
+        reinterpret_cast<const char*>(epoch) - offsetof(Pipe, write_epoch));
+}
+
+const char* pipe_name(const Pipe* pipe) noexcept
+{
+    return pipe->debug_name != nullptr ? pipe->debug_name : "<unnamed>";
+}
+
+// Does a chain of edges lead from `from` back to `target`? (`held == from` edges step to
+// their awaited pipe.) Depth-bounded for safety; the registry is tiny (live suspensions).
+bool waits_reaches(const Pipe* from, const Pipe* target, int depth) noexcept
+{
+    if (from == target)
+        return true;
+    if (depth > 64)
+        return false;
+    for (const Waits_edge& e : waits_edges)
+    {
+        if (e.held == from && waits_reaches(e.awaited, target, depth + 1))
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
+bool waits_for_record(const Access_context* held, const void* ticket, const Task_control_block* waiter,
+                      Pipe* const* awaited, int count)
+{
+    if (held == nullptr || count == 0)
+        return false;
+    std::scoped_lock lock(waits_mutex);
+    bool recorded = false;
+    held->for_each_epoch([&](const std::atomic<std::uint64_t>* epoch)
+    {
+        const Pipe* held_pipe = pipe_from_epoch(epoch);
+        for (int i = 0; i < count; ++i)
+        {
+            const Pipe* awaited_pipe = awaited[i];
+            if (awaited_pipe == nullptr)
+                continue;
+            if (waits_reaches(awaited_pipe, held_pipe, 0))
+            {
+                // The closing edge. Find the counterpart edge out of the awaited pipe to
+                // name the other task; for a self-cycle (awaiting an object this task
+                // holds) there is none.
+                const Waits_edge* other = nullptr;
+                for (const Waits_edge& e : waits_edges)
+                {
+                    if (e.held == awaited_pipe)
+                    {
+                        other = &e;
+                        break;
+                    }
+                }
+                char message[512];
+                if (awaited_pipe == held_pipe)
+                {
+                    std::snprintf(message, sizeof message,
+                        "waits-for cycle: task (block %p) holding '%s' awaits the same object -- the "
+                        "access queues behind the very grant the awaiter holds and the frame never "
+                        "resumes; access it under the held grant instead (reentrancy covers the "
+                        "writer-owner case)",
+                        static_cast<const void*>(waiter), pipe_name(held_pipe));
+                }
+                else
+                {
+                    std::snprintf(message, sizeof message,
+                        "waits-for cycle: task (block %p) holding '%s' awaits '%s', while task "
+                        "(block %p) holding '%s' awaits '%s' -- a suspended ABBA deadlock (no thread "
+                        "parks; the frames simply never resume). Prefer the access hierarchy: declare "
+                        "the object on the node, read a Versioned snapshot, or stage via Deferred "
+                        "(docs/coroutine-first.md section 2)",
+                        static_cast<const void*>(waiter), pipe_name(held_pipe), pipe_name(awaited_pipe),
+                        static_cast<const void*>(other != nullptr ? other->waiter : nullptr),
+                        pipe_name(awaited_pipe),
+                        other != nullptr ? pipe_name(other->awaited) : "?");
+                }
+                ts::fatal(message);
+            }
+            waits_edges.push_back({ held_pipe, awaited_pipe, ticket, waiter });
+            recorded = true;
+        }
+    });
+    return recorded;
+}
+
+void waits_for_clear(const void* ticket) noexcept
+{
+    std::scoped_lock lock(waits_mutex);
+    std::erase_if(waits_edges, [&](const Waits_edge& e) { return e.ticket == ticket; });
+}
+
 // The `sync_wait` diagnostic (declared in task.h, defined here for the `Pipe` layout):
 // the caller established that the wait is about to park inside a task. Sharp message
 // when the wait target is a pipe task queued on a pipe the current scope's grant covers

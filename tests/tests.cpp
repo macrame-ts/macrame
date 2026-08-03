@@ -65,6 +65,28 @@ static ts::Task<void> stale_stray(tests::Counter& k, ts::Signal go)
     k.increment();
 }
 
+// Death scenario body (`waits_for_cycle`): a coroutine graph-node body that touches its
+// declared object, waits until BOTH nodes hold their grants (the flag sync forces the
+// overlap), then awaits the OTHER node's object -- the suspended-ABBA shape. Each deferred
+// acquire records a waits-for edge; whichever inserts second closes the cycle and fatals.
+static std::atomic<int> abba_holding{ 0 };
+static ts::Task<void> abba_body(tests::Counter& own, ts::Guarded<tests::Counter>& other)
+{
+    own.increment();
+    abba_holding.fetch_add(1, std::memory_order_acq_rel);
+    while (abba_holding.load(std::memory_order_acquire) < 2)
+        std::this_thread::yield();   // both nodes hold before either awaits
+    auto guard = co_await ts::read_write(other);   // defers behind the other node's grant -> cycle
+    guard->increment();
+}
+
+// Death scenario body (`signal_reset_awaited`): parks a coroutine on the signal so the
+// re-arm-while-awaited misuse has a live awaiter.
+static ts::Task<void> await_signal(ts::Signal s)
+{
+    co_await s;
+}
+
 void run_death_scenario(const char* name)
 {
     using tests::Counter;
@@ -423,6 +445,29 @@ void run_death_scenario(const char* name)
         ts::Guarded<Counter> w;
         ts::Signal never;
         coro_await_under_guard(w, never).sync();   // fatals during the coroutine's eager run
+    }
+    else if (std::strcmp(name, "waits_for_cycle") == 0)
+    {
+        // Two independent coroutine graph nodes, each holding its declared object and
+        // awaiting the other's (see `abba_body`). The waits-for detector fatals on the
+        // closing edge. Companion: `test_cross_object_declared` (coroutine_tests) --
+        // declare both objects and let compile() order the nodes.
+        ts::Guarded<Counter> a{ ts::Named{ "objA" } };
+        ts::Guarded<Counter> b{ ts::Named{ "objB" } };
+        ts::Static_task_graph graph;
+        graph.add_node([&b](Counter& own) { return abba_body(own, b); }, a);
+        graph.add_node([&a](Counter& own) { return abba_body(own, a); }, b);
+        graph.compile();
+        graph.execute().sync();
+    }
+    else if (std::strcmp(name, "signal_reset_awaited") == 0)
+    {
+        // Re-arming a Signal while a coroutine is suspended on it: the signal has not
+        // settled, so `reset()` hits the not-settled fatal -- the awaited-side variant of
+        // `reset_unsettled`. Companion: `test_signal_reset` (settle, then reset).
+        ts::Signal s;
+        ts::Task<void> t = await_signal(s);   // suspends (never triggered)
+        s.reset();   // -> fatal
     }
     // unknown scenario: return without dying -> parent's expect_death fails
 }

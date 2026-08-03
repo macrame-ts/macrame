@@ -448,6 +448,39 @@ void test_death_scope_unjoined()
 }
 #endif
 
+// Companion for the waits-for-cycle fatal (docs/coroutine-first.md §2 hierarchy, step 1):
+// the same cross-object communication with BOTH objects declared -- compile() derives the
+// conflict edges and orders the nodes, so neither suspends and no cycle can form.
+Task<void> declared_pair_body(tests::Counter& own, tests::Counter& other)
+{
+    own.increment();
+    other.increment();
+    co_return;
+}
+
+void test_cross_object_declared()
+{
+    ts::Guarded<tests::Counter> a;
+    ts::Guarded<tests::Counter> b;
+    ts::Static_task_graph graph;
+    graph.add_node([](tests::Counter& own, tests::Counter& other) { return declared_pair_body(own, other); }, a, b);
+    graph.add_node([](tests::Counter& own, tests::Counter& other) { return declared_pair_body(own, other); }, b, a);
+    graph.compile();
+    graph.execute().sync();
+    TS_CHECK(a.access([](const tests::Counter& c) { return c.value(); }).sync() == 2);
+    TS_CHECK(b.access([](const tests::Counter& c) { return c.value(); }).sync() == 2);
+}
+
+#if TS_SAFETY_CHECKS
+// The suspended-ABBA deadlock: two coroutine nodes each holding a declared grant and
+// awaiting the other's object. The waits-for detector fatals on the closing edge -- the
+// only diagnosis this shape can get (no thread parks; the frames simply never resume).
+void test_death_waits_for_cycle()
+{
+    TS_CHECK(ts::test::expect_death("waits_for_cycle"));
+}
+#endif
+
 } // namespace
 
 void run_coroutine_tests()
@@ -476,6 +509,10 @@ void run_coroutine_tests()
     run("co task_scope join", test_task_scope_join);
 #if TS_SAFETY_CHECKS
     run("death: task_scope unjoined", test_death_scope_unjoined);
+#endif
+    run("co cross-object declared", test_cross_object_declared);
+#if TS_SAFETY_CHECKS
+    run("death: waits-for cycle", test_death_waits_for_cycle);
 #endif
     run("co showcase", test_showcase);
 }

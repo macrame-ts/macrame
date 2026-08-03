@@ -464,6 +464,13 @@ void test_death_reset_unsettled()
     TS_CHECK(ts::test::expect_death("reset_unsettled"));   // reset() before the signal settled
 }
 
+void test_death_signal_reset_awaited()
+{
+    // The awaited-side variant: a coroutine is suspended on the signal when reset() hits
+    // the same not-settled guard. Companion: `test_signal_reset` (settle, then reset).
+    TS_CHECK(ts::test::expect_death("signal_reset_awaited"));
+}
+
 // --- K: nested tasks (scoped launches) -------------------------------------
 
 // A nested task launched inside a parent's body gates the parent's completion.
@@ -534,6 +541,7 @@ void run_task_tests()
     run("launch cancelled", test_launch_cancelled);
     run("signal reset", test_signal_reset);
     run("death: reset unsettled", test_death_reset_unsettled);
+    run("death: signal reset while awaited", test_death_signal_reset_awaited);
     run("nested gates parent", test_nested_gates_parent);
     run("nested multiple", test_nested_multiple);
     run("death: nested outside", test_death_nested_outside);

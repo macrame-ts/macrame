@@ -175,6 +175,22 @@ struct Task_awaiter
         if (pipe_guard_depth > 0)
             ts::fatal("co_await while holding a Guarded guard (pipe held across suspension)");
 
+#if TS_SAFETY_CHECKS
+        // Waits-for edges (docs/coroutine-first.md §2): suspending on a PIPE JOB while this
+        // context holds grants -- the job's turn cannot arrive until its pipes drain, so a
+        // held-grant cycle through them is the suspended-ABBA deadlock. Recorded before the
+        // attach (the segment's `current_access` is still installed here); cleared at
+        // `await_resume`. Non-pipe tasks record nothing.
+        if (core_->pipe_count > 0 && current_access != nullptr)
+        {
+            Pipe* awaited[8];
+            int n = 0;
+            for (std::uint8_t i = 0; i < core_->pipe_count && n < 8; ++i)
+                awaited[n++] = core_->pipe_links[i].pipe;
+            recorded_ = waits_for_record(current_access, this, current_task.get(), awaited, n);
+        }
+#endif
+
         exit_segment_if_ours(h.promise());
 
         core_->attach([this, h](void*, bool)
@@ -193,6 +209,10 @@ struct Task_awaiter
 
     decltype(auto) await_resume()
     {
+#if TS_SAFETY_CHECKS
+        if (recorded_)
+            waits_for_clear(this);
+#endif
         if constexpr (std::is_void_v<R>)
         {
             return;   // a cancelled void task simply resumes (mirrors sync())
@@ -207,6 +227,9 @@ struct Task_awaiter
 
     Task_ptr core_;
     std::atomic<int> state_{ 0 };
+#if TS_SAFETY_CHECKS
+    bool recorded_ = false;   // waits-for edges recorded at suspend, cleared at resume
+#endif
 };
 
 // The shared (result-agnostic) half of the fused promise. The block is the FIRST member,
@@ -431,6 +454,15 @@ struct Pipe_guard_awaiter
         if (pipe_guard_depth > 0)
             ts::fatal("co_await a Guarded guard while holding another (pipe held across suspension)");
 
+#if TS_SAFETY_CHECKS
+        // Waits-for edge (docs/coroutine-first.md §2): a deferred acquire is a genuine
+        // suspension on this pipe; record {each held grant -> pipe_} and cycle-check.
+        // `current_access` is still the segment's context here (`exit_segment` restores
+        // task identity, not the access scope). Cleared at `await_resume`.
+        Pipe* awaited = &pipe_;
+        recorded_ = waits_for_record(current_access, this, owner_of(h), &awaited, 1);
+#endif
+
         if (state_.exchange(2, std::memory_order_acq_rel) == 1)
         {
             enter_segment_if_ours(h.promise());
@@ -441,6 +473,10 @@ struct Pipe_guard_awaiter
 
     Pipe_guard<T, Mode> await_resume() noexcept
     {
+#if TS_SAFETY_CHECKS
+        if (recorded_)
+            waits_for_clear(this);
+#endif
         return Pipe_guard<T, Mode>(scheduler_, pipe_, obj_);   // prvalue -> elided into the local
     }
 
@@ -459,6 +495,9 @@ public:
     Pipe& pipe_;
     T* obj_;
     std::atomic<int> state_{ 0 };
+#if TS_SAFETY_CHECKS
+    bool recorded_ = false;   // waits-for edge recorded at suspend, cleared at resume
+#endif
 };
 
 // Awaiter joining a set of tasks: resumes once every one has settled. Shared by
