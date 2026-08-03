@@ -80,6 +80,19 @@ and [docs/pipe-rebase.md](docs/pipe-rebase.md) §0.
 - Resumption runs on a bounded thread-local trampoline on the settling/granting thread — no
   queue hop, iterative so the stack stays O(1).
 
+### Samples and measurement
+
+- `sample/game_frame.cpp` gained a **third composition of the same frame**,
+  `run_frame_graph_free` — the ~34 systems as multi-object `ts::async` calls with every
+  derived edge written out as a `co_await`, no `Static_task_graph`. It answers "what does
+  the graph buy" with a measurement ([docs/guide.md](docs/guide.md) §6.4): safety is the
+  pipe's either way, order is the graph's (69 derived edges become 17 chain coroutines and
+  42 awaits, and pipe FIFO does *not* stand in for the conflict edges), and the runtime gap
+  is coroutine resume round trips (+1.6% on a 4.1 ms frame, +28.7% on a 0.45 ms one), not
+  the +95 allocations per frame.
+- New `--bench` section (`graph 1.0` / `free 1.0` / `graph .05` / `free .05`, µs/frame) and
+  `--memprofile` entries (`frame graph` / `frame graph-free`, allocations per frame).
+
 ## 0.1.0 — never tagged
 
 The pre-coroutine state: the callback composition vocabulary (`then` / `when_all` / task

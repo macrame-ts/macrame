@@ -12,6 +12,9 @@ namespace sample
 {
 void game_frame_stats(int frames, float time_scale,
                       double& avg_ms, double& serial_ms, float& transform0);
+void game_frame_free_stats(int frames, float time_scale,
+                           double& avg_ms, double& serial_ms, float& transform0);
+long long game_frame_draw_count();
 }
 
 #include <algorithm>
@@ -508,6 +511,33 @@ void test_engine_determinism()
     TS_CHECK(a == b);
 }
 
+// The same frame composed without a `Static_task_graph` (sample's `run_frame_graph_free`):
+// the same systems as multi-object `ts::async` calls with every derived edge written out as
+// a `co_await`. It must produce the same observable result as the graph baseline -- entity
+// 0's published transform is local_xf + bodies = 2 + 3, and it only reads 5 if propagation
+// ran after BOTH ik_post and finalize, so a dropped edge shows up here.
+void test_engine_graph_free()
+{
+    double avg_ms = 0.0, serial_ms = 0.0;
+    float graph_xf = 0.0f, free_a = 0.0f, free_b = 0.0f;
+    sample::game_frame_stats(5, 0.3f, avg_ms, serial_ms, graph_xf);
+    long long graph_drawn = sample::game_frame_draw_count();
+    sample::game_frame_free_stats(5, 0.3f, avg_ms, serial_ms, free_a);
+    long long free_drawn = sample::game_frame_draw_count();
+    sample::game_frame_free_stats(5, 0.3f, avg_ms, serial_ms, free_b);
+    long long free_drawn_again = sample::game_frame_draw_count();
+
+    TS_CHECK(free_a == 5.0f);
+    TS_CHECK(free_a == graph_xf);              // equivalent to the graph baseline
+    TS_CHECK(free_a == free_b);                // and deterministic across runs
+    // The transform invariant cannot see the draw-producer/submit ordering (every mock
+    // system writes the same constant every frame, so a one-frame skew is invisible); the
+    // submitted command count can -- `submit` clears the queue, so it counts only what the
+    // producers pushed before it ran.
+    TS_CHECK(free_drawn == graph_drawn);
+    TS_CHECK(free_drawn == free_drawn_again);
+}
+
 // Awaited fork-join, nested two deep: the coroutine-first shape of the classic
 // oversubscription deadlock. The outer coroutines saturate every worker and each AWAITS
 // its inner tasks; awaiting suspends (frees the worker) instead of parking it, so the
@@ -769,6 +799,7 @@ void run_integration_tests()
     run("repeat stress x20", test_repeat_stress);
     run("engine frame invariants", test_engine_frame);
     run("engine determinism", test_engine_determinism);
+    run("engine frame without a graph", test_engine_graph_free);
     run("oversubscription no deadlock", test_oversubscription_no_deadlock);
     run("deep await chain no deadlock", test_deep_await_chain_no_deadlock);
 }

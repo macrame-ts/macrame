@@ -185,6 +185,45 @@ at the dependency counter's zero transition splits that overhead out exactly:
 ready-to-start is acquire + queue latency, attributed per node as "dispatch
 wait".
 
+### 2.4 What the graph is worth, measured
+
+The graph is optional — the access verbs and `co_await` compose the same work —
+so the library owes an answer to "what does declaring it buy". `sample/game_frame.cpp`
+carries both spellings of one ~34-system frame over the same `World` and the
+same system bodies (`build_frame_graph` vs `run_frame_graph_free`), which makes
+the answer measurable rather than rhetorical. Three results, none of them the
+expected one:
+
+**Safety is not what it buys.** Every claim the harness enforces comes from the
+pipe turn a declaration takes, and a hand-composed `ts::async(fn, objs…)` takes
+the same turn. Dropping the graph weakens exactly one guarantee: nothing derives
+or checks the *order*.
+
+**Pipe FIFO does not stand in for the conflict edges.** The tempting shortcut —
+launch the systems in declaration order and let each object's FIFO reproduce the
+derived edges — does not hold, because the multi-object cascade enters links one
+at a time in canonical (pipe-address) order. A system blocked on its first object
+has not taken its slot on the later ones, so a system launched after it walks
+straight past. In the sample this mis-orders `frustum_cull` before `camera` and
+lets `submit` clear the draw queue before `cmd_record` reaches it — a frame of
+draw commands lost, silently, with every declaration correct and the frame 7.6%
+*faster* for the missing edges. This is the completeness hazard's twin: the
+harness is an oracle for undeclared access, and there is no oracle for
+mis-ordered *declared* access. `compile()` derives 69 edges for those 34 nodes;
+by hand the same frame is 17 chain coroutines and 42 `co_await`s.
+
+**The performance advantage is resume locality, not allocation amortization.**
+The standing assumption was that near-zero-alloc re-runs were the graph's
+measurable edge. They are not: graph-free costs +95 allocations per frame (134
+vs 38) which at ~17 ns each is under 2 µs, against a measured +56–64 µs/frame on a
+4.1 ms frame and +89–131 µs on a 0.46 ms one (+1.4–1.6% / +19–29%). The gap is ~50
+coroutine suspend/resume round trips at ~1.8 µs each. The graph dispatches a
+successor directly on the thread that settled its last predecessor; an awaited
+handle suspends a frame and resumes it through the trampoline. So the lever for
+closing it is resume locality, and the practical reading is that hand
+composition is free on millisecond-grained systems and starts to cost at
+fine grain.
+
 ---
 
 ## 3. Scheduler

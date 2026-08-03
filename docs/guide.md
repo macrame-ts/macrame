@@ -825,6 +825,59 @@ Three mistakes are caught with a fatal in checked builds:
   callers with an edge. (This also catches the plain single-threaded mistake of
   starting a second run without awaiting the first.)
 
+### 6.4 Do I need the static graph?
+
+Nothing forces you to build one. The access verbs plus `co_await` compose the
+same work: launch each system with `ts::async(fn, objs…)`, hold the returned
+`Task<void>` handles, and `co_await` a system's producers before launching it.
+The sample carries both spellings of one ~34-system frame — `build_frame_graph`
+and `run_frame_graph_free` in `sample/game_frame.cpp` — over the same `World`
+and the same system bodies, so the difference is only in how the schedule is
+produced. What the comparison shows:
+
+**Safety is the pipe's, not the graph's.** A hand-composed system still takes a
+mode-aware turn on every object it declares, so two conflicting systems never
+overlap and the harness still fatals on an undeclared touch. Dropping the graph
+costs you nothing here.
+
+**Order is the graph's.** `compile()` derives 69 edges from those 34 nodes'
+declarations. Written by hand that frame is 17 chain coroutines and 42
+`co_await`s. Do not expect the pipe's FIFO to stand in for the conflict edges:
+a multi-object access enters its links one at a time in canonical order, so a
+system blocked on its first object has not yet taken its slot on the later ones
+and a system launched after it walks straight past. Launching the sample's node
+list in declaration order with no explicit awaits runs `frustum_cull` before
+`camera` and lets `submit` clear the draw queue before `cmd_record` reaches it —
+losing a frame of draw commands, with every declaration correct, the harness
+silent, and the frame 7.6% *faster* for it. The harness is an oracle for
+undeclared access, not for mis-ordered declared access; a missing edge is a
+silent race.
+
+**Cost is a scheduler round trip per edge, not the allocations.** Measured on
+that frame (22 hardware threads, `--bench` reports both):
+
+| | µs/frame | allocs/frame |
+| --- | --- | --- |
+| graph, heavy systems (~4.1 ms frame) | 4102–4110 | 38 |
+| graph-free, same frame | +1.4–1.6% (+56–64 µs) | 134 |
+| graph, light systems (~0.46 ms frame) | 457–470 | 38 |
+| graph-free, same frame | +19–29% (+89–131 µs) | 134 |
+
+The graph-free composition costs ~95 extra allocations per frame, but at ~17 ns
+each that is under 2 µs — a rounding error against the 56–131 µs it actually
+costs. The real difference is the resume: the graph dispatches a successor
+directly on the thread that settled the last predecessor, while an awaited
+handle suspends a coroutine and resumes it, and ~50 of those round trips at
+~1.8 µs each (`coro chn` in `--bench`) is the whole gap.
+
+So: on a frame whose systems are milliseconds, hand composition is within noise
+and the graph is a maintainability tool — the schedule is derived from
+declarations that already exist, it is checked (cycles are fatal), and it is
+visible (`--dot`, the trace SVG). On fine-grained work the round trips start to
+matter. Reach for the graph when the structure is fixed and you want it derived
+and inspectable; compose by hand when the structure is dynamic, data-dependent,
+or small enough that writing the edges out is honest documentation.
+
 ---
 
 ## 7. `parallel_for`

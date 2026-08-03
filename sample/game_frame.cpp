@@ -22,6 +22,12 @@
 //     Choices that change a node's access (L1, L3, L4) branch at construction on
 //     `opt`; the body-level splits (L2) branch inside the system bodies.
 //
+//   Frame_variant::graph_free -- the baseline frame with no `Static_task_graph` at
+//     all: the same systems as multi-object `ts::async` calls, the same schedule
+//     written out with `co_await` (`run_frame_graph_free`). The measurement behind
+//     "what does the static graph buy me" -- the pipe still gives safety, the graph
+//     gives the schedule.
+//
 // What the layers show:
 //   - `Static_task_graph` -- nodes over guarded stores; every edge derived from
 //     parameter const-ness. A real render frame's worth of nodes: a gameplay
@@ -73,8 +79,10 @@ namespace sample
 {
 
 // Baseline = a straightforward composition; optimised = the same frame after the
-// levers the trace makes obvious. `build_frame_graph` takes the variant.
-enum class Frame_variant { baseline, optimised };
+// levers the trace makes obvious. `build_frame_graph` takes either. `graph_free` is
+// not a graph at all -- the same baseline frame hand-composed with coroutines and the
+// access verbs (`run_frame_graph_free`), the comparison case for what `compile()` buys.
+enum class Frame_variant { baseline, optimised, graph_free };
 
 namespace
 {
@@ -1088,21 +1096,280 @@ double serial_budget_ms()
          + budget::replication + budget::stats + budget::gc + budget::debug_overlay;
 }
 
-} // namespace
+// --- the same frame, composed without a graph --------------------------------------
+//
+// The comparison case for "what does the static graph actually buy me?". Same `World`,
+// same tick_* bodies, no `Static_task_graph`: every system is an ordinary multi-object
+// `ts::async` and the schedule is written by hand with `co_await`.
+//
+// Safety is unchanged, and it was never the graph's: each system takes a mode-aware turn
+// on every object it declares, so two conflicting systems never overlap and the access
+// harness still fatals on an undeclared touch.
+//
+// The ordering is what has to be written by hand. Pipe FIFO is not a substitute for the
+// graph's conflict edges: a multi-object access enters its links one at a time in canonical
+// (pipe-address) order, so a system blocked on its first object has not yet taken its
+// slot on the later ones and a system enqueued after it walks straight past. Enqueueing
+// the baseline node list in declaration order and awaiting the handles at the end is
+// measurably wrong: `frustum_cull` runs before `camera` (its `camera` read lands while
+// `camera` is still queued behind `input`), and `submit` takes the draw queue before
+// `cmd_record` reaches it, so a frame of draw commands is dropped -- with the transform
+// invariant still reading 5 and the harness silent, because every declaration is correct
+// and only the order is wrong.
+//
+// So every edge `compile()` derives is an explicit `co_await` here, and the frame is cut
+// into chains so a consumer waits for its own producer rather than for a whole chain.
+// Nothing below is checked: a missing `co_await` is a silent race between two systems
+// that both declared their access correctly.
 
-// --- entry points -----------------------------------------------------------------
+// Physics front: broadphase -> narrowphase. Independent of the frame head.
+ts::Task<void> gf_physics_front(World& world)
+{
+    co_await ts::async(&tick_broadphase, world.bodies, world.broad_pairs);
+    co_await ts::async(&tick_narrowphase, world.broad_pairs, world.contacts);
+}
 
-// Run `frames` frames at `scale`; returns the measured average ms/frame, the
+// Physics back: solver -> finalize. The solver reads this frame's combat, so the chain
+// splits here -- the front half has no gameplay input and starts at t=0.
+ts::Task<void> gf_physics_back(World& world, ts::Task<void> front, ts::Task<void> combat)
+{
+    co_await front;
+    co_await combat;
+    co_await ts::async(&tick_solver, world.contacts, world.combat, world.velocities);
+    co_await ts::async(&tick_finalize, world.velocities, world.bodies);
+}
+
+ts::Task<void> gf_navigation(World& world, ts::Task<void> navmesh_rebuild)
+{
+    co_await navmesh_rebuild;
+    co_await ts::async(&tick_navigation, world.nav_mesh, world.nav_tiles, world.transforms.state(), world.paths);
+}
+
+// AI reads this frame's trio (the baseline shape), so it carries four inbound edges.
+ts::Task<void> gf_AI(World& world, ts::Task<void> navigation, ts::Task<void> combat, ts::Task<void> economy,
+    ts::Task<void> quests)
+{
+    co_await navigation;
+    co_await combat;
+    co_await economy;
+    co_await quests;
+    co_await ts::async(
+        [&world](const Transforms& xf, const Paths& paths, const Combat& c, const Economy& e, const Quests& q,
+            Intents& intents) { tick_AI(world.nav_mesh, xf, paths, c, e, q, intents); },
+        world.transforms.state(), world.paths, world.combat, world.economy, world.quests, world.intents);
+}
+
+// Animation core: anim_graph -> ik_post. Stops at ik_post because propagation waits for
+// exactly that, not for skinning -- a chain handle is coarser than an edge, so every
+// fan-out point in the frame becomes another chain.
+ts::Task<void> gf_anim_core(World& world, ts::Task<void> AI)
+{
+    co_await AI;
+    co_await ts::async(&tick_anim_graph, world.skeletons, world.intents, world.anim_pose);
+    co_await ts::async([](const Anim_pose& pose, Local_xf& local_xf) { tick_ik_post(pose, local_xf, false); },
+        world.anim_pose, world.local_xf);
+}
+
+ts::Task<void> gf_skinning(World& world, ts::Task<void> anim_core)
+{
+    co_await anim_core;
+    co_await ts::async(&tick_skinning, world.local_xf, world.skin_matrices);
+}
+
+// Propagation stages this frame's transforms; the flip publishes them. The recorder is
+// minted per frame here -- the graph mints one at build time and reuses it, which is one
+// of the composition costs the graph-free frame re-pays every frame.
+ts::Task<void> gf_propagation(World& world, ts::Task<void> anim_core, ts::Task<void> physics_back)
+{
+    co_await anim_core;
+    co_await physics_back;
+    co_await ts::async(
+        [rec = world.transforms.recorder()](const Local_xf& local_xf, const Bodies& bodies,
+            const Velocities& velocities) mutable { tick_propagation(local_xf, bodies, velocities, rec); },
+        world.local_xf, world.bodies, world.velocities);
+}
+
+ts::Task<void> gf_frustum_cull(World& world, ts::Task<void> camera)
+{
+    co_await camera;
+    co_await ts::async(&tick_frustum_cull, world.transforms.state(), world.camera, world.renderables,
+        world.visibility);
+}
+
+ts::Task<void> gf_occlusion_cull(World& world, ts::Task<void> frustum_cull)
+{
+    co_await frustum_cull;
+    co_await ts::async(&tick_occlusion_cull, world.transforms.state(), world.visibility, world.vis_final);
+}
+
+ts::Task<void> gf_cmd_record(World& world, ts::Task<void> occlusion_cull, ts::Task<void> shadow)
+{
+    co_await occlusion_cull;
+    co_await shadow;
+    co_await ts::async(
+        [](const Vis_final& vis, const Shadow_map& shadows, const Renderables& renderables, Draw_lists& draws)
+        { draws.push_batch(tick_cmd_record(vis, shadows, renderables)); },
+        world.vis_final, world.shadow_map, world.renderables, world.draw_lists);
+}
+
+ts::Task<void> gf_UI(World& world, ts::Task<void> quests)
+{
+    co_await quests;
+    co_await ts::async([](const Quests& q, UI& widgets, Draw_lists& draws)
+        { draws.push_batch(tick_UI(q, widgets, false)); },
+        world.quests, world.UI, world.draw_lists);
+}
+
+// Submit consumes the queue, so it waits for all three producers. In the graph these are
+// conflict edges on `draw_lists`; here they are three awaits, and forgetting one submits
+// a partial frame with nothing to report it.
+ts::Task<void> gf_submit(World& world, ts::Task<void> cmd_record, ts::Task<void> particles, ts::Task<void> UI_widgets)
+{
+    co_await cmd_record;
+    co_await particles;
+    co_await UI_widgets;
+    co_await ts::async([](const Transforms& prev_xf, Draw_lists& draws)
+        {
+            read_all(prev_xf);
+            drawn.fetch_add(draws.count(), std::memory_order_relaxed);
+            parallel_cost(budget::submit);
+            draws.clear();
+        },
+        world.transforms.state(), world.draw_lists);
+}
+
+ts::Task<void> gf_vfx(World& world, ts::Task<void> particles)
+{
+    co_await particles;
+    co_await ts::async(&tick_vfx, world.transforms.state(), world.particles, world.vfx);
+}
+
+ts::Task<void> gf_gc(World& world, ts::Task<void> streaming, ts::Task<void> particles)
+{
+    co_await streaming;
+    co_await particles;
+    co_await ts::async(&tick_gc, world.assets, world.renderables, world.particles, world.gc);
+}
+
+ts::Task<void> gf_replication(World& world, ts::Task<void> AI)
+{
+    co_await AI;
+    co_await ts::async(&tick_replication, world.combat, world.economy, world.quests, world.intents,
+        world.replication);
+}
+
+ts::Task<void> gf_stats(World& world, ts::Task<void> economy, ts::Task<void> physics_back,
+    ts::Task<void> frustum_cull)
+{
+    co_await economy;
+    co_await physics_back;   // covers combat (the solver waits for it) and finalize's bodies
+    co_await frustum_cull;
+    co_await ts::async(&tick_stats, world.combat, world.economy, world.bodies, world.visibility, world.stats);
+}
+
+ts::Task<void> gf_debug_overlay(World& world, ts::Task<void> economy)
+{
+    co_await economy;
+    co_await ts::async([](const auto& economy_store, const auto& xf) { tick_debug_overlay(economy_store, xf); },
+        world.economy, world.transforms.state());
+}
+
+// The baseline frame with no graph. Reproduces the baseline schedule: same systems, same
+// access sets, same edges -- written out.
+ts::Task<void> run_frame_graph_free(World& world)
+{
+    // Branches with no dependency on the frame head start at t=0, as the graph would
+    // dispatch them: physics reads last frame's bodies, and the render pipeline reads the
+    // last published transforms.
+    ts::Task<void> physics_front = gf_physics_front(world);
+    ts::Task<void> shadow = ts::async(&tick_shadow, world.transforms.state(), world.skeletons, world.shadow_map);
+    ts::Task<void> audio = ts::async(&tick_audio, world.transforms.state(), world.audio_out);
+    ts::Task<void> particles = ts::async([](const Transforms& prev_xf, Particles& p, Draw_lists& draws)
+        { draws.push_batch(tick_particles(prev_xf, p)); },
+        world.transforms.state(), world.particles, world.draw_lists);
+    ts::Task<void> vfx = gf_vfx(world, particles);
+
+    // Frame head. Eight systems read `input`, so this one await stands for eight edges.
+    co_await ts::async(&tick_input, world.input);
+
+    ts::Task<void> camera = ts::async(&tick_camera, world.input, world.camera);
+    ts::Task<void> networking = ts::async(&tick_networking, world.input, world.net);
+    ts::Task<void> streaming = ts::async(
+        [&world](const Input& in, Assets& assets) { tick_streaming(world.asset_source, in, assets); },
+        world.input, world.assets);
+    ts::Task<void> navmesh_rebuild = ts::async(&tick_navmesh_rebuild, world.input, world.nav_tiles);
+
+    ts::Task<void> frustum_cull = gf_frustum_cull(world, camera);
+    ts::Task<void> occlusion_cull = gf_occlusion_cull(world, frustum_cull);
+    ts::Task<void> cmd_record = gf_cmd_record(world, occlusion_cull, shadow);
+    ts::Task<void> gc = gf_gc(world, streaming, particles);
+    ts::Task<void> navigation = gf_navigation(world, navmesh_rebuild);
+
+    co_await networking;
+    co_await ts::async(&tick_scripting, world.input, world.net, world.script_events);
+
+    ts::Task<void> combat = ts::async(
+        [](const Transforms& xf, const Input& in, const Net& net, const Script_events& ev, Combat& c)
+        { tick_combat(xf, in, net, ev, c, false); },
+        world.transforms.state(), world.input, world.net, world.script_events, world.combat);
+    ts::Task<void> economy = ts::async(&tick_economy, world.transforms.state(), world.input, world.net,
+        world.script_events, world.economy);
+    ts::Task<void> quests = ts::async(&tick_quests, world.transforms.state(), world.input, world.net,
+        world.script_events, world.quests);
+
+    ts::Task<void> UI_widgets = gf_UI(world, quests);
+    ts::Task<void> debug_overlay = gf_debug_overlay(world, economy);
+    ts::Task<void> physics_back = gf_physics_back(world, physics_front, combat);
+    ts::Task<void> AI = gf_AI(world, navigation, combat, economy, quests);
+    ts::Task<void> anim_core = gf_anim_core(world, AI);
+    ts::Task<void> skinning = gf_skinning(world, anim_core);
+    ts::Task<void> replication = gf_replication(world, AI);
+    ts::Task<void> propagation = gf_propagation(world, anim_core, physics_back);
+    ts::Task<void> stats = gf_stats(world, economy, physics_back, frustum_cull);
+    ts::Task<void> submit = gf_submit(world, cmd_record, particles, UI_widgets);
+
+    // The flip. `compile()` derives its predecessors from the explicit `after(propagation)`
+    // plus every pre-flip reader of `transforms.state()` -- thirteen of them. Seven awaits
+    // cover the set here; the other six are transitive, which is a fact about this frame's
+    // shape that a reader has to re-derive by hand every time the frame changes.
+    co_await propagation;
+    co_await occlusion_cull;   // covers frustum_cull, camera
+    co_await shadow;
+    co_await submit;           // covers cmd_record, particles, UI
+    co_await audio;
+    co_await vfx;
+    co_await debug_overlay;    // covers economy; propagation covers combat/quests/navigation/AI
+    co_await ts::async(ts::publish_body(world.transforms), world.transforms.state());
+
+    // Post-flip: cloth reads the fresh version.
+    co_await ts::async(&tick_cloth, world.transforms.state(), world.cloth);
+
+    // Manual completion. `execute()` settles when the last node does; here the frame owns
+    // that bookkeeping, and every branch nothing downstream awaited has to be joined by
+    // hand or the frame reports done with work still running.
+    co_await skinning;
+    co_await replication;
+    co_await stats;
+    co_await gc;
+}
+
+// --- the frame runner ---------------------------------------------------------------
+
+// Run `frames` frames of `variant` at `scale`; reports the measured average ms/frame, the
 // serial budget at that scale, and entity 0's published transform (deterministic:
-// propagation wrote local_xf + bodies = 2 + 3 = 5).
-void game_frame_stats(int frames, float scale, double& avg_ms, double& serial_ms, float& transform0)
+// propagation wrote local_xf + bodies = 2 + 3 = 5, in every variant).
+void frame_stats(int frames, float scale, Frame_variant variant, double& avg_ms, double& serial_ms,
+    float& transform0)
 {
     constexpr int entities = 1000;
     time_scale = scale;
     reset_stats();
 
     World world{ entities };
-    ts::Static_task_graph graph = build_frame_graph(world, Frame_variant::baseline);
+    const bool graph_free = variant == Frame_variant::graph_free;
+    ts::Static_task_graph graph;
+    if (!graph_free)
+        graph = build_frame_graph(world, variant);
 
     using clock = std::chrono::steady_clock;
     auto t0 = clock::now();
@@ -1117,13 +1384,43 @@ void game_frame_stats(int frames, float scale, double& avg_ms, double& serial_ms
                 hud_snapshots.fetch_add(1, std::memory_order_relaxed);
         }, world.combat, world.economy);
 
-        graph.execute().sync();
+        if (graph_free)
+            run_frame_graph_free(world).sync();
+        else
+            graph.execute().sync();
     }
     double total_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
 
     avg_ms = total_ms / frames;
     serial_ms = serial_budget_ms() * scale;
     transform0 = world.transforms.read([](const Transforms& t) { return t.size() > 0 ? t.get(0) : 0.0f; }).sync();
+}
+
+} // namespace
+
+// --- entry points -----------------------------------------------------------------
+
+// The graph baseline (see `frame_stats`).
+void game_frame_stats(int frames, float scale, double& avg_ms, double& serial_ms, float& transform0)
+{
+    frame_stats(frames, scale, Frame_variant::baseline, avg_ms, serial_ms, transform0);
+}
+
+// The same frame with no `Static_task_graph` (see `run_frame_graph_free`): same World,
+// same system bodies, hand-written schedule. Must produce the same `transform0`.
+void game_frame_free_stats(int frames, float scale, double& avg_ms, double& serial_ms, float& transform0)
+{
+    frame_stats(frames, scale, Frame_variant::graph_free, avg_ms, serial_ms, transform0);
+}
+
+// Draw commands submitted over the last stats run. `submit` clears the queue, so this counts
+// only what the three producers pushed BEFORE it ran -- an observable the producer/submit
+// ordering decides. The transform invariant cannot see that ordering (every mock system
+// writes the same constant every frame, so a one-frame skew is invisible), which is why the
+// equivalence test compares this too.
+long long game_frame_draw_count()
+{
+    return drawn.load();
 }
 
 // Compile the frame graph and write its structure as Graphviz DOT (no frames run).
@@ -1225,6 +1522,14 @@ void run_game_frame_sample(int frames, float scale)
     double avg_ms = 0.0, serial_ms = 0.0;
     float transform0 = 0.0f;
     game_frame_stats(frames, scale, avg_ms, serial_ms, transform0);
+    long long graph_drawn = game_frame_draw_count();
+
+    // The same frame with no graph, for the side-by-side (`--bench` reports it properly;
+    // this line keeps the sample and the stress loop exercising the path).
+    double free_ms = 0.0, free_serial_ms = 0.0;
+    float free_transform0 = 0.0f;
+    game_frame_free_stats(frames, scale, free_ms, free_serial_ms, free_transform0);
+    long long free_drawn = game_frame_draw_count();
 
     int workers = ts::global_scheduler().worker_count();
     double ideal_ms = serial_ms / workers;
@@ -1237,9 +1542,12 @@ void run_game_frame_sample(int frames, float scale)
     std::printf("  streamed %d assets, %d batches via a fire-and-forget coroutine\n",
         streamed.load(), batches.load());
     std::printf("  %lld draw commands staged/written by producers, applied by submit\n",
-        drawn.load());
+        graph_drawn);
     std::printf("  %d HUD snapshots via multi-object ts::async (combat + economy)\n",
         hud_snapshots.load());
+    std::printf("  graph-free composition of the same frame: %.2f ms/frame (%+.1f%%), "
+                "transform0 %.1f, %lld draw commands\n",
+        free_ms, 100.0 * (free_ms - avg_ms) / avg_ms, free_transform0, free_drawn);
 }
 
 } // namespace sample

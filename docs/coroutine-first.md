@@ -342,9 +342,32 @@ Not blockers; to be worked through while the stages land:
    builds) remains a possible convenience if splitting proves high-friction in practice —
    its cost is that enforcement is runtime-only, so shipping builds would race silently
    on the mistake the split makes unrepresentable. Note only; no action for now.
-5. **Library without static graphs** — the coroutine-first story for users who never
-   build a graph: what the pure-dynamic usage model looks like (access verbs + scopes +
-   pipes only), what guarantees weaken, what the guide should say.
+5. ~~**Library without static graphs**~~ — **ANSWERED (2026-08), with a measurement.**
+   `sample/game_frame.cpp` now carries a third composition of the same ~34-system frame,
+   `run_frame_graph_free` (same `World`, same `tick_*` bodies, no `Static_task_graph`):
+   every system is a multi-object `ts::async`, every edge a `co_await`. Findings, in
+   `docs/guide.md` §6.4:
+   - **Safety does not weaken at all** — it was never the graph's. A hand-composed system
+     takes the same mode-aware pipe turn on everything it declares, and the harness still
+     catches undeclared access. What weakens is exactly one thing: nothing derives or
+     checks the ORDER.
+   - **Pipe FIFO is not a substitute for conflict edges**, which was the tempting
+     assumption going in. The multi-object cascade enters links one at a time in canonical
+     order, so a system blocked on its first object has not taken its slot on the later
+     ones and a later launch overtakes it. Launching the sample's node list in declaration
+     order with no explicit awaits mis-orders `frustum_cull` before `camera` and `submit`
+     before `cmd_record` (a frame of draw commands lost), silently — every declaration
+     correct, harness quiet, and 7.6% faster for it. `compile()` derives 69 edges here;
+     by hand that is 17 chain coroutines and 42 `co_await`s.
+   - **The graph's perf advantage is NOT allocation amortization**, contrary to the
+     standing assumption. Graph-free costs +95 allocations/frame (134 vs 38) — under 2 µs
+     at ~17 ns each — but +64 µs/frame on a 4.1 ms frame and +131 µs on a 0.45 ms one
+     (+1.6% / +28.7%). The gap is ~50 coroutine suspend/resume round trips at ~1.8 µs
+     (`coro chn`): the graph dispatches a successor on the thread that settled its last
+     predecessor, an awaited handle does not. If that ever needs closing, the lever is
+     resume locality, not the allocator — see §5.
+   - Guide text landed as §6.4 "Do I need the static graph?"; benchmark entries
+     `graph 1.0 / free 1.0 / graph .05 / free .05` under `--bench`.
 
 ## 11. Post-initial-implementation action list (author, 2026-08)
 

@@ -12,6 +12,8 @@
 // sample/physics.cpp, sample/blackboard.cpp.
 namespace sample
 {
+void game_frame_free_stats(int frames, float time_scale,
+                           double& avg_ms, double& serial_ms, float& transform0);
 void game_frame_stats(int frames, float time_scale,
                       double& avg_ms, double& serial_ms, float& transform0);
 void stress_game_frame_optimised(int frames, int workers);
@@ -1072,6 +1074,16 @@ int main()
         double avg = 0.0, serial = 0.0;
         float xf = 0.0f;
         sample::game_frame_stats(20, 0.2f, avg, serial, xf);
+    }
+    std::puts("tsan: game_frame graph-free frames");
+    for (int i = 0; i < 10; ++i)
+    {
+        // The same frame with no graph: ~34 multi-object asyncs a chain of coroutines
+        // orders by hand. Covers the coroutine composition surface the graph path does not
+        // (per-frame chain frames, cross-chain handle awaits, per-frame recorder mint).
+        double avg = 0.0, serial = 0.0;
+        float xf = 0.0f;
+        sample::game_frame_free_stats(20, 0.2f, avg, serial, xf);
     }
     std::puts("tsan: game_frame optimised frames");
     sample::stress_game_frame_optimised(40, 4);   // gameplay Versioned + Deferred staging

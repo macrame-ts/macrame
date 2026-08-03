@@ -11,6 +11,15 @@
 #include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
 
+// The game-frame sample is a single self-contained .cpp (no header). Both compositions of
+// the same frame are profiled: the compiled graph amortizes its per-run state, the
+// graph-free coroutine composition rebuilds it every frame.
+namespace sample
+{
+void game_frame_stats(int frames, float time_scale, double& avg_ms, double& serial_ms, float& transform0);
+void game_frame_free_stats(int frames, float time_scale, double& avg_ms, double& serial_ms, float& transform0);
+}
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -124,6 +133,39 @@ void measure(const char* name, int k, Op&& op)
     std::printf("  %-18s %7.2f allocs/op   %8.1f bytes/op\n",
                 name, static_cast<double>(c) / k, static_cast<double>(b) / k);
 }
+
+using Frame_run = void (*)(int, float, double&, double&, float&);
+
+// Per-FRAME cost of a whole game frame, either composition. Each entry point builds its own
+// `World` (and, for the graph, compiles it), so the per-frame figure is taken as a
+// difference between an n-frame run and a 1-frame run -- the one-time setup cancels.
+void measure_frame(const char* name, Frame_run run)
+{
+    constexpr int frames = 41;   // 40 frames of difference
+    double avg_ms = 0.0, serial_ms = 0.0;
+    float transform0 = 0.0f;
+
+    auto count = [&](int n, long long& allocs, long long& bytes)
+    {
+        run(n, 0.05f, avg_ms, serial_ms, transform0);   // warm up
+        g_count.store(0, std::memory_order_relaxed);
+        g_bytes.store(0, std::memory_order_relaxed);
+        g_on.store(true, std::memory_order_relaxed);
+        run(n, 0.05f, avg_ms, serial_ms, transform0);
+        g_on.store(false, std::memory_order_relaxed);
+        allocs = g_count.load(std::memory_order_relaxed);
+        bytes = g_bytes.load(std::memory_order_relaxed);
+    };
+
+    long long one_allocs = 0, one_bytes = 0, many_allocs = 0, many_bytes = 0;
+    count(1, one_allocs, one_bytes);
+    count(frames, many_allocs, many_bytes);
+
+    double per = static_cast<double>(frames - 1);
+    std::printf("  %-18s %7.1f allocs/frame %7.0f bytes/frame\n", name,
+                static_cast<double>(many_allocs - one_allocs) / per,
+                static_cast<double>(many_bytes - one_bytes) / per);
+}
 }
 
 void run_mem_profile()
@@ -205,6 +247,10 @@ void run_mem_profile()
             graph.execute().sync();
         });
     }
+
+    std::printf("\ngame frame (sample/game_frame.cpp, 1000 entities, ~34 systems):\n");
+    measure_frame("frame graph", &sample::game_frame_stats);
+    measure_frame("frame graph-free", &sample::game_frame_free_stats);
 
     std::printf("\n(block sizeof: Task_control_block = %zu bytes)\n",
                 sizeof(ts::detail::Task_control_block));
