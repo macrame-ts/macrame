@@ -42,6 +42,18 @@ blocks. The risks these tests must cover (labels track the design discussion):
 
 ## 2. Two waves
 
+> **Wave-2 status (2026-08).** The lock-free tail chain this plan was written against was
+> implemented and then **retired** ([pipe-rebase.md](pipe-rebase.md) §0.1), so every Wave-2
+> row that asserts *chain* internals is **moot**: the reader-group sentinel does not exist,
+> nothing is elided, and there are no race-delay hooks to arm. Concretely: **C2**'s hook half,
+> **C4**, **D1** and **D3**'s hook half are moot (their black-box halves — C2's stress, D3's
+> promotion-vs-close — landed as ordinary tests and remain valuable regardless of the pipe's
+> internals), and `Pipe_probe` and the race-delay macro were never needed. The one Wave-2
+> group that survived the retirement is **§F** (`writer_owner`), because grant ownership is
+> not a chain concept — it landed 2026-08, re-scoped in place. Wave 1 is unaffected: it was
+> written black-box precisely so it would outlive whichever implementation shipped, which is
+> exactly what happened.
+
 - **Wave 1 — black-box `[bb]`.** Drive only the public `Guarded` / graph / `Deferred` /
   `Versioned` API. These MUST pass on the current (pre-rebase) pipe; they land first and
   become the regression oracle. Any Wave-1 test that fails on the current impl is a test
@@ -140,13 +152,13 @@ Each entry: id, `[bb]`/`[wb]`, one line of WHAT, one line of HOW.
   window.
 - **C3** `[bb]` backout ordering. *How:* a reader that loses the join to a closing writer
   re-forms after it; assert it runs after the writer's effect, never overlapping it.
-- **C4** `[wb]` sentinel completes once. *How:* `Pipe_probe` asserts the sentinel
-  completes exactly once and the next writer is released exactly once under the
-  last-reader-out ∥ close ∥ next-writer race.
+- **C4** ~~`[wb]` sentinel completes once~~ — **moot (2026-08)**: no sentinel exists in the
+  evolved pipe; a reader group is `active_readers` under the pipe mutex.
 
 ### D. Lone-reader elision + promotion (`pipe_tests`) — R5
-- **D1** `[wb]` lone reader elided. *How:* a single read then a write allocates NO
-  sentinel (global alloc counter via `Pipe_probe`); ordering + value correct.
+- **D1** ~~`[wb]` lone reader elided~~ — **moot (2026-08)**: elision was a chain optimization
+  (avoid allocating a sentinel block for a single reader). The evolved pipe allocates nothing
+  per reader in the first place, so there is nothing to elide or to count.
 - **D2** `[bb]` promotion on 2nd reader. *How:* a lone reader in flight, a 2nd joins →
   both concurrent (`Parallel_gate{2}`); a following writer waits for both. (Passes on the
   current impl too — two readers already overlap — so it is `[bb]`.)
@@ -261,4 +273,5 @@ Note: the `commit_mutex_` removal + `last_write()` exposure is a Wave-2 / follow
 5. Green on the CURRENT pipe (regression baseline), commit.
 
 Wave 2 (C2 hooks, C4, D1, D3 hooks, F1–F4, race-delay macro, `Pipe_probe`) lands with
-the rewrite.
+the rewrite. **Outcome (2026-08):** only F1–F4 landed (see §F); everything else on that
+list died with the chain — see the status note in §2.
