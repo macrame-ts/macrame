@@ -40,8 +40,8 @@
 //     draw producers stage grant-free and go wide; the baseline writes the queue
 //     directly, so the producers serialise -- a real inefficiency the trace
 //     shows and the exercise removes.
-//   - Dynamic work outside the graph: streaming fires `async` loads joined by
-//     `when_all`; AI fires speculative cancellable nav queries.
+//   - Dynamic work outside the graph: streaming fires `async` loads a coroutine
+//     awaits and folds; AI fires speculative cancellable nav queries.
 //   - Internal parallelism: heavy systems split their work with `parallel_for`.
 //
 // The core logic is plainly thread-unsafe single-threaded code -- no atomics, no

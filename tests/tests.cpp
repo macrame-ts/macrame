@@ -4,10 +4,8 @@
 #include "ts/guarded.h"
 #include "ts/static_task_graph.h"
 
-#if defined(__cpp_impl_coroutine)
 #include "ts/coroutine_support.h"
 #include "ts/task_scope.h"
-#endif
 
 #include "scheduler_tests.h"
 #include "access_tests.h"
@@ -46,7 +44,6 @@ void run_all_tests()
     run_versioned_tests();
 }
 
-#if defined(__cpp_impl_coroutine)
 // Death scenario body: acquire a `Guarded` write guard, then `co_await` other work while
 // still holding it -- the pipe-held-across-suspension anti-pattern. Runs eagerly, so the fatal
 // fires during the call below, before `sync()`. `never` is never triggered, so `co_await never`
@@ -57,7 +54,16 @@ static ts::Task<int> coro_await_under_guard(ts::Guarded<tests::Counter>& w, ts::
     co_await never;              // suspend while the guard is held -> fatal
     co_return g->value();
 }
-#endif
+
+// Death scenario body (`stale_inherited_grant`): created inside a node body, so the frame
+// inherits the node's grant; suspended on `go` (a non-nested stray), it resumes only after
+// the node completed and released its hold -- the write then runs under a stale inherited
+// grant and the harness fatals.
+static ts::Task<void> stale_stray(tests::Counter& k, ts::Signal go)
+{
+    co_await go;
+    k.increment();
+}
 
 void run_death_scenario(const char* name)
 {
@@ -143,10 +149,11 @@ void run_death_scenario(const char* name)
         ts::Static_task_graph g;
         g.add_node([&stray, &go](Counter& k)
         {
-            // Deliberately NOT `ts::nested`/`add_nested`: the task inherits the node's
-            // grant but does not gate the node's completion. Gated on `go`, so it runs
-            // only after the node has completed and released its write hold on `c`.
-            stray = ts::task([&k] { k.increment(); }).after(go).launch();
+            // Deliberately NOT `ts::nested`: the coroutine inherits the node's grant (its
+            // promise snapshots it at creation, here inside the body) but does not gate the
+            // node's completion. Suspended on `go`, it resumes only after the node has
+            // completed and released its write hold on `c`.
+            stray = stale_stray(k, go);
         }, c);
         g.compile();
         g.execute().sync();   // node done; its write grant on `c` released (epoch moved)
@@ -186,16 +193,14 @@ void run_death_scenario(const char* name)
         while (!t.is_done()) std::this_thread::yield();
         t.sync();   // cancelled value task has no result -> fatal
     }
-    else if (std::strcmp(name, "add_nested_outside") == 0)
+    else if (std::strcmp(name, "nested_outside") == 0)
     {
-        ts::Task<int> t = ts::launch([] { return 1; });
-        t.sync();
-        ts::add_nested(t);   // no currently-executing task -> fatal
+        ts::nested([] {});   // no currently-executing task to scope to -> fatal
     }
     else if (std::strcmp(name, "reset_unsettled") == 0)
     {
-        auto t = ts::task([] { return 1; });   // built, not launched -> not settled
-        t.reset();   // reset before the task has settled -> fatal
+        ts::Signal s;   // never triggered -> not settled
+        s.reset();      // re-arm before the signal has settled -> fatal
     }
 #if TS_SAFETY_CHECKS
     else if (std::strcmp(name, "sync_in_task") == 0)
@@ -250,13 +255,6 @@ void run_death_scenario(const char* name)
         }(std::move(t)).sync();
     }
 #endif
-    else if (std::strcmp(name, "after_post_launch") == 0)
-    {
-        ts::Signal gate;
-        auto t = ts::task([] { return 1; });
-        t.launch();
-        t.after(gate);   // prerequisites are frozen at launch -> fatal
-    }
     else if (std::strcmp(name, "deferred_drop_staged") == 0)
     {
         ts::Guarded<int> target{ 0 };

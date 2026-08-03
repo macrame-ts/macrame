@@ -202,8 +202,8 @@ void parallel_for(int n, Body&& body, Parallel_options opts = {})
 }
 
 // Non-blocking parallel_for: returns a Task<void> that completes when all items are done.
-// Composable (.then / when_all). One heap allocation (the returned Task's block holds the
-// state). Do NOT block on it inside a graph node.
+// Composable (`co_await` it, or gate work on it via `ts::nested`). One heap allocation (the
+// returned Task's block holds the state). Do NOT block on it inside a graph node.
 template<typename Body>
     requires std::invocable<Body&, int>
 Task<void> async_parallel_for(int n, Body&& body, Parallel_options opts = {})

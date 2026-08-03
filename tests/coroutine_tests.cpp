@@ -69,18 +69,18 @@ void test_thread_safe()
     TS_CHECK(obj.async([](const int& v) { return v; }).sync() == 11);   // 5 + (5 + 1)
 }
 
-// 4. Fan-out / fan-in: start two tasks, then `co_await when_all`, unpacking the tuple.
-Task<int> co_when_all()
+// 4. Fan-out / fan-in: start two tasks (they run eagerly, concurrently), then await both --
+// sequential awaits complete when the last one does.
+Task<int> co_join()
 {
     Task<int> t1 = ts::launch([] { return 3; });
     Task<int> t2 = ts::launch([] { return 4; });
-    auto [a, b] = co_await ts::when_all(std::move(t1), std::move(t2));
-    co_return a * b;
+    co_return co_await t1 * co_await t2;
 }
 
-void test_when_all()
+void test_join()
 {
-    TS_CHECK(co_when_all().sync() == 12);
+    TS_CHECK(co_join().sync() == 12);
 }
 
 // 5. A `co_await` loop -- the case continuations cannot express without recursion.
@@ -227,15 +227,16 @@ void test_death_await_under_guard()
 }
 
 // 13. Feature showcase: one coroutine weaving the whole system into straight-line code --
-// prioritized producers joined by when_all (dependencies), a task that forks nested work,
+// prioritized producers awaited as a join (dependencies), a task that forks nested work,
 // a Guarded write-guard critical section, async_parallel_for, a Signal phase gate,
 // cooperative cancellation, and a final async read.
 Task<int> co_showcase(ts::Guarded<tests::Counter>& world, ts::Signal& phase, Cancellation_token tok)
 {
-    // (a) priority + dependency fan-in: a high- and a low-priority producer, joined.
+    // (a) priority + dependency fan-in: a high- and a low-priority producer, both awaited.
     Task<int> hi = ts::launch([] { return 3; }, { .priority = ts::Priority::high });
     Task<int> lo = ts::launch([] { return 4; }, { .priority = ts::Priority::low });
-    auto [a, b] = co_await ts::when_all(std::move(hi), std::move(lo));      // 3, 4
+    int a = co_await hi;                                                    // 3
+    int b = co_await lo;                                                    // 4
 
     // (b) nested tasks: a task body forks nested work; its completion gates on them.
     // `nested_sum` lives in the coroutine frame, so it outlives the forked nested tasks.
@@ -457,7 +458,7 @@ void run_coroutine_tests()
     run("co simple", test_simple);
     run("co chained", test_chained);
     run("co thread_safe", test_thread_safe);
-    run("co when_all", test_when_all);
+    run("co join", test_join);
     run("co loop", test_loop);
     run("co cancel", test_cancel);
     run("co access context", test_access_context);

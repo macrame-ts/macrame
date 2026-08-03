@@ -1,5 +1,5 @@
 ﻿// ThreadSanitizer stress driver. Exercises the concurrency paths (scheduler,
-// Guarded reader/writer pipe, Static_task_graph + parallel_for, then/when_all)
+// Guarded reader/writer pipe, Static_task_graph + parallel_for, coroutine composition)
 // without the Windows-specific test harness, so it builds under clang/libstdc++
 // with -fsanitize=thread on Linux/macOS. See tsan/run.sh and tsan/README.md.
 //
@@ -27,9 +27,7 @@ std::size_t physics_pose_hash(int frames);   // final snapshot hash after `frame
 #include "graph_trace.h"   // tools/: worker-side stamps + settle-side fold under TSan
 #include "test_util.h"     // tests/: the Rw_probe dual oracle (shared with the unit suite)
 
-#if defined(__cpp_impl_coroutine)
 #include "ts/coroutine_support.h"
-#endif
 
 #include <algorithm>
 #include <array>
@@ -252,6 +250,12 @@ void stress_pipe_reservation()
 
 // Many threads triggering one Signal concurrently while others wait / attach
 // continuations: idempotent `complete()` must fire exactly once with no race.
+ts::Task<void> observe_signal(ts::Signal sig, std::atomic<int>& fired)
+{
+    co_await sig;
+    fired.fetch_add(1, std::memory_order_relaxed);
+}
+
 void stress_signal()
 {
     constexpr int rounds = 2000, triggerers = 6;
@@ -259,10 +263,10 @@ void stress_signal()
     {
         ts::Signal sig;
         std::atomic<int> fired{ 0 };
-        // Capture the continuation as a task and join on IT: `sig.sync()` waits for the signal
-        // to settle, NOT for its downstream `then` continuation (which runs after `settle`'s
-        // `notify_all`), so asserting `fired` right after `sig.sync()` would be an over-assertion.
-        ts::Task<void> fired_done = sig.then([&fired] { fired.fetch_add(1, std::memory_order_relaxed); });
+        // An awaiting observer, joined on ITS handle: `sig.sync()` waits for the signal to
+        // settle, not for work the settle resumes, so asserting `fired` right after
+        // `sig.sync()` would be an over-assertion.
+        ts::Task<void> fired_done = observe_signal(sig, fired);
 
         {
             std::vector<std::jthread> threads;
@@ -271,8 +275,22 @@ void stress_signal()
             threads.emplace_back([&] { sig.sync(); });   // a concurrent waiter
         }   // join
         sig.sync();
-        fired_done.sync();   // the continuation has now run
+        fired_done.sync();   // the observer has now run
         assert(fired.load() == 1);
+    }
+
+    // A resettable Signal re-armed between rounds, with concurrent waiters/triggerers.
+    for (int r = 0; r < 2000; ++r)
+    {
+        ts::Signal sig;
+        {
+            std::vector<std::jthread> threads;
+            for (int w = 0; w < 3; ++w)
+                threads.emplace_back([&] { sig.sync(); });
+            sig.trigger();
+        }   // join
+        sig.reset();
+        assert(!sig.is_done());
     }
 }
 
@@ -329,50 +347,13 @@ void stress_graph_nested()
     }
 }
 
-// when_all joining prerequisites that complete on different worker threads: mixed
-// void + non-void + move-only, consumed apply-style. Exercises the join's remaining
-// counter, slot moves, and finish across threads.
-void stress_when_all()
+ts::Task<int> launch_plus_one(int k)
 {
-    ts::Guarded<int> a{ 3 }, b{ 4 }, c{ 5 };
-    std::atomic<int> total{ 0 };
-    for (int i = 0; i < 3000; ++i)
-    {
-        ts::Task<void> v = a.async([](int& x) { ++x; });                          // void
-        ts::Task<int> r = b.async([](const int& x) { return x; });               // value
-        ts::Task<std::unique_ptr<int>> m = c.async([](const int& x) { return std::make_unique<int>(x); }); // move-only
-
-        int s = ts::when_all(v, r, m)
-            .then([](int rv, std::unique_ptr<int>& mv) { return rv + *mv; })      // apply-style, void dropped
-            .sync();
-        total.fetch_add(s, std::memory_order_relaxed);
-    }
-    assert(total.load() == 3000 * 9);
+    co_return co_await ts::launch([k] { return k; }) + 1;
 }
 
-// when_all with a prerequisite cancelled concurrently with the join: request_cancel
-// races the prereq's body check and the join's decrement/finish. The join must settle
-// exactly once (completed or cancelled) and never stall (the counter must still reach 0).
-void stress_when_all_cancel()
-{
-    ts::Guarded<int> a{ 1 }, b{ 2 }, c{ 3 };
-    for (int i = 0; i < 3000; ++i)
-    {
-        ts::Cancellation_source src;
-        ts::Task<int> ta = a.async([](const int& x) { return x; });
-        ts::Task<int> tb = b.async([](const int& x) { return x; }, { .token = src.token() });
-        ts::Task<int> tc = c.async([](const int& x) { return x; });
-
-        auto j = ts::when_all(ta, tb, tc);
-        std::jthread canceller([&] { src.request_cancel(); });   // race the join
-        canceller.join();
-        while (!j.is_done())                                     // must settle, not stall
-            std::this_thread::yield();
-    }
-}
-
-// Many external threads launching standalone tasks (body-in-block) concurrently,
-// each chained and awaited.
+// Many external threads launching standalone tasks (body-in-block) concurrently, each
+// consumed by an awaiting coroutine and joined at the boundary.
 void stress_launch()
 {
     constexpr int threads = 6, per = 1500;
@@ -384,40 +365,28 @@ void stress_launch()
             ps.emplace_back([&]
             {
                 for (int k = 0; k < per; ++k)
-                {
-                    int v = ts::launch([k] { return k; }).then([](int x) { return x + 1; }).sync();
-                    sum.fetch_add(v, std::memory_order_relaxed);
-                }
+                    sum.fetch_add(launch_plus_one(k).sync(), std::memory_order_relaxed);
             });
         }
     }   // join
     (void)sum;
 }
 
-// Prerequisites: prereqs complete on worker threads while `.after()` registers them
-// and `.launch()` arms the dependent -- racing add_prerequisite against settle (the
-// per-block mutex) and concurrent num_locks decrements from several prereqs.
-void stress_prereq()
+// Awaited fork-join under oversubscription: outer coroutines saturate the workers and
+// AWAIT their inner tasks -- suspension frees the worker, so the inner tasks always find
+// one (the deadlock the old blocking join needed retraction for is structurally absent).
+// Stresses suspension/resume racing worker completion across two nesting levels.
+ts::Task<void> awaited_inner_join(std::atomic<int>& total)
 {
-    for (int i = 0; i < 1500; ++i)
-    {
-        std::atomic<int> done{ 0 };
-        auto a = ts::launch([&] { done.fetch_add(1, std::memory_order_relaxed); });
-        auto b = ts::launch([&] { done.fetch_add(1, std::memory_order_relaxed); });
-        auto c = ts::launch([&] { done.fetch_add(1, std::memory_order_relaxed); });
-
-        std::atomic<int> seen{ -1 };
-        ts::task([&] { seen.store(done.load(std::memory_order_relaxed), std::memory_order_relaxed); })
-            .after(a, b, c).launch().sync();
-        assert(seen.load() == 3);   // dependent ran only after all three prerequisites
-    }
+    ts::Task<void> a = ts::launch([&total] { total.fetch_add(1, std::memory_order_relaxed); });
+    ts::Task<void> b = ts::launch([&total] { total.fetch_add(1, std::memory_order_relaxed); });
+    ts::Task<void> c = ts::launch([&total] { total.fetch_add(1, std::memory_order_relaxed); });
+    co_await a;
+    co_await b;
+    co_await c;
 }
 
-// Retraction under oversubscription: nested fork-join where the outer tasks saturate
-// the workers and block on inner get()s. Retraction runs the un-started inner tasks
-// inline -- stressing the `started` claim (retractor vs worker) and inline execution
-// racing worker execution and completion.
-void stress_retraction()
+void stress_awaited_forkjoin()
 {
     const int outer = 2 * static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
     for (int i = 0; i < 200; ++i)
@@ -425,77 +394,10 @@ void stress_retraction()
         std::atomic<int> total{ 0 };
         std::vector<ts::Task<void>> tasks;
         for (int o = 0; o < outer; ++o)
-        {
-            tasks.push_back(ts::launch([&]
-            {
-                // Inner chunks + a dependent join; get() the join -> DEEP retraction
-                // (retract the chunks, then the join).
-                auto a = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); });
-                auto b = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); });
-                auto c = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); });
-                ts::task([] {}).after(a, b, c).launch().sync();
-            }));
-        }
+            tasks.push_back(awaited_inner_join(total));
         for (auto& t : tasks)
             t.sync();
         assert(total.load() == outer * 3);
-    }
-
-    // then / when_all retraction: the continuation's completion is callback-driven, but a
-    // retraction-hint backlink lets get() run the (retractable) producer inline. Stresses
-    // the hint racing the producer's worker dispatch, and the run_state claim (retractor
-    // vs worker) through the continuation.
-    for (int i = 0; i < 200; ++i)
-    {
-        std::atomic<int> total{ 0 };
-        std::vector<ts::Task<void>> tasks;
-        for (int o = 0; o < outer; ++o)
-        {
-            tasks.push_back(ts::launch([&]
-            {
-                int r = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); return 1; })
-                            .then([&](int x) { total.fetch_add(1, std::memory_order_relaxed); return x + 1; })
-                            .sync();
-                (void)r;
-                ts::Task<int> a = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); return 1; });
-                ts::Task<int> b = ts::launch([&] { total.fetch_add(1, std::memory_order_relaxed); return 2; });
-                int s = ts::when_all(a, b).then([](int x, int y) { return x + y; }).sync();
-                (void)s;
-            }));
-        }
-        for (auto& t : tasks)
-            t.sync();
-        assert(total.load() == outer * 4);
-    }
-}
-
-// Inline dispatch: dependents marked set_inline() run on whatever thread settles their
-// prerequisite (a worker, or the get()-thread's retractor). Under oversubscription the
-// outer tasks saturate the workers and get() an inline chain, so it runs inline via
-// retraction. Stresses the dispatch fork (release -> dispatch_ready), the per-thread
-// trampoline, and inline execution racing worker completion + the run_state claim.
-void stress_inline()
-{
-    const int outer = 2 * static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-    for (int i = 0; i < 400; ++i)
-    {
-        std::atomic<int> count{ 0 };
-        std::vector<ts::Task<void>> tasks;
-        for (int o = 0; o < outer; ++o)
-        {
-            tasks.push_back(ts::launch([&count]
-            {
-                auto a = ts::launch([&count] { count.fetch_add(1, std::memory_order_relaxed); });
-                auto b = ts::task([&count] { count.fetch_add(1, std::memory_order_relaxed); })
-                             .set_inline().after(a).launch();
-                auto c = ts::task([&count] { count.fetch_add(1, std::memory_order_relaxed); })
-                             .set_inline().after(b).launch();
-                c.sync();
-            }));
-        }
-        for (auto& t : tasks)
-            t.sync();
-        assert(count.load() == outer * 3);
     }
 }
 
@@ -517,55 +419,8 @@ void stress_nested()
     }
 }
 
-// Reusable task: one block/body re-run many times via reset(). Stresses reset()
-// (re-arm) racing the completing worker's settle tail -- get() wakes on notify_all
-// while the worker is still exiting settle, then the main thread re-arms and re-launches.
-void stress_reuse()
-{
-    std::atomic<int> total{ 0 };
-    auto t = ts::task([&total] { return total.fetch_add(1, std::memory_order_relaxed) + 1; });
-
-    int last = 0;
-    for (int i = 0; i < 5000; ++i)
-    {
-        if (i > 0)
-            t.reset();
-        t.launch();
-        last = t.sync();
-    }
-    assert(last == 5000);
-
-    // Reuse + prerequisites + retraction: get() retracts (runs the prereq then the
-    // dependent inline), racing the worker dispatch; reset() re-arms for the next round.
-    // Stresses the generation stamp that voids the stale (retraction-duplicate) dispatch.
-    std::atomic<int> log{ 0 };
-    auto dep = ts::task([&log] { return log.load(std::memory_order_relaxed); });
-    for (int i = 1; i <= 3000; ++i)
-    {
-        if (i > 1)
-            dep.reset();
-        ts::Task<void> prereq = ts::launch([&log, i] { log.store(i, std::memory_order_relaxed); });
-        dep.after(prereq).launch();
-        assert(dep.sync() == i);   // ran after THIS round's prerequisite, not a stale run
-    }
-
-    // A resettable Signal re-armed between rounds, with concurrent waiters/triggerers.
-    for (int r = 0; r < 2000; ++r)
-    {
-        ts::Signal sig;
-        {
-            std::vector<std::jthread> threads;
-            for (int w = 0; w < 3; ++w)
-                threads.emplace_back([&] { sig.sync(); });
-            sig.trigger();
-        }   // join
-        sig.reset();
-        assert(!sig.is_done());
-    }
-}
-
 // Cancellation racing execution: request_cancel (a store) concurrent with the body's
-// token check (a load) and with then-propagation; the block must settle exactly once.
+// token check (a load); the block must settle exactly once, completed or cancelled.
 void stress_cancel()
 {
     ts::Guarded<int> d{ 0 };
@@ -574,14 +429,13 @@ void stress_cancel()
     {
         ts::Cancellation_source src;
         ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });
-        ts::Task<int> u = t.then([](int v) { return v + 1; });   // propagates settle either way
 
         std::jthread canceller([&] { src.request_cancel(); });   // race the body
         canceller.join();
 
-        while (!u.is_done())
+        while (!t.is_done())
             std::this_thread::yield();
-        assert(u.is_done());   // settled exactly once, whether completed or cancelled
+        assert(t.is_done());   // settled exactly once, whether completed or cancelled
     }
 
     // Graph cancellation racing the run.
@@ -601,7 +455,7 @@ void stress_cancel()
 
 // A token-taking body polling the token while another thread cancels: request_cancel racing
 // the body's polling read of the shared cancel flag, and the block settling completed after a
-// cooperative early-out. Also races a then-inline continuation dispatched off the completer.
+// cooperative early-out.
 void stress_token_body()
 {
     for (int i = 0; i < 2000; ++i)
@@ -619,13 +473,11 @@ void stress_token_body()
             return 7;
         }, { .token = src.token() });
 
-        ts::Task<int> u = t.then([](int v) { return v + 1; }, { .run_inline = true });
-
         while (!started.load(std::memory_order_relaxed))
             std::this_thread::yield();
         src.request_cancel();
 
-        assert(u.sync() == 8);            // body early-outed, completed, continuation ran inline
+        assert(t.sync() == 7);            // body early-outed, completed
         assert(stage.load() == 1);
     }
 
@@ -648,27 +500,6 @@ void stress_token_body()
             std::this_thread::yield();
         src.request_cancel();
         assert(t.sync() == 5);
-    }
-
-    // A then continuation whose own body takes a token, cancelled while it runs: cancel
-    // races the continuation's polling read after it dispatches off the producer.
-    for (int i = 0; i < 2000; ++i)
-    {
-        ts::Cancellation_source src;
-        std::atomic<bool> started{ false };
-        ts::Task<int> p = ts::launch([] { return 1; });
-        ts::Task<int> u = p.then([&started](int v, ts::Cancellation_token tok)
-        {
-            started.store(true, std::memory_order_relaxed);
-            while (!tok.is_cancel_requested())
-                std::this_thread::yield();
-            return v + 1;
-        }, { .token = src.token() });
-
-        while (!started.load(std::memory_order_relaxed))
-            std::this_thread::yield();
-        src.request_cancel();
-        assert(u.sync() == 2);
     }
 }
 
@@ -869,7 +700,6 @@ void stress_parallel_for()
     }
 }
 
-#if defined(__cpp_impl_coroutine)
 // Coroutine spike: the awaiter's resume fires on the thread that settles the awaited task
 // (cross-thread), racing `await_suspend`'s handshake (`state_`). Many external threads each
 // drive a coroutine that `co_await`s a chain of launched tasks; `sync()` joins. Exercises the
@@ -955,7 +785,6 @@ void stress_coroutine_deep()
     gate.trigger();   // cascade of `depth` resumes -- must not overflow the stack
     assert(t.sync() == depth);
 }
-#endif
 
 // Deferred: per-thread recorders staging concurrently with fire-and-forget commits
 // and pipe readers. Stresses the slot mutex (stage vs cut), the registration path,
@@ -1061,124 +890,12 @@ void stress_physics()
     (void)a; (void)b;
 }
 
-#if defined(TS_REUSE_FORENSICS)
-// Isolated forensic driver for the stress_reuse `dep.sync() == i` flake (see the forensics
-// ring in task.h). Runs ONLY the reuse+prereq+retraction loop, many times per process; on a
-// mismatch records everything and CONTINUES (no abort) so one long run collects many
-// captures. Enabled by env TS_REUSE_ONLY=1; outer iteration count via TS_REUSE_ITERS.
-const char* forensic_event_name(std::uint32_t id)
-{
-    using namespace ts::detail::forensics;
-    switch (id)
-    {
-    case E_round: return "ROUND      ";
-    case E_reset: return "RESET      ";
-    case E_release: return "RELEASE    ";
-    case E_submit: return "SUBMIT     ";
-    case E_pop: return "POP        ";
-    case E_claim_ok: return "CLAIM_OK   ";
-    case E_claim_fail: return "CLAIM_FAIL ";
-    case E_cancel_branch: return "CANCEL_BR  ";
-    case E_body: return "BODY       ";
-    case E_prereq_body: return "PREREQ_BODY";
-    case E_settle: return "SETTLE     ";
-    case E_retract_exec: return "RETRACT_EXE";
-    case E_sync_ret: return "SYNC_RET   ";
-    default: return "?          ";
-    }
-}
-
-void forensic_dump(std::uint32_t tail)
-{
-    using namespace ts::detail::forensics;
-    std::uint32_t end = ring_idx.load(std::memory_order_relaxed);
-    std::uint32_t begin = end > tail ? end - tail : 0;
-    std::printf("--- ring dump [%u..%u) ---\n", begin, end);
-    for (std::uint32_t s = begin; s < end; ++s)
-    {
-        const Entry& e = ring[s & (ring_size - 1)];
-        std::printf("  %8u %s a=%llu b=%llu tid=%04x\n", s, forensic_event_name(e.id.load(std::memory_order_relaxed)),
-                    static_cast<unsigned long long>(e.a.load(std::memory_order_relaxed)),
-                    static_cast<unsigned long long>(e.b.load(std::memory_order_relaxed)),
-                    e.tid.load(std::memory_order_relaxed));
-    }
-    std::printf("--- end dump ---\n");
-}
-
-int reuse_forensics_main()
-{
-    using namespace ts::detail::forensics;
-    int outer = 50;
-    if (const char* it = std::getenv("TS_REUSE_ITERS"))
-        outer = std::atoi(it);
-    int captures = 0;
-
-    for (int iter = 0; iter < outer; ++iter)
-    {
-        std::atomic<int> log{ 0 };
-        auto dep = ts::task([&log]
-        {
-            int v = log.load(std::memory_order_relaxed);
-            if (auto* w = watched.load(std::memory_order_relaxed))
-                rec(E_body, static_cast<std::uint64_t>(v), w->run_state.load(std::memory_order_relaxed));
-            return v;
-        });
-        watched.store(nullptr, std::memory_order_relaxed);   // re-arm per outer iter (fresh block)
-
-        for (int i = 1; i <= 3000; ++i)
-        {
-            if (i > 1)
-                dep.reset();
-            TS_FORENSIC_G(E_round, static_cast<std::uint64_t>(i), static_cast<std::uint64_t>(iter));
-            ts::Task<void> prereq = ts::launch([&log, i]
-            {
-                log.store(i, std::memory_order_relaxed);
-                TS_FORENSIC_G(E_prereq_body, static_cast<std::uint64_t>(i), 0);
-            });
-            ts::Task<int> h = dep.after(prereq).launch();
-            if (i == 1)
-                watched.store(ts::detail::core_of(h).get(), std::memory_order_relaxed);
-            int got = dep.sync();
-            TS_FORENSIC_G(E_sync_ret, static_cast<std::uint64_t>(got), static_cast<std::uint64_t>(i));
-            if (got != i)
-            {
-                ++captures;
-                auto* c = ts::detail::core_of(h).get();
-                bool completed_now, cancelled_now;
-                {
-                    std::scoped_lock lk(c->mutex);   // race-free capture read of the plain bools
-                    completed_now = c->completed;
-                    cancelled_now = c->cancelled;
-                }
-                std::printf("CAPTURE iter=%d round=%d got=%d run_state=%llu dispatch_arg=%llu num_locks=%u "
-                            "completed=%d cancelled=%d ready=%d\n",
-                            iter, i, got,
-                            static_cast<unsigned long long>(c->run_state.load(std::memory_order_relaxed)),
-                            static_cast<unsigned long long>(c->dispatch_arg.load(std::memory_order_relaxed)),
-                            c->num_locks.load(std::memory_order_relaxed),
-                            completed_now ? 1 : 0, cancelled_now ? 1 : 0,
-                            c->ready.load(std::memory_order_relaxed) ? 1 : 0);
-                forensic_dump(160);
-                std::fflush(stdout);
-            }
-        }
-        if ((iter + 1) % 10 == 0)
-            std::printf("heartbeat: iter %d/%d, captures %d\n", iter + 1, outer, captures);
-    }
-    std::printf("reuse forensics done: %d outer iters, %d captures\n", outer, captures);
-    return captures > 0 ? 42 : 0;
-}
-#endif // TS_REUSE_FORENSICS
 
 } // namespace
 
 int main()
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered: last stage is visible if it hangs
-#if defined(TS_REUSE_FORENSICS)
-    if (std::getenv("TS_REUSE_ONLY"))
-        return reuse_forensics_main();
-#endif
     std::puts("tsan: scheduler stress");   stress_scheduler();
     std::puts("tsan: thread_safe stress");  stress_thread_safe();
     std::puts("tsan: pipe rw stress");       stress_pipe_rw();
@@ -1187,14 +904,9 @@ int main()
     std::puts("tsan: pipe reservation stress"); stress_pipe_reservation();
     std::puts("tsan: inline async stress");  stress_inline_async();
     std::puts("tsan: signal stress");       stress_signal();
-    std::puts("tsan: when_all stress");      stress_when_all();
-    std::puts("tsan: when_all cancel stress"); stress_when_all_cancel();
     std::puts("tsan: launch stress");        stress_launch();
-    std::puts("tsan: prereq stress");        stress_prereq();
+    std::puts("tsan: awaited fork-join stress"); stress_awaited_forkjoin();
     std::puts("tsan: nested stress");        stress_nested();
-    std::puts("tsan: reuse stress");         stress_reuse();
-    std::puts("tsan: retraction stress");    stress_retraction();
-    std::puts("tsan: inline stress");        stress_inline();
     std::puts("tsan: cancel stress");        stress_cancel();
     std::puts("tsan: token body stress");    stress_token_body();
     std::puts("tsan: cancel callback stress"); stress_cancel_callback();
@@ -1205,11 +917,9 @@ int main()
     std::puts("tsan: spin_then_block stress"); stress_idle_policy(ts::Idle_policy::spin_then_block);
     std::puts("tsan: handoff stress");        stress_idle_policy(ts::Idle_policy::handoff);
     std::puts("tsan: parallel_for stress");  stress_parallel_for();
-#if defined(__cpp_impl_coroutine)
     std::puts("tsan: coroutine stress");     stress_coroutine();
     std::puts("tsan: coroutine guard stress"); stress_coroutine_guard();
     std::puts("tsan: coroutine deep cascade"); stress_coroutine_deep();
-#endif
     std::puts("tsan: graph nested stress");  stress_graph_nested();
     std::puts("tsan: deferred stress");      stress_deferred();
     std::puts("tsan: versioned stress");     stress_versioned();

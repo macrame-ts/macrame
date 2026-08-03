@@ -291,25 +291,6 @@ void test_nested_inherits_access()
     TS_CHECK(v == 5);
 }
 
-// The builder path (ts::task().launch() + add_nested) must inherit the node's grant too
-// -- not just ts::nested. Guards against the launch/task access-inheritance asymmetry.
-void test_builder_nested_inherits_access()
-{
-    ts::Guarded<tests::Counter> c;
-
-    ts::Static_task_graph g;
-    g.add_node([](tests::Counter& counter)
-    {
-        ts::Task<void> t = ts::task([&counter] { counter.add(7); }).launch();   // builder, not ts::nested
-        ts::add_nested(t);
-    }, c);
-    g.compile();
-
-    g.execute().sync();
-    int v = c.async([](const tests::Counter& k) { return k.value(); }).sync();
-    TS_CHECK(v == 7);
-}
-
 // Nested sub-work gates a conflicting successor: the reader node must see every write
 // the writer node's nested tasks made (they gate its completion, which orders the edge).
 void test_nested_before_successor()
@@ -961,7 +942,6 @@ void run_graph_tests()
     run("cancel skips nodes", test_cancel_skips_nodes);
     run("nested gates completion", test_nested_gates_completion);
     run("nested inherits access", test_nested_inherits_access);
-    run("builder nested inherits access", test_builder_nested_inherits_access);
     run("nested before successor", test_nested_before_successor);
     run("node priority order", test_node_priority_order);
     run("graph node inline on caller", test_graph_node_inline_on_caller);

@@ -4,9 +4,7 @@
 #include "ts/static_task_graph.h"
 #include "ts/access.h"
 
-#if defined(__cpp_impl_coroutine)
 #include "ts/coroutine_support.h"
-#endif
 
 #include <algorithm>
 #include <array>
@@ -297,7 +295,6 @@ std::vector<double> bench_launch_sync()
     });
 }
 
-#if defined(__cpp_impl_coroutine)
 // Coroutine task creation + boundary sync: the fused frame+block path (one allocation,
 // docs/coroutine-first.md §5.1). Target: at or below `launch` above.
 static ts::Task<int> trivial_coro() { co_return 1; }
@@ -330,33 +327,19 @@ std::vector<double> bench_coro_chain()
         return chain;
     });
 }
-#endif
 
-// Task::then: continuation chain length K fired off one producer.
-std::vector<double> bench_then()
-{
-    ts::Guarded<int> obj{ 0 };
-    constexpr int chain = 50;
-    return measure([&]() -> uint64_t
-    {
-        ts::Task<int> t = obj.async([](const int& v) { return v; });
-        for (int k = 0; k < chain; ++k)
-            t = t.then([](int v) { return v + 1; });
-        t.sync();
-        return chain;
-    });
-}
-
-// when_all: typed join over 4 prerequisites + a consuming continuation.
-std::vector<double> bench_when_all()
+// Awaited join over 4 async reads (the coroutine-first form of the old typed join).
+std::vector<double> bench_coro_join()
 {
     ts::Guarded<int> a{ 1 }, b{ 2 }, c{ 3 }, d{ 4 };
     auto read = [](const int& v) { return v; };
     return measure([&]() -> uint64_t
     {
-        ts::when_all(a.async(read), b.async(read), c.async(read), d.async(read))
-            .then([](std::tuple<int, int, int, int>& r) { return std::get<0>(r); })
-            .sync();
+        (void)[&]() -> ts::Task<int>
+        {
+            ts::Task<int> ta = a.async(read), tb = b.async(read), tc = c.async(read), td = d.async(read);
+            co_return co_await ta + co_await tb + co_await tc + co_await td;
+        }().sync();
         return 1;
     });
 }
@@ -434,14 +417,11 @@ void run_benchmarks()
 
     std::printf("\nfeatures:\n");
     report("launch", bench_launch_sync());
-#if defined(__cpp_impl_coroutine)
     report("coro", bench_coro_sync());
     report("coro chn", bench_coro_chain());
-#endif
     report("ts_write", bench_ts_write());
     report("ts_read", bench_ts_read());
-    report("then", bench_then());
-    report("when_all", bench_when_all());
+    report("coro join", bench_coro_join());
     report("graph", bench_graph_execute());
     report("harness", bench_harness());
 }
