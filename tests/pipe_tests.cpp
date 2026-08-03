@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <thread>
 #include <vector>
 
@@ -315,10 +316,25 @@ void test_graph_async_hammer()
         hammers.emplace_back([&a, &b, &stop, t]
         {
             std::uint32_t s = static_cast<std::uint32_t>(t) * 7919u;
+            // Bounded in-flight window: a wedged pipe once piled ~30M fire-and-forget
+            // entries (multi-GB; the OOM took the host down). Retain handles and wait for
+            // the oldest before pushing more, so a wedge saturates at `window` entries and
+            // the main thread's deadline handles the diagnosis.
+            constexpr std::size_t window = 64;
+            std::deque<ts::Task<void>> inflight;
             while (!stop.load(std::memory_order_relaxed))
             {
-                a.async([s](const Rw_probe& p) { p.observe_read(s); });
-                b.async([s](Rw_probe& p) { p.observe_write(s); });
+                while (inflight.size() >= window && !stop.load(std::memory_order_relaxed))
+                {
+                    if (inflight.front().is_done())
+                        inflight.pop_front();
+                    else
+                        std::this_thread::yield();
+                }
+                if (inflight.size() >= window)
+                    break;   // stopped while saturated (wedge): drop the handles and exit
+                inflight.push_back(a.async([s](const Rw_probe& p) { p.observe_read(s); }));
+                inflight.push_back(b.async([s](Rw_probe& p) { p.observe_write(s); }));
                 ++s;
             }
         });

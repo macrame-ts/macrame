@@ -37,6 +37,7 @@ std::size_t physics_pose_hash(int frames);   // final snapshot hash after `frame
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -217,10 +218,24 @@ void stress_pipe_reservation()
         asyncs.emplace_back([&]
         {
             std::uint32_t s = 0;
+            // Bounded in-flight window (mirrors the pipe_tests hammer): a wedged pipe must
+            // saturate at `window` retained entries, not balloon the process/WSL VM to OOM
+            // while the run.sh timeout counts down.
+            constexpr std::size_t window = 64;
+            std::deque<ts::Task<void>> inflight;
             while (!stop.load(std::memory_order_relaxed))
             {
-                a.async([s](const tests::Rw_probe& p) { p.observe_read(s); });
-                b.async([s](tests::Rw_probe& p) { p.observe_write(s); });
+                while (inflight.size() >= window && !stop.load(std::memory_order_relaxed))
+                {
+                    if (inflight.front().is_done())
+                        inflight.pop_front();
+                    else
+                        std::this_thread::yield();
+                }
+                if (inflight.size() >= window)
+                    break;   // stopped while saturated
+                inflight.push_back(a.async([s](const tests::Rw_probe& p) { p.observe_read(s); }));
+                inflight.push_back(b.async([s](tests::Rw_probe& p) { p.observe_write(s); }));
                 ++s;
             }
         });
