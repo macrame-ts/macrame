@@ -302,10 +302,22 @@ Not blockers; to be worked through while the stages land:
 3. **Nested graphs** — a graph run launched from within another graph's node (or a
    coroutine): limitations, object-overlap rules (task-internals §10 scenarios 2–3),
    whether the coroutine model makes an inner `co_await g.execute()` safe and useful.
-4. **Revoking grants on suspension** — instead of holding grants across a suspension
-   (§2), could a node release its grants at suspend and re-acquire at resume (epoch-style
-   revalidation, mutation-in-progress hazards, fairness)? Would shrink held-idle windows
-   at the cost of atomicity of the node's view.
+4. **Revoking grants on suspension — discussed 2026-08, parked with an outcome.** Full
+   revoke-and-reacquire is coherent (condition-variable `wait` semantics) but carries four
+   costs: the torn node view (silent unless epoch revalidation is made always-on),
+   structurally unrevocable grants (live scope children / lends — the quiet-scope
+   condition), resume re-acquisition latency + priority inversion, and a second "color"
+   of await. Its upside (revoked awaits dissolve the suspended-ABBA class) does not
+   outweigh them without a demonstrating workload; parked. **The preferred form of the
+   same optimization is node-splitting**: declare the narrower access set on a second
+   node ordered after the first — statically safe (the second body never receives the
+   released object, so a stray touch is impossible by construction, not merely
+   harness-caught), visible in the derived edges/DOT/trace, and the object frees at the
+   first node's completion. A dynamic `ts::release_early(obj)` (drop a grant permanently
+   mid-node; harness evicts the object from the context so later touches fatal in checked
+   builds) remains a possible convenience if splitting proves high-friction in practice —
+   its cost is that enforcement is runtime-only, so shipping builds would race silently
+   on the mistake the split makes unrepresentable. Note only; no action for now.
 5. **Library without static graphs** — the coroutine-first story for users who never
    build a graph: what the pure-dynamic usage model looks like (access verbs + scopes +
    pipes only), what guarantees weaken, what the guide should say.
