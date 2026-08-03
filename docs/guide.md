@@ -260,13 +260,13 @@ Sub-work inherits grants: a task launched from inside a task body (or a
 fan-out over data the parent owns just works.
 
 An inherited grant is only valid while the access scope it came from is
-still open. Nested sub-work (`ts::nested`, `ts::add_nested`) is always
-safe — the parent's completion (and so its grant release) waits for it. A
-plain `ts::launch` that is *not* gated as nested can outlive the parent's
-access scope; if it then touches the parent's guarded data, the harness
-aborts with a stale-grant diagnostic instead of letting the access race
-whoever holds the object next. The fix is always the same: gate the
-sub-work with `ts::nested`/`ts::add_nested`.
+still open. Nested sub-work (`ts::nested`) is always safe — the parent's
+completion (and so its grant release) waits for it. A plain `ts::launch`
+that is *not* gated as nested can outlive the parent's access scope; if it
+then touches the parent's guarded data, the harness aborts with a
+stale-grant diagnostic instead of letting the access race whoever holds
+the object next. The fix is always the same: gate the sub-work with
+`ts::nested`.
 
 ---
 
@@ -283,73 +283,81 @@ ts::Task<void> b = ts::launch(io_work, { .priority = ts::Priority::low });
 `ts::Launch_options` carries `{ .token, .priority }` — a cancellation token
 (§4.5) and a queue priority (`high`, `normal`, `low`; §10.1).
 
-### 4.2 Dependencies
+### 4.2 Composing with `co_await`
 
-To run a task after others complete, build it with `ts::task(...).after(...)`:
+Composition — sequencing, joining, transforming results — is written as
+coroutines. A function whose return type is `ts::Task<R>` and whose body uses
+`co_await`/`co_return` *is* a task; it starts eagerly when called, suspends at
+each await that isn't ready yet, and frees its worker while suspended:
 
 ```cpp
-ts::Task<void> load  = ts::launch(load_assets);
-ts::Task<void> parse = ts::launch(parse_config);
-
-auto ready = ts::task([] { finish_boot(); })
-                 .after(load, parse)
-                 .launch();
+ts::Task<int> pipeline()
+{
+    int a = co_await ts::launch(step_one);              // sequence: run after step_one
+    int b = co_await ts::launch([a] { return step_two(a); });
+    co_return a + b;
+}
 ```
 
-`after` accepts any mix of `Task<R>`s; the dependent runs once every
-prerequisite has settled. If a prerequisite was *cancelled*, the dependent is
-cancelled too (cancellation propagates forward; §4.5).
+A join is just several awaits — launch everything first (the tasks run
+concurrently from the moment they are launched), then await in any order.
+Awaiting an already-settled task costs no suspension, so the order of the
+awaits does not serialize the work:
 
-### 4.3 Getting results: `sync()` and `take()`
+```cpp
+ts::Task<Scene> load_scene()
+{
+    ts::Task<Meshes>    m = ts::launch(load_meshes);     // all three in flight
+    ts::Task<Textures>  t = ts::launch(load_textures);
+    ts::Task<Animation> a = ts::launch(load_animations);
+    co_return Scene(co_await m, co_await t, co_await a); // join
+}
+```
 
-`sync()` blocks until the task settles and returns the result **by
-`const&`** — it does not consume. Any number of readers may `sync()` the same
-task; the result is immutable once set:
+`co_await task` resumes with the result by `const&` (non-consuming, same
+contract as `sync()`; §4.3). Loops, branches, and early returns across
+asynchronous steps read as straight-line code — there is no callback
+vocabulary to learn, and no callback-flavored types to thread results through.
+If a prerequisite was *cancelled*, awaiting it: a `Task<void>` simply resumes,
+a value task is fatal — check `is_cancelled()` first (§4.4).
+
+One structural rule (the coroutine-lambda trap): a coroutine lambda's captures
+live in the lambda *object*, which usually dies at the end of the statement —
+while the coroutine's frame lives on. For any coroutine that outlives its
+defining statement, use a free (or member) coroutine function and pass state
+as parameters; parameters are copied into the frame and live as long as it
+does.
+
+### 4.3 The blue boundary: `sync()` and `take()`
+
+Threads split into two kinds: **task threads** (workers running task bodies)
+and **blue threads** — `main`, dedicated engine threads, anything outside the
+scheduler. Inside a task you *await*; a blue thread cannot await, so it
+*blocks*:
 
 ```cpp
 ts::Task<Mesh> m = ts::launch(build_mesh);
-const Mesh& view1 = m.sync();
-const Mesh& view2 = m.sync();   // fine
+const Mesh& view = m.sync();    // blue thread: block until settled, read by const&
 ```
 
-To *move* the result out (ownership transfer, or a move-only type), use
-`take()` — the one destructive read, which must be last:
+`sync()` returns the result **by `const&`** — it does not consume; any number
+of readers may `sync()` the same task. To *move* the result out (ownership
+transfer, or a move-only type), use `take()` — the one destructive read,
+which must be last:
 
 ```cpp
 ts::Task<std::unique_ptr<Level>> t = ts::launch(load_level);
 std::unique_ptr<Level> level = t.take();
 ```
 
-A `sync()` on a task that hasn't started may run it (and its un-started
-prerequisites) *inline on the calling thread* instead of waiting — this is
-called **retraction** and is what makes blocking on a task safe even when all
-workers are busy blocking on other tasks. It applies to plain tasks only, not
-to pipe (`async`) work.
+`sync()`/`take()` are **blue-thread verbs**. Calling them inside a task parks
+a worker on work that may need that worker — the pool-exhaustion deadlock —
+so a `sync()` that would genuinely block inside a task is **fatal** under
+safety checks (§5.0.1). The sanctioned in-task waits are `co_await`, the
+`parallel_for` join (it runs chunks on the caller), and gating completion on
+children via `ts::nested` (§4.5).
 
-`sync()` waits for the task itself — **not** for continuations chained on it
-(§4.4). To wait for a continuation, `sync()` the task `then` returned.
-
-### 4.4 Continuations: `then` and `when_all`
-
-```cpp
-ts::Task<int> price = fetch_price();
-ts::Task<int> doubled = price.then([](int p) { return p * 2; });
-
-ts::Task<int> a = ..., b = ...;
-ts::Task<int> sum = ts::when_all(a, b).then([](int x, int y) { return x + y; });
-```
-
-`then(fn, opts)` schedules `fn` when the producer completes; for a non-void
-producer, `fn` receives the result by reference. `opts` is `ts::Task_options`
-`{ .token, .priority, .run_inline }`.
-
-`when_all(tasks...)` joins several tasks into a `Task<std::tuple<...>>`.
-`void` prerequisites contribute ordering only and drop out of the tuple
-(all-`void` joins produce `Task<void>`); move-only results are moved in. The
-consuming `then` may take the tuple by reference, or — as above — take the
-elements *unpacked* as separate parameters ("apply-style").
-
-### 4.5 Cancellation
+### 4.4 Cancellation
 
 Cooperative, value-based (no exceptions):
 
@@ -365,10 +373,12 @@ if (t.is_cancelled()) { ... }  // settled as cancelled
 Rules:
 
 - A cancelled task **settles cancelled** instead of running; cancellation
-  propagates to dependents (`after`) and continuations (`then`).
-- `sync()` on a cancelled `Task<void>` simply returns; on a cancelled *value*
-  task it is fatal (there is no result) — check `is_cancelled()` first.
-- A cancelled `when_all` prerequisite cancels the whole join.
+  propagates to graph successors as a completion state.
+- `sync()` on (or `co_await` of) a cancelled `Task<void>` simply
+  returns/resumes; on a cancelled *value* task it is fatal (there is no
+  result) — check `is_cancelled()` first and branch.
+- A coroutine polls between awaits: check `is_cancelled()` on what it awaited,
+  or its own token, and `co_return` early.
 
 For cancellation arriving *mid-run*, a body may opt in by declaring a
 trailing token parameter — it receives the task's token and can poll:
@@ -382,13 +392,13 @@ ts::launch([](ts::Cancellation_token tok)
 ```
 
 A cooperative early return settles the task **completed** (it ran), not
-cancelled. This works in every body position: `launch`/`task`/`nested`
-bodies, `async` accessors (`[](T& v, ts::Cancellation_token t)`), and `then`
-continuations. For work that blocks rather than polls, register a push
-notification: `ts::Cancel_callback cb(token, [] { wake_the_socket(); });` —
+cancelled. This works in `launch`/`nested` bodies and `async` accessors
+(`[](T& v, ts::Cancellation_token t)`). For work that blocks rather than
+polls, register a push notification:
+`ts::Cancel_callback cb(token, [] { wake_the_socket(); });` —
 `request_cancel()` invokes it synchronously.
 
-### 4.6 Nested tasks
+### 4.5 Nested tasks and scopes
 
 Work launched *inside* a task body can gate the parent's completion:
 
@@ -400,31 +410,25 @@ ts::launch([]
 }).sync();   // returns only after all 4 nested tasks finished
 ```
 
-`ts::nested(fn)` launches and attaches in one step; `ts::add_nested(task)`
-attaches an existing task. Nested work inherits the parent's access grants.
-
-### 4.7 Reusable tasks
-
-`ts::task(fn)` returns a `Task_builder` that can re-run the same task without
-reallocating:
+`ts::nested(fn)` launches and attaches in one step; nested work inherits the
+parent's access grants. In a coroutine body the children also join the
+frame's implicit scope, so you can await them mid-body:
 
 ```cpp
-auto step = ts::task([&sim] { return sim.tick(); });
-
-step.launch();
-int r0 = step.sync();
-
-step.reset().launch();       // re-arm and run again
-int r1 = step.sync();
+ts::Task<void> frame_section()
+{
+    ts::nested(build_shadow_list);
+    ts::nested(build_visible_list);
+    co_await ts::join_nested();     // both lists done here
+    merge_lists();                  // safe to consume their output
+}
 ```
 
-Constraints: one run in flight at a time; `reset()` only after the previous
-run settled and its result was consumed. The cancellation token is **fixed at
-creation** (set it once with `.token(t)` before the first launch) and carries
-over every rerun — since cancellation is one-way, a reusable task whose token
-fired stays cancelled on re-runs; use a fresh task for a fresh cancellation
-scope. `ts::Signal` (§10.3) is the reusable phase gate built on the same
-mechanism.
+For several independent lifetimes — or a scope handed to helpers — use the
+explicit `ts::Task_scope`: `scope.launch(fn)` records a child,
+`co_await scope.join()` awaits all recorded children. A scope destroyed with
+unjoined children is fatal (lost children), the structured-concurrency
+analogue of the journal's lost-writes fatal.
 
 ---
 
@@ -450,16 +454,21 @@ the same access (write / read, from const-ness) and both return `Task<R>`:
   runs the functor immediately on the *calling* thread — no scheduling — and
   otherwise queues it. That fast path suits the many short critical sections
   typical of this API, at the cost of briefly blocking the caller when it takes
-  it. This is the default; reach for it unless you have a reason not to.
+  it. This is the default; reach for it unless you have a reason not to. It is
+  also **reentrant**: if the calling task already holds this object's write
+  access (a graph node's declared write, an enclosing write body), the functor
+  runs under that access rather than queueing behind it — so a helper that
+  takes a `Guarded<T>&` and calls `access` works whether or not its caller
+  happens to hold the object.
 - **`async`** always schedules the functor onto a worker, never the caller's
   thread. Use it for a heavy functor you don't want running inline (it would
   block the caller and hold the object longer), or when you specifically want
   fire-and-forget submission that never blocks.
 
-(This is distinct from *task* inline dispatch — `set_inline` / `run_inline` on
-`launch`/`then`/graph nodes — which is about running a ready task on the
-thread that settled its last prerequisite. `access` is about a free object at
-call time. Different mechanisms; only the task one is called "inline".)
+(This is distinct from *graph-node* inline dispatch — `Graph_node::set_inline`
+— which is about running a ready node on the thread that settled its last
+prerequisite. `access` is about a free object at call time. Different
+mechanisms; only the node one is called "inline".)
 
 Semantics of the per-object pipe:
 
@@ -485,40 +494,32 @@ and `async` alike (a cancellation token, a scheduling priority). There is no
   over) a graph while a run is in flight — both would otherwise dangle and
   crash far from the cause.
 
-### 5.0.1 The never-block rule is diagnosed
+### 5.0.1 The never-block rule is enforced
 
-Blocking inside a task or node body ties up a worker and risks deadlock;
-the rule has always been "consume results with `then`/`when_all` or gate
-sub-work with `ts::nested`, never `sync()` inside a body". In
-`TS_SAFETY_CHECKS` builds a violation now reports instead of just
-misbehaving: a `sync()` that is genuinely about to block, issued under an
-access scope, on work a waiter cannot run itself, fails a **`TS_ENSURE`** —
-the library's recoverable assert. The default report is
-`ENSURE FAILED: <message>` plus a call stack, with a debugger break when
-one is attached; execution then continues. A failure that recurs (say,
-every frame) is reported once per call site but *counted* every time. Two
+Blocking inside a task or node body ties up a worker and risks
+pool-exhaustion deadlock; the rule is "await results with `co_await`, or
+gate sub-work with `ts::nested` — never `sync()` inside a body". In
+`TS_SAFETY_CHECKS` builds a violation is **fatal** at the call: a `sync()`
+that is genuinely about to park inside a task aborts with a stack, with two
 messages:
 
-- *"sync() on an access to an object this scope already holds"* — the
-  certain-deadlock shape: the awaited access is queued behind the very
-  grant you are waiting inside.
-- *"blocking sync() on non-retractable work inside an access scope"* — the
-  general hazard.
+- *"sync() inside a task on an access to an object this task already
+  holds"* — the certain-deadlock shape: the awaited access is queued behind
+  the very grant you are waiting inside.
+- *"blocking sync() inside a task"* — the general hazard; `co_await` it
+  instead.
 
 What does **not** fire: `parallel_for` inside a node (its join runs chunks
-on the caller), `sync()` on plain launched tasks (a blocked waiter runs
-them inline — retraction), and any `sync()` from a thread holding no access
-scope. The test harness and the `--bench`/`--stress` drivers fail the run
-on any failure a test did not explicitly expect, so a violation cannot pass
-CI silently.
+on the caller and waits only on provably running helpers), and any `sync()`
+from a blue thread (no task context — blocking is what blue threads do).
 
-A host application can replace how failures are presented with
-`ts::set_ensure_handler` (`std::set_terminate` shape — returns the previous
-handler): for example, a Windows game might pop an attach-a-debugger dialog
-from its handler. The library deliberately ships no dialog of its own —
-that is host policy, and there is no portable equivalent — and the failure
-counting is outside the handler, so custom presentation never hides a
-failure from the harness or CI.
+The suspended twin of the blocked-thread deadlock is also detected: two
+coroutines that each *hold* an object and `co_await` the other's object
+deadlock with **no thread parked** — both frames are suspended, every
+worker is free, and the frames simply never resume. The safety harness
+records waits-for edges at every suspension on a pipe and fatals the moment
+an edge closes a cycle, naming both tasks and both objects (§8.2 has the
+rule that avoids the shape in the first place).
 
 ### 5.1 Multi-object access
 
@@ -557,8 +558,8 @@ ts::access([](auto& p, auto& r) { r.mirror(p); },   // same, spelled with tags
 It is not a mutex wrapper: you submit a functor rather than lock/unlock around
 raw access. With `async` (or a contended `access`) the body runs later on a
 worker and the caller keeps going; with an uncontended `access` it runs inline
-right away. Either way you get a `Task<R>`; if you need the result *now*, that
-is `sync()` and you should be sure you are allowed to block (§11.2).
+right away. Either way you get a `Task<R>`; inside a task, consume it with
+`co_await`; on a blue thread, `sync()` (§4.3, §11.2).
 
 ---
 
@@ -607,10 +608,15 @@ Node capabilities:
 - `node.priority(p)` — queue priority per node.
 - `node.set_inline()` — run the node on the thread that readied it when its
   objects are immediately available (low-latency chaining for small nodes).
-- Node bodies may spawn **nested tasks** (§4.6) — the node's completion, and
+- Node bodies may spawn **nested tasks** (§4.5) — the node's completion, and
   thus its successors, gate on them; nested work inherits the node's grants,
   so dynamic fan-out over the node's data passes the harness.
-- `execute(scheduler, token)` accepts a cancellation token: not-yet-started
+- A node body may be a **coroutine**: return `ts::Task<void>` from the body
+  and it may `co_await` mid-node — the node completes (releasing its grants
+  and successors) when the *frame* completes, not at the first suspension,
+  and its declared grants are held for the frame's whole life. While the
+  frame is suspended its worker is free.
+- `execute({ .token = t })` accepts a cancellation token: not-yet-started
   nodes are skipped and the run's completion settles cancelled.
 
 Objects are held per node, not per run: a node acquires exactly the objects
@@ -807,10 +813,10 @@ which cover the common cases today.
 
 ---
 
-## 8. Coroutines
+## 8. Coroutines in depth
 
-If your toolchain has C++20 coroutines, include `coroutine_support.h`; the
-task system becomes awaitable with no other changes.
+Composition is coroutines (§4.2); this chapter is the deeper contract. The
+support is part of the core (`ts.h` includes it; coroutines are required).
 
 ### 8.1 Awaiting tasks
 
@@ -826,11 +832,11 @@ int r = pipeline().sync();   // a coroutine returning Task<R> is itself a task
 ```
 
 `co_await task` suspends the coroutine until the task settles and resumes
-with the result (`const R&`, same contract as `sync()`). The win over `then`
-chains is ordinary control flow: loops, branches, and early returns across
-asynchronous steps read like straight-line code. Deep chains resume
+with the result (`const R&`, same contract as `sync()`). A coroutine task
+starts **eagerly** — the body runs to its first genuine suspension on the
+calling thread — and while suspended holds no worker. Deep chains resume
 iteratively (bounded stack), and each resumed segment carries the
-coroutine's access grants.
+coroutine's access grants and task identity, whatever thread it resumes on.
 
 Cancellation stays value-based: a cancelled awaited `Task<void>` just
 resumes; check `is_cancelled()` or poll a token between awaits — there is no
@@ -882,8 +888,15 @@ rec.stage([](Score_board& b) { b.add("alice", 10); });   // no access taken; nev
 rec.stage([](Score_board& b) { b.add("bob", 5); });
 
 // later, at a point you choose:
-ts::Task<void> applied = staged.commit_async();          // ONE write applies everything
+ts::Task<void> applied = staged.commit();                // ONE write applies everything
 ```
+
+`commit()` auto-dispatches on grant ownership. Called from the task that holds
+the target's write grant — a graph node that declared the write, an
+`async`/`access` write body — it applies **inline under that grant**, no second
+access acquisition, and returns an already-settled task. Called from anywhere
+else, it enqueues one ordinary async write on the target and returns that
+write's completion. One verb, both worlds; the old `commit_async` is gone.
 
 Contracts, briefly (full statements live in
 [deferred-versioned-state.md](deferred-versioned-state.md)):
@@ -901,14 +914,20 @@ Contracts, briefly (full statements live in
 - **Lost writes are loud**: destroying a `Deferred` with staged, uncommitted
   commands is fatal (under `TS_SAFETY_CHECKS`); `discard()` is the explicit
   escape.
-- **Sync before destroying**: destroying a `Deferred` while a `commit_async`
-  is still in flight is fatal (under `TS_SAFETY_CHECKS`) — sync the task it
-  returned first. The pending job uses the `Deferred`, and a destructor that
-  silently blocked on it would hide a bug. With the last commit settled the
-  destructor is non-blocking.
-
-Inside a graph node that already holds write access to the target, apply
-without a second pipe trip: `staged.commit()` (the bound object is implicit).
+- **Sync before destroying**: destroying a `Deferred` while an enqueued
+  `commit()` is still in flight is fatal (under `TS_SAFETY_CHECKS`) — sync the
+  task it returned first. The pending job uses the `Deferred`, and a destructor
+  that silently blocked on it would hide a bug. With the last commit settled
+  the destructor is non-blocking (inline commits finish in-call).
+- **The inline path's task carries no ordering**: when `commit()` applies
+  inline (you held the grant), the returned task settled *before* the apply —
+  it answers `is_done()` truthfully but provides no happens-before edge.
+  Observers of the data order through the object's pipe, which orders.
+- **Commit from the grant holder, not nested sub-work**: inside a node/body
+  that holds the write grant, call `commit()` there. Calling it from a nested
+  task running under the *inherited* grant is a misuse (the nested task is not
+  the holder; the enqueued write would queue behind the very grant it waits
+  out) — fatal under `TS_SAFETY_CHECKS`.
 
 For one logical producer parallelized internally (staging from inside a
 `parallel_for`), mint a `Parallel_recorder` instead: per-worker storage, no
@@ -980,10 +999,10 @@ in `sample/blackboard.cpp`. Both are deterministic and verify themselves.
 ### 10.1 Priorities
 
 `ts::Priority { high, normal, low }`, defaulting to `normal`, accepted by
-every route: `launch`/`nested` options, builder `.priority(p)`, `async`
-options, `then` options, `Graph_node::priority(p)`. `high` is strict (always
-served first); `low` still makes progress under sustained load (an aging
-valve prevents starvation).
+every route: `launch`/`nested` options, `async` options,
+`Graph_node::priority(p)`. `high` is strict (always served first); `low`
+still makes progress under sustained load (an aging valve prevents
+starvation).
 
 ### 10.2 Scheduler configuration
 
@@ -1007,13 +1026,18 @@ A manually-completed `Task<void>` — a phase gate:
 
 ```cpp
 ts::Signal frame_start;
-auto work = ts::task(run_systems).after(frame_start).launch();
+ts::Task<void> work = [](ts::Signal gate) -> ts::Task<void>
+{
+    co_await gate;       // suspends until triggered
+    run_systems();
+}(frame_start);
 ...
-frame_start.trigger();   // idempotent; releases everything gated on it
+frame_start.trigger();   // idempotent; releases everything awaiting it
 ```
 
-`Signal::reset()` re-arms it for the next phase (same rules as reusable
-tasks).
+`Signal::reset()` re-arms it for the next phase — the one sanctioned re-arm
+(one use in flight; reset only after it settled and every awaiter resumed;
+re-arming an un-triggered signal is fatal).
 
 ---
 
@@ -1031,10 +1055,11 @@ system comes from `parallel_for` and nested tasks under the system's grant.
 
 ### 11.2 Never block inside a task or node
 
-Blocking a worker starves the pool. Consume another system's result with a
-continuation or a graph edge, not a `sync()` inside a body. The exceptions
-that are safe by design: `parallel_for` (the caller participates) and
-`sync()` from *outside* the scheduler (retraction protects it).
+Blocking a worker starves the pool. Consume another system's result with
+`co_await` or a graph edge, never a `sync()` inside a body — the harness
+makes the violation fatal (§5.0.1). The exceptions that are safe by design:
+`parallel_for` (the caller participates, and waits only on running helpers)
+and `sync()` from a blue thread (blocking is what blue threads do).
 
 ### 11.3 Fire-and-forget is fine
 
@@ -1047,8 +1072,8 @@ result, completion, or cancellation.
 | situation | tool |
 |---|---|
 | fixed per-frame structure | `Static_task_graph` |
-| ad-hoc async work, cross-system calls | `launch` / `async` / `then` |
-| complex control flow across async steps | coroutines |
+| ad-hoc async work, cross-system calls | `launch` / `async` |
+| sequencing / joining / transforming results | coroutines (`co_await`) |
 | data-parallel loop | `parallel_for` |
 | many writers, batched visibility | `Deferred` |
 | stable read view + atomic version flips | `Versioned` |
@@ -1056,7 +1081,27 @@ result, completion, or cancellation.
 
 ---
 
-## 12. Limitations & WIP
+## 12. Migrating from the callback vocabulary
+
+Earlier revisions composed with callbacks and builders. That entire surface
+is deleted — composition is coroutines — and every removal is a compile
+error, not a behavior change. The replacements:
+
+| deleted | replacement |
+|---|---|
+| `t.then(fn)` | `co_await t`, then just call `fn` — `co_return fn(co_await t);` |
+| `ts::when_all(a, b, c)` | launch all, then await all: `co_await a; co_await b; co_await c;` (awaiting settled tasks is free; results come back typed, no tuple) |
+| `ts::task(fn).after(x, y).launch()` | a coroutine body: `co_await x; co_await y; fn();` — prerequisites are awaits at the top of the body |
+| `Task_builder::priority/token` | `ts::launch(fn, { .priority, .token })` at the launch site |
+| `Task_builder::set_inline` / `Task_options::run_inline` | deleted for dynamic tasks (graph nodes keep `Graph_node::set_inline`) |
+| `Task_builder::reset()` (reusable tasks) | call the coroutine again — one frame per run is the model; `Signal::reset()` remains the re-armable phase gate |
+| `ts::add_nested(task)` | `ts::nested(fn)` (launch-and-attach), or record into a `ts::Task_scope` |
+| `Task_options` | `Launch_options` (`launch`/`nested`) or `Access_options` (`access`/`async`) |
+| retraction (blocking `sync()` running work inline) | deleted — a blue thread parks (that is fine); an in-task `sync()` is fatal, `co_await` instead |
+
+---
+
+## 13. Limitations & WIP
 
 Stated plainly; each is on the roadmap (`docs/TODO.md`):
 
@@ -1085,7 +1130,7 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
 - [design.md](design.md) — the design rationale: why these primitives, what
   was tried and rejected, and how it compares to other systems.
 - [task-internals.md](task-internals.md) — dynamic-task internals (control
-  block, lifecycle, retraction, nested tasks).
+  block, lifecycle, coroutine frames, nested tasks).
 - [command-buffer-design.md](command-buffer-design.md) — the design study
   behind `Deferred`/`Versioned`, including the UE research.
 - [deferred-versioned-state.md](deferred-versioned-state.md) — the staged-

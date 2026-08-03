@@ -1,11 +1,11 @@
 ﻿#include "coroutine_tests.h"
 #include "harness.h"
 
-#if defined(__cpp_impl_coroutine)
-
 #include "ts/coroutine_support.h"
 #include "ts/guarded.h"
 #include "ts/parallel_for.h"
+#include "ts/static_task_graph.h"
+#include "ts/task_scope.h"
 #include "test_util.h"
 
 #include <atomic>
@@ -67,18 +67,18 @@ void test_thread_safe()
     TS_CHECK(obj.async([](const int& v) { return v; }).sync() == 11);   // 5 + (5 + 1)
 }
 
-// 4. Fan-out / fan-in: start two tasks, then `co_await when_all`, unpacking the tuple.
-Task<int> co_when_all()
+// 4. Fan-out / fan-in: start two tasks (they run eagerly, concurrently), then await both --
+// sequential awaits complete when the last one does.
+Task<int> co_join()
 {
     Task<int> t1 = ts::launch([] { return 3; });
     Task<int> t2 = ts::launch([] { return 4; });
-    auto [a, b] = co_await ts::when_all(std::move(t1), std::move(t2));
-    co_return a * b;
+    co_return co_await t1 * co_await t2;
 }
 
-void test_when_all()
+void test_join()
 {
-    TS_CHECK(co_when_all().sync() == 12);
+    TS_CHECK(co_join().sync() == 12);
 }
 
 // 5. A `co_await` loop -- the case continuations cannot express without recursion.
@@ -225,15 +225,16 @@ void test_death_await_under_guard()
 }
 
 // 13. Feature showcase: one coroutine weaving the whole system into straight-line code --
-// prioritized producers joined by when_all (dependencies), a task that forks nested work,
+// prioritized producers awaited as a join (dependencies), a task that forks nested work,
 // a Guarded write-guard critical section, async_parallel_for, a Signal phase gate,
 // cooperative cancellation, and a final async read.
 Task<int> co_showcase(ts::Guarded<tests::Counter>& world, ts::Signal& phase, Cancellation_token tok)
 {
-    // (a) priority + dependency fan-in: a high- and a low-priority producer, joined.
+    // (a) priority + dependency fan-in: a high- and a low-priority producer, both awaited.
     Task<int> hi = ts::launch([] { return 3; }, { .priority = ts::Priority::high });
     Task<int> lo = ts::launch([] { return 4; }, { .priority = ts::Priority::low });
-    auto [a, b] = co_await ts::when_all(std::move(hi), std::move(lo));      // 3, 4
+    int a = co_await hi;                                                    // 3
+    int b = co_await lo;                                                    // 4
 
     // (b) nested tasks: a task body forks nested work; its completion gates on them.
     // `nested_sum` lives in the coroutine frame, so it outlives the forked nested tasks.
@@ -290,6 +291,196 @@ void test_showcase()
     }
 }
 
+// --- coroutine-first §6 matrix companions ---------------------------------
+
+// Companion to the `sync_in_task` fatal: the sanctioned wait inside a task is `co_await` --
+// suspend (freeing the worker) until the access's turn, no park, no fatal. A blocker holds
+// the pipe first so the await genuinely suspends.
+Task<int> await_instead_of_sync(ts::Guarded<int>& b, std::atomic<bool>& release)
+{
+    ts::Task<void> blocker = b.async([&release](int&)
+    {
+        while (!release.load(std::memory_order_relaxed))
+            std::this_thread::yield();
+    });
+    ts::Task<int> write = b.async([](int& v) { v = 7; return v; });
+    release.store(true, std::memory_order_relaxed);
+    int v = co_await write;   // suspends behind the blocker, resumes when granted
+    co_return v;
+}
+
+void test_coro_await_instead_of_sync()
+{
+    ts::Guarded<int> b{ 0 };
+    std::atomic<bool> release{ false };
+    TS_CHECK(await_instead_of_sync(b, release).sync() == 7);
+}
+
+// Companion to the `await_cancelled_value` fatal: check `is_cancelled()` first, then branch --
+// the same precondition discipline as `sync()`.
+Task<int> await_cancelled_checked(ts::Task<int> maybe_cancelled)
+{
+    while (!maybe_cancelled.is_done())
+        std::this_thread::yield();
+    if (maybe_cancelled.is_cancelled())
+        co_return -1;             // handled: no await of a result that does not exist
+    co_return co_await maybe_cancelled;
+}
+
+void test_await_cancelled_checked()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();
+    ts::Guarded<int> d{ 0 };
+    ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });
+    TS_CHECK(await_cancelled_checked(std::move(t)).sync() == -1);
+}
+
+#if TS_SAFETY_CHECKS
+void test_death_await_cancelled_value()
+{
+    TS_CHECK(ts::test::expect_death("await_cancelled_value"));
+}
+#endif
+
+// The reentrant access arm (coroutine-first §4.2, doctrine (b)): `access` from a task that
+// already holds the object's write grant runs inline under it instead of queueing behind
+// itself (which used to be the sharp same-object deadlock).
+void test_access_reentrant_under_own_grant()
+{
+    ts::Guarded<int> a{ 0 };
+    ts::Static_task_graph g;
+    std::atomic<int> seen{ -1 };
+    g.add_node([&a, &seen](int& v)
+    {
+        v = 5;
+        ts::Task<int> r = a.access([](const int& x) { return x; });   // reentrant: inline, done
+        TS_CHECK(r.is_done());
+        seen.store(r.sync());   // settled -> sync is a plain read, legal in-task
+    }, a);
+    g.compile();
+    g.execute().sync();
+    TS_CHECK(seen.load() == 5);
+}
+
+// --- stage 2: implicit scope, Task_scope, coroutine nodes -----------------
+
+// The §4.4 shape: a coroutine node body -- nested fan-out joins the node's implicit scope,
+// a mid-body join makes the results usable, a foreign read awaits under held grants, and
+// the node completes (releasing grants, unlocking successors) only at frame completion.
+void test_coroutine_graph_node()
+{
+    ts::Guarded<std::vector<int>> phys{ std::vector<int>{ 1, 2, 3 } };
+    ts::Guarded<int> audio{ 40 };
+    ts::Guarded<int> result{ 0 };
+    std::atomic<int> total{ 0 };
+    std::atomic<int> successor_runs{ 0 };
+
+    ts::Static_task_graph g;
+    g.add_node([&audio, &total](const std::vector<int>& islands, int& out) -> ts::Task<void>
+    {
+        total.store(0);                                             // re-run-safe
+        for (int island : islands)                                  // data-dependent fan-out
+            ts::nested([&total, island] { total.fetch_add(island); });
+
+        co_await ts::join_nested();                                 // solves needed mid-body
+        TS_CHECK(total.load() == 6);
+
+        int mix = co_await audio.access([](const int& a) { return a; });   // foreign read (c)
+        out = total.load() + mix;
+        co_return;
+    }, phys, result);
+    g.add_node([&successor_runs](const int& out)
+    {
+        TS_CHECK(out == 46);   // the successor sees the frame's full effect (post-join, post-await)
+        successor_runs.fetch_add(1);
+    }, result);
+    g.compile();
+    g.execute().sync();
+    TS_CHECK(successor_runs.load() == 1);
+
+    g.execute().sync();   // re-run: the node re-arms; the frame is per-run
+    TS_CHECK(successor_runs.load() == 2);
+}
+
+// join_nested resets the list: children launched after the join gate co_return as usual.
+Task<int> two_phase_nested(std::atomic<int>& counter)
+{
+    ts::nested([&counter] { counter.fetch_add(1); });
+    co_await ts::join_nested();
+    int after_first = counter.load();
+    ts::nested([&counter] { counter.fetch_add(10); });   // gates completion via the counter
+    co_return after_first;
+}
+
+void test_join_nested_two_phase()
+{
+    std::atomic<int> counter{ 0 };
+    ts::Task<int> t = two_phase_nested(counter);
+    TS_CHECK(t.sync() == 1);          // the join saw phase one...
+    TS_CHECK(counter.load() == 11);   // ...and completion gated on phase two
+}
+
+// Explicit Task_scope: launch several, join once; the handle stays usable individually.
+Task<int> scoped_fanout()
+{
+    ts::Task_scope scope;
+    std::atomic<int>* sum = new std::atomic<int>{ 0 };
+    for (int i = 1; i <= 4; ++i)
+        scope.launch([sum, i] { sum->fetch_add(i); });
+    co_await scope.join();
+    int v = sum->load();
+    delete sum;
+    co_return v;
+}
+
+void test_task_scope_join()
+{
+    TS_CHECK(scoped_fanout().sync() == 10);
+}
+
+#if TS_SAFETY_CHECKS
+// Companion pair for the lost-children fatal: joining before scope exit is the sanctioned
+// form (above); dropping a scope with recorded children is fatal.
+void test_death_scope_unjoined()
+{
+    TS_CHECK(ts::test::expect_death("scope_unjoined"));
+}
+#endif
+
+// Companion for the waits-for-cycle fatal (docs/coroutine-first.md §2 hierarchy, step 1):
+// the same cross-object communication with BOTH objects declared -- compile() derives the
+// conflict edges and orders the nodes, so neither suspends and no cycle can form.
+Task<void> declared_pair_body(tests::Counter& own, tests::Counter& other)
+{
+    own.increment();
+    other.increment();
+    co_return;
+}
+
+void test_cross_object_declared()
+{
+    ts::Guarded<tests::Counter> a;
+    ts::Guarded<tests::Counter> b;
+    ts::Static_task_graph graph;
+    graph.add_node([](tests::Counter& own, tests::Counter& other) { return declared_pair_body(own, other); }, a, b);
+    graph.add_node([](tests::Counter& own, tests::Counter& other) { return declared_pair_body(own, other); }, b, a);
+    graph.compile();
+    graph.execute().sync();
+    TS_CHECK(a.access([](const tests::Counter& c) { return c.value(); }).sync() == 2);
+    TS_CHECK(b.access([](const tests::Counter& c) { return c.value(); }).sync() == 2);
+}
+
+#if TS_SAFETY_CHECKS
+// The suspended-ABBA deadlock: two coroutine nodes each holding a declared grant and
+// awaiting the other's object. The waits-for detector fatals on the closing edge -- the
+// only diagnosis this shape can get (no thread parks; the frames simply never resume).
+void test_death_waits_for_cycle()
+{
+    TS_CHECK(ts::test::expect_death("waits_for_cycle"));
+}
+#endif
+
 } // namespace
 
 void run_coroutine_tests()
@@ -298,7 +489,7 @@ void run_coroutine_tests()
     run("co simple", test_simple);
     run("co chained", test_chained);
     run("co thread_safe", test_thread_safe);
-    run("co when_all", test_when_all);
+    run("co join", test_join);
     run("co loop", test_loop);
     run("co cancel", test_cancel);
     run("co access context", test_access_context);
@@ -307,11 +498,21 @@ void run_coroutine_tests()
     run("co guard loop", test_guard_loop);
     run("co guard contention", test_guard_contention);
     run("co await-under-guard fatal", test_death_await_under_guard);
+    run("co await instead of sync", test_coro_await_instead_of_sync);
+    run("co await cancelled checked", test_await_cancelled_checked);
+#if TS_SAFETY_CHECKS
+    run("death: await cancelled value", test_death_await_cancelled_value);
+#endif
+    run("co access reentrant under own grant", test_access_reentrant_under_own_grant);
+    run("co graph node", test_coroutine_graph_node);
+    run("co join_nested two-phase", test_join_nested_two_phase);
+    run("co task_scope join", test_task_scope_join);
+#if TS_SAFETY_CHECKS
+    run("death: task_scope unjoined", test_death_scope_unjoined);
+#endif
+    run("co cross-object declared", test_cross_object_declared);
+#if TS_SAFETY_CHECKS
+    run("death: waits-for cycle", test_death_waits_for_cycle);
+#endif
     run("co showcase", test_showcase);
 }
-
-#else   // no coroutine support in this toolchain
-
-void run_coroutine_tests() {}
-
-#endif

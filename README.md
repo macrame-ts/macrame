@@ -152,7 +152,7 @@ rec.stage([e](World& w) { w.apply_damage(e); });   // recorded, not applied yet
 auto hp = world.async([](const World& w) { return w.health_of(player); });
 
 // At a chosen point, the whole batch applies as one write, in a deterministic order:
-staged.commit_async().sync();
+staged.commit().sync();
 ```
 
 ### 4. Stable reads while the next version is built — `Versioned<T>`
@@ -181,7 +181,7 @@ poses.publish().sync();
 Layered and composable — use as much as you need, and in a way that suits you best. Going from bottom-up:
 
 - **Scheduler** — efficient work-stealing, configurable idle policies, priorities. Minimal API; usable independently of the rest.
-- **Tasks** — `launch` work with prerequisites (`after`), continuations (`then`), typed joins (`when_all`), cooperative cancellation (incl. mid-body early-out). Reusable (no allocs). Nested and inline tasks. Priorities. Blocking waits run not-yet-started work inline (retraction), so fork-join can't deadlock the pool while touching only related work and thus avoiding ubiquitous "busy waiting" issues.
+- **Tasks** — `launch` work and compose it as coroutines: `co_await` is the one continuation/join/dependency mechanism, so pipelines read as straight-line code with typed results in scope. Cooperative cancellation (incl. mid-body early-out). Nested tasks and task scopes gate a parent on dynamic fan-out. Priorities. Awaiting frees the worker, so fork-join of any depth can't deadlock the pool; an in-task blocking wait is caught by the safety harness, and so is the suspended two-object deadlock (a waits-for cycle detector names both tasks and objects).
 - **`parallel_for`** — for the data-parallel work that does live inside a part; caller-participating (nested-safe), with guided/balanced/unbalanced chunking. plus **`async_parallel_for`** for extra flexibility.
 - **Coroutines** — `co_await` any task; `co_await ts::read_only/read_write(obj)` yields an RAII access guard; holding one across a suspension is detected and fails fast.
 - **`Guarded<T>`** — a thread-safe API for a shared object: a per-object reader/writer queue (concurrent reads, exclusive writes, FIFO) reached via `access` (opportunistic — runs inline when free) or `async` (always scheduled), plus multi-object operations with deadlock-free ordered acquisition.

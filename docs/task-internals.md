@@ -4,15 +4,16 @@
 rationale narrative; this document is the deep design-of-record.)
 
 Design of record for the dynamic task object: what a task *is*, the states it
-moves through, how prerequisites / nested tasks / retraction work, and how it is
-allocated. Distilled from the design discussion; grounded in the Unreal Engine
-Tasks system (`Engine/Source/Runtime/Core/.../Tasks/TaskPrivate.{h,cpp}`), with
-the differences that matter for *our* access-safety model called out.
+moves through, how pipe turns / nested tasks / coroutine frames work, and how
+it is allocated. Distilled from the design discussion; grounded in the Unreal
+Engine Tasks system (`Engine/Source/Runtime/Core/.../Tasks/TaskPrivate.{h,cpp}`),
+with the differences that matter for *our* access-safety model called out.
 
-**Status:** design/target. Current code has `Task_state<R>` (a plain
-completion+result blob) and `Static_task_graph`; this doc describes what they
-evolve into. Not all of it is implemented yet — retraction and nested tasks in
-particular are follow-ups the layout below is designed to admit.
+**Status:** implemented, coroutine-first (docs/coroutine-first.md). Composition
+is `co_await`; the callback vocabulary this document once specified (`then`,
+`when_all`, builders, retraction, dynamic-task inline dispatch) was built,
+validated, and then deleted in the coroutine-first transformation — those
+sections remain below as historical record, marked as such.
 
 ---
 
@@ -27,7 +28,7 @@ the capability set), never upgraded at runtime (a live upgrade is race-prone).
 |---|---|---|---|
 | Primitive | none | 0 alloc (closure rides the queue slot / SBO) | `Scheduler::submit` |
 | Group | one shared latch (counter + one completion) | 0 alloc/task, 1 for the group | `parallel_for` |
-| Task | `Task_control_block` (+ closure for executable) | 1 alloc | `async`, `then`, `when_all`, graph |
+| Task | `Task_control_block` (+ closure for executable) | 1 alloc | `async`, `launch`, coroutine frames, graph |
 
 There is deliberately **no middle "awaitable-but-no-deps" tier.** You cannot know
 at construction whether a task will later be awaited, chained, or made a nested
@@ -47,41 +48,46 @@ Three types on the Task tier; two private, two public handles (one shared).
 
 - **`Task_control_block`** (private) — **fully monomorphic** (not templated at all):
   the refcounted completion/dependency core — completion signal, `ready`/`cancelled`,
-  successors, prerequisite/nested backlinks, the lock-counter — plus two type-erased
-  hooks: `void* result_ptr` (nullptr ⇒ no result: `void` or bodyless) and
-  `void (*execute)(Task_control_block*)` (nullptr ⇒ no body: bodyless). Continuations
-  are stored erased too (`move_only_function<void(void* result, bool cancelled)>`). A
-  third fn-ptr, `on_complete` (nullptr for most tasks), fires once at `settle` and —
-  unlike a continuation — is **not consumed**, so a re-armed reusable block (a graph
-  node, §7.1) keeps it across runs: an alloc-free completion hook.
-  All the heavy logic is compiled **once**, regardless of how many result/body types
-  exist. The dependency machinery only ever traffics in `Task_control_block*`.
+  successors, the lock-counter — plus two type-erased hooks: `void* result_ptr`
+  (nullptr ⇒ no result: `void` or bodyless) and
+  `void (*execute)(const Task_ptr&, uint64)` (nullptr ⇒ no body: bodyless). Internal
+  continuations are stored erased too
+  (`move_only_function<void(void* result, bool cancelled)>` — the coroutine awaiter's
+  resume hook and detail-level chains attach here). A third fn-ptr, `on_complete`
+  (nullptr for most tasks), fires once at `settle` and — unlike a continuation — is
+  **not consumed**, so a re-armed block (a graph node, §7.1) keeps it across runs: an
+  alloc-free completion hook. All the heavy logic is compiled **once**, regardless of
+  how many result/body types exist. The dependency machinery only ever traffics in
+  `Task_control_block*`.
 
 - **Storage wrappers** (private, per instantiation) — everything that carries a type
   is composed *around* the block, not into it:
   - `Result_block<R>  { Task_control_block core; std::optional<R> result; }` — for
-    results with no body (`then`, `when_all`, a promise).
-  - `Executable<Body,R> { Task_control_block core; std::optional<R> result; Body body; }`
+    results with no body (detail-level producers).
+  - `Executable<Body,R> { Task_control_block core; Result_storage<R> storage; Body body; }`
     — for `async` / `launch`.
-  - a bodyless resultless block (`Signal`, a pure join) is just `Task_control_block`.
+  - `Task_promise<R>` — the **fused coroutine frame**: the promise embeds the block
+    (first member) inside the compiler-allocated frame, so frame + block + result are
+    one allocation and the block's `destroy` thunk destroys the whole frame.
+  - a bodyless resultless block (`Signal`) is just `Task_control_block`.
 
-  The wrapper is allocated with `make_shared`; the handle is a `shared_ptr`
-  **aliasing** `&wrapper.core`, so the one refcount owns the whole wrapper (result +
-  body destroyed with it) while everything downstream sees only the monomorphic
-  block. `core.result_ptr` points at the wrapper's `result` (or null); `core.execute`
-  points at a per-`Body` thunk that `static_cast`s the block back to `Executable`
-  (block is the first member) and runs the body.
+  Ownership is **intrusive**: the refcount and a `destroy` thunk live in the block
+  (`Task_ptr` is one pointer, half a `shared_ptr` handle), and the thunk deletes the
+  enclosing wrapper — the block is the wrapper's first member, so a
+  `Task_control_block*` aliases it. `core.result_ptr` points at the wrapper's stored
+  result (or null); `core.execute` points at a per-`Body` thunk that casts the block
+  back to the wrapper and runs the body.
 
-- **`Task<R>`** (public) — the consumer handle (a future): `sync()`, `is_done()`,
-  `then()`, use as a prerequisite. `sync()` does `static_cast<R*>(core->result_ptr)`
-  and moves out — the cast is always to the right `R` (storage + handle are created
-  together at one site, both on the same `R`; confined to `detail`).
+- **`Task<R>`** (public) — the consumer handle: `co_await` (from tasks), `sync()` /
+  `take()` (from blue threads), `is_done()`/`is_cancelled()`. `sync()` reads
+  `static_cast<const R*>(core->result_ptr)` by `const&` — the cast is always to the
+  right `R` (storage + handle are created together at one site, both on the same `R`;
+  confined to `detail`).
 
 - **`Signal`** (public) — a bodyless `Task<void>` completed by hand: `trigger()`.
-  Consumer side inherited from `Task<void>` (`get`/`wait`, `is_done`, `then`,
-  prerequisite); `trigger()` is the producer side, idempotent. UE's `FTaskEvent`:
-  a done-signal / barrier / phase gate. Allocates just the bare block (no result, no
-  body).
+  Consumer side inherited from `Task<void>` (`co_await`/`sync`, `is_done`);
+  `trigger()` is the producer side, idempotent. UE's `FTaskEvent`: a done-signal /
+  barrier / phase gate. Allocates just the bare block (no result, no body).
 
 ### 2.1 Fully monomorphic block, no inheritance, no virtual, no result/body tax
 
@@ -96,11 +102,10 @@ function pointer + `shared_ptr` aliasing (above). And we go further than "erase 
 body" — **erase the result too**, so the block is parameterized on *nothing*:
 
 - **No polymorphism** → no virtual dtor, no vtable, no typeinfo, no D0/D1/D2 triple.
-  Destroy is handled by `make_shared`'s deleter for the wrapper (one per wrapper
-  type, unavoidable).
+  Destroy is the block's `destroy` thunk (one per wrapper type, unavoidable).
 - **Per-instantiation codegen** collapses to the wrapper struct + its `execute` thunk
   (~1–2 functions per body/result type) — no `R` on the block, so the heavy machinery
-  (lock-counter, retraction, close, successor walking, scheduling) is emitted **once**.
+  (lock-counter, close, successor walking, scheduling) is emitted **once**.
 - **No `<void>` specialization.** Today two near-identical blocks exist
   (`Task_control_block<R>` and the `<void>` one); monomorphizing collapses them to
   one. `void` = `result_ptr == nullptr`; bodyless = `execute == nullptr`.
@@ -110,19 +115,21 @@ body" — **erase the result too**, so the block is parameterized on *nothing*:
   negligible next to the body.
 
 `R`/`Body` appear only in: the thin `Task<R>` handle, the wrapper structs, the
-`execute` thunk, and the `then`-closures (which cast `result_ptr`). Everything else
+`execute` thunk, and the awaiter (which casts `result_ptr`). Everything else
 is monomorphic.
 
 ### The body / no-body seam (and why the *body* still can't be split from an executable)
 
 The body is composed into the *executable's* wrapper, reachable from the block via
-`execute`. This is safe precisely because it's the **one** separation the retraction
-rule (§6) allows: a bodyless block has no body and is never executed, so nothing
-reaches for a body that isn't there. For an *executable* task the body and the block
-stay in one allocation (the wrapper) — a retracting waiter holding the block reaches
-the body through `execute` + the cast, so the body must not live in separately-owned
-memory. Composition-in-one-wrapper keeps that invariant while still costing bodyless
-blocks nothing.
+`execute`. For an *executable* task the body and the block stay in one allocation
+(the wrapper): any handle to the block keeps the not-yet-run body alive, so no
+scheduler-side owner can free the closure out from under a dispatch that still
+reaches it through `execute` + the cast. (Historically this single-blob rule was
+*forced* by retraction — a waiter running the body inline through its own handle —
+see §6; the lifetime argument outlives the feature.) A bodyless block has no body
+and is never executed, so nothing reaches for a body that isn't there —
+composition-in-one-wrapper keeps the invariant while costing bodyless blocks
+nothing.
 
 ---
 
@@ -138,11 +145,14 @@ Created ──launch──> Pending ──(last prereq)──> Queued ──disp
    └──────────────────────────> Completed <── all nested done ── Awaiting-nested
 ```
 
-- **Created** — mutable; the builder / `Signal` path attaches prerequisites and
-  properties here. `async` skips this: it is born launched.
-- **Pending** — launched, waiting on execution prerequisites.
+- **Created** — mutable; creation sites set dispatch properties here. `async`
+  and `ts::launch` are born launched; a coroutine task is born *running* (eager
+  start — the body executes on the calling thread to its first suspension).
+- **Pending** — launched, waiting on execution prerequisites (pipe turns).
 - **Queued** — prerequisites met; owned by the scheduler.
-- **Running** — a worker (or a retractor) holds execution permission; body runs.
+- **Running** — a worker holds execution permission; body runs. A coroutine
+  body may suspend and resume across threads; the task stays logically Running
+  (no worker is held while suspended).
 - **Awaiting-nested** — body returned but nested tasks are still outstanding.
   **Body-return ≠ completion.** Most tasks skip this state.
 - **Completed** — result published, waiters released, successors unlocked. This
@@ -152,32 +162,48 @@ Created ──launch──> Pending ──(last prereq)──> Queued ──disp
 
 ## 4. The unified lock-counter
 
-One `std::atomic<uint32> num_locks` tracks *both* pre-execution blockers
-(prerequisites) and post-execution blockers (nested tasks), distinguished by a
-high-bit mode flag. This is the mechanism that makes prerequisites and nested
-tasks the same thing seen across the execution boundary.
+One `std::atomic<uint32> num_locks` tracks *both* pre-execution blockers and
+post-execution blockers (nested tasks), distinguished by a high-bit mode flag.
+This is the mechanism that makes prerequisites and nested tasks the same thing
+seen across the execution boundary — and, coroutine-first, it doubles as the
+**implicit per-frame scope's counter**: children gate the frame's completion
+through the same locks.
 
 ```
 execution_flag = 0x8000'0000        // MSB; set at execution start
 
-construct        : num_locks = 1                 // the "not launched" lock
-add prerequisite : ++num_locks                   // (Created only)
-launch           : --num_locks; if 0 -> schedule
-prereq completes : --num_locks; if 0 -> schedule
+pipe task        : num_locks = pipe_count        // one lock per pipe turn
+turn arrives     : --num_locks; if 0 -> dispatch
 
-claim/execute    : CAS num_locks 0 -> execution_flag + 1   // one winner; +1 self-lock
-add nested       : ++num_locks                   // during body; now above the flag
+execute (claim)  : claim(gen) on run_state       // one-runner CAS; then
+                   num_locks = execution_flag+1  // executing + body self-lock
+coroutine birth  : num_locks = execution_flag+1  // the promise arms it directly
+                                                 // (born executing, eager start)
+add nested       : ++num_locks                   // during body; above the flag
 body returns     : n = --num_locks; if n == execution_flag -> Close()
 nested completes : n = --num_locks; if n == execution_flag -> Close()
 ```
 
-- Below `execution_flag`, the count is outstanding prerequisites; reaching 0
-  schedules. The claim CAS (`0 -> execution_flag + 1`) is the single linearization
-  point for "who runs this," shared by worker dispatch and retraction.
-- The `+1` self-lock on claim ensures a nested task completing mid-body cannot
-  `Close` the parent before the body finishes.
+- Below `execution_flag`, the count is outstanding pipe turns (the pipe rebase's
+  `pipe_count` trigger); reaching 0 dispatches. The one-runner claim moved off
+  this counter onto `run_state` (generation + claim bit fused in one atomic);
+  with one dispatch per run and re-arm only after settle, a failed claim is a
+  machinery bug (fatal under `TS_SAFETY_CHECKS`), not a dedup path.
+- The `+1` self-lock ensures a nested task completing mid-body cannot `Close`
+  the parent before the body finishes. A coroutine promise arms
+  `execution_flag + 1` at construction (the body starts eagerly, so the frame is
+  executing from birth); the final awaiter drops the self-lock at `co_return`.
 - Above `execution_flag`, the count is outstanding nested tasks; the last one to
-  hit `execution_flag` closes the parent.
+  hit `execution_flag` closes the parent. This above-the-flag regime *is* the
+  implicit scope of docs/coroutine-first.md §4.3 — evaluated against a separate
+  scope object during the coroutine-first deletions and kept: the counter
+  already counts exactly the scope's members, and a scope object would add
+  state without deleting any transition.
+- **Historical (deleted 2026-08, coroutine-first):** the below-flag mode also
+  counted explicit prerequisites (`ts::task(fn).after(...)`, `then`'s producer
+  link), with a frozen-at-launch invariant enforced at `add_prerequisite`.
+  Ordering between dynamic tasks is now expressed by awaiting inside a
+  coroutine body; the below-flag mode serves pipe turns only.
 
 (Pipe serialization is handled separately by `Guarded`'s reader/writer pipe,
 not this counter; ordering-via-pipe is out of scope here.)
@@ -188,8 +214,7 @@ not this counter; ordering-via-pipe is out of scope here.)
 
 | Data | Live | Notes |
 |---|---|---|
-| Closure + captures | Created → body-return | exec-bounded; destroy right after the body to release captures early |
-| Backlink array | Created → Completed | reused: prerequisites (released at claim), then nested (released at Close) |
+| Closure + captures | Created → body-return | exec-bounded; destroy right after the body to release captures early. A coroutine frame's parameters live to Completed (children may read them) |
 | `num_locks` | Created → Completed | mode flips at `execution_flag` |
 | Result | body-return → last reader | **written** at body-return, **published** at Close |
 | Successors, waiters | Created → Completed(+) | released at Close |
@@ -204,36 +229,43 @@ work bytes": release the captures early, not the bytes.
 
 ---
 
-## 6. Retraction
+## 6. Waiting: the blue boundary (historical: retraction)
 
-A thread waiting on `T` does not block a worker — it walks `T`'s backlinks and
-executes the un-started prerequisites inline (claiming each via the §4 CAS so a
-worker cannot double-run it), recursively, then runs `T`. This is *targeted*
-busy-waiting (only your own dependency subtree, in order) — not the general
-"execute arbitrary queued work," which invites stack growth and priority
-inversion.
+The pool-exhaustion deadlock — a task blocking on other tasks that need a
+thread from the same bounded pool — is a documented, recurring failure in every
+comparable system (Taskflow, oneTBB, Rayon, Java `ForkJoinPool`, .NET TPL,
+GCD). Coroutine-first answers it by construction:
 
-**Retraction is why work and completion must be one refcounted object.** The
-waiter holds the completion handle and from it must reach the un-executed closure.
-If the closure lived in separate single-owner (e.g. arena) memory, the retractor
-could dereference it just as the winning executor frees it — the reclamation
-use-after-free we have already been bitten by. A single refcounted block dissolves
-it: the waiter's handle keeps the whole block (closure included) alive, and the
-claim is a CAS on a field of a guaranteed-live object. This decides the
-single-blob layout on *safety* grounds, independent of the (hard-to-isolate)
-allocation-count comparison.
+- **Inside a task, waiting is `co_await`.** The frame suspends, the worker is
+  freed, the awaited task's settle resumes the frame (on the settling thread,
+  through the bounded resume trampoline). No thread is ever parked on task
+  progress, so the deadlock's precondition never forms. Arbitrarily deep
+  awaited fork-join drains on any pool size — covered by the deep-await-chain
+  and awaited-fork-join tests where the old blocking-join deadlock tests stood.
+- **On a blue thread (main, dedicated engine threads), `sync()` parks.** A
+  non-worker thread parking is harmless; that is the sanctioned blocking
+  consumption point, and the only one.
+- **An in-task `sync()` about to park is fatal** under `TS_SAFETY_CHECKS`
+  (`sync_wait` → `blocking_sync_diagnose`, with a sharper message when the
+  target is queued behind the caller's own grant). `parallel_for`'s join is the
+  documented exception: the caller drains unclaimed chunks itself and then
+  waits only on helpers provably running on workers — bounded, deadlock-free.
 
-The deadlock class this removes — a task blocking on other tasks that need a thread
-from the same bounded pool — is a documented, recurring failure in every comparable
-system (Taskflow, oneTBB, Rayon, Java `ForkJoinPool`, .NET TPL, GCD). Those are the two
-horns targeted busy-waiting threads between: **park** and risk that pool-exhaustion
-deadlock; **busy-wait on arbitrary queued work** (the peer mitigation — TBB `isolate`,
-Taskflow `corun`, FJP helping) and inherit a distinct hazard family (re-entrancy /
-"moonlighting" correctness bugs, TLS corruption, stack overflow, priority inversion,
-convoy latency). Retraction takes neither: automatic, targeted to the waiter's own
-subtree, thread-free. Prior-art survey with issue-tracker citations for both horns and
-the honest scope of what retraction does *not* cover:
-[retraction-vs-pool-exhaustion.md](retraction-vs-pool-exhaustion.md).
+**Historical record — retraction (deleted 2026-08, coroutine-first).** The
+previous answer let a blocking waiter *run the awaited work itself*: `sync()`
+on an un-started task walked its backward links and executed the un-started
+prerequisite subtree inline, claiming each task via a one-runner CAS so a
+worker could not double-run it — targeted busy-waiting, distinct from both
+horns peers take (park and risk deadlock; or help on *arbitrary* queued work —
+TBB `isolate`, Taskflow `corun`, FJP helping — and inherit re-entrancy, TLS,
+stack-depth, and priority-inversion hazards). It worked, carried the two
+hardest races in the project's history in its reuse corner (design.md §4.5),
+and became dead weight the moment in-task blocking stopped being legal: a blue
+thread can simply park, and a task cannot block at all. The prior-art survey
+remains: [retraction-vs-pool-exhaustion.md](retraction-vs-pool-exhaustion.md).
+One structural consequence outlived it: work and completion stay one
+refcounted object (the single-blob block layout) — the waiter's handle keeps
+the closure alive, which any future inline-execution scheme would need again.
 
 ---
 
@@ -244,32 +276,36 @@ completion depends on — equivalent to the parent awaiting it at the end of its
 body, but without that being lexically expressible where the nested task is
 spawned.
 
-- The parent is found via `thread_local Task_control_block* current_task`,
-  installed at execution start (companion to `thread_local Scheduler*
-  current_scheduler` and the per-task `Access_context`).
-- Registration reuses the prerequisite mechanism: the nested task `++`s the
-  parent's `num_locks` and is pushed into the parent's backlink array (also
-  enabling nested-task retraction); the parent completes only once all nested
-  tasks do (§4).
-- `parallel_for` chunks are a degenerate nested task today ("subtasks inherit the
-  parent node's context"). First-class nested tasks generalize them; the default
-  cheap `parallel_for` stays on the group-latch tier (§1) — nested-task-block
-  chunks are an opt-in richer mode (retraction + uniform access inheritance) at
-  per-chunk cost.
+- The parent is found via `thread_local Task_ptr current_task`, installed at
+  execution start — and, for a coroutine, re-installed around every resumed
+  segment (companion to `thread_local Scheduler* current_scheduler` and the
+  per-task `Access_context`).
+- Registration (`detail::add_nested`, spelled `ts::nested` publicly): the
+  nested task `++`s the parent's `num_locks` and records the parent in its
+  `successors`, so its settle releases the parent; the parent completes only
+  once all nested tasks do (§4). In a coroutine segment the child is also
+  recorded in the frame's implicit scope list, so `co_await ts::join_nested()`
+  can await the children mid-body; `ts::Task_scope` is the explicit-scope
+  variant (its own list, `co_await scope.join()`, fatal if dropped unjoined).
+- `parallel_for` chunks are a degenerate nested task ("subtasks inherit the
+  parent node's context"); the default cheap `parallel_for` stays on the
+  group-latch tier (§1).
 
 ### 7.1 Nested tasks inside a graph node
 
-A `Static_task_graph` node can now spawn nested tasks (`ts::nested` /
-`ts::add_nested`) — needed for dynamic, data-dependent fan-out a static
-`parallel_for` can't express (e.g. a physics node discovering N runtime islands
-and solving them in parallel). This required making a graph node a **real task
-block**, not a bare closure: `run_node` builds the node body as an
-`Executable<Body,void>` and submits `execute` on the run's scheduler, so
-`Executable::run` installs `current_task` and the `execution_flag` self-lock (§4)
-around the body — exactly the state `add_nested` needs. The node's graph
-post-logic (early release, successor release, run completion) runs as a
-**continuation** on that block, so it fires only after the body *and* all nested
-tasks settle — the §8 invariant, structurally.
+A `Static_task_graph` node can spawn nested tasks (`ts::nested`) — needed for
+dynamic, data-dependent fan-out a static `parallel_for` can't express (e.g. a
+physics node discovering N runtime islands and solving them in parallel). This
+required making a graph node a **real task block**, not a bare closure:
+`run_node` builds the node body as an `Executable<Body,void>` and submits
+`execute` on the run's scheduler, so `Executable::run` installs `current_task`
+and the `execution_flag` self-lock (§4) around the body — exactly the state
+`add_nested` needs. The node's graph post-logic (early release, successor
+release, run completion) fires only after the body *and* all nested tasks
+settle — the §8 invariant, structurally. A **coroutine node body** (returning
+`Task<void>`) rides the same mechanism: the returned frame is attached as a
+nested child of the node block, so the node completes when the frame completes
+— suspension neither completes the node nor releases its grants.
 
 This is a **scoped** version of "graph nodes are blocks": nodes get a block for
 their *execution / nesting / completion* only. Scheduling stays as it was — data
@@ -332,14 +368,16 @@ body-return, whenever nested tasks exist. Otherwise a downstream reader races a
 live nested writer — the completeness hazard in a new guise. Nested-completion
 gating is therefore a **safety invariant**, not a convenience.
 
-**Realized (§7.1).** A graph node runs as an `Executable` block whose graph
-post-logic (which releases successors and the object reservation) is a
-*continuation* — it fires only at `Completed`, after every nested task. So a
-downstream node's `remaining_deps` is not decremented, and the object is not
-released, until the node's nested writers are done. The nested writers inherit the
-node's grant by value, so they run under the same declared access the reservation
-holds. The invariant holds structurally, verified under TSan (`graph nested
-stress`).
+**Realized (§7.1).** A graph node runs as a task block whose graph post-logic
+(which releases successors and the object holds) is the block's persistent
+`on_complete` hook — it fires only at `Completed`, after every nested task. So
+a downstream node's `remaining_deps` is not decremented, and the object is not
+released, until the node's nested writers are done. The nested writers inherit
+the node's grant by value, so they run under the same declared access the hold
+covers. A coroutine node body is the same invariant through the same
+mechanism: the frame is a nested child, so grants span suspensions and release
+at frame completion. The invariant holds structurally, verified under TSan
+(`graph nested stress`).
 
 ---
 
@@ -449,8 +487,8 @@ an inline node runs on the settling thread **only if it can acquire all its obje
 then** — a contended object (async grabbed it in a gap) defers it to the queue, exactly the
 "revoke the predecessor's access, acquire the successor's, else defer" hand-off. A chain of
 inline nodes on one object trampolines: each releases the object at completion, the next
-acquires it synchronously and dispatches inline. Caveats mirror `Task_builder::set_inline`
-(runs on a nondeterministic thread — the caller for a root — must not block); an all-inline
+acquires it synchronously and dispatches inline. Caveats: it runs on a nondeterministic
+thread (the caller for a root), bypasses priority, and must not block; an all-inline
 graph runs synchronously on the `execute()` caller.
 
 **Multi-object `ts::access` / `ts::async`** reuses the *same* acquire primitive outside the
@@ -503,7 +541,7 @@ node, and complete access declarations.**
 ## 11. Cancellation
 
 Cooperative, no exceptions. `Cancellation_source` owns an `atomic<bool>` flag; its
-`token()` is handed to `async` / `then` / `execute`. **Cancellation is a completion
+`token()` is handed to `async` / `launch` / `execute`. **Cancellation is a completion
 state**, not a separate channel: a settled task is either completed or cancelled.
 
 - **Checked when work is about to run.** `async`'s body and each graph `run_node`
@@ -514,24 +552,22 @@ state**, not a separate channel: a settled task is either completed or cancelled
   early-out for cancellation that arrives *while it runs* (the pre-run skip only covers
   work that hasn't started). Declare a trailing `Cancellation_token` parameter —
   `ts::launch([](Cancellation_token t){ ... if (t.is_cancel_requested()) return; ... })`,
-  `[](T& v, Cancellation_token t)` for `async`, or on a `then` continuation in any shape
-  (void / whole-result / apply-style). `Executable::run` forwards the block's token when
-  the wrapped body accepts it; a token-taking body isn't invocable at the shorter arity, so
-  the result-type traits (`Task_result_t` for bare tasks, `Async_result_t`/`Async_accessor`
-  for `async`, `Apply_invocable_tok`/`Invoke_result_tok` for `then`) pick the result off the
-  token-arity overload. A `then` body gets the continuation's own token (`opts.token`); the
-  `chain` body always takes a token and forwards it to `produce`, which passes it to `fn`
-  only when `fn` declared it. A cooperative early-out *returns normally*, so the task settles
-  **completed** (with whatever partial result), not cancelled — the token being set doesn't
-  auto-cancel a running task.
-- **Propagates automatically.** Continuations carry the outcome — `void(bool
-  cancelled)` for `void`, `void(R*)` (nullptr = cancelled) for a value. `complete`
-  fires them with the result; `cancel` fires them with the cancel signal, and each
-  continuation's closure then cancels *its* subsequent. So cancelling one task
-  cancels the whole downstream chain, and a cancelled prerequisite cancels its
-  continuations even if they weren't given the token. `then(fn, {.token = ...})` also
-  lets the token cancel *at that link* even when the producer succeeded.
-- **Graph:** `execute(scheduler, token)` — pending nodes skip (the DAG still drains so
+  `[](T& v, Cancellation_token t)` for `async`. `Executable::run` forwards the block's
+  token when the wrapped body accepts it; a token-taking body isn't invocable at the
+  shorter arity, so the result-type traits (`Task_result_t` for bare tasks,
+  `Async_result_t` for `async`) pick the result off the token-arity overload. A
+  cooperative early-out *returns normally*, so the task settles **completed** (with
+  whatever partial result), not cancelled — the token being set doesn't auto-cancel a
+  running task. A coroutine body polls its own token (or the awaited tasks'
+  `is_cancelled()`) between awaits and `co_return`s early — same semantics, ordinary
+  control flow.
+- **Propagates as observed state.** A graph successor of a cancelled node settles
+  cancelled (`prereq_cancelled` via `release`); an awaiting coroutine *observes* the
+  cancellation — a cancelled `Task<void>` await just resumes, a cancelled value await
+  is fatal (check `is_cancelled()` first and branch/`co_return`). The awaiter is code
+  in the consumer's body, so what "propagation" should mean is written where it
+  matters instead of baked into a chain rule.
+- **Graph:** `execute({ .token = t })` — pending nodes skip (the DAG still drains so
   the run settles), and the completion `Task<void>` is cancelled. In-flight nodes
   finish.
 - **`sync()`:** a cancelled `void` `sync()` unblocks (query `is_cancelled()`); a
@@ -541,13 +577,6 @@ state**, not a separate channel: a settled task is either completed or cancelled
 The token flag is atomic and `settle` is idempotent under the block's mutex, so
 `request_cancel` racing a body's check or a completion is race-free (verified under
 TSan): the block settles exactly once, either way.
-
-- **`when_all`:** if any prerequisite settles cancelled, the join settles **cancelled**
-  (it can't form a complete tuple) rather than stalling. The join attaches to each
-  prerequisite *directly* (not via `.then`, which skips its continuation on cancellation
-  and would leave the counter stuck): on cancel it flags the join and still decrements,
-  so the last prerequisite to settle runs `finish`, which cancels the result. Downstream
-  `.then` off the join propagates it.
 
 - **Cancel callback (push).** `Cancel_callback(token, fn)` (RAII, `std::stop_callback`-
   style) registers `fn`; `request_cancel()` fires all registered callbacks synchronously
@@ -563,115 +592,38 @@ TSan): the block settles exactly once, either way.
 
 ## Open items
 
-- **Done:** `Task_state → Task_control_block` rename; idempotent `complete()`;
-  `Signal` (bodyless triggerable `Task<void>`); graph↔async pipe reservation, lazy on
-  acquire + early on release — window `[first accessor, last accessor]` (§10);
-  cooperative cancellation (§11); the **monomorphic block** + composed result/body
-  (§2) — body in an `Executable<Body,R>` reached via `core.execute`; **standalone
-  `ts::launch(fn)`**; the **lock-counter (pre-execution half)** — `num_locks` +
-  `successors` on the block, with dynamic prerequisites via
-  `ts::task(fn).after(x,y).launch()` (a settled prerequisite releases the dependent; a
-  *cancelled* one propagates — marks `prereq_cancelled` so the dependent settles cancelled
-  rather than running, uniform with `then`). `submit_ready` bridges the counter
-  to the scheduler. The **post-execution half** too (§7): the `execution_flag` mode
-  bit — a running body sets flag + a self-lock; `ts::nested(fn)` / `ts::add_nested(t)`
-  (via `current_task` TLS) add completion-locks; the parent completes only once its
-  self-lock and all nested tasks have released. **Retraction** (§6): a blocking
-  `sync()` on a *retractable* (bare-scheduler), ready, not-yet-started task runs it
-  **inline** on the waiting thread — the `started` claim (`exchange`) ensures a worker
-  and a retractor never both run it. **Deep**: `sync()` on a *dependent* (a builder task
-  with prerequisites) walks its `prerequisites` (backward links) recursively, runs the
-  un-started subtree inline, then the dependent — so waiting on a join, not just a leaf,
-  is deadlock-free. This breaks the oversubscription deadlock (nested fork-join where
-  parents block all workers while children queue). Non-retractable prerequisites (pipe
-  tasks, externally-triggered `Signal`s) are left to complete on their own.
-  **Nested tasks inside graph nodes** (§7.1): a node runs as an `Executable` block
-  (so `current_task` is set and completion gates on nested tasks), its graph
-  post-logic a continuation firing at `Completed`; `ts::launch`/`nested` inherit the
-  launcher's `Access_context` by value, so nested sub-work may touch the node's owned
-  guarded data. Realizes the §8 invariant structurally.
-  **Inline dispatch** — `ts::task(fn).set_inline().after(...)` runs a ready task on the
-  thread that settled its last prerequisite, not the queue (latency-sensitive dependents).
-  The dispatch forks in `release` at `num_locks == 0` (`dispatch_ready`): inline → run
-  here, else `submit_ready`. A **per-thread FIFO trampoline** (`inline_pending` vector +
-  head index; `clear()` retains capacity) makes a chain of inline tasks run iteratively —
-  O(1) stack instead of `settle → release → execute → settle …` recursion. Caveats
-  (documented, not enforced): runs on a nondeterministic / possibly external thread,
-  bypasses priority, must not block. `run_inline` is a packed bit in `Flags`
-  (with `priority`/`retractable`). `then` takes the same knobs via the shared `Task_options`
-  aggregate (`t.then(fn, {.priority = high})`, `{.run_inline = true}`, `{.token = ...}`) —
-  `chain` sets the continuation's `flags.priority`/`flags.run_inline` before `release`, so
-  a `then` dispatches inline / at a priority exactly as a builder task does. Graph/async
-  inline still pending.
-  **Reusable tasks** — `Task_control_block::reset()` re-arms a settled block in place
-  (monomorphic, scalars only: reuse is a *block* capability, so no new `<R>` type). The
-  existing `Task_builder<R>` (from `ts::task(fn)`) is the reusable handle — it already
-  retains the block after `launch()`, now also has `reset()`/`sync()`/`is_done()`:
-  `t.reset().after(x).launch(); r = t.sync();` re-runs one block/body/result-storage
-  (prereqs re-established each run; one run in flight; `reset()` guarded by the block's
-  `ready` flag). `Signal::reset()` gives a reusable phase gate. Subtlety: retraction
-  leaves a *duplicate* dispatch (it runs the body inline while `release` also queued
-  one), harmlessly deduped by the one-runner claim — but reuse re-arms the block, so a
-  leftover duplicate could re-run the body against the *next* run. Fixed by fusing the
-  claim and the reuse generation into **one atomic** (`run_state`: `[63:1]` generation,
-  bit 0 claimed): a dispatch captures the generation it was queued for and `claim(gen)`s;
-  a stale duplicate (generation bumped by `reset`) fails the CAS. Two separate atomics
-  would race — a stale dispatch could observe the old generation but the new unclaimed
-  bit and wrongly run (caught under TSan on the reuse+prerequisites+retraction stress).
+- **Done (current model):** the monomorphic block + composed result/body (§2) with
+  intrusive refcounting; standalone `ts::launch(fn)`; `Signal`; the unified
+  lock-counter, both halves (§4) — pipe turns below the flag, nested tasks /
+  the implicit scope above it; nested tasks inside graph nodes + coroutine node
+  bodies (§7.1); graph↔async pipe coexistence via mode-aware acquire (§10);
+  cooperative cancellation (§11); the fused coroutine frame (`Task_promise`
+  embedding the block); the blue-boundary blocking rule with the in-task fatal
+  (§6); the waits-for cycle detector for suspended-ABBA deadlocks
+  (docs/coroutine-first.md §2); allocation-free graph re-runs (§7.1, ~19% faster
+  on the 8-node `graph` benchmark than per-run blocks).
+- **Historical record (built, validated, deleted 2026-08 in coroutine-first):**
+  `then` rebased onto proper prerequisite-linked tasks; `when_all` with the
+  one-allocation intrusive join; `ts::task(fn).after(...)` builders with
+  frozen-at-launch enforcement; builder-handle reusable tasks (the fused
+  `run_state` generation+claim atomic remains, simplified to one-dispatch-per-run
+  with a machinery-bug assert); deep retraction (+ the never-landed pipe-task
+  retraction design — its admission-ordering analysis is preserved in the TODO
+  §1.14 addendum); dynamic-task inline dispatch (`set_inline`/`run_inline` —
+  the flag and per-thread FIFO trampoline survive as the graph's
+  `Graph_node::set_inline` mechanism). Rationale and the deletion argument:
+  design.md §4.3–§4.5.
 - **Compile-time grouping:** schedule an object's accessors close together to shrink
-  its reservation window (fewer interior gaps), where the DAG allows — trades against
+  its hold window (fewer interior gaps), where the DAG allows — trades against
   parallelism / critical path, so profiling-guided.
 - Reservation follow-ups: cheaper idle-pipe reserve (lock-free flag vs mutex) if the
   per-object mutex cost matters; detect nested/concurrent-run reservation deadlock
   (§10 scenarios 2–3) instead of hanging.
-- **Re-base the graph and `when_all` onto the block's lock-counter** — the graph's
-  `remaining_deps`/`Node.successors` and `when_all`'s counter are now the *same*
-  mechanism as `num_locks`/`successors`; fold them in so there's one implementation
-  (the graph↔dynamic unification, realized). *Partial:* graph nodes now run as
-  `Executable` blocks for execution/nesting/completion (§7.1), but scheduling still
-  uses `remaining_deps` + the lazy reservation (`remaining_objects`) rather than
-  `num_locks` — the prerequisite half is deliberately *not* folded in, because the
-  lazy reservation needs a separate data-ready signal. Folding the scheduling half
-  (and letting graph nodes be `after`/`then` prerequisites, and be retractable) is the
+- **Fold graph scheduling onto the block's lock-counter** — graph nodes run as task
+  blocks for execution/nesting/completion (§7.1), but scheduling still uses
+  `remaining_deps` + the lazy reservation (`remaining_objects`) rather than
+  `num_locks`; the prerequisite half is deliberately not folded in, because the lazy
+  reservation needs a separate data-ready signal. Folding the scheduling half is the
   remaining work.
-- **Reuse graph node blocks across runs:** **done** (§7.1) — node blocks and the
-  `Run_state` are built at `compile()` and re-armed each `execute()`, nodes dispatch
-  via the raw scheduler API, and completion uses the block's persistent `on_complete`
-  fn-ptr instead of a per-run continuation. A run now allocates only its `done` handle
-  (+ a reservation closure only when an object is contended). ~19% faster on the
-  8-node `graph` benchmark vs the per-run-block version.
-- **Retraction of pipe/async tasks** — today only bare-scheduler tasks (`launch`/
-  `task`/`nested`) are `retractable`. It is *not fundamental*: the pipe's completion
-  bookkeeping (`--active_readers`, `dispatch`, `notify`) rides the `submit_job` **wrapper**,
-  which runs independently of whether the body was claimed — so a body run inline by
-  retraction wouldn't corrupt pipe state (the wrapper still does the accounting; the
-  body just no-ops its claim). The real blocker is *admission ordering*: retraction can
-  reach a block whose pipe job is still **queued behind a conflicting writer** (not yet
-  admitted) and run it inline out of turn — racing that writer. Making async retractable
-  therefore means gating retractability on **pipe admission** (e.g. set `retractable`
-  in `submit_job`, when the pipe has granted the turn), so retraction only ever runs a
-  task the pipe already cleared. Bounded plumbing, and only helps *admitted* jobs (a job
-  still in the pipe deque isn't a scheduler task and is unreachable by retraction anyway).
-  Parked until async-retraction is a real need. **Reframe (2026-07):** the deeper cause is
-  that pipe ordering is not a `prerequisite` chain (unlike UE's serial `FPipe`, where the
-  previous piped task *is* a prerequisite and retraction covers pipe chains for free). The
-  pipe-rebase note ([TODO.md](TODO.md) §1.14 addendum) works this through — writer retraction
-  would fall out of the rebase; reader retraction (N predecessors, no single edge) would not.
-- **`then` rebased onto proper tasks. Done.** A `then` continuation is no longer an
-  inline callback in the producer's `settle`; it's a real `Executable` with the producer
-  as a `num_locks` **prerequisite** — queued by default (so it carries a priority and the
-  scheduler can interleave), inline opt-in. Its body reads `producer->result_ptr` (the
-  producer is kept alive as the prerequisite + the body's capture). A cancelled prerequisite
-  still `release`s → dispatches the continuation, but sets the block's `prereq_cancelled`
-  flag, so `Executable::run` cancels instead of consuming a missing result — the *same*
-  cancel-propagation `after` now uses (no `then`-specific mechanism). Deep-retractable
-  *natively* now (the producer is in `prerequisites`, so `retract`
-  walks to it and — after it settles, `num_locks == 0` — runs the continuation inline),
-  which replaced the earlier retraction-hint hack for `then`. Subtlety found in the build:
-  the continuation must have `num_locks == 1` until the producer settles — with `num_locks
-  == 0` (hint-only), `retract` ran it *before* the producer, reading a null `result_ptr`.
-  `when_all`'s **join** stays a bodyless aggregator + retraction hint; its **consumption**
-  (the `.then` off it) is this rebased path.
-- Nested tasks + `current_task` TLS; re-base `parallel_for`'s rich mode on them.
 - Group latch tier for the default `parallel_for`.
 - Pooled block allocator + the one microbenchmark.

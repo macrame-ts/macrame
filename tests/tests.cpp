@@ -4,13 +4,13 @@
 #include "ts/guarded.h"
 #include "ts/static_task_graph.h"
 
-#if defined(__cpp_impl_coroutine)
 #include "ts/coroutine_support.h"
-#endif
+#include "ts/task_scope.h"
 
 #include "scheduler_tests.h"
 #include "access_tests.h"
 #include "guarded_tests.h"
+#include "pipe_tests.h"
 #include "task_tests.h"
 #include "graph_tests.h"
 #include "parallel_tests.h"
@@ -34,6 +34,7 @@ void run_all_tests()
     run_scheduler_tests();
     run_access_tests();
     run_guarded_tests();
+    run_pipe_tests();
     run_task_tests();
     run_graph_tests();
     run_parallel_tests();
@@ -43,7 +44,6 @@ void run_all_tests()
     run_versioned_tests();
 }
 
-#if defined(__cpp_impl_coroutine)
 // Death scenario body: acquire a `Guarded` write guard, then `co_await` other work while
 // still holding it -- the pipe-held-across-suspension anti-pattern. Runs eagerly, so the fatal
 // fires during the call below, before `sync()`. `never` is never triggered, so `co_await never`
@@ -54,7 +54,38 @@ static ts::Task<int> coro_await_under_guard(ts::Guarded<tests::Counter>& w, ts::
     co_await never;              // suspend while the guard is held -> fatal
     co_return g->value();
 }
-#endif
+
+// Death scenario body (`stale_inherited_grant`): created inside a node body, so the frame
+// inherits the node's grant; suspended on `go` (a non-nested stray), it resumes only after
+// the node completed and released its hold -- the write then runs under a stale inherited
+// grant and the harness fatals.
+static ts::Task<void> stale_stray(tests::Counter& k, ts::Signal go)
+{
+    co_await go;
+    k.increment();
+}
+
+// Death scenario body (`waits_for_cycle`): a coroutine graph-node body that touches its
+// declared object, waits until BOTH nodes hold their grants (the flag sync forces the
+// overlap), then awaits the OTHER node's object -- the suspended-ABBA shape. Each deferred
+// acquire records a waits-for edge; whichever inserts second closes the cycle and fatals.
+static std::atomic<int> abba_holding{ 0 };
+static ts::Task<void> abba_body(tests::Counter& own, ts::Guarded<tests::Counter>& other)
+{
+    own.increment();
+    abba_holding.fetch_add(1, std::memory_order_acq_rel);
+    while (abba_holding.load(std::memory_order_acquire) < 2)
+        std::this_thread::yield();   // both nodes hold before either awaits
+    auto guard = co_await ts::read_write(other);   // defers behind the other node's grant -> cycle
+    guard->increment();
+}
+
+// Death scenario body (`signal_reset_awaited`): parks a coroutine on the signal so the
+// re-arm-while-awaited misuse has a live awaiter.
+static ts::Task<void> await_signal(ts::Signal s)
+{
+    co_await s;
+}
 
 void run_death_scenario(const char* name)
 {
@@ -140,10 +171,11 @@ void run_death_scenario(const char* name)
         ts::Static_task_graph g;
         g.add_node([&stray, &go](Counter& k)
         {
-            // Deliberately NOT `ts::nested`/`add_nested`: the task inherits the node's
-            // grant but does not gate the node's completion. Gated on `go`, so it runs
-            // only after the node has completed and released its write hold on `c`.
-            stray = ts::task([&k] { k.increment(); }).after(go).launch();
+            // Deliberately NOT `ts::nested`: the coroutine inherits the node's grant (its
+            // promise snapshots it at creation, here inside the body) but does not gate the
+            // node's completion. Suspended on `go`, it resumes only after the node has
+            // completed and released its write hold on `c`.
+            stray = stale_stray(k, go);
         }, c);
         g.compile();
         g.execute().sync();   // node done; its write grant on `c` released (epoch moved)
@@ -183,16 +215,65 @@ void run_death_scenario(const char* name)
         while (!t.is_done()) std::this_thread::yield();
         t.sync();   // cancelled value task has no result -> fatal
     }
-    else if (std::strcmp(name, "add_nested_outside") == 0)
+    else if (std::strcmp(name, "nested_outside") == 0)
     {
-        ts::Task<int> t = ts::launch([] { return 1; });
-        t.sync();
-        ts::add_nested(t);   // no currently-executing task -> fatal
+        ts::nested([] {});   // no currently-executing task to scope to -> fatal
     }
     else if (std::strcmp(name, "reset_unsettled") == 0)
     {
-        auto t = ts::task([] { return 1; });   // built, not launched -> not settled
-        t.reset();   // reset before the task has settled -> fatal
+        ts::Signal s;   // never triggered -> not settled
+        s.reset();      // re-arm before the signal has settled -> fatal
+    }
+#if TS_SAFETY_CHECKS
+    else if (std::strcmp(name, "sync_in_task") == 0)
+    {
+        // A node body parking on a pipe job for an object the task does not hold: fatal
+        // (coroutine-first §4.1). The blocker keeps `b`'s pipe busy so the sync genuinely
+        // parks (no timing dependence: the fatal fires before the wait).
+        ts::Guarded<tests::Counter> a;
+        ts::Guarded<int> b{ 0 };
+        std::atomic<bool> release{ false };
+        ts::Static_task_graph g;
+        g.add_node([&b, &release](tests::Counter&)
+        {
+            ts::Task<void> blocker = b.async([&release](int&)
+            {
+                while (!release.load(std::memory_order_relaxed))
+                    std::this_thread::yield();
+            });
+            b.async([](int& v) { v = 7; return v; }).sync();   // parks inside a task -> fatal
+        }, a);
+        g.compile();
+        g.execute().sync();
+    }
+#endif
+    else if (std::strcmp(name, "scope_unjoined") == 0)
+    {
+        // Dropping an explicit Task_scope with recorded children loses their join -- fatal
+        // (the lost-children analogue of the journal's lost-writes). Companion:
+        // `test_task_scope_join` (co_await scope.join() before scope exit).
+        static std::atomic<bool> hold{ true };
+        {
+            ts::Task_scope scope;
+            scope.launch([] { while (hold.load(std::memory_order_relaxed)) std::this_thread::yield(); });
+        }   // -> fatal (child recorded, never joined)
+        hold.store(false);
+    }
+    else if (std::strcmp(name, "await_cancelled_value") == 0)
+    {
+        // Awaiting a cancelled Task<R> with non-void R: no result to produce, no
+        // exceptions -- a precondition, mirroring sync(). Companion:
+        // `test_await_cancelled_checked` (coroutine_tests).
+        ts::Cancellation_source src;
+        src.request_cancel();
+        ts::Guarded<int> d{ 0 };
+        ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });
+        while (!t.is_done())
+            std::this_thread::yield();
+        [](ts::Task<int> cancelled) -> ts::Task<void>
+        {
+            co_await cancelled;   // -> fatal
+        }(std::move(t)).sync();
     }
     else if (std::strcmp(name, "deferred_drop_staged") == 0)
     {
@@ -225,11 +306,30 @@ void run_death_scenario(const char* name)
             ts::Deferred<int> d{ target };
             auto rec = d.recorder();
             rec.stage([](int& v) { ++v; });
-            d.commit_async();   // queued behind the blocker: still in flight
+            d.commit();   // queued behind the blocker: still in flight
             // `d` destroyed with the commit unsettled -> fatal (before the
             // staged-leftover check can fire)
         }
     }
+#if TS_SAFETY_CHECKS
+    else if (std::strcmp(name, "deferred_commit_nested_grant") == 0)
+    {
+        ts::Guarded<int> target{ 0 };
+        ts::Deferred<int> d{ target };
+        auto rec = d.recorder();
+        rec.stage([](int& v) { ++v; });
+        ts::Static_task_graph g;
+        g.add_node([&d](int&)
+        {
+            // The nested body inherits the node's write grant but is NOT the grant
+            // holder (`writer_owner` is the node); its commit() would enqueue behind
+            // the node's own hold -> the misuse diagnostic fatals at the call.
+            ts::nested([&d] { d.commit(); }).sync();
+        }, target);
+        g.compile();
+        g.execute().sync();
+    }
+#endif
     else if (std::strcmp(name, "recorder_empty_stage") == 0)
     {
         ts::Guarded<int> target{ 0 };
@@ -340,13 +440,34 @@ void run_death_scenario(const char* name)
         ts::Access_scope scope(ctx);
         v.publish_into(other);   // not this Versioned's front -> fatal
     }
-#if defined(__cpp_impl_coroutine)
     else if (std::strcmp(name, "coro_await_under_guard") == 0)
     {
         ts::Guarded<Counter> w;
         ts::Signal never;
         coro_await_under_guard(w, never).sync();   // fatals during the coroutine's eager run
     }
-#endif
+    else if (std::strcmp(name, "waits_for_cycle") == 0)
+    {
+        // Two independent coroutine graph nodes, each holding its declared object and
+        // awaiting the other's (see `abba_body`). The waits-for detector fatals on the
+        // closing edge. Companion: `test_cross_object_declared` (coroutine_tests) --
+        // declare both objects and let compile() order the nodes.
+        ts::Guarded<Counter> a{ ts::Named{ "objA" } };
+        ts::Guarded<Counter> b{ ts::Named{ "objB" } };
+        ts::Static_task_graph graph;
+        graph.add_node([&b](Counter& own) { return abba_body(own, b); }, a);
+        graph.add_node([&a](Counter& own) { return abba_body(own, a); }, b);
+        graph.compile();
+        graph.execute().sync();
+    }
+    else if (std::strcmp(name, "signal_reset_awaited") == 0)
+    {
+        // Re-arming a Signal while a coroutine is suspended on it: the signal has not
+        // settled, so `reset()` hits the not-settled fatal -- the awaited-side variant of
+        // `reset_unsettled`. Companion: `test_signal_reset` (settle, then reset).
+        ts::Signal s;
+        ts::Task<void> t = await_signal(s);   // suspends (never triggered)
+        s.reset();   // -> fatal
+    }
     // unknown scenario: return without dying -> parent's expect_death fails
 }

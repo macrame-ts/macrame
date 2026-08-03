@@ -7,6 +7,7 @@
 
 #include "ts/guarded.h"
 #include "ts/task.h"
+#include "ts/coroutine_support.h"
 #include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
 
@@ -168,17 +169,23 @@ void run_mem_profile()
         (void)a.async([](const int& v) { return v; }).sync();
     });
 
-    measure("then", k, [&a]
+    measure("coro chain", k, [&a]
     {
-        (void)a.async([](const int& v) { return v; }).then([](int v) { return v + 1; }).sync();
+        (void)[&a]() -> ts::Task<int>
+        {
+            int v = co_await a.async([](const int& v) { return v; });
+            co_return v + 1;
+        }().sync();
     });
 
-    measure("when_all", k, [&a, &b]
+    measure("coro join", k, [&a, &b]
     {
-        (void)ts::when_all(a.async([](const int& v) { return v; }),
-                           b.async([](const int& v) { return v; }))
-            .then([](int x, int y) { return x + y; })
-            .sync();
+        (void)[&a, &b]() -> ts::Task<int>
+        {
+            ts::Task<int> x = a.async([](const int& v) { return v; });
+            ts::Task<int> y = b.async([](const int& v) { return v; });
+            co_return co_await x + co_await y;
+        }().sync();
     });
 
     measure("parallel_for(64)", k, []

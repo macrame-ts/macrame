@@ -4,6 +4,8 @@
 #include "ts/static_task_graph.h"
 #include "ts/access.h"
 
+#include "ts/coroutine_support.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -224,31 +226,120 @@ std::vector<double> bench_ts_read()
     });
 }
 
-// Task::then: continuation chain length K fired off one producer.
-std::vector<double> bench_then()
+// Pipe contention: N producer threads hammer ONE object's reader/writer pipe with a
+// read-heavy async mix (`read_pct`% reads). This is the fixture the pipe rebase must be
+// validated non-regressive against (docs/pipe-rebase.md R10): it stresses the current
+// `Pipe::mutex` on every enqueue/admission -- the cost the lock-free tail is meant to
+// remove without hurting the uncontended path. 100% reads isolates admission throughput
+// (readers never serialize); mixing writes adds serialization + the writer/reader handoff.
+std::vector<double> bench_pipe_contention(unsigned producers, int read_pct)
 {
-    ts::Guarded<int> obj{ 0 };
+    ts::Guarded<uint64_t> obj{ 0 };
+    std::atomic<uint64_t> completed{ 0 };
+
+    auto run_once = [&]() -> uint64_t
+    {
+        std::atomic<bool> stop{ false };
+        std::atomic<uint64_t> submitted{ 0 };
+        {
+            std::vector<std::jthread> threads;
+            for (unsigned i = 0; i < producers; ++i)
+            {
+                threads.emplace_back([&, i]
+                {
+                    uint64_t local = 0;
+                    while (!stop.load(std::memory_order_relaxed))
+                    {
+                        // Deterministic per-thread read/write interleave (no RNG).
+                        if (static_cast<int>((local + i) % 100) < read_pct)
+                            obj.async([&completed](const uint64_t& v)
+                                { completed.fetch_add(1, std::memory_order_relaxed); return v; });
+                        else
+                            obj.async([&completed](uint64_t& v)
+                                { ++v; completed.fetch_add(1, std::memory_order_relaxed); });
+                        ++local;
+                    }
+                    submitted.fetch_add(local, std::memory_order_relaxed);
+                });
+            }
+            std::this_thread::sleep_for(target);
+            stop.store(true, std::memory_order_relaxed);
+        }   // join producers
+
+        uint64_t total = submitted.load(std::memory_order_relaxed);
+        while (completed.load(std::memory_order_acquire) < total)
+            std::this_thread::yield();
+        completed.store(0, std::memory_order_relaxed);
+        return total;
+    };
+
+    std::vector<double> ops_per_sec;
+    for (int r = 0; r < warmup + reps; ++r)
+    {
+        auto t0 = Clock::now();
+        uint64_t ops = run_once();
+        double sec = std::chrono::duration<double>(Clock::now() - t0).count();
+        if (r >= warmup)
+            ops_per_sec.push_back(ops / sec);
+    }
+    return ops_per_sec;
+}
+
+// Bare task creation + boundary sync: the `make_executable` path (the fusion baseline).
+std::vector<double> bench_launch_sync()
+{
+    return measure([&]() -> uint64_t
+    {
+        (void)ts::launch([] { return 1; }).sync();
+        return 1;
+    });
+}
+
+// Coroutine task creation + boundary sync: the fused frame+block path (one allocation,
+// docs/coroutine-first.md §5.1). Target: at or below `launch` above.
+static ts::Task<int> trivial_coro() { co_return 1; }
+
+std::vector<double> bench_coro_sync()
+{
+    return measure([&]() -> uint64_t
+    {
+        (void)trivial_coro().sync();
+        return 1;
+    });
+}
+
+// Coroutine composition: await a chain of K eagerly-launched stages -- the coroutine-first
+// equivalent of the `then` chain benchmark below (the number to beat, §5.5).
+static ts::Task<int> chain_coro(int chain)
+{
+    int v = co_await ts::launch([] { return 0; });
+    for (int k = 0; k < chain; ++k)
+        v = co_await ts::launch([v] { return v + 1; });
+    co_return v;
+}
+
+std::vector<double> bench_coro_chain()
+{
     constexpr int chain = 50;
     return measure([&]() -> uint64_t
     {
-        ts::Task<int> t = obj.async([](const int& v) { return v; });
-        for (int k = 0; k < chain; ++k)
-            t = t.then([](int v) { return v + 1; });
-        t.sync();
+        (void)chain_coro(chain).sync();
         return chain;
     });
 }
 
-// when_all: typed join over 4 prerequisites + a consuming continuation.
-std::vector<double> bench_when_all()
+// Awaited join over 4 async reads (the coroutine-first form of the old typed join).
+std::vector<double> bench_coro_join()
 {
     ts::Guarded<int> a{ 1 }, b{ 2 }, c{ 3 }, d{ 4 };
     auto read = [](const int& v) { return v; };
     return measure([&]() -> uint64_t
     {
-        ts::when_all(a.async(read), b.async(read), c.async(read), d.async(read))
-            .then([](std::tuple<int, int, int, int>& r) { return std::get<0>(r); })
-            .sync();
+        (void)[&]() -> ts::Task<int>
+        {
+            ts::Task<int> ta = a.async(read), tb = b.async(read), tc = c.async(read), td = d.async(read);
+            co_return co_await ta + co_await tb + co_await tc + co_await td;
+        }().sync();
         return 1;
     });
 }
@@ -319,11 +410,18 @@ void run_benchmarks()
     report("s+block", bench_fork_join(ts::Idle_policy::spin_then_block));
     report("handoff", bench_fork_join(ts::Idle_policy::handoff));
 
+    std::printf("\npipe contention (%u producers, read-heavy mix -- pipe rebase R10 baseline):\n", hw);
+    report("100% rd", bench_pipe_contention(hw, 100));
+    report("90% rd",  bench_pipe_contention(hw, 90));
+    report("50% rd",  bench_pipe_contention(hw, 50));
+
     std::printf("\nfeatures:\n");
+    report("launch", bench_launch_sync());
+    report("coro", bench_coro_sync());
+    report("coro chn", bench_coro_chain());
     report("ts_write", bench_ts_write());
     report("ts_read", bench_ts_read());
-    report("then", bench_then());
-    report("when_all", bench_when_all());
+    report("coro join", bench_coro_join());
     report("graph", bench_graph_execute());
     report("harness", bench_harness());
 }

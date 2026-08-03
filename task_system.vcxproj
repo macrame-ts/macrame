@@ -49,6 +49,7 @@
     <ClCompile Include="tests\task_tests.cpp" />
     <ClCompile Include="tests\tests.cpp" />
     <ClCompile Include="tests\guarded_tests.cpp" />
+    <ClCompile Include="tests\pipe_tests.cpp" />
     <ClCompile Include="tests\deferred_tests.cpp" />
     <ClCompile Include="tests\versioned_tests.cpp" />
   </ItemGroup>
@@ -70,9 +71,11 @@
     <ClInclude Include="tools\graph_trace.h" />
     <ClInclude Include="tools\trace_stamps.h" />
     <ClInclude Include="include\ts\task.h" />
+    <ClInclude Include="include\ts\task_scope.h" />
     <ClInclude Include="include\ts\ts.h" />
     <ClInclude Include="include\ts\version.h" />
     <ClInclude Include="include\ts\guarded.h" />
+    <ClInclude Include="include\ts\detail\pipe_link.h" />
     <ClInclude Include="include\ts\deferred.h" />
     <ClInclude Include="include\ts\detail\journal.h" />
     <ClInclude Include="include\ts\versioned.h" />
@@ -90,6 +93,7 @@
     <ClInclude Include="tests\tests.h" />
     <ClInclude Include="tests\test_util.h" />
     <ClInclude Include="tests\guarded_tests.h" />
+    <ClInclude Include="tests\pipe_tests.h" />
     <ClInclude Include="tests\deferred_tests.h" />
     <ClInclude Include="tests\versioned_tests.h" />
   </ItemGroup>

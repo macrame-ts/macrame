@@ -1,4 +1,5 @@
 #include "integration_tests.h"
+#include "ts/coroutine_support.h"
 #include "ts/guarded.h"
 #include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
@@ -35,8 +36,9 @@ int read_value(ts::Guarded<int>& d)
     return d.async([](const int& v) { return v; }).sync();
 }
 
-// `then()` chained off the graph's `execute()` completion handle.
-void test_then_off_graph_completion()
+// The graph's completion handle awaited from a coroutine -- the coroutine-first spelling
+// of the old `then`-off-`execute()` chain.
+void test_await_graph_completion()
 {
     ts::Guarded<int> a{ 0 };
     ts::Static_task_graph g;
@@ -44,21 +46,28 @@ void test_then_off_graph_completion()
     g.compile();
 
     std::atomic<bool> after{ false };
-    g.execute().then([&after] { after.store(true); }).sync();
+    [](ts::Static_task_graph& graph, std::atomic<bool>& flag) -> ts::Task<void>
+    {
+        co_await graph.execute();
+        flag.store(true);
+    }(g, after).sync();
 
     TS_CHECK(after.load());
     TS_CHECK(read_value(a) == 5);
 }
 
-// `when_all` over async results, feeding a value into a graph run.
-void test_when_all_into_graph()
+// Joining async results into a graph run -- the coroutine-first spelling of the old
+// `when_all(...).then(...)` join: the accesses run concurrently (eager), sequential awaits
+// complete when the last does.
+void test_await_join_into_graph()
 {
     ts::Guarded<int> a{ 2 }, b{ 3 };
-    int sum = ts::when_all(
-            a.async([](const int& v) { return v; }),
-            b.async([](const int& v) { return v; }))
-        .then([](std::tuple<int, int>& r) { return std::get<0>(r) + std::get<1>(r); })
-        .sync();
+    int sum = [](ts::Guarded<int>& ga, ts::Guarded<int>& gb) -> ts::Task<int>
+    {
+        ts::Task<int> ra = ga.async([](const int& v) { return v; });
+        ts::Task<int> rb = gb.async([](const int& v) { return v; });
+        co_return co_await ra + co_await rb;
+    }(a, b).sync();
 
     ts::Guarded<int> c{ 0 };
     ts::Static_task_graph g;
@@ -477,7 +486,7 @@ void test_repeat_stress()
 }
 
 // Drive the whole mock game-engine frame (graph + Versioned transforms +
-// internal parallelism + Guarded::async + then/when_all) and assert frame-level
+// internal parallelism + Guarded::async + awaited streaming) and assert frame-level
 // invariants. Reaching the assertions at all proves no deadlock and -- since
 // the access harness is live -- zero access violations (a violation would have
 // aborted the process).
@@ -499,23 +508,21 @@ void test_engine_determinism()
     TS_CHECK(a == b);
 }
 
-// A naive blocking fork-join: launch a task per item, then get() each.
-template<typename Fn>
-void naive_parallel_for(int n, Fn fn)
+// Awaited fork-join, nested two deep: the coroutine-first shape of the classic
+// oversubscription deadlock. The outer coroutines saturate every worker and each AWAITS
+// its inner tasks; awaiting suspends (frees the worker) instead of parking it, so the
+// inner tasks always find workers -- the deadlock the old blocking join could only
+// survive via retraction is structurally absent. Watchdog'd so a regression fails the
+// test rather than hanging forever.
+ts::Task<void> awaited_fork_join(int n, std::atomic<int>& total)
 {
     std::vector<ts::Task<void>> tasks;
     for (int i = 0; i < n; ++i)
-        tasks.push_back(ts::launch([fn, i] { fn(i); }));
+        tasks.push_back(ts::launch([&total] { total.fetch_add(1); }));
     for (auto& t : tasks)
-        t.sync();
+        co_await t;
 }
 
-// Nested parallel-for → oversubscription deadlock. The outer tasks saturate every
-// worker and each blocks in a get() waiting on its inner tasks; the inner tasks sit in
-// the queue with no free worker to run them → classic deadlock. Retraction breaks it:
-// a blocked get() runs the un-started task inline on the waiting thread instead of
-// parking. Watchdog'd so a deadlock fails the test rather than hanging forever (this
-// test runs last, so a poisoned scheduler doesn't affect the others).
 void test_oversubscription_no_deadlock()
 {
     std::atomic<int> total{ 0 };
@@ -524,17 +531,21 @@ void test_oversubscription_no_deadlock()
 
     std::thread runner([&]
     {
-        naive_parallel_for(outer, [&](int)
-        {
-            naive_parallel_for(4, [&](int) { total.fetch_add(1); });
-        });
+        std::vector<ts::Task<void>> outers;
+        for (int i = 0; i < outer; ++i)
+            outers.push_back([](std::atomic<int>& t) -> ts::Task<void>
+            {
+                co_await awaited_fork_join(4, t);
+            }(total));
+        for (auto& t : outers)
+            t.sync();   // boundary wait (this thread is not a worker)
         done.store(true);
     });
 
     for (int i = 0; i < 300 && !done.load(); ++i)
         std::this_thread::sleep_for(10ms);   // up to ~3s
 
-    TS_CHECK(done.load());   // false => oversubscription deadlock (retraction not working)
+    TS_CHECK(done.load());   // false => suspension is not freeing workers
     if (done.load())
     {
         runner.join();
@@ -546,12 +557,10 @@ void test_oversubscription_no_deadlock()
     }
 }
 
-// Deep retraction: each outer task get()s a DEPENDENT (a builder task with
-// prerequisites), not the leaf chunks. Simple retraction can't run it (its
-// prerequisites aren't met); deep retraction walks its prerequisites, runs the
-// un-started chunks inline, then runs the dependent — so it too avoids the
-// oversubscription deadlock.
-void test_deep_retraction_no_deadlock()
+// Deep awaited dependency chains under oversubscription: each outer coroutine awaits a
+// JOIN coroutine that itself awaits leaf tasks -- two suspension layers deep, workers
+// saturated. Every await frees its worker, so the whole tree drains without retraction.
+void test_deep_await_chain_no_deadlock()
 {
     std::atomic<int> total{ 0 };
     std::atomic<bool> done{ false };
@@ -559,97 +568,26 @@ void test_deep_retraction_no_deadlock()
 
     std::thread runner([&]
     {
-        naive_parallel_for(outer, [&](int)
-        {
-            ts::Task<void> a = ts::launch([&] { total.fetch_add(1); });
-            ts::Task<void> b = ts::launch([&] { total.fetch_add(1); });
-            ts::Task<void> c = ts::launch([&] { total.fetch_add(1); });
-            ts::Task<void> join = ts::task([] {}).after(a, b, c).launch();
-            join.sync();   // deep-retract: run a/b/c inline, then the join
-        });
+        std::vector<ts::Task<void>> outers;
+        for (int i = 0; i < outer; ++i)
+            outers.push_back([](std::atomic<int>& t) -> ts::Task<void>
+            {
+                ts::Task<void> join = awaited_fork_join(3, t);
+                co_await join;   // a dependent-of-dependents, awaited not synced
+            }(total));
+        for (auto& t : outers)
+            t.sync();
         done.store(true);
     });
 
     for (int i = 0; i < 300 && !done.load(); ++i)
         std::this_thread::sleep_for(10ms);
 
-    TS_CHECK(done.load());   // false => deep retraction not working
+    TS_CHECK(done.load());   // false => nested suspension is not freeing workers
     if (done.load())
     {
         runner.join();
         TS_CHECK(total.load() == outer * 3);
-    }
-    else
-    {
-        runner.detach();
-    }
-}
-
-// Deep retraction through a `then` chain: each outer task get()s a CONTINUATION, whose
-// completion is continuation-driven (an attach callback), not lock-counter driven. The
-// retraction-hint backlink lets the blocked get() walk to the producer and run it inline,
-// so a then chain is deadlock-free under oversubscription like an after chain.
-void test_then_retraction_no_deadlock()
-{
-    std::atomic<int> total{ 0 };
-    std::atomic<bool> done{ false };
-    const int outer = 2 * static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-
-    std::thread runner([&]
-    {
-        naive_parallel_for(outer, [&](int)
-        {
-            int r = ts::launch([&] { total.fetch_add(1); return 20; })   // retractable producer
-                        .then([&](int x) { total.fetch_add(1); return x + 1; })
-                        .sync();   // deep-retract: run the producer inline, its callback fires the continuation
-            (void)r;
-        });
-        done.store(true);
-    });
-
-    for (int i = 0; i < 300 && !done.load(); ++i)
-        std::this_thread::sleep_for(10ms);
-
-    TS_CHECK(done.load());   // false => `then` not deep-retractable
-    if (done.load())
-    {
-        runner.join();
-        TS_CHECK(total.load() == outer * 2);   // producer + continuation, once per outer
-    }
-    else
-    {
-        runner.detach();
-    }
-}
-
-// Same, through a when_all join: get() on the join walks its retraction hints, runs each
-// (retractable) prerequisite inline, they settle -> finish completes the join.
-void test_when_all_retraction_no_deadlock()
-{
-    std::atomic<int> total{ 0 };
-    std::atomic<bool> done{ false };
-    const int outer = 2 * static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-
-    std::thread runner([&]
-    {
-        naive_parallel_for(outer, [&](int)
-        {
-            ts::Task<int> a = ts::launch([&] { total.fetch_add(1); return 1; });
-            ts::Task<int> b = ts::launch([&] { total.fetch_add(1); return 2; });
-            int s = ts::when_all(a, b).then([](int x, int y) { return x + y; }).sync();
-            (void)s;
-        });
-        done.store(true);
-    });
-
-    for (int i = 0; i < 300 && !done.load(); ++i)
-        std::this_thread::sleep_for(10ms);
-
-    TS_CHECK(done.load());   // false => when_all not deep-retractable
-    if (done.load())
-    {
-        runner.join();
-        TS_CHECK(total.load() == outer * 2);
     }
     else
     {
@@ -668,12 +606,13 @@ void test_single_threaded_end_to_end()
     ts::Scheduler_scope scope{ { .single_threaded = true } };
     const std::thread::id main_id = std::this_thread::get_id();
 
-    // Bare launch + then: inline, done at return, on this thread.
+    // Bare launch + an awaiting coroutine: inline, done at return, on this thread (the
+    // await never suspends -- the producer is already settled when the coroutine starts).
     std::thread::id launch_ran_on{};
     ts::Task<int> t = ts::launch([&launch_ran_on] { launch_ran_on = std::this_thread::get_id(); return 6; });
     TS_CHECK(t.is_done());
     TS_CHECK(launch_ran_on == main_id);
-    ts::Task<int> t2 = t.then([](int v) { return v * 7; });
+    ts::Task<int> t2 = [](ts::Task<int> src) -> ts::Task<int> { co_return co_await src * 7; }(t);
     TS_CHECK(t2.is_done());
     TS_CHECK(t2.sync() == 42);
 
@@ -762,37 +701,17 @@ void test_single_threaded_deterministic_order()
 }
 
 #if TS_SAFETY_CHECKS
-// The blocking-sync diagnostic fires -- once, deterministically -- when a node body
-// blocks on a pipe job for an object the scope does NOT hold, and the sync still
-// completes correctly. The blocker on `b`'s pipe spins until the report lands, so the
-// awaited write cannot finish before the check runs (no timing dependence).
-void test_blocking_sync_warns_but_completes()
+// Coroutine-first §4.1: a node body that would genuinely park on a pipe job (an object the
+// task does not hold) is FATAL, not a warning -- the park occupies a worker and risks
+// pool-exhaustion deadlock. The sanctioned form is `co_await` (companion:
+// `test_coro_await_access_in_node`, coroutine_tests).
+void test_blocking_sync_in_task_is_fatal()
 {
-    ts::test::Expected_ensures expect{ 1 };   // diagnostic fires on a worker thread; no F5 break
-    long long base = ts::ensure_failure_count();
-    ts::Guarded<tests::Counter> a;
-    ts::Guarded<int> b{ 0 };
-
-    ts::Static_task_graph g;
-    g.add_node([&b, base](tests::Counter& k)
-    {
-        ts::Task<void> blocker = b.async([base](int&)
-        {
-            while (ts::ensure_failure_count() == base)
-                std::this_thread::yield();
-        });
-        ts::Task<int> t = b.async([](int& v) { v = 7; return v; });
-        TS_CHECK(t.sync() == 7);   // reports (queued behind the blocker), then completes
-        k.add(1);
-    }, a);
-    g.compile();
-    g.execute().sync();
-
-    TS_CHECK(ts::ensure_failure_count() == base + 1);
+    TS_CHECK(ts::test::expect_death("sync_in_task"));
 }
 
 // Sanctioned fork-join inside a node produces zero reports: `parallel_for` joins via the
-// state's own wait (never `retract_or_wait`), and bare-task joins retract.
+// state's own wait (the one blessed in-task wait -- it waits only on running helpers).
 void test_parallel_for_in_node_no_reports()
 {
     long long base = ts::ensure_failure_count();
@@ -820,8 +739,8 @@ void test_parallel_for_in_node_no_reports()
 void run_integration_tests()
 {
     std::printf("\n[integration] tests\n");
-    run("then off graph completion", test_then_off_graph_completion);
-    run("when_all into graph", test_when_all_into_graph);
+    run("await graph completion", test_await_graph_completion);
+    run("await join into graph", test_await_join_into_graph);
     run("graph then dynamic", test_graph_then_dynamic);
     run("graph/async no overlap (during)", test_graph_async_no_overlap_during);
     run("graph/async no overlap (before)", test_async_before_graph_no_overlap);
@@ -836,7 +755,7 @@ void run_integration_tests()
     run("single-threaded: sync inside body", test_single_threaded_sync_inside_body);
     run("single-threaded: deterministic order", test_single_threaded_deterministic_order);
 #if TS_SAFETY_CHECKS
-    run("blocking sync warns but completes", test_blocking_sync_warns_but_completes);
+    run("death: blocking sync in task", test_blocking_sync_in_task_is_fatal);
     run("parallel_for in node: no reports", test_parallel_for_in_node_no_reports);
 #endif
     run("multi async no deadlock", test_multi_async_no_deadlock);
@@ -851,7 +770,5 @@ void run_integration_tests()
     run("engine frame invariants", test_engine_frame);
     run("engine determinism", test_engine_determinism);
     run("oversubscription no deadlock", test_oversubscription_no_deadlock);
-    run("deep retraction no deadlock", test_deep_retraction_no_deadlock);
-    run("then retraction no deadlock", test_then_retraction_no_deadlock);
-    run("when_all retraction no deadlock", test_when_all_retraction_no_deadlock);
+    run("deep await chain no deadlock", test_deep_await_chain_no_deadlock);
 }

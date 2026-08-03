@@ -6,7 +6,6 @@
 #include "ts/detail/journal.h"
 #include "ts/task.h"
 
-#include <mutex>
 #include <utility>
 
 namespace ts
@@ -21,30 +20,29 @@ namespace ts
 // writes; after it, all of them.
 //
 // Access control is `Guarded`'s: the commit is an ordinary write, staging touches nothing
-// shared. Two commit forms:
-//   - `commit_async()` -- acquires the write itself and applies the batch async (returns a
-//     task to sync); the fire-and-forget form.
-//   - `commit()` -- applies under a write grant the caller already holds (a graph node's
-//     declared write, or inside a `target.async` write body); no second acquisition.
+// shared. ONE commit verb, auto-dispatching on grant ownership -- called from the task that
+// holds the target's write grant (a graph node's declared write, an `async`/`access` write
+// body) `commit()` applies INLINE under that grant, no second acquisition; called from
+// anywhere else it enqueues an ordinary async write and returns a task to await.
 //
-// Use (dynamic tasks):
+// Use:
 //   ts::Guarded<Draw_list> queue;                     // the target
 //   ts::Deferred<Draw_list> dl{ queue };              // a command buffer over it
 //   auto rec = dl.recorder();
 //   rec.stage([cmd](Draw_list& q){ q.push(cmd); });   // record now, grant-free (many producers)
-//   dl.commit_async();                                // apply the batch as one write
-// In a graph, a node that already holds the target's write grant calls `commit()`; order
-// producers before the commit (a graph edge / `after`).
+//   co_await dl.commit();                             // apply the batch as one write
+// In a graph, a node that already holds the target's write grant just calls `commit()`;
+// order producers before the commit with an edge.
 //
 // Contract:
 //  - Ordering: intra-recorder FIFO is semantic (build on it); cross-recorder order is
 //    arbitrary -- never build semantics on it -- but deterministic given a deterministic
 //    mint/destroy sequence, so runs are reproducible (see journal.h). Commands staged
 //    after a commit's cut ride the next commit.
-//  - Sync the task `commit_async()` returns before destroying the `Deferred` (the pending
-//    write still references it) -- violating it is fatal. Leftover staged-but-uncommitted
-//    commands at destruction are fatal lost writes (`discard()` drops them). Must outlive
-//    any outstanding `Recorder`.
+//  - Await the task an ENQUEUED `commit()` returns before destroying the `Deferred` (the
+//    pending write still references it) -- violating it is fatal under `TS_SAFETY_CHECKS`.
+//    Leftover staged-but-uncommitted commands at destruction are fatal lost writes
+//    (`discard()` drops them). Must outlive any outstanding `Recorder`.
 //
 // The staging machinery (`detail::Journal`, `Recorder`, `Parallel_recorder`) is shared
 // with `Versioned<T>`: reach for `Versioned<T>` when readers need a stable snapshot of the
@@ -63,25 +61,22 @@ public:
     // intended (e.g. teardown mid-frame).
     ~Deferred()
     {
-        // Writes on the target are FIFO, so the last-submitted commit settling means
+        // Writes on the target are FIFO, so the last-enqueued commit settling means
         // no pending write still references this Deferred; the destructor then has
         // nothing to wait for (unrelated accesses on the target are `~Guarded`'s
-        // business). An unsettled commit is a contract violation: surface it hard
-        // rather than block silently -- a long-parking destructor goes unnoticed
-        // and usually marks a bug worth fixing.
-        // Snapshot under the commit lock (a commit_async racing destruction is
-        // already UB; the lock still keeps the read well-defined and ordered).
-        Task<void> last;
-        bool issued;
-        {
-            std::lock_guard lock(commit_mutex_);
-            last = last_commit_;
-            issued = commit_issued_;
-        }
-        if (issued && !last.is_done())
+        // business, and inline commits finished in-call). An unsettled commit is a
+        // contract violation: surface it hard rather than block silently -- a
+        // long-parking destructor goes unnoticed and usually marks a bug worth
+        // fixing. `last_commit_` is recorded under the pipe mutex atomically with
+        // the enqueue (see `pipe_enqueue`), so it can never lag FIFO order; the
+        // snapshot takes the same mutex (a commit racing destruction is already UB,
+        // the lock keeps the sanctioned quiescent read well-defined).
+        detail::Task_ptr last =
+            detail::pipe_locked_snapshot(detail::Guarded_access::pipe(*target_), last_commit_);
+        if (last != nullptr && !last->ready.load(std::memory_order_acquire))
         {
 #if TS_SAFETY_CHECKS
-            fatal("Deferred destroyed with a commit_async still in flight -- sync the "
+            fatal("Deferred destroyed with a commit still in flight -- sync the "
                   "returned task before destruction");
 #endif
             // Shipping safety net: the job dereferences this Deferred when it runs;
@@ -114,11 +109,60 @@ public:
         return Parallel_recorder<T>(journal_, global_scheduler());
     }
 
-    // Apply everything staged so far to the bound object, which the caller must
-    // already hold write access to (checked). The object is implicit (this Deferred
-    // binds one `Guarded<T>`), so there is no way to commit into the wrong instance.
-    // Cut happens now: commands staged after this point ride the next commit.
-    void commit()
+    // Apply everything staged so far as ONE write on the bound object, auto-dispatching
+    // on grant ownership (the object is implicit, so there is no way to commit into the
+    // wrong instance):
+    //
+    //  1. The calling task holds the target's write grant (`Pipe::writer_owner` is this
+    //     task -- a graph node's declared write, an `async`/`access` write body): apply
+    //     INLINE under that grant, cut now. Returns a pre-settled task; NOTE it provides
+    //     no happens-before edge (it settled before the apply) -- observers of the data
+    //     order through the object's pipe, which orders.
+    //  2. Anyone else: enqueue as an ordinary async write on the target -- one access
+    //     acquisition amortized over the whole batch; the cut happens when the write
+    //     RUNS. Returns the write's completion; sync it before destroying the Deferred.
+    //
+    // The enqueue records the write into `last_commit_` atomically (under the pipe
+    // mutex), so concurrent fire-and-forget commits keep the destructor's settled check
+    // exact -- no external lock. Contract: from NESTED sub-work running under a parent's
+    // inherited write grant, call `commit()` in the grant-holding task instead -- the
+    // nested task is not the holder, and the enqueued write would queue behind the very
+    // grant it waits out (fatal under `TS_SAFETY_CHECKS`, a silent deadlock-on-sync
+    // otherwise).
+    Task<void> commit(Access_options opts = {})
+    {
+        detail::Pipe& pipe = detail::Guarded_access::pipe(*target_);
+        detail::Task_control_block* owner = pipe.writer_owner.load(std::memory_order_acquire);
+        if (owner != nullptr && owner == detail::current_task.get())
+        {
+            if (opts.token.is_cancel_requested())
+                return detail::task_from_core<void>(detail::cancelled_void_core());   // batch retained
+            apply_under_grant();
+            return detail::task_from_core<void>(detail::settled_void_core());
+        }
+#if TS_SAFETY_CHECKS
+        // Nested sub-work under an inherited write grant: not the holder (`writer_owner`
+        // is the parent), and enqueueing would deadlock behind the parent's own hold the
+        // moment anyone syncs it. Surface the misuse at the call.
+        if (detail::current_access != nullptr
+            && detail::current_access->holds_write_epoch(detail::pipe_epoch(pipe)))
+            fatal("Deferred::commit() from nested sub-work under an inherited write grant -- "
+                  "commit from the task holding the grant (the node/async body) instead");
+#endif
+        return detail::Guarded_access::commit_write(
+            *target_, [this](T&) { apply_under_grant(); }, opts, &last_commit_);
+    }
+
+    // Drop everything staged so far, explicitly. The escape hatch for teardown.
+    void discard()
+    {
+        journal_.cut();
+    }
+
+private:
+    // The apply half shared by both `commit()` arms: requires (and checks) a write grant
+    // on the bound object; cuts now and applies the batch.
+    void apply_under_grant()
     {
         T* t = detail::Guarded_access::instance(*target_);
 #if TS_SAFETY_CHECKS
@@ -129,43 +173,15 @@ public:
             cmd(*t);
     }
 
-    // Apply as an ordinary async write on the target: one access acquisition amortized
-    // over the whole batch. The cut happens when the write RUNS (its turn in the
-    // target's write order), so it captures everything staged before the write actually
-    // happens. Returns the completion; sync it before destroying the Deferred (see the
-    // destructor). Callable concurrently (producers may fire-and-forget); the lock spans
-    // submit + store so `last_commit_` is the last commit in submission order -- store
-    // order alone would let an earlier write's handle overwrite a later one's, and the
-    // destructor's settled check would then miss a still-pending write. Uncontended in
-    // single-committer use; the submit inside the lock cannot re-enter (a commit body
-    // never calls `commit_async`).
-    Task<void> commit_async(Access_options opts = {})
-    {
-        std::lock_guard lock(commit_mutex_);
-        last_commit_ = target_->async([this](T&) { commit(); }, opts);
-        commit_issued_ = true;
-        return last_commit_;
-    }
-
-    // Drop everything staged so far, explicitly. The escape hatch for teardown.
-    void discard()
-    {
-        journal_.cut();
-    }
-
-private:
     Guarded<T>* target_;
     detail::Journal<T> journal_;
-    // The most recent `commit_async`'s completion; the destructor's in-flight
-    // check. FIFO makes one handle cover all commits. Unconditional (not
-    // safety-only): it gates the shipping destructor's wait-skip. `Task` has no
-    // null test, hence the flag.
-    Task<void> last_commit_;
-    bool commit_issued_ = false;
-    // Orders concurrent commit_async calls (enqueue + handle store as one step).
-    // Interim: the pipes-as-edges rebase (TODO 1.14) exposes the pipe's own tail
-    // as the last-write handle, deleting this mutex -- see the 1.14 addendum.
-    std::mutex commit_mutex_;
+    // The most recent ENQUEUED commit's block; the destructor's in-flight check (null
+    // until a commit enqueues; inline commits finish in-call and never record). Written
+    // under the target pipe's mutex atomically with the enqueue (`pipe_enqueue`'s
+    // `record`), so FIFO order and record order cannot diverge -- the property the old
+    // `commit_mutex_` existed to enforce externally. Unconditional (not safety-only):
+    // it gates the shipping destructor's wait-skip.
+    detail::Task_ptr last_commit_;
 };
 
 } // namespace ts

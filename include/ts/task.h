@@ -6,7 +6,6 @@
 #include "ts/detail/ref_count.h"   // intrusive Ref_ptr / Ref_counted (preferred over shared_ptr)
 #include "ts/detail/trace_owner.h"   // scheduler-free trace seam: owner inheritance + busy attribution
 
-#include <array>
 #include <atomic>
 #include <concepts>
 #include <condition_variable>
@@ -16,7 +15,6 @@
 #include <mutex>
 #include <optional>
 #include <thread>
-#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -27,9 +25,9 @@ namespace ts
 template<typename R> class Task;
 
 // Cooperative cancellation. A `Cancellation_source` owns the request flag; hand its
-// `token()` to `async`/`then`/`Static_task_graph::execute`. Cancellation is checked
+// `token()` to `async`/`launch`/`Static_task_graph::execute`. Cancellation is checked
 // when a task/node is about to run (not-yet-started work is skipped) and propagates
-// down continuations and graph successors as a completion state (see `is_cancelled`).
+// down awaiting coroutines and graph successors as a completion state (see `is_cancelled`).
 // A default-constructed token is never cancelled. For a *push* notification (wake work
 // that blocks rather than polls) register a `Cancel_callback` on the token.
 class Cancel_callback;
@@ -46,10 +44,10 @@ void drain_serial_pending() noexcept;
 #if TS_SAFETY_CHECKS
 struct Task_control_block;
 // Defined in guarded.cpp (it needs the `Pipe` layout this header deliberately lacks):
-// diagnose a blocking `sync()` on non-retractable work issued under an access scope -- a
-// `TS_ENSURE` failure with the sharp same-object message when the target is an async access
-// on an object the current context holds (certain deadlock), the general never-block warning
-// otherwise. Called by `retract_or_wait` only when the wait is genuinely about to park.
+// diagnose a blocking `sync()` issued from inside a task -- fatal, with the sharp
+// same-object message when the target is an async access on an object the current
+// context holds (certain deadlock), the general never-park message otherwise. Called
+// by `sync_wait` only when the wait is genuinely about to park.
 void blocking_sync_diagnose(const Task_control_block* blk) noexcept;
 #endif
 
@@ -194,78 +192,9 @@ namespace detail
 
 struct Task_control_block;
 
-#if defined(TS_REUSE_FORENSICS)
-// Diagnostic-only lock-free event ring for the stress_reuse flake hunt (see the
-// `TS_REUSE_ONLY` driver in tsan/tsan_main.cpp). Compiled ONLY under TS_REUSE_FORENSICS;
-// the default build sees no-op macros and is unaffected. Hooks filter on one `watched`
-// block (the reused `dep`), record {event, a, b, tid} with relaxed atomics (minimal
-// perturbation, TSan-clean by construction), and the driver dumps the tail on a capture.
-namespace forensics
-{
-enum Event : std::uint32_t
-{
-    E_none = 0,
-    E_round,          // a = round i, b = outer iter        (driver)
-    E_reset,          // a = new gen                        (Task_control_block::reset)
-    E_release,        // a = num_locks after, b = prereq_cancelled (release)
-    E_submit,         // a = gen published to dispatch_arg  (submit_ready)
-    E_pop,            // a = gen read from dispatch_arg     (run_block_dispatch)
-    E_claim_ok,       // a = gen, b = path (1 queue, 2 retract, 3 other)
-    E_claim_fail,     // a = gen, b = path
-    E_cancel_branch,  // token/prereq-cancel skip taken     (Executable::run)
-    E_body,           // a = log value read, b = run_state raw (driver body)
-    E_prereq_body,    // a = i                              (driver prereq body)
-    E_settle,         // a = cancel flag, b = already-completed (settle, under lock)
-    E_retract_exec,   // a = gen about to execute inline    (retract)
-    E_sync_ret,       // a = value returned, b = round i    (driver)
-};
-
-struct Entry
-{
-    std::atomic<std::uint64_t> a{ 0 };
-    std::atomic<std::uint64_t> b{ 0 };
-    std::atomic<std::uint32_t> id{ 0 };
-    std::atomic<std::uint32_t> tid{ 0 };
-};
-
-inline constexpr std::uint32_t ring_size = 1u << 17;   // ~131k events, wraps
-inline Entry ring[ring_size];
-inline std::atomic<std::uint32_t> ring_idx{ 0 };
-inline std::atomic<Task_control_block*> watched{ nullptr };
-inline thread_local std::uint64_t claim_path = 0;   // 1 queue-dispatch, 2 retract, 3 other
-
-inline std::uint32_t tid_hash() noexcept
-{
-    return static_cast<std::uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xffffu);
-}
-
-inline void rec(Event id, std::uint64_t a, std::uint64_t b) noexcept
-{
-    std::uint32_t i = ring_idx.fetch_add(1, std::memory_order_relaxed) & (ring_size - 1);
-    ring[i].a.store(a, std::memory_order_relaxed);
-    ring[i].b.store(b, std::memory_order_relaxed);
-    ring[i].tid.store(tid_hash(), std::memory_order_relaxed);
-    ring[i].id.store(id, std::memory_order_relaxed);
-}
-
-inline void rec_if(const Task_control_block* c, Event id, std::uint64_t a, std::uint64_t b) noexcept
-{
-    if (c && c == watched.load(std::memory_order_relaxed))
-        rec(id, a, b);
-}
-} // namespace forensics
-#define TS_FORENSIC(c, ev, a, b) ::ts::detail::forensics::rec_if((c), ::ts::detail::forensics::ev, (a), (b))
-#define TS_FORENSIC_G(ev, a, b) ::ts::detail::forensics::rec(::ts::detail::forensics::ev, (a), (b))
-#define TS_FORENSIC_PATH(p) (::ts::detail::forensics::claim_path = (p))
-#else
-#define TS_FORENSIC(c, ev, a, b) ((void)0)
-#define TS_FORENSIC_G(ev, a, b) ((void)0)
-#define TS_FORENSIC_PATH(p) ((void)0)
-#endif
-
 // Intrusive strong-refcount ownership of a `Task_control_block`. The count + a `destroy`
 // thunk live IN the block (no separate control block), so a handle is ONE pointer (half a
-// `shared_ptr`) -- lighter in the successor/prerequisite/inline vectors and on every copy.
+// `shared_ptr`) -- lighter in the successor/inline vectors and on every copy.
 // The block's refcount starts at 0; the first `Task_ptr(&block)` brings it to 1. `inc`/`dec`
 // are defined below the block (they touch its members).
 void intrusive_inc(Task_control_block* p) noexcept;
@@ -327,6 +256,18 @@ private:
 // time; see `release` and `dispatch_arg` for the TOCTOU this closes.
 void submit_ready(Task_ptr block, std::uint64_t gen);
 
+// A task's per-pipe queue entry (full definition in ts/detail/pipe_link.h).
+struct Pipe_link;
+
+// Enter the task's first pipe (defined in the pipe layer, like `submit_ready` -- a
+// scheduler-free seam). Called when the pipe turns are the only unmet locks: by
+// `release()` when the count drops to `pipe_count` (a task with ordinary prerequisites),
+// or directly by a creation site with none (`async`, a data-ready graph node). The
+// remaining pipes are entered by the sequential canonical cascade as earlier turns
+// arrive (docs/pipe-rebase.md §0.2). `record`, when non-null, receives the block under
+// the first pipe's mutex (the enqueue-and-record seam; see guarded.h).
+void pipe_enter_first(Task_control_block* blk, Task_ptr* record = nullptr);
+
 // --- Task control block ----------------------------------------------------
 //
 // The refcounted completion/dependency core behind a `Task<R>` handle. FULLY
@@ -338,14 +279,15 @@ void submit_ready(Task_ptr block, std::uint64_t gen);
 // cancellation to their own subsequent. `settle()` is idempotent — the first settle
 // wins (so a bodyless block can be triggered; see `Signal`). Result-consumption contract:
 // `sync()` returns `const R&` (non-consuming), so any number of readers (`sync()` twice,
-// `sync()` + `then`, N waiters) share one immutable-after-settle result; `take()` is the
+// several awaiters, N waiters) share one immutable-after-settle result; `take()` is the
 // single destructive move (ownership handoff / move-only R). At most one mover, and last.
 struct Task_control_block
 {
     // NOTE: members are ordered for size, not logic -- the sub-8-byte fields are clustered
     // (below the 8-byte block) so they share padding instead of each punching a hole between
     // pointers/atomics, and the two 32-bit atomics sit together to fill one 8-byte slot.
-    // sizeof shrank 336 -> 320 by this reorder alone (clang-cl x64). See docs/task-internals.md §2.
+    // sizeof shrank 336 -> 320 by this reorder alone, then 320 -> 280 when the coroutine-first
+    // deletions dropped the `prerequisites` vector (clang-cl x64). See docs/task-internals.md §2.
 
     // Intrusive strong refcount (see `Task_ptr`) + `num_locks`. Two 32-bit atomics packed
     // adjacent = one 8-byte slot, no padding. `refcount` starts at 0 (first `Task_ptr` -> 1).
@@ -365,35 +307,32 @@ struct Task_control_block
     // Unlike a continuation it is NOT consumed, so a reused block (e.g. a re-armed graph
     // node) keeps it across runs -- an alloc-free completion hook. Null for most tasks.
     void (*on_complete)(Task_control_block*) = nullptr;
-    // One-runner claim + reuse generation fused into ONE atomic, so a stale dispatch and
-    // a concurrent `reset()` can't be observed out of order (two separate atomics could,
-    // letting a stale dispatch see the old generation but the new unclaimed state and
-    // wrongly run). Bits [63:1] = generation (bumped by `reset`), bit [0] = body claimed.
-    // A dispatch captures the generation it was queued for and calls `claim(gen)`: exactly
-    // one caller (worker or retractor) wins per generation; a dispatch left stale by a
-    // `reset` (retraction queues a duplicate the reset would otherwise let re-run the
-    // body) fails the CAS and skips.
+    // One-runner claim + re-arm generation fused into ONE atomic. Bits [63:1] =
+    // generation (bumped by `reset` -- `Signal::reset`, the graph's per-run re-arm),
+    // bit [0] = body claimed. A dispatch captures the generation it was queued for and
+    // calls `claim(gen)`. Every run has exactly ONE dispatch (`fetch_sub` values are
+    // unique, so one releaser crosses zero), consumed before the run settles, and
+    // `reset` requires a settled run -- so a claim can never legitimately fail; the CAS
+    // is a machinery-bug detector (fatal under `TS_SAFETY_CHECKS`, skip in shipping),
+    // not a dedup mechanism.
     std::atomic<std::uint64_t> run_state{ 0 };
     // Per-dispatch argument, published by the dispatcher right before handing the block to the
-    // scheduler queue (release; the trampoline's load is the acquire) so the payload need not
-    // ride in the 16-byte `Task_entry` (the work-stealing deque stores those as
-    // `std::atomic<Task_entry>`, lock-free only at two words). Interpreted by the MATCHING
-    // trampoline, so the meanings can't mix:
-    //   - `run_block_dispatch` (bare-scheduler dispatch, `submit_ready`): the reuse GENERATION,
-    //     captured by the releaser BEFORE its `num_locks` decrement (see `release` -- reading it
-    //     after the decrement was a TOCTOU: a releaser delayed past the retract+reset of the run
-    //     it released would stamp the NEXT generation, whose claim then succeeded with
-    //     prerequisites still unmet) and published with a MONOTONIC-MAX CAS (a delayed releaser
-    //     must not regress the slot below a newer round's publish -- that would orphan the newer
-    //     round's dispatch and hang a non-retracting waiter). Every value in the slot is
-    //     therefore a generation whose run genuinely released to zero, so a stale entry reads
-    //     either its own generation (claim fails after a reset) or a newer READY one (safe
-    //     early run; `claim` de-dups) -- `claim` stays the correctness gate.
-    //   - `run_pipe_job_read/write` (pipe-job dispatch, `Guarded::async`): the owning `Pipe*`
-    //     (a pipe block is created, dispatched once, and never `reset`, so its generation is
-    //     always 0 and the slot is free to carry the pipe instead; plain store under the pipe
-    //     mutex -- the monotonic-gen scheme above never touches pipe blocks, disjoint path).
+    // scheduler queue (release store; the trampoline's load is the acquire) so the payload need
+    // not ride in the 16-byte `Task_entry` (the work-stealing deque stores those as
+    // `std::atomic<Task_entry>`, lock-free only at two words). Carries the generation the
+    // releaser captured at/before its `num_locks` decrement (see `release`). Pipe tasks
+    // dispatch through the same trampoline at generation 0 (their blocks are never `reset`),
+    // so the slot's meaning is uniform.
     std::atomic<std::uint64_t> dispatch_arg{ 0 };
+    // The task's pipe entries (docs/pipe-rebase.md §0.2): an array of `pipe_count` links
+    // embedded in the owning allocation (`Piped_executable` or the graph's per-node slab),
+    // in canonical (ascending pipe-address) order. Null / 0 for a non-pipe task.
+    // `pipe_count` doubles as the `release()` trigger threshold (pipes are entered when it
+    // is the only remaining lock count -- pipes-entered-last); `pipes_entered` is the
+    // cascade's progress, and settle advances exactly links `[0, pipes_entered)`. Both
+    // byte fields are written single-threaded (creation / the sequential cascade) and
+    // published by the atomics around them.
+    Pipe_link* pipe_links = nullptr;
     Cancellation_token token;          // checked by `execute` before running the body
 
     // --- one-byte cluster --------------------------------------------------------------
@@ -405,26 +344,23 @@ struct Task_control_block
     // cluster's padding absorbs it -- so they stay plain bools; simpler, no under-lock RMW.)
     std::atomic<bool> ready{ false };
     // Set when a PREREQUISITE settled cancelled (`release` propagates the settle's cancel
-    // state). A result-consuming dependent (`then`) has no result to read, and an
-    // ordering dependent (`after`) inherits the cancellation for consistency, so
+    // state): a dependent (a graph successor) inherits the cancellation, so
     // `Executable::run` cancels instead of running the body. Harmless if set on a task
     // already executing (a cancelled nested child): the flag is only read at execution
     // start. Reset by `reset()` / graph re-arm.
     std::atomic<bool> prereq_cancelled{ false };
     bool completed = false;            // mutex-only
     bool cancelled = false;            // mutex-only
+    // Pipe fields (see `pipe_links`): entry count / trigger threshold, and cascade progress.
+    std::uint8_t pipe_count = 0;
+    std::uint8_t pipes_entered = 0;
     // Static dispatch properties, packed into one byte (all set at creation, never
-    // mutated once the block is shared, so non-atomic is race-free). `priority` and
-    // `run_inline` are read together at dispatch; `retractable` in the retraction guard.
+    // mutated once the block is shared, so non-atomic is race-free). Read together at
+    // dispatch. `run_inline` is graph-internal (`Graph_node::set_inline`).
     struct Flags
     {
         Priority priority : 2 = Priority::normal;   // queue position when dispatched
-        bool retractable : 1 = false;               // safe to run inline from a waiter (no pipe/access binding)
         bool run_inline : 1 = false;                // dispatch on the settling thread, not the queue
-        // Single-object pipe job: `dispatch_arg` carries the owning `Pipe*` (stamped at
-        // creation). A spare bit consumed by the blocking-sync diagnostic; written only
-        // under `TS_SAFETY_CHECKS`.
-        bool pipe_job : 1 = false;
     };
     Flags flags;
     // -----------------------------------------------------------------------------------
@@ -432,27 +368,26 @@ struct Task_control_block
     std::mutex mutex;
     std::condition_variable done_cv;   // wakes N waiters (a `Signal` is a barrier)
 
-    std::vector<Task_ptr> successors;      // decremented on settle
-    std::vector<Task_ptr> prerequisites;   // backward links, for deep retraction
+    std::vector<Task_ptr> successors;      // released on settle (nested children -> parent)
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
-    // This block's current reuse generation — the high bits of `run_state`, above the
-    // claim bit (`run_state >> 1`). Bumped by `reset()` on each reuse. A dispatch captures
-    // this value and passes it to `claim(gen)`; if `reset` bumped it in the meantime, that
-    // dispatch is stale (a leftover from the prior run) and its claim CAS fails. See
-    // `run_state` / `claim`.
+    // This block's current re-arm generation — the high bits of `run_state`, above the
+    // claim bit (`run_state >> 1`). Bumped by `reset()` on each re-arm. A dispatch
+    // captures this value and passes it to `claim(gen)`. See `run_state`.
     std::uint64_t generation() const noexcept { return run_state.load(std::memory_order_relaxed) >> 1; }
 
-    // Claim the body for `gen`; true if this caller should run it. Fails if already
-    // claimed (another runner) or if `gen` is no longer current (re-armed by `reset`).
+    // Claim the body for `gen`; true if this caller should run it. One dispatch per run
+    // and re-arm only after settle mean failure is impossible in a correct program (see
+    // `run_state`) -- a failed CAS here is a duplicate or stale dispatch, i.e. a
+    // machinery bug: fatal under `TS_SAFETY_CHECKS`, degrade to a skip in shipping.
     bool claim(std::uint64_t gen) noexcept
     {
         std::uint64_t expected = gen << 1;
         const bool ok = run_state.compare_exchange_strong(
             expected, (gen << 1) | 1u, std::memory_order_acq_rel, std::memory_order_relaxed);
-#if defined(TS_REUSE_FORENSICS)
-        forensics::rec_if(this, ok ? forensics::E_claim_ok : forensics::E_claim_fail,
-                          gen, forensics::claim_path);
+#if TS_SAFETY_CHECKS
+        if (!ok)
+            ts::fatal("Task_control_block::claim failed -- duplicate or stale dispatch (machinery bug)");
 #endif
         return ok;
     }
@@ -462,30 +397,31 @@ struct Task_control_block
 
     // A prerequisite or nested task settled. Decrement `blk`'s lock count and, when the
     // last lock drops, dispatch it (prerequisites met) or complete it (nested done).
-    // `prereq_cancelled` carries whether the settling prerequisite was *cancelled*: a
-    // dependent (`then`/`after`) then cancels instead of running (checked at execution
-    // start). Non-prerequisite releases (the "not launched"/"not attached" lock) pass
-    // false. Nesting is ordering-only, so a cancelled nested child sets the flag harmlessly
-    // (the parent is already executing; the flag is only read before the body).
+    // `prereq_cancelled` carries whether the settling prerequisite was *cancelled*: the
+    // dependent (a graph successor) then cancels instead of running (checked at execution
+    // start). Non-prerequisite releases pass false. Nesting is ordering-only, so a
+    // cancelled nested child sets the flag harmlessly (the parent is already executing;
+    // the flag is only read before the body).
     static void release(const Task_ptr& blk, bool prereq_cancelled = false)
     {
         if (prereq_cancelled)
             blk->prereq_cancelled.store(true, std::memory_order_relaxed);
         // Capture the generation BEFORE the decrement. Our not-yet-released lock pins the
         // current run (it cannot start, so it cannot complete, so `reset()` cannot re-arm
-        // it), so this read names exactly the run this lock belongs to. Reading it AFTER
-        // the decrement is a TOCTOU: once the count hits zero the run can complete via
-        // retraction and be re-armed, and a releaser preempted in that window would stamp
-        // its dispatch with the NEXT generation -- which then claims a run whose
-        // prerequisites are not yet met (proven by the stress_reuse forensics: `got == i-1`
-        // with the current generation claimed; see tsan/reuse_hunt.sh).
+        // it), so this read names exactly the run this lock belongs to.
         std::uint64_t gen = blk->generation();
         std::uint32_t now = blk->num_locks.fetch_sub(1, std::memory_order_acq_rel) - 1;
-        TS_FORENSIC(blk.get(), E_release, now, prereq_cancelled ? 1 : 0);
         if (now == 0)
-            dispatch_ready(blk, gen);     // pre-execution: prerequisites met -> queue, or run inline
+            dispatch_ready(blk, gen);     // pre-execution: all locks (incl. pipe turns) met
         else if (now == execution_flag)
             blk->complete();              // post-execution: nested done -> complete (`gen` unused)
+        else if (now == blk->pipe_count)
+            pipe_enter_first(blk.get());  // only pipe locks left -> enter line 0 (§5.5 pipes last)
+        // The pipe branch is exact: pre-execution counts decrease monotonically (the
+        // prerequisite set is frozen at launch), so `pipe_count` is crossed once, by exactly
+        // one releaser (`fetch_sub` values are unique); a `pipe_count == 0` task takes the
+        // `now == 0` dispatch instead, and post-execution counts sit above `execution_flag`,
+        // far from any `pipe_count`.
     }
 
     // Per-thread FIFO trampoline for inline tasks: a ready inline task runs on THIS thread
@@ -496,7 +432,7 @@ struct Task_control_block
     // vector grows). `clear()` at the end retains capacity -> no steady-state allocation.
     // Each entry carries the GENERATION captured at release time (same TOCTOU as the queued
     // path: re-reading `generation()` at drain time could see a newer gen if the block was
-    // retracted + re-armed between the push and the drain step).
+    // re-armed between the push and the drain step).
     inline static thread_local std::vector<std::pair<Task_ptr, std::uint64_t>> inline_pending;
     inline static thread_local bool inline_draining = false;
 
@@ -529,11 +465,9 @@ struct Task_control_block
     {
         std::vector<std::move_only_function<void(void*, bool)>> conts;
         std::vector<Task_ptr> succs;
-        std::vector<Task_ptr> prereqs;   // drop (no longer needed)
         void* r = nullptr;               // the result for continuations, captured under the lock
         {
             std::scoped_lock lock(mutex);
-            TS_FORENSIC(this, E_settle, cancel_ ? 1 : 0, completed ? 1 : 0);
             if (completed)
                 return;
             completed = true;
@@ -547,12 +481,11 @@ struct Task_control_block
             ready.store(true, std::memory_order_release);
             conts = std::move(continuations);
             succs = std::move(successors);
-            prereqs = std::move(prerequisites);
             // Read `result_ptr` for the continuations HERE, under the lock -- not after the
-            // notify below. Otherwise a reusable task's `sync()` (woken by the notify) can
-            // `reset()` + relaunch and the new run overwrites `result_ptr` while this settle
-            // tail still reads it (a data race the reuse stress hits under TSan). The moved-out
-            // `conts`/`succs` are local, so firing them after the notify is fine.
+            // notify below. Otherwise a re-armable block's waiter (woken by the notify) can
+            // `reset()` + re-run and the new run overwrites `result_ptr` while this settle
+            // tail still reads it (a data race under TSan). The moved-out `conts`/`succs`
+            // are local, so firing them after the notify is fine.
             r = cancel_ ? nullptr : result_ptr;
         }
         done_cv.notify_all();   // `completed` set under the lock above: no lost wakeup
@@ -583,10 +516,10 @@ struct Task_control_block
         done_cv.wait(lock, [this] { return completed; });
     }
 
-    // Re-arm this settled block for another run (reuse — see `Task_builder::reset` /
-    // `Signal::reset`). `successors`/`prerequisites`/`continuations` were drained by
-    // `settle`, and the result storage is overwritten by the next run's body, so only
-    // the completion scalars reset here. Leaves `num_locks` at 0 (the caller re-applies
+    // Re-arm this settled block for another run (`Signal::reset`, the graph's per-run
+    // re-arm). `successors`/`continuations` were drained by `settle`,
+    // and the result storage is overwritten by the next run's body, so only the
+    // completion scalars reset here. Leaves `num_locks` at 0 (the caller re-applies
     // any launch lock). Precondition: settled and quiescent — one run in flight, prior
     // result consumed; the `ready` gate rejects re-arming a task that has not settled.
     void reset()
@@ -599,64 +532,11 @@ struct Task_control_block
         prereq_cancelled.store(false, std::memory_order_relaxed);
         num_locks.store(0, std::memory_order_relaxed);
         ready.store(false, std::memory_order_release);
-        TS_FORENSIC(this, E_reset, generation(), 0);
     }
 
-    // Deep retraction: run the un-started part of `blk`'s dependency subtree inline on
-    // the *calling* thread instead of parking on it — so a waiter under worker
-    // exhaustion (nested fork-join) makes progress rather than deadlocking. Retract
-    // `blk`'s prerequisites first (recursively), then, once its prerequisites are met
-    // and it hasn't started, run its body inline. `execute` claims via `run_state`, so a
-    // worker and a retractor never both run a body; non-retractable prerequisites
-    // (async accesses, externally-triggered `Signal`s) are left to complete on their own.
-    static void retract(const Task_ptr& blk)
-    {
-        if (!blk->flags.retractable || blk->ready.load(std::memory_order_acquire))
-            return;
-
-        std::vector<Task_ptr> prereqs;
-        {
-            std::scoped_lock lock(blk->mutex);
-            prereqs = blk->prerequisites;   // snapshot (they clear as they settle)
-        }
-        for (const auto& p : prereqs)
-            retract(p);
-
-        // Reading `generation()` after the locks check is safe HERE (unlike `release`): the
-        // retractor is a `sync()` caller of the CURRENT run, and only the resetter advances
-        // the generation -- the builder contract (one run in flight; `reset()` only after the
-        // prior run settled and was consumed) means no thread can be re-arming the block
-        // while a same-run retractor is inside this call.
-        if (blk->execute && blk->num_locks.load(std::memory_order_acquire) == 0)
-        {
-            TS_FORENSIC(blk.get(), E_retract_exec, blk->generation(), 0);
-            TS_FORENSIC_PATH(2);
-            blk->execute(blk, blk->generation());   // ready & not started -> run inline (no-op if a worker beat us)
-            TS_FORENSIC_PATH(0);
-        }
-    }
-
-    static void retract_or_wait(const Task_ptr& blk)
-    {
-        retract(blk);
-        // Worker-less mode: the awaited work (an async access, a released successor) may be
-        // queued on THIS thread's serial trampoline behind the current frame -- run it
-        // before parking, or nothing ever would. No-op otherwise.
-        drain_serial_pending();
-#if TS_SAFETY_CHECKS
-        // About to genuinely block (retraction and the serial drain could not finish the
-        // target) under an access scope, on work a waiter cannot help along: the
-        // never-block-in-a-body rule, diagnosed at the violation instead of documented
-        // only. Retractable targets are exempt by the condition -- sanctioned fork-join
-        // (`parallel_for`, bare-task joins) retracts instead of parking. `ready` is an
-        // approximation (the target may complete concurrently after the check) -- a rare
-        // borderline report, never a missed hazard class.
-        if (current_access && !blk->flags.retractable
-            && !blk->ready.load(std::memory_order_acquire))
-            blocking_sync_diagnose(blk.get());
-#endif
-        blk->wait();
-    }
+    // Blocking wait for `blk` to settle (the blue-thread `sync()` path); defined after
+    // `current_task` below (the in-task blocking fatal reads it).
+    static void sync_wait(const Task_ptr& blk);
 };
 
 // `Task_ptr` refcount ops (block is complete here). `dec` at 0 runs the wrapper's `destroy`.
@@ -664,10 +544,49 @@ inline void intrusive_inc(Task_control_block* p) noexcept
 {
     p->refcount.fetch_add(1, std::memory_order_relaxed);
 }
+// Bounded destruction trampoline. A block's destruction can release references to other
+// blocks (a fused coroutine frame owns its `Task` parameters and promise state), so a
+// deep chain destroyed recursively --
+// dec -> destroy -> member dec -> destroy -> ... -- overflows the stack (a 50k-deep await
+// cascade did, under TSan). The last release pushes instead, and the outermost drain
+// destroys iteratively (O(1) stack); the vector retains capacity, so the steady state
+// allocates nothing.
+// Trivially-destructible on purpose: releases can run during thread/process teardown
+// (scheduler drain, TLS destructors), after a non-trivial thread-local's destructor would
+// already have run -- a `std::vector` here crashed at exit under TSan. The small buffer is
+// deliberately leaked at thread exit.
+struct Destroy_queue
+{
+    Task_control_block** items = nullptr;
+    std::size_t size = 0;
+    std::size_t cap = 0;
+    bool draining = false;
+};
+inline thread_local Destroy_queue destroy_queue;
+
 inline void intrusive_dec(Task_control_block* p) noexcept
 {
-    if (p->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1)
-        p->destroy(p);
+    if (p->refcount.fetch_sub(1, std::memory_order_acq_rel) != 1)
+        return;
+    Destroy_queue& q = destroy_queue;
+    if (q.size == q.cap)
+    {
+        std::size_t new_cap = q.cap == 0 ? 16 : q.cap * 2;
+        auto** grown = new Task_control_block*[new_cap];
+        for (std::size_t i = 0; i < q.size; ++i)
+            grown[i] = q.items[i];
+        delete[] q.items;
+        q.items = grown;
+        q.cap = new_cap;
+    }
+    q.items[q.size++] = p;
+    if (q.draining)
+        return;   // the active drain on this thread destroys it -- don't recurse
+    q.draining = true;
+    for (std::size_t head = 0; head < q.size; ++head)
+        q.items[head]->destroy(q.items[head]);   // may push more
+    q.size = 0;   // buffer retained
+    q.draining = false;
 }
 
 // Result storage composed around the monomorphic block. `core` is the FIRST member so
@@ -686,13 +605,30 @@ struct Result_block
     }
 };
 
-// A bare block (no result, no body -- `Signal`, a `when_all` void join): one allocation,
-// destroyed as a plain `Task_control_block` when its refcount hits 0.
+// A bare block (no result, no body -- `Signal`): one allocation, destroyed as a plain
+// `Task_control_block` when its refcount hits 0.
 inline Task_ptr make_bare_block()
 {
     auto* b = new Task_control_block();
     b->destroy = [](Task_control_block* c) { delete c; };
     return Task_ptr(b);   // refcount 0 -> 1
+}
+
+// Shared pre-settled void blocks for verbs whose fast path finishes the work in-call
+// (`Deferred::commit` applying inline under a held grant): one static block per outcome,
+// allocated once and never freed, so returning a `Task<void>` costs no allocation.
+// Ordering contract: a pre-settled task provides no happens-before edge to its observer
+// (it settled before the work it reports on) -- callers that need ordering must go through
+// the object's pipe, which orders; the settled handle only answers `is_done`/`sync` truthfully.
+inline const Task_ptr& settled_void_core()
+{
+    static Task_ptr core = [] { Task_ptr b = make_bare_block(); b->complete(); return b; }();
+    return core;
+}
+inline const Task_ptr& cancelled_void_core()
+{
+    static Task_ptr core = [] { Task_ptr b = make_bare_block(); b->cancel(); return b; }();
+    return core;
 }
 
 // Make a fresh block for a `Task<R>`; returns the handle core plus (for a non-void R) a RAW
@@ -719,6 +655,33 @@ auto make_block()
 // alive until the child completes.
 inline thread_local Task_ptr current_task;
 
+// The running segment's implicit-scope child list (docs/coroutine-first.md §4.3): a
+// coroutine frame installs its own per-frame list around each segment (see
+// `coroutine_support.h`), so `ts::nested` can record children for a mid-body
+// `co_await ts::join_nested()`. Null for functor bodies (no await, counter-gated only)
+// and outside tasks.
+inline thread_local std::vector<Task_ptr>* current_scope_children = nullptr;
+
+inline void Task_control_block::sync_wait(const Task_ptr& blk)
+{
+    // Worker-less mode: the awaited work (an async access, a released successor) may be
+    // queued on THIS thread's serial trampoline behind the current frame -- run it
+    // before parking, or nothing ever would. No-op otherwise.
+    drain_serial_pending();
+#if TS_SAFETY_CHECKS
+    // Coroutine-first (docs/coroutine-first.md §4.1): about to genuinely park INSIDE a
+    // task on work the waiter cannot help along -- fatal, not a warning: the park
+    // occupies a worker and risks pool-exhaustion deadlock, and `co_await` is the
+    // sanctioned wait. `parallel_for` joins never route here (they wait on the group
+    // state directly, on provably running helpers). `ready` is an approximation (the
+    // target may complete concurrently after the check) -- a rare borderline fatal on
+    // a genuinely-parking call, never a missed hazard class.
+    if (current_task && !blk->ready.load(std::memory_order_acquire))
+        blocking_sync_diagnose(blk.get());
+#endif
+    blk->wait();
+}
+
 // Empty for `void`, so an executable `void` task pays nothing for a result.
 template<typename R> struct Result_storage { std::optional<R> result; };
 template<> struct Result_storage<void> {};
@@ -726,9 +689,8 @@ template<> struct Result_storage<void> {};
 // An executable task: the monomorphic block (FIRST member, so a `Task_control_block*`
 // aliases / `reinterpret_cast`s back to it) + result storage + the body + a token.
 // `run` is wired into `core.execute`; the scheduler/pipe invokes it via
-// `block->execute(block)`. The body lives here (reachable from the block for future
-// reuse/retraction); its type is erased behind the `execute` function pointer, so the
-// block and everything downstream stay monomorphic.
+// `block->execute(block)`. The body lives here, its type erased behind the `execute`
+// function pointer, so the block and everything downstream stay monomorphic.
 template<typename Body, typename R>
 struct Executable
 {
@@ -743,12 +705,11 @@ struct Executable
     static void run(const Task_ptr& c, std::uint64_t gen)
     {
         if (!c->claim(gen))
-            return;   // claimed by another runner, or stale after a reset
+            return;   // machinery bug (fatal under TS_SAFETY_CHECKS); skip in shipping
 
         auto* self = reinterpret_cast<Executable*>(c.get());
         if (c->token.is_cancel_requested() || c->prereq_cancelled.load(std::memory_order_acquire))
         {
-            TS_FORENSIC(c.get(), E_cancel_branch, gen, 0);
             c->cancel();   // own token, or a prerequisite cancelled (no result to consume)
             return;
         }
@@ -834,7 +795,7 @@ concept Task_body = std::invocable<std::decay_t<Fn>&>
 // Wrap `fn` so the task runs under the access grant active where it was BUILT (see
 // access.h): sub-work launched from a task body inherits the launcher's permissions and
 // may touch the launcher's guarded data. The snapshot is by value, so it is valid after
-// the launcher unwinds and on whatever worker (or retractor) runs the body; a top-level
+// the launcher unwinds and on whatever worker runs the body; a top-level
 // build (no active grant) captures nothing, so the scope is a no-op. Shared by
 // `ts::launch` and `ts::task` so both the eager and the builder path inherit alike. If
 // `fn` takes a trailing `Cancellation_token`, the wrapper does too (forwarded by
@@ -867,119 +828,23 @@ auto with_inherited_access(Fn&& fn)
     }
 }
 
-// --- apply-style continuation detection -----------------------------------
-//
-// A `then` off a tuple-valued task may take the tuple by reference (`then([](tuple&
-// t){...})`) or, apply-style, its elements unpacked (`then([](A& a, B& b){...})`). Any
-// continuation shape may also opt into a trailing `Cancellation_token` (body-level
-// early-out, like every other task body), so each detection comes in a plain and a
-// token-taking flavor.
-
-template<typename> inline constexpr bool is_tuple_v = false;
-template<typename... Ts> inline constexpr bool is_tuple_v<std::tuple<Ts...>> = true;
-
-// Invocable with the tuple's elements unpacked (`fn(Ts&...)`), plain or + a trailing token.
-template<typename Fn, typename Tuple> struct Apply_invocable : std::false_type {};
-template<typename Fn, typename... Ts>
-struct Apply_invocable<Fn, std::tuple<Ts...>> : std::bool_constant<std::is_invocable_v<Fn, Ts&...>> {};
-
-template<typename Fn, typename Tuple> struct Apply_invocable_tok : std::false_type {};
-template<typename Fn, typename... Ts>
-struct Apply_invocable_tok<Fn, std::tuple<Ts...>>
-    : std::bool_constant<std::is_invocable_v<Fn, Ts&..., const Cancellation_token&>> {};
-
-// The producer's result taken as a whole (`fn(R&)`), plain or + a trailing token.
-template<typename Fn, typename R>
-inline constexpr bool takes_whole_v =
-    std::is_invocable_v<Fn, R&> || std::is_invocable_v<Fn, R&, const Cancellation_token&>;
-
-// `then(fn)` unpacks when the producer is a tuple, `fn` does NOT take the tuple by
-// reference (either arity), but it IS invocable with the tuple's elements (either arity).
-template<typename Fn, typename R>
-inline constexpr bool use_apply_v =
-    is_tuple_v<R> && !takes_whole_v<Fn, R>
-    && (Apply_invocable<Fn, R>::value || Apply_invocable_tok<Fn, R>::value);
-
-template<typename Fn, typename Tuple, bool WithToken> struct Apply_result;
-template<typename Fn, typename... Ts>
-struct Apply_result<Fn, std::tuple<Ts...>, false> { using type = std::invoke_result_t<Fn, Ts&...>; };
-template<typename Fn, typename... Ts>
-struct Apply_result<Fn, std::tuple<Ts...>, true>
-{ using type = std::invoke_result_t<Fn, Ts&..., const Cancellation_token&>; };
-
-// `invoke_result_t<Fn, Args...>`, optionally with a trailing token appended. A struct (not
-// `conditional_t`) so only the selected arity is instantiated — the other would be
-// ill-formed when `fn` accepts just one of them.
-template<typename Fn, bool WithToken, typename... Args> struct Invoke_result_tok
-{ using type = std::invoke_result_t<Fn, Args...>; };
-template<typename Fn, typename... Args> struct Invoke_result_tok<Fn, true, Args...>
-{ using type = std::invoke_result_t<Fn, Args..., const Cancellation_token&>; };
-
-// The control block behind a `Task` handle (used to wire prerequisites).
+// The control block behind a `Task` handle (for detail-layer wiring).
 template<typename R>
 Task_ptr core_of(const Task<R>& t) noexcept;
 
-// Link `prereq` into `dependent`'s prerequisites as a RETRACTION HINT only — no lock
-// count, no successor, completion stays whatever drives `dependent` (a continuation
-// callback for `then`/`when_all`). It lets a blocking `sync()` on `dependent` walk to
-// `prereq` and run it inline (deep retraction) when `prereq` is retractable and
-// un-started, instead of parking a worker. Skipped if `prereq` already settled (nothing
-// to retract; its callback has fired or will fire). Pushed under `prereq`'s mutex like
-// `add_prerequisite`, and only before `dependent` is exposed, so it doesn't race
-// `dependent`'s later settle/retract.
-inline void add_retraction_hint(const Task_ptr& prereq, const Task_ptr& dependent)
-{
-    std::scoped_lock lock(prereq->mutex);
-    if (!prereq->completed)
-        dependent->prerequisites.push_back(prereq);
-}
-
-// Register `succ` as a successor of `prereq` (bumping its lock count), unless `prereq`
-// has already settled. `after` orders `succ` after `prereq` and propagates cancellation:
-// a cancelled `prereq` still releases `succ`, but marks `succ->prereq_cancelled` so it
-// settles cancelled rather than running (see `release` / `Executable::run`).
-inline void add_prerequisite(const Task_ptr& prereq, const Task_ptr& succ)
-{
-    std::scoped_lock lock(prereq->mutex);
-    if (!prereq->completed)
-    {
-        succ->num_locks.fetch_add(1, std::memory_order_relaxed);
-        prereq->successors.push_back(succ);
-        succ->prerequisites.push_back(prereq);   // backward link, for deep retraction
-    }
-    else if (prereq->cancelled)
-    {
-        // Already settled cancelled -> `release` won't run, so propagate here: `succ`
-        // settles cancelled instead of running (a `then` would otherwise read a missing
-        // result). Under `prereq`'s mutex, so `cancelled` is consistent.
-        succ->prereq_cancelled.store(true, std::memory_order_relaxed);
-    }
-}
+// `core_of`'s inverse: wrap an existing block in a handle. For detail-layer producers
+// (`Deferred::commit`'s pre-settled sentinel) that hand out a `Task` for a block they
+// did not create through the public builders.
+template<typename R>
+Task<R> task_from_core(Task_ptr core) noexcept;
 
 } // namespace detail
 
-// Dispatch options for a queued task body — a `then` continuation or a `Guarded` access
-// (`access`/`async`). An aggregate, so it takes designated initializers at the call site:
-// `t.then(fn, {.priority = Priority::high})`, `obj.access(fn, {.token = tok})`. `token` makes
-// the body skippable before it runs (and, if the body declares a trailing `Cancellation_token`,
-// is forwarded to it for a mid-run early-out). `run_inline` (used by `then`) runs the
-// continuation on the thread that settles the producer instead of queueing it — same trade-offs
-// as `Task_builder::set_inline`. Used by `then` and the task-builder path.
-struct Task_options
-{
-    Cancellation_token token = {};
-    Priority priority = Priority::normal;
-    bool run_inline = false;
-};
-
 // Options for a `Guarded` access (`access` / `async`, single- and multi-object). Deliberately
-// WITHOUT `run_inline`: the verb chooses inline-vs-enqueued (`access` runs inline when the queue
-// is free via `pipe_try_inline`; `async` always enqueues), so a `run_inline` field here would be
-// silently ignored — splitting the type makes passing it a compile error instead. `token` makes
-// the body skippable before it runs (and is forwarded to a trailing-`Cancellation_token` body for
-// a mid-run early-out); `priority` sets the queue position when enqueued.
-// TODO(code-review): revisit whether Access_options and Task_options should stay separate or share
-// a base once the review reaches the Guarded surface — the split is the conservative choice for now.
+// WITHOUT a run-inline knob: the verb chooses inline-vs-enqueued (`access` runs inline when the
+// queue is free via `pipe_try_inline`; `async` always enqueues). `token` makes the body skippable
+// before it runs (and is forwarded to a trailing-`Cancellation_token` body for a mid-run
+// early-out); `priority` sets the queue position when enqueued.
 struct Access_options
 {
     Cancellation_token token = {};
@@ -987,18 +852,17 @@ struct Access_options
 };
 
 // Dispatch options for launching a standalone task (`ts::launch`) or a nested one
-// (`ts::nested`). Deliberately WITHOUT `run_inline`: `launch`/`nested` have no prerequisites,
-// so there is no settling thread to inline onto — inline dispatch is a builder capability
-// (`ts::task(fn).set_inline()`). `token` makes it skippable before it runs; `priority` sets
-// its queue position.
+// (`ts::nested`). `token` makes it skippable before it runs; `priority` sets its queue
+// position.
 struct Launch_options
 {
     Cancellation_token token = {};
     Priority priority = Priority::normal;
 };
 
-// Handle to an async result. `sync()` blocks for the result (call once; may retract + run
-// the task inline); `then()` chains a continuation that runs when this task completes.
+// Handle to an async result. `co_await` it from a coroutine task (the sanctioned
+// composition — see coroutine_support.h); `sync()` blocks for the result from a blue
+// (non-task) thread.
 template<typename R>
 class Task
 {
@@ -1023,18 +887,17 @@ public:
 
     // Blocks until the task settles and returns its result **by `const&`** (non-consuming):
     // any number of readers may `sync()` the same task (returns `const R&` for a value task,
-    // `void` for a void one). The reference is valid while a handle (this `Task`, or the
-    // `Task_builder` / another copy) keeps the block alive; `T r = t.sync()` copies within the
+    // `void` for a void one). The reference is valid while a handle (this `Task` or
+    // another copy) keeps the block alive; `T r = t.sync()` copies within the
     // full-expression and is always safe. To *move* the result out (ownership handoff, or a
     // move-only `R`) use `take()`. For a value task, fatal if it was cancelled (no result) —
     // check `is_cancelled()` first; a cancelled `void` sync() simply returns.
-    // NOTE: `sync()` waits for THIS task to settle, not for its downstream `then` continuations
-    // — `settle()` fires continuations AFTER waking waiters (`notify_all`), so a continuation may
-    // still be running (or not yet started) when `sync()` returns. To wait for a continuation,
-    // `sync()` the `Task` that `then()` returns.
+    // NOTE: `sync()` waits for THIS task to settle, not for work attached downstream —
+    // `settle()` fires internal continuations AFTER waking waiters (`notify_all`), so an
+    // attached callback may still be running (or not yet started) when `sync()` returns.
     decltype(auto) sync()
     {
-        detail::Task_control_block::retract_or_wait(core_);
+        detail::Task_control_block::sync_wait(core_);
         if constexpr (std::is_void_v<R>)
         {
             return;
@@ -1052,81 +915,10 @@ public:
     // consume (see the block's result-consumption contract). Fatal if the task was cancelled.
     R take() requires (!std::is_void_v<R>)
     {
-        detail::Task_control_block::retract_or_wait(core_);
+        detail::Task_control_block::sync_wait(core_);
         if (core_->cancelled)
             ts::fatal("Task::take() on a cancelled task; check is_cancelled() first");
         return std::move(*static_cast<R*>(core_->result_ptr));
-    }
-
-    // Chains a continuation. Runs `fn` when this task completes; if this task is
-    // cancelled (or `token` is cancelled when the continuation fires), `fn` is skipped
-    // and the cancellation propagates to the returned task. For a non-void producer
-    // `fn` receives the result by reference (or, for a tuple, apply-style); for void
-    // it takes no argument.
-    // The continuation `fn` may declare a trailing `Cancellation_token` in any of its
-    // shapes (void / whole-result / apply-style) to poll for cancellation mid-run; the
-    // token forwarded is the continuation's own (`opts.token`, checked at dispatch too).
-    template<typename Fn>
-    auto then(Fn&& fn, Task_options opts = {})
-    {
-        if constexpr (std::is_void_v<R>)
-        {
-            constexpr bool tok = detail::takes_token_v<std::decay_t<Fn>>;
-            if constexpr (!tok && !std::is_invocable_v<std::decay_t<Fn>&>)
-                static_assert(detail::always_false<Fn>,
-                    "then: a continuation off a Task<void> takes no arguments, "
-                    "optionally a trailing Cancellation_token");
-            else
-            {
-                using R2 = detail::Task_result_t<Fn>;
-                return chain<R2>([fn = std::forward<Fn>(fn)](void*, const Cancellation_token& t) mutable -> R2
-                {
-                    if constexpr (tok) return fn(t);
-                    else return fn();
-                }, std::move(opts));
-            }
-        }
-        else if constexpr (detail::use_apply_v<Fn, R>)
-        {
-            constexpr bool tok = detail::Apply_invocable_tok<std::decay_t<Fn>, R>::value
-                                 && !detail::Apply_invocable<std::decay_t<Fn>, R>::value;
-            using R2 = typename detail::Apply_result<std::decay_t<Fn>, R, tok>::type;
-            return chain<R2>([fn = std::forward<Fn>(fn)](void* r, const Cancellation_token& t) mutable -> R2
-            {
-                if constexpr (tok)
-                    return std::apply([&fn, &t](auto&... xs) -> R2 { return fn(xs..., t); }, *static_cast<R*>(r));
-                else
-                    return std::apply(fn, *static_cast<R*>(r));
-            }, std::move(opts));
-        }
-        else
-        {
-            // Gate before `Invoke_result_tok` instantiates: a wrong shape otherwise
-            // cascades through the trait (and, for a tuple producer, adds a misleading
-            // tuple-to-element conversion error).
-            constexpr bool whole = std::is_invocable_v<std::decay_t<Fn>&, R&>
-                                   || std::is_invocable_v<std::decay_t<Fn>&, R&, const Cancellation_token&>;
-            if constexpr (!whole && detail::is_tuple_v<R>)
-                static_assert(detail::always_false<Fn>,
-                    "then: a continuation off a when_all join must take the result tuple by "
-                    "reference or its elements unpacked, either optionally with a trailing "
-                    "Cancellation_token");
-            else if constexpr (!whole)
-                static_assert(detail::always_false<Fn>,
-                    "then: a continuation off a Task<R> must accept the result (R&), "
-                    "optionally with a trailing Cancellation_token");
-            else
-            {
-                constexpr bool tok = std::is_invocable_v<std::decay_t<Fn>&, R&, const Cancellation_token&>
-                                     && !std::is_invocable_v<std::decay_t<Fn>&, R&>;
-                using R2 = typename detail::Invoke_result_tok<std::decay_t<Fn>&, tok, R&>::type;
-                return chain<R2>([fn = std::forward<Fn>(fn)](void* r, const Cancellation_token& t) mutable -> R2
-                {
-                    if constexpr (tok) return fn(*static_cast<R*>(r), t);
-                    else return fn(*static_cast<R*>(r));
-                }, std::move(opts));
-            }
-        }
     }
 
 protected:
@@ -1135,33 +927,8 @@ protected:
 private:
     template<typename R2>
     friend detail::Task_ptr detail::core_of(const Task<R2>&) noexcept;
-
-    // A continuation is a PROPER scheduled task (an `Executable`), not an inline callback:
-    // its body runs `produce(producer's result)`, dispatched through the normal prerequisite
-    // path when the producer settles -- queued by default (so the scheduler can slot
-    // higher-priority work between a task and its continuation), inline opt-in. The producer
-    // is a real `num_locks` prerequisite (so a blocking wait / retraction doesn't run this
-    // task before the result exists, and `prerequisites` makes it deep-retractable). A
-    // *cancelled* producer still dispatches us (cancellation propagates via
-    // `prereq_cancelled`), and since there is then no result to consume, `Executable::run`
-    // cancels this task instead of running the body. `produce` takes the producer's
-    // `result_ptr` (null for a void producer); the producer stays alive as our prerequisite.
-    template<typename R2, typename Produce>
-    Task<R2> chain(Produce produce, Task_options opts)
-    {
-        auto producer = core_;
-        auto next = detail::make_executable<R2>(
-            [producer, produce = std::move(produce)](const Cancellation_token& tok) mutable -> R2
-            { return produce(producer->result_ptr, tok); },
-            std::move(opts.token));
-        next->flags.retractable = true;
-        next->flags.priority = opts.priority;
-        next->flags.run_inline = opts.run_inline;
-        next->num_locks.store(1, std::memory_order_relaxed);   // "not attached" lock
-        detail::add_prerequisite(producer, next);              // wait for the producer to settle
-        detail::Task_control_block::release(next);             // drop the lock -> dispatch when ready
-        return Task<R2>(std::move(next));
-    }
+    template<typename R2>
+    friend Task<R2> detail::task_from_core(detail::Task_ptr) noexcept;
 
     detail::Task_ptr core_;
 };
@@ -1172,116 +939,10 @@ namespace detail
 template<typename R>
 Task_ptr core_of(const Task<R>& t) noexcept { return t.core_; }
 
-} // namespace detail
-
-// A configured-but-not-launched task: attach prerequisites, then `launch()`. Built by
-// `ts::task(fn)`; owns the executable block until launched. `launch()` removes the
-// "not launched" lock, so the task runs once every prerequisite has settled.
-//
-// The builder is also the **reusable** handle: it retains the block after `launch()`
-// (which hands out a `Task<R>` aliasing the same block, but the builder keeps its own
-// reference), so a body + result storage allocated once can be re-run many times. The
-// pattern is `t.reset().after(...).launch(); r = t.sync();` — `reset()` re-arms the block
-// and the "not launched" lock for another run, prerequisites are re-established each run.
-// One run in flight; `reset()` only after the prior run settled and its result was
-// consumed. This avoids reallocation (pooling doesn't help — reuse is the point).
 template<typename R>
-class Task_builder
-{
-public:
-    // Run after each prerequisite settles. Call before `launch()` (each run).
-    template<typename... Ps>
-    Task_builder& after(const Task<Ps>&... prerequisites)
-    {
-        (detail::add_prerequisite(detail::core_of(prerequisites), core_), ...);
-        return *this;
-    }
+Task<R> task_from_core(Task_ptr core) noexcept { return Task<R>(std::move(core)); }
 
-    // Set the queue priority for the run (applied when the task dispatches). Call before
-    // `launch()`.
-    Task_builder& priority(Priority p)
-    {
-        core_->flags.priority = p;
-        return *this;
-    }
-
-    // Dispatch this task INLINE — run it on the thread that settles its last prerequisite,
-    // rather than queueing it. For latency-sensitive / very small dependents. Trade-offs:
-    // it runs on a nondeterministic thread (possibly external — see docs), bypasses
-    // priority, and must not block; a deep inline chain is bounded by a trampoline. Call
-    // before `launch()`.
-    Task_builder& set_inline()
-    {
-        core_->flags.run_inline = true;
-        return *this;
-    }
-
-    // Set the cancellation token for the task. Call BEFORE the first `launch()` — the token
-    // is fixed dispatch config, not per-run: `launch()` must NOT rewrite it, because a
-    // *reused* block can have a prior run's worker still reading `token` (in `Executable::run`)
-    // when the next round would write it, and that read/write is unsynchronized across the
-    // reuse×retraction path — a data race. Setting it once, before any dispatch, is
-    // happens-before the read. To re-run under a different token, make a fresh `ts::task`.
-    Task_builder& token(Cancellation_token t)
-    {
-        core_->token = std::move(t);
-        return *this;
-    }
-
-    Task<R> launch()
-    {
-        detail::Task_control_block::release(core_);   // remove the launch lock
-        return Task<R>(core_);
-    }
-
-    // Re-arm for another run: re-arm the block and restore the "not launched" lock, so
-    // `after(...).launch()` runs it again. Precondition: the prior run settled and its
-    // result was consumed (one run in flight). Chain: `t.reset().after(x).launch()`.
-    // The cancellation `token` is NOT reset — it is fixed dispatch config (set once via
-    // `.token()` before the first launch) and carries over every reuse round; `reset()`
-    // cannot swap it. Since cancellation is one-way, a reused task whose token was cancelled
-    // stays cancelled on every re-run — for a fresh cancellation scope, make a new `ts::task`.
-    // (Rewriting `token` per run would race a prior run's worker still reading it — see the
-    // `.token()` note.)
-    Task_builder& reset()
-    {
-        core_->reset();
-        core_->num_locks.store(1, std::memory_order_relaxed);   // the "not launched" lock
-        return *this;
-    }
-
-    // Read this run's result by `const&` (see `Task<R>::sync`) / move it out (`take`) / query
-    // completion. The builder is the handle; equivalently `launch()`'s returned `Task<R>` can
-    // be used. The block outlives the temporary `Task` here (the builder's `core_` keeps it).
-    decltype(auto) sync() { return Task<R>(core_).sync(); }
-    R take() requires (!std::is_void_v<R>) { return Task<R>(core_).take(); }
-    bool is_done() const noexcept { return Task<R>(core_).is_done(); }
-    bool is_cancelled() const noexcept { return Task<R>(core_).is_cancelled(); }
-
-private:
-    template<typename Fn> requires detail::Task_body<Fn> friend auto task(Fn&& fn);
-
-    explicit Task_builder(detail::Task_ptr core) noexcept
-        : core_(std::move(core))
-    {}
-
-    detail::Task_ptr core_;
-};
-
-// Configure a standalone task (body + prerequisites) to launch later. `fn` takes no
-// arguments (a bare scheduler task). Runs once all prerequisites (added via
-// `.after(...)`) have settled. Inherits the launcher's access grant (like `ts::launch`),
-// so a builder task used as nested sub-work may touch the parent's guarded data.
-template<typename Fn>
-    requires detail::Task_body<Fn>
-auto task(Fn&& fn)
-{
-    using R = detail::Task_result_t<Fn>;
-    auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), {});
-    core->num_locks.store(1, std::memory_order_relaxed);   // the "not launched" lock
-    core->flags.retractable = true;   // bare scheduler task: safe to run inline from a waiter
-    return Task_builder<R>(std::move(core));
-}
+} // namespace detail
 
 // Launch a standalone task on the scheduler — a bare functor with no access target (the
 // primitive `async` for work that touches no guarded object). Returns a `Task<R>`; a
@@ -1299,26 +960,32 @@ auto launch(Fn&& fn, Launch_options opts = {})
 {
     using R = detail::Task_result_t<Fn>;
     auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), std::move(opts.token));
-    core->flags.retractable = true;   // bare scheduler task (no pipe binding): safe to run inline from a waiter
     core->flags.priority = opts.priority;
     detail::submit_ready(core, core->generation());   // fresh block, pre-dispatch: gen 0, race-free read
     return Task<R>(core);
 }
 
-// Attach `child` as a NESTED task of the currently-executing task: that task will not
-// complete until `child` settles (completed or cancelled). Call from within a task
-// body (async / launch / task); fatal if there is no running task. `child` can be
-// launched any way — nesting is a completion dependency, orthogonal to how it runs.
-template<typename R>
-void add_nested(const Task<R>& child)
+namespace detail
 {
-    detail::Task_ptr parent = detail::current_task;
+
+// Attach `child` as a NESTED task of the currently-executing task: that task will not
+// complete until `child` settles (completed or cancelled). Fatal if there is no running
+// task. Detail-level -- the public spellings are `ts::nested` (launch + attach) and the
+// graph's coroutine-node wiring; nesting is a completion dependency, orthogonal to how
+// the child runs.
+inline void add_nested(Task_ptr child_core)
+{
+    Task_ptr parent = current_task;
     if (!parent)
-        ts::fatal("add_nested called outside a running task");
+        ts::fatal("ts::nested called outside a running task");
 
     parent->num_locks.fetch_add(1, std::memory_order_relaxed);   // a completion lock on the parent
 
-    detail::Task_ptr child_core = detail::core_of(child);
+    // Record for a mid-body `co_await ts::join_nested()` when the caller's segment carries an
+    // implicit scope (a coroutine frame installs one; functor bodies have none -- they cannot
+    // await, and their children gate completion via the counter alone).
+    if (current_scope_children != nullptr)
+        current_scope_children->push_back(child_core);
     {
         std::scoped_lock lock(child_core->mutex);
         if (!child_core->completed)
@@ -1327,166 +994,31 @@ void add_nested(const Task<R>& child)
             return;
         }
     }
-    detail::Task_control_block::release(parent);   // child already settled -> release the lock now
+    Task_control_block::release(parent);   // child already settled -> release the lock now
 }
 
+} // namespace detail
+
 // Launch a task and attach it as a nested task of the currently-executing task (its
-// completion gates the parent's). Sugar for `launch` + `add_nested`; call from within a
-// task body.
+// completion gates the parent's): the parent will not complete until the child settles.
+// Call from within a task body; fatal outside one.
 template<typename Fn>
     requires detail::Task_body<Fn>
 auto nested(Fn&& fn, Launch_options opts = {})
 {
     auto t = launch(std::forward<Fn>(fn), std::move(opts));
-    add_nested(t);
+    detail::add_nested(detail::core_of(t));
     return t;
-}
-
-namespace detail
-{
-
-// The tuple of the non-void prerequisite results (voids drop out).
-template<typename... Rs>
-using Kept_tuple_t = decltype(std::tuple_cat(
-    std::declval<std::conditional_t<std::is_void_v<Rs>, std::tuple<>, std::tuple<Rs>>>()...));
-
-// `when_all` result: void when nothing is kept (all prerequisites void), else the
-// kept tuple.
-template<typename... Rs>
-using When_all_result_t = std::conditional_t<
-    std::tuple_size_v<Kept_tuple_t<Rs...>> == 0, void, Kept_tuple_t<Rs...>>;
-
-template<typename> struct To_optionals;
-template<typename... Ts> struct To_optionals<std::tuple<Ts...>>
-{
-    using type = std::tuple<std::optional<Ts>...>;
-};
-
-// Slot index of each prerequisite in the kept tuple (-1 for a void prerequisite).
-template<typename... Rs>
-constexpr std::array<int, sizeof...(Rs)> when_all_slots()
-{
-    std::array<bool, sizeof...(Rs)> is_void{ std::is_void_v<Rs>... };
-    std::array<int, sizeof...(Rs)> slot{};
-    int next = 0;
-    for (std::size_t i = 0; i < sizeof...(Rs); ++i)
-        slot[i] = is_void[i] ? -1 : next++;
-    return slot;
-}
-
-// A `when_all` join's shared state: one intrusive allocation shared by every prerequisite's
-// continuation + the finish.
-// `next_core` (owned) keeps the join block alive; for a value join the block is a
-// `Result_block<Result>` that `next_core` aliases, recovered by `reinterpret_cast` in `finish`.
-template<typename Slots, typename Result>
-struct Join_state : Ref_counted<Join_state<Slots, Result>>
-{
-    Slots slots;
-    std::atomic<int> remaining;
-    std::atomic<bool> any_cancelled{ false };   // set if any prerequisite settled cancelled
-    Task_ptr next_core;
-
-    explicit Join_state(int n) : remaining(n) {}
-
-    // A prerequisite settled: store its result (or flag cancel), decrement; the last to settle
-    // runs `finish`.
-    template<int Slot, typename R>
-    void settle_one(void* r, bool cancelled)
-    {
-        if (cancelled)
-            any_cancelled.store(true, std::memory_order_relaxed);
-        else if constexpr (!std::is_void_v<R>)
-            std::get<Slot>(slots).emplace(std::move(*static_cast<R*>(r)));   // move out of the prerequisite
-        if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1)
-            finish();
-    }
-
-    void finish()
-    {
-        if (any_cancelled.load(std::memory_order_relaxed))
-        {
-            next_core->cancel();   // some slots empty (cancelled prereqs) -> no complete tuple
-            return;
-        }
-        if constexpr (!std::is_void_v<Result>)
-        {
-            auto* wrapper = reinterpret_cast<Result_block<Result>*>(next_core.get());
-            [&]<std::size_t... J>(std::index_sequence<J...>)
-            {
-                wrapper->store(Result(std::move(*std::get<J>(slots))...));   // move (move-only ok)
-            }(std::make_index_sequence<std::tuple_size_v<Slots>>{});
-        }
-        next_core->complete();
-    }
-};
-
-template<int Slot, typename R, typename Join>
-void when_all_attach_one(Task<R> prereq, const Task_ptr& next_core, Ref_ptr<Join> state)
-{
-    // Attach directly to the prerequisite (NOT via `.then`, which skips its continuation
-    // on cancellation and would leave the join's `remaining` counter stuck above 0 -- the
-    // join would never settle). Each continuation holds one `Ref_ptr<Join_state>`.
-    Task_ptr prereq_core = core_of(prereq);
-    prereq_core->attach(
-        [state = std::move(state)](void* r, bool cancelled) mutable
-        {
-            state->template settle_one<Slot, R>(r, cancelled);
-        });
-    add_retraction_hint(prereq_core, next_core);   // deep-retractable: sync() can run each prereq inline
-}
-
-} // namespace detail
-
-// Typed join: completes when every prerequisite completes. Void prerequisites act as
-// pure ordering (they drop out of the result); the results of the non-void ones are
-// carried as a tuple (as `void` if all prerequisites are void). Results may be
-// move-only. Consume with `.then` — either the tuple, or, apply-style, its elements
-// unpacked (`then([](A& a, B& b){ ... })`). If any prerequisite is cancelled the join
-// settles **cancelled** (it cannot form a complete tuple) rather than stalling; query
-// with `Task::is_cancelled()`, and a `.then` off it propagates the cancellation.
-template<typename... Rs>
-Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
-{
-    static_assert(sizeof...(Rs) > 0, "when_all needs at least one task");
-
-    using Result = detail::When_all_result_t<Rs...>;
-    using Slots = typename detail::To_optionals<detail::Kept_tuple_t<Rs...>>::type;
-    using Join = detail::Join_state<Slots, Result>;
-
-    // The join block: a bare block for a void result, else a `Result_block<Result>` whose
-    // handle the `Join_state` recovers by aliasing (see `Join_state::finish`).
-    detail::Task_ptr next_core;
-    if constexpr (std::is_void_v<Result>)
-        next_core = detail::make_bare_block();
-    else
-        next_core = std::get<0>(detail::make_block<Result>());
-    next_core->flags.retractable = true;   // a blocking sync() can retract the (retractable) prerequisites
-
-    // ONE allocation for all the join's shared state (was four `make_shared`).
-    auto state = detail::make_ref<Join>(static_cast<int>(sizeof...(Rs)));
-    state->next_core = next_core;
-
-    constexpr auto slot = detail::when_all_slots<Rs...>();
-    auto prereqs = std::make_tuple(std::move(prerequisites)...);
-
-    [&]<std::size_t... I>(std::index_sequence<I...>)
-    {
-        (detail::when_all_attach_one<slot[I]>(std::get<I>(std::move(prereqs)), next_core, state), ...);
-    }(std::index_sequence_for<Rs...>{});
-
-    return Task<Result>(std::move(next_core));
 }
 
 // A manually-completed synchronization point: a bodyless `Task<void>` (no work is
 // scheduled or executed) that you `trigger()` by hand. It is both producer and
 // consumer in one handle — the consumer side is inherited from `Task<void>`
-// (`get`/`wait`, `is_done`, `then`), the producer side is `trigger()`. Copyable;
+// (`co_await` / `sync`, `is_done`), the producer side is `trigger()`. Copyable;
 // copies share one control block. Used as a done-signal, a barrier / pipeline-phase
 // gate, or an inter-task signal (the integrated equivalent of a manual-reset event
 // / a promise+future fused). `trigger()` is idempotent (first call wins), so it is
-// safe to trigger from multiple threads or more than once. As with any `Task`, `sync()`
-// returns when the signal is triggered — it does NOT wait for `then` continuations (they
-// fire after the waiter is woken); `sync()` the `Task` a `then()` returns to await one.
+// safe to trigger from multiple threads or more than once.
 class Signal : public Task<void>
 {
 public:

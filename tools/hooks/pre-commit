@@ -9,7 +9,7 @@
 # working tree, not the index -- close enough for catching API drift.
 git diff --cached --name-only | grep -qE '\.(h|cpp)$' || exit 0
 
-check='clang++ -std=c++23 -fsyntax-only -fno-exceptions -Iinclude -Isample -Itools tsan/tsan_main.cpp'
+check='clang++ -std=c++23 -fsyntax-only -fno-exceptions -Iinclude -Isample -Itools -Itests tsan/tsan_main.cpp'
 fail_msg='pre-commit: tsan/tsan_main.cpp no longer compiles -- migrate it (or bypass once with --no-verify)'
 
 if command -v wsl.exe >/dev/null 2>&1; then

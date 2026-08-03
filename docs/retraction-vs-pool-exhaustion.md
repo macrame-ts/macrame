@@ -304,3 +304,24 @@ Busy-wait hazard family (§3):
 Ecosystem write-ups:
 - [Avoiding Deadlock from Rayon Thread Pool Exhaustion](https://imfeld.dev/writing/avoiding_rayon_thread_pool_exhaustion)
 - [.NET ThreadPool starvation, and how queuing makes it worse (Criteo)](https://medium.com/criteo-engineering/net-threadpool-starvation-and-how-queuing-makes-it-worse-512c8d570527)
+
+## 7. Outcome (2026-08): retraction retired by the coroutine-first decision
+
+The assessment arc, for the record. First pass proposed banning in-task blocking and
+deleting retraction; the author's pushback established three corrections: (a) retraction
+is an optimization, not only a correctness net (executing an un-started dependency inline
+on the waiting core is never slower than a park + worker round-trip — retraction is to
+`sync()` what symmetric transfer is to `co_await`); (b) a graph node with pending nested
+tasks is already a suspension point holding grants, so the real rule is *what* you await
+under a grant, not *whether* (the suspension-under-grant doctrine,
+[coroutine-first.md](coroutine-first.md) §2); (c) partial retraction coverage plus
+coloring made "coroutines replace it" incomplete while both colors existed.
+
+The coroutine-first decision resolves the trilemma by removing the blue color from task
+interiors: dynamic waits are suspensions (no park, no pool exhaustion — §1's hazard is
+structurally gone), the inline-execution optimization survives natively (eager start +
+symmetric transfer), and in-task `sync()` becomes a fatal instead of a mitigated hazard.
+Retraction and its supporting machinery (claim/generation, `retractable`, hints) are
+removed in that plan's stage 4. This survey stays as the analysis that priced all three
+options — both horns, retraction, and the ban — and as the record that the ban only
+became the right answer once coroutines were made mandatory rather than optional.

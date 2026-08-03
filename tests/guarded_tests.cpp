@@ -370,6 +370,39 @@ void test_async_read_schedules()
     TS_CHECK(d.async([](const int& v) { return v; }).sync() == 7);
 }
 
+// --- B: FIFO group ordering (pipe-rebase regression guard) ----------------
+
+// B2: arrival R1, W, R2 -- the writer between the two reads closes R1's group, so R2 forms
+// a NEW group after the writer. A shared sequence counter stamps execution order; R2 must
+// run after W (never join R1's group) and observe the write.
+void test_rwr_group_separation()
+{
+    ts::Guarded<int> d{ 0 };
+    std::atomic<int> seq{ 0 };
+    std::atomic<int> r1_at{ -1 }, w_at{ -1 }, r2_at{ -1 };
+
+    ts::Task<int> r1 = d.async([&](const int& v) { r1_at = seq.fetch_add(1); return v; });
+    ts::Task<void> w = d.async([&](int& v) { w_at = seq.fetch_add(1); v = 5; });
+    ts::Task<int> r2 = d.async([&](const int& v) { r2_at = seq.fetch_add(1); return v; });
+
+    int r1v = r1.sync();
+    w.sync();
+    int r2v = r2.sync();
+
+    TS_CHECK(r1_at.load() < w_at.load() && w_at.load() < r2_at.load());   // R1 < W < R2
+    TS_CHECK(r1v == 0);   // R1 ran before the write
+    TS_CHECK(r2v == 5);   // R2 ran after it -> did not join R1's group
+}
+
+// B4: writers run in launch order -- an order-sensitive fold composes to one exact value.
+void test_writer_fifo()
+{
+    ts::Guarded<int> d{ 0 };
+    for (int i = 1; i <= 6; ++i)
+        d.async([i](int& v) { v = v * 10 + i; });
+    TS_CHECK(read_value(d) == 123456);   // FIFO: (((((1)*10+2)*10+3)...)
+}
+
 } // namespace
 
 void run_guarded_tests()
@@ -384,6 +417,8 @@ void run_guarded_tests()
     run("concurrent readers", test_concurrent_readers);
     run("writer exclusion", test_writer_exclusion);
     run("reader after writer", test_reader_after_writer);
+    run("R,W,R group separation", test_rwr_group_separation);
+    run("writer FIFO", test_writer_fifo);
     run("independent objects parallel", test_independent_objects_parallel);
     run("generic readers overlap", test_generic_readers_overlap);
     run("generic writer serializes", test_generic_writer_serializes);

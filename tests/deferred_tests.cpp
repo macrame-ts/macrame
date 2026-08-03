@@ -24,7 +24,7 @@ static_assert(!std::is_copy_constructible_v<ts::Recorder<int>>, "recorder is a p
 static_assert(std::is_move_constructible_v<ts::Recorder<int>>);
 static_assert(!std::is_copy_constructible_v<ts::Deferred<int>>);
 static_assert(std::is_same_v<
-    decltype(std::declval<ts::Deferred<int>&>().commit_async()), ts::Task<void>>);
+    decltype(std::declval<ts::Deferred<int>&>().commit()), ts::Task<void>>);
 
 // --- basics -------------------------------------------------------------------
 
@@ -36,7 +36,7 @@ void test_stage_commit_applies_all()
     auto rec = d.recorder();
     rec.stage([](Counter& c) { c.add(3); });
     rec.stage([](Counter& c) { c.add(4); });
-    d.commit_async().sync();
+    d.commit().sync();
 
     int v = target.async([](const Counter& c) { return c.value(); }).sync();
     TS_CHECK(v == 7);
@@ -50,7 +50,7 @@ void test_stage_takes_no_grant()
     ts::Deferred<Counter> d{ target };
     auto rec = d.recorder();
     rec.stage([](Counter& c) { c.increment(); });
-    d.commit_async().sync();
+    d.commit().sync();
     TS_CHECK(target.async([](const Counter& c) { return c.value(); }).sync() == 1);
 }
 
@@ -58,7 +58,7 @@ void test_empty_commit()
 {
     ts::Guarded<int> target{ 9 };
     ts::Deferred<int> d{ target };
-    d.commit_async().sync();
+    d.commit().sync();
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 9);
 }
 
@@ -70,7 +70,7 @@ void test_intra_recorder_fifo()
     auto rec = d.recorder();
     for (int i = 0; i < 10; ++i)
         rec.stage([i](std::vector<int>& v) { v.push_back(i); });
-    d.commit_async().sync();
+    d.commit().sync();
 
     auto v = target.async([](const std::vector<int>& v) { return v; }).sync();
     TS_CHECK(v.size() == 10);
@@ -91,7 +91,7 @@ void test_recorder_creation_order_not_stage_order()
     rec2.stage([](std::vector<int>& v) { v.push_back(4); });
     rec1.stage([](std::vector<int>& v) { v.push_back(1); });
     rec1.stage([](std::vector<int>& v) { v.push_back(2); });
-    d.commit_async().sync();
+    d.commit().sync();
 
     auto v = target.async([](const std::vector<int>& v) { return v; }).sync();
     TS_CHECK((v == std::vector<int>{ 1, 2, 3, 4 }));
@@ -116,7 +116,7 @@ void test_concurrent_staging()
     }
     staging.clear();   // join
 
-    d.commit_async().sync();
+    d.commit().sync();
     int v = target.async([](const Counter& c) { return c.value(); }).sync();
     TS_CHECK(v == threads * per_thread);
 }
@@ -133,7 +133,7 @@ void test_readers_see_none_then_all()
 
     // Reader queued BEFORE the commit job: pipe FIFO runs it first -> pre-state.
     ts::Task<int> before = target.async([](const int& v) { return v; });
-    ts::Task<void> commit = d.commit_async();
+    ts::Task<void> commit = d.commit();
     ts::Task<int> after = target.async([](const int& v) { return v; });
 
     TS_CHECK(before.sync() == 0);
@@ -195,11 +195,11 @@ void test_straggler_rides_next_commit()
 
     auto rec = d.recorder();
     rec.stage([](int& v) { v += 1; });
-    d.commit_async().sync();
+    d.commit().sync();
     rec.stage([](int& v) { v += 2; });   // after the cut
 
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 1);
-    d.commit_async().sync();
+    d.commit().sync();
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 3);
 }
 
@@ -214,13 +214,13 @@ void test_cancelled_commit_retains_commands()
     auto rec = d.recorder();
     rec.stage([](int& v) { v = 7; });
 
-    ts::Task<void> commit = d.commit_async({ .token = src.token() });
+    ts::Task<void> commit = d.commit({ .token = src.token() });
     commit.sync();   // cancelled void sync unblocks
     TS_CHECK(commit.is_cancelled());
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 0);
 
     // The skipped commit never cut -- the commands are still staged.
-    d.commit_async().sync();
+    d.commit().sync();
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 7);
 }
 
@@ -232,7 +232,7 @@ void test_discard()
     auto rec = d.recorder();
     rec.stage([](int& v) { v = 99; });
     d.discard();
-    d.commit_async().sync();
+    d.commit().sync();
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 0);
 }
 
@@ -243,7 +243,7 @@ void test_move_only_command()
 
     auto rec = d.recorder();
     rec.stage([p = std::make_unique<int>(31)](int& v) { v = *p; });
-    d.commit_async().sync();
+    d.commit().sync();
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 31);
 }
 
@@ -258,7 +258,7 @@ void test_parallel_recorder_from_parallel_for()
 
     auto rec = d.parallel_recorder();
     ts::parallel_for(n, [&rec](int) { rec.stage([](Counter& c) { c.increment(); }); });
-    d.commit_async().sync();
+    d.commit().sync();
 
     TS_CHECK(target.async([](const Counter& c) { return c.value(); }).sync() == n);
 }
@@ -275,7 +275,7 @@ void test_parallel_recorder_overflow_lane()
     {
         std::jthread ext([&rec] { rec.stage([](Counter& c) { c.add(2); }); });
     }
-    d.commit_async().sync();
+    d.commit().sync();
     TS_CHECK(target.async([](const Counter& c) { return c.value(); }).sync() == 3);
 }
 
@@ -306,7 +306,7 @@ void test_released_slot_commands_survive()
         auto rec = d.recorder();
         rec.stage([](int& v) { v += 5; });
     }   // released before any commit
-    d.commit_async().sync();
+    d.commit().sync();
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 5);
 }
 
@@ -325,7 +325,7 @@ void test_slot_reuse_inherits_position()
 
     r2.stage([](std::vector<int>& v) { v.push_back(2); });
     r3.stage([](std::vector<int>& v) { v.push_back(1); });
-    d.commit_async().sync();
+    d.commit().sync();
 
     auto v = target.async([](const std::vector<int>& v) { return v; }).sync();
     TS_CHECK((v == std::vector<int>{ 1, 2 }));
@@ -344,7 +344,7 @@ void test_recorder_churn_does_not_grow_journal()
         auto rec = d.recorder();
         rec.stage([](int& v) { ++v; });
     }
-    d.commit_async().sync();
+    d.commit().sync();
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == churn);
 }
 
@@ -360,7 +360,7 @@ void test_parallel_recorder_churn()
         auto rec = d.parallel_recorder();
         rec.stage([](int& v) { ++v; });
     }
-    d.commit_async().sync();
+    d.commit().sync();
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 2000);
 }
 
@@ -379,7 +379,7 @@ void test_late_bound_recorder()
     ts::Recorder<int> rec;             // empty
     rec = d.recorder();                // late-bound
     rec.stage([](int& v) { v = 4; });
-    d.commit_async().sync();
+    d.commit().sync();
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 4);
 }
 
@@ -392,7 +392,7 @@ void test_synced_commit_then_destroy()
         ts::Deferred<int> d{ target };
         auto rec = d.recorder();
         rec.stage([](int& v) { v += 5; });
-        d.commit_async().sync();
+        d.commit().sync();
     }   // dtor: last commit settled -> no fatal
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 5);
 }
@@ -406,6 +406,15 @@ void test_dtor_inflight_commit_is_fatal()
 {
     TS_CHECK(ts::test::expect_death("deferred_dtor_inflight_commit"));
 }
+
+#if TS_SAFETY_CHECKS
+// `commit()` from nested sub-work under an inherited write grant: not the holder, and the
+// enqueued write would queue behind the parent's own hold -- diagnosed at the call.
+void test_commit_nested_grant_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("deferred_commit_nested_grant"));
+}
+#endif
 
 void test_moved_from_recorder_stage_is_fatal()
 {
@@ -446,6 +455,9 @@ void run_deferred_tests()
     run("deferred: synced commit then destroy", test_synced_commit_then_destroy);
     run("deferred: destroy with staged commands is fatal", test_drop_staged_is_fatal);
     run("deferred: destroy with commit in flight is fatal", test_dtor_inflight_commit_is_fatal);
+#if TS_SAFETY_CHECKS
+    run("deferred: commit from nested inherited grant is fatal", test_commit_nested_grant_is_fatal);
+#endif
     run("deferred: stage on moved-from recorder is fatal", test_moved_from_recorder_stage_is_fatal);
     run("deferred: stage on empty parallel recorder is fatal", test_empty_parallel_recorder_stage_is_fatal);
 }

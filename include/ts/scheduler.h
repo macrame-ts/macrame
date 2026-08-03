@@ -154,7 +154,7 @@ public:
     // executing tasks -- every task kind (graph nodes, `parallel_for` slices, async pipe
     // jobs, continuations). Feeds the trace's core-utilization metric: the busy delta over
     // a run window, divided by `workers * window`. Work run inline on non-worker threads
-    // (retraction, inline roots on the caller) is not counted. Relaxed sum over per-worker
+    // (inline roots on the caller) is not counted. Relaxed sum over per-worker
     // counters -- a snapshot, exact only at quiescent points.
     long long busy_ticks() const noexcept
     {
@@ -235,7 +235,7 @@ public:
         slot.body.fetch_add(dt, std::memory_order_relaxed);
         slot.machinery.fetch_add(-dt, std::memory_order_relaxed);
     }
-    // Credit `dt` ticks to body without netting machinery -- an inline/retracted body that
+    // Credit `dt` ticks to body without netting machinery -- an inline-dispatched body that
     // did not pass through `run_task` (nothing booked its span as machinery). No-op off-worker.
     void add_body_only(int worker_index, long long dt) noexcept
     {

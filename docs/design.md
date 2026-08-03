@@ -292,23 +292,23 @@ intrusively; the body is reached through one function pointer. Templating
 the block (the obvious alternative) was rejected because the scheduler is
 runtime-configured and thread-locals like the current-scheduler pointer would
 fracture across instantiations — and because a single block type is what
-makes reuse (`reset()` re-arms scalars in place), pooling, and the forensic
-tooling below tractable. `shared_ptr` was systematically replaced with
-intrusive refcounting (one pointer per handle, one allocation, a `destroy`
-thunk for the aliasing wrappers).
+makes re-arm (`reset()` for `Signal` and the graph's per-run nodes) and
+pooling tractable. `shared_ptr` was systematically replaced with intrusive
+refcounting (one pointer per handle, one allocation, a `destroy` thunk for
+the aliasing wrappers). A coroutine task fuses further: the promise *embeds*
+the block, so frame + block + result are one allocation.
 
 The allocation story was then attacked empirically: a deterministic
 allocation profiler (`--memprofile`) counts allocations per operation, which
 found — among other things — that every queued task paid a second heap
 allocation just to box a closure for the scheduler's raw function-pointer
 API. The dispatch path was restructured so *the block itself is the queue
-payload* (16-byte queue entries, per-dispatch state riding on the block), and
-`when_all`'s six-allocations-per-join was collapsed into one intrusive join
-state. Current counts: `launch` and `async` allocate exactly one block per
-operation. The measured conclusion worth recording: allocation is a
-*secondary* cost here — cross-thread scheduling latency dominates rich
-operations — so the remaining pooling/arena work is scheduled as WIP, not
-emergency.
+payload* (16-byte queue entries, per-dispatch state riding on the block).
+Current counts: `launch` and `async` allocate exactly one block per
+operation; a coroutine chain allocates one frame per coroutine. The measured
+conclusion worth recording: allocation is a *secondary* cost here —
+cross-thread scheduling latency dominates rich operations — so the remaining
+pooling/arena work is scheduled as WIP, not emergency.
 
 ### 4.2 Results: `const&` by default, `take()` to move
 
@@ -322,30 +322,59 @@ readers; at most one mover, and it must be last" — the multi-consumer
 ergonomics of `shared_future` without a second type, and move-only results
 still work.
 
-### 4.3 Builders, not persistent task objects
+### 4.3 One composition mechanism (historical: builders, `then`, `when_all`)
 
-`ts::task(fn).after(...).launch()` is launch-time configuration spelled
-fluently, and it doubles as the **reusable task** handle (`reset()` +
-relaunch re-uses one block/body/result slot). It is deliberately *not* a
-persistent reconfigurable task object: a survey across UE, TBB, Taskflow,
-.NET, Rust and others found the cold-task/builder pattern consistently
-avoided where offered; systems fix prerequisites at launch. Result-passing
-was likewise kept off `after` (ordering and cancellation only) because a
-prerequisite's result feeding a dependent's body *is* `when_all` + `then` by
-construction.
+Earlier revisions carried a full callback-composition surface: `then`
+continuations (with apply-style tuple unpacking), `when_all` joins,
+`ts::task(fn).after(...)` builders doubling as reusable-task handles, deep
+retraction, and inline dispatch for dynamic tasks. It worked, and each piece
+had a defensible rationale — the builder survey (UE, TBB, Taskflow, .NET,
+Rust all fix prerequisites at launch), the `when_all`-carries-results
+argument, retraction as the oversubscription answer.
 
-### 4.4 Blocking without deadlock: retraction
+All of it is deleted. The coroutine expresses every one of those shapes as
+ordinary control flow — sequencing is an await, a join is several awaits
+(awaiting a settled task is free, so order does not serialize), a transform
+is code after the await, a prerequisite is an await at the top of the body —
+with results carried typed, in scope, no tuples and no callback plumbing.
+Two vocabularies for the same graph meant every user chose per call site and
+every reviewer read both; one vocabulary was worth more than the sum of the
+deleted features. The functor forms that remain (`launch`, `access`/`async`
+bodies, graph nodes, `parallel_for`) are *leaves* — work, not composition.
 
-`sync()` on a not-yet-started, non-pipe task runs it — and its un-started
-prerequisite subtree — *inline on the waiting thread*, gated by an atomic
-one-runner claim. This "retraction" (plus caller participation in
-`parallel_for`) is why nested fork-join cannot deadlock the pool even with
-every worker blocked, without oversubscription machinery.
+What replaced "reusable tasks" is nothing: a coroutine allocates one frame
+per run, and the measured allocation story (§4.1) says that is not the cost
+worth complicating the model for. `Signal::reset()` remains the one
+sanctioned re-arm (a phase gate has no result and a trivially quiescent
+window), and the graph re-arms its persistent node blocks per run — both on
+the same `reset()` scalar re-arm the builder once used.
+
+### 4.4 Blocking: the blue boundary (historical: retraction)
+
+The old answer to "what if `sync()` is called with all workers busy?" was
+**retraction**: a blocking `sync()` on a not-yet-started task ran it — and
+its un-started prerequisite subtree — inline on the waiting thread, gated by
+an atomic one-runner claim. It genuinely worked, and it was genuinely
+subtle: the reuse×retraction corner produced the two hardest bugs in the
+project's history (§4.5).
+
+Coroutine-first dissolves the question instead of answering it. Threads
+split into task threads and **blue threads** (main, dedicated engine
+threads). Inside a task, waiting is `co_await` — the frame suspends, the
+worker is freed, no deadlock is possible by construction. On a blue thread,
+`sync()` parks — and parking a non-worker thread is harmless. The residual
+in-task `sync()` is a bug by definition and is **fatal** under safety checks
+(sharp message when the target is queued behind the caller's own grant). The
+one deliberate exception is `parallel_for`'s join: the caller drains chunks
+itself and then waits only on helpers that are provably running on workers —
+bounded, deadlock-free, no retraction needed. With no retraction there is
+also exactly one dispatch per run, which collapsed the claim/generation
+machinery to a plain store plus a safety-check assert.
 
 ### 4.5 Two real races, and the method that caught them
 
-The reuse×retraction corner produced the two hardest bugs in the project's
-history, both instructive:
+The (since-deleted) reuse×retraction corner produced the two hardest bugs in
+the project's history, both instructive enough to keep on record:
 
 - **Token rewrite race**: relaunching a reused task rewrote its cancellation
   token while a prior round's worker could still read it. Fixed by making
@@ -364,44 +393,61 @@ The second bug had survived four independent happens-before analyses (all
 optimized build pinned to two cores — despite having been seen only under
 TSan and initially dismissed as tooling noise. Three transferable lessons,
 now house rules: **capture state before the RMW that grants you rights over
-it** (reading after is a TOCTOU); **"only reproduces under TSan" does not
-mean TSan artifact** — pin to two cores to amplify preemption windows; and
+it** (reading after is a TOCTOU; the generation capture in `release()` still
+follows this rule today); **"only reproduces under TSan" does not mean TSan
+artifact** — pin to two cores to amplify preemption windows; and
 **capture-and-continue forensics beat theorem-proving** — the bug fell to an
-event-ring instrumented build (kept in-tree, compiled out by default) in one
-session.
+event-ring instrumented build in one session. The racing machinery and the
+forensic ring were both deleted with retraction; the lessons were not.
 
 ---
 
-## 5. Coroutines
+## 5. Coroutines: the composition model
 
-C++20 coroutine support is an additive layer (`coroutine_support.h`), not a
-re-founding: `co_await task` registers the coroutine as a continuation on
-the same control block `then` uses; a coroutine returning `Task<R>` is an
-ordinary task to everyone else.
+Coroutine support began as an additive layer and was then made the
+foundation (the coroutine-first transformation, `docs/coroutine-first.md`):
+composition *is* coroutines, and the callback vocabulary is gone (§4.3). The
+design points that carry the weight:
 
-Three design points carry the weight:
-
+- **Fused frame and block.** The promise embeds the `Task_control_block`
+  (first-member aliasing, the `Executable` pattern), so a coroutine task is
+  one allocation and is an ordinary `Task<R>` to everyone else. The frame
+  holds a running self-reference; awaiters, handles, and nested children
+  hold refs, so a fire-and-forget frame lives exactly until settled.
+- **Eager start, blue boundary.** A coroutine task runs to its first genuine
+  suspension on the calling thread (no cold tasks — matching the launch
+  model everywhere else), suspends without holding a worker, and is consumed
+  by `co_await` from tasks or `sync()` from blue threads only (§4.4).
 - **Access grants across suspension.** The harness's grant set is
   thread-local, and a coroutine migrates threads at every suspension. The
   model: a coroutine is a chain of task-*segments*, and each resumed segment
-  re-installs the coroutine's grant snapshot — the nested-task inheritance
-  mechanism reused verbatim, no new concept.
+  re-installs the coroutine's grant snapshot and task identity — the
+  nested-task inheritance mechanism reused verbatim, no new concept. A
+  coroutine *graph node* holds its declared grants until the frame
+  completes — suspension does not release grants; body-return is not
+  completion.
 - **The pipe is already an async reader/writer lock**, so
   `co_await ts::read_write(obj)` yields an RAII guard with direct object access —
   `folly::coro::Mutex::co_scoped_lock`'s shape on top of machinery that
   existed anyway. The canonical coroutine footgun — suspending while holding
-  a lock — is *detected*: a `co_await` under a live guard is fatal. The
-  project's signature safety mechanism catches the signature coroutine
-  mistake.
+  a lock — is *detected*: a `co_await` under a live guard is fatal.
+- **The suspended deadlock is detected too.** Two frames that each hold a
+  grant and await the other's object deadlock with *no thread parked* — the
+  failure mode a blocked-thread diagnostic can never see. Under safety
+  checks every suspension-on-a-pipe records waits-for edges (held grants →
+  awaited pipe) in a global registry, cleared at resume, cycle-checked on
+  insert; the closing edge faults, naming both tasks and both objects. This
+  is what makes awaited dynamic cross-object access a *blessable* residual
+  pattern rather than a documented hazard.
 - **Cancellation is value-based** because exceptions are off project-wide: a
-  cancelled await resumes with cancelled state to inspect, never a throw.
-  This was forced by the no-exceptions constraint and turned out cleaner
-  than exception-driven cancellation — control flow stays visible.
+  cancelled await resumes with cancelled state to inspect (fatal for a value
+  task — check first), never a throw. Forced by the no-exceptions
+  constraint; turned out cleaner — control flow stays visible.
 
-Resumes run through a bounded trampoline (deep continuation cascades resume
-iteratively, proven to 50k depth), and coroutine frames currently heap —
-folding the control block into the frame is planned WIP alongside the
-allocator work.
+Resumes run through a bounded trampoline (deep cascades resume iteratively,
+proven to 50k depth), destruction through another (a deep chain of fused
+frames releases iteratively), and both retain capacity — no steady-state
+allocation.
 
 ---
 
@@ -421,6 +467,18 @@ contention with readers — and one `commit` applies the whole batch under a
 single write access. Readers see none of a batch before the commit and all
 of it after (stable snapshots instead of racy prefixes). The pipe remains
 the only arbitration mechanism; the harness is untouched.
+
+`commit()` is one auto-dispatching verb. The pipe carries an always-on
+`writer_owner` — the task currently holding its write grant — so `commit()`
+called *by the holder* (a graph node's declared write, an `async` write body)
+applies inline under the grant it already has, while any other caller's
+commit becomes one enqueued write. The alternative — two spellings, the
+under-grant `commit()` and an acquiring `commit_async()` — pushed a
+scheduling decision onto the user that the pipe can answer itself, and made
+the common "call it from wherever the frame logic sits" case a foot-gun
+(the wrong spelling either double-acquires or deadlocks). Ownership is
+behavior-bearing state, so it lives outside `TS_SAFETY_CHECKS`; the
+diagnostic-only grant machinery stays gated.
 
 The rejected alternative here was a **"lazy `Guarded`"** — a mode where
 `async` writes queue but don't execute until a flush node runs. It fails on
@@ -541,9 +599,7 @@ compile-time checking worth watching.
 
 **7.9a `TS_ENSURE` (the UE-`ensure`-shaped recoverable assert).** `ts::fatal`
 is the right tool for corruption; some hazards deserve a loud diagnostic
-without killing the process — the first user is the
-blocking-`sync()`-under-grant check (a perf/deadlock hazard, not certain
-corruption; author decision). The macro evaluates its expression once in
+without killing the process. The macro evaluates its expression once in
 every configuration and yields the bool (`if (!TS_ENSURE(x, "..."))`
 recovers naturally, UE semantics); on failure it counts every occurrence
 but reports once per call site (a captureless-lambda function-local static
@@ -560,15 +616,16 @@ host's custom presentation (its own attach dialog, say — the library ships
 none deliberately) can never hide a failure: the test harness fails on
 failures no test explicitly consumed, and the bench/stress drivers fail
 their exit code on any — a tripped ensure cannot pass CI by virtue of the
-program having survived it. The blocking-sync check itself lives at the one
-chokepoint every blocking task wait passes through (`retract_or_wait`),
-fires only when the wait is genuinely about to park under an access scope
-on non-retractable work, and distinguishes the certain-deadlock shape (the
-target is an access to an object the waiting scope holds — matched by
-comparing the target pipe's epoch address against the context's captured
-epoch sources) from the general never-block violation. Sanctioned fork-join
-is structurally exempt: `parallel_for` joins through its own counter, and
-retractable targets are run by the waiter instead of waited on.
+program having survived it. (The mechanism's first user — the blocking-sync
+warning — was later *promoted to fatal* when coroutine-first made an in-task
+`sync()` a bug by definition rather than a hazard: the check lives at the
+one chokepoint every blocking wait passes through (`sync_wait`), fires only
+when the wait is genuinely about to park inside a task, and distinguishes
+the certain-deadlock shape — the target is an access to an object the
+waiting task holds, matched by comparing the target pipe's epoch address
+against the context's captured epoch sources — from the general never-block
+violation. `parallel_for` joins through its own counter and is structurally
+exempt.)
 
 **7.10 Requiring copyable `T` / `.copy()` accessors.** `folly::Synchronized`
 offers lock-and-copy-out; here the guarded objects are whole subsystems
@@ -592,9 +649,10 @@ it:
 - **Determinism as a test**: both engine samples run twice and compare
   results bitwise — which is what caught a replica-divergence bug on day
   one of `Versioned` and motivated the built-in divergence check.
-- **Forensic instrumentation kept in-tree** (compiled out by default): the
-  event-ring harness that cracked the TOCTOU (§4.5) remains as a regression
-  tool, alongside the deterministic allocation profiler.
+- **Forensics on demand**: the event-ring harness that cracked the TOCTOU
+  (§4.5) was purpose-built, kept until the machinery it instrumented was
+  deleted, then deleted with it; the deterministic allocation profiler
+  remains in-tree.
 - **Platform reality of the oracles.** ThreadSanitizer has no Windows
   runtime, and most game development happens on Windows: TSan therefore
   verifies *this library's* concurrency machinery (portable sources, Linux
@@ -619,7 +677,7 @@ it:
   needing only the unordered pair to execute, not the corrupting order),
   but it sees only interleavings actually sampled, so coverage is
   schedule-dependent and it verifies the *implementation* under the contract
-  (queue, pipe, refcounts, lock-counter, retraction claims). The access
+  (queue, pipe, refcounts, lock-counter, coroutine handshakes). The access
   harness is the dual — *complete but narrow*: any undeclared touch of a
   `Guarded` is caught on the first run of that path, deterministically and
   with no concurrency required (it catches the *latent* race the completeness
@@ -639,7 +697,8 @@ it:
 Project documents:
 
 - [task-internals.md](task-internals.md) — the dynamic-task design of
-  record: control block, lifecycle, lock-counter, retraction, nested tasks.
+  record: control block, lifecycle, lock-counter, coroutine frames, nested
+  tasks.
 - [task-systems-comparison.md](task-systems-comparison.md) — the survey: UE
   Tasks, TBB, Taskflow, HPX, folly, Marl, Rayon/Tokio, Go, GCD, and the
   scheduler literature.

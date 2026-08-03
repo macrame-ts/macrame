@@ -1,9 +1,12 @@
 #include "ts/guarded.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace ts
 {
@@ -68,20 +71,17 @@ void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closur
 }
 
 // Trampoline for a queued block dispatch: the block travels as the entry's `data_` (its ref
-// adopted from the queue), the reuse generation via the block's `dispatch_arg`. No heap
+// adopted from the queue), the generation via the block's `dispatch_arg`. No heap
 // closure -- the block IS the payload -- so a bare task dispatch allocates nothing beyond its
 // own block (killing the per-dispatch `submit_closure` alloc that hit every queued task).
 static void run_block_dispatch(void* data)
 {
     Task_ptr block(static_cast<Task_control_block*>(data), Adopt_ref{});   // adopt the queued ref
     std::uint64_t gen = block->dispatch_arg.load(std::memory_order_acquire);
-    TS_FORENSIC(block.get(), E_pop, gen, 0);
-    TS_FORENSIC_PATH(1);
     if (block->execute)
-        block->execute(block, gen);              // claims `gen` internally (dedup + stale-skip)
-    else if (block->claim(gen))                  // bodyless: claim so a stale/duplicate no-ops
+        block->execute(block, gen);              // claims `gen` internally
+    else if (block->claim(gen))                  // bodyless: claim guards against machinery bugs
         block->complete();
-    TS_FORENSIC_PATH(0);
 }   // `block` decrements here -> releases the ref the queue held
 
 // A block whose prerequisites are all met: schedule it to run (its body, or, if
@@ -89,48 +89,150 @@ static void run_block_dispatch(void* data)
 //
 // `gen` was captured by the RELEASER at/before the `num_locks` decrement that hit zero (see
 // `release`), so it names the run that actually became ready -- it is never re-read here.
-// Re-reading `generation()` at this point was the premature-dispatch TOCTOU: a releaser
-// preempted between its decrement and this call can wake AFTER the run it released was
-// retracted, consumed, and re-armed -- the re-read stamped the NEXT generation, whose claim
-// then succeeded while that round's prerequisites were still unmet (captured live by
-// tsan/reuse_hunt.sh: 112/400 iterations on a plain 2-core-pinned build).
+// One dispatch per run and re-arm only after settle (see `run_state`) mean the slot holds
+// at most one live value at a time, so a plain release store publishes it.
 void submit_ready(Task_ptr block, std::uint64_t gen)
 {
     Priority priority = block->flags.priority;
-    // Publish `gen` with a MONOTONIC-MAX CAS, not a plain store: the same delayed releaser
-    // must not regress `dispatch_arg` below a newer round's publish (that would orphan the
-    // newer round's dispatch -- both entries would fail `claim`, and a non-retracting waiter
-    // would hang). Generations only increase, so max is sound; the loop is per-dispatch
-    // (cold) and virtually always uncontended. Invariant: every value in `dispatch_arg` is a
-    // generation whose run genuinely released to zero, so a popped entry reads either its own
-    // gen (claim fails after a reset) or a newer READY one (safe early run; claim de-dups).
-    std::uint64_t cur = block->dispatch_arg.load(std::memory_order_relaxed);
-    while (cur < gen && !block->dispatch_arg.compare_exchange_weak(
-               cur, gen, std::memory_order_release, std::memory_order_relaxed))
-    {
-    }
-    TS_FORENSIC(block.get(), E_submit, gen, 0);
+    block->dispatch_arg.store(gen, std::memory_order_release);
     // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
     global_scheduler().submit(&run_block_dispatch, block.release(), priority);
 }
 
+// ===== the evolved mutex pipe (docs/pipe-rebase.md §0.2) ====================================
+//
+// One mutex per pipe guards the admission state and the intrusive queue of the tasks' own
+// embedded `Pipe_link`s. An admitted entry's TURN fires `release()` on its owner -- the pipe
+// is a prerequisite source for the block machinery (the `pipe_count` trigger in task.h), not
+// a dispatcher -- and a multi-object task's turn also enters its next link (the sequential
+// canonical cascade). Turn-firing happens OUTSIDE the mutex: `release()` reaching zero
+// dispatches (a scheduler submit, possibly a wake syscall; worker-less mode executes at
+// submit), so admission collects the granted entries under the lock and fires after unlock.
+// The task settles -> `advance_pipe_links` releases each entered pipe, admitting successors.
+
 namespace
 {
 
-// Jobs admitted by one `dispatch` pass, collected under the pipe mutex and SUBMITTED AFTER
-// it is released (see `dispatch`). Small inline buffer: a pass admits one writer or a short
-// run of readers.
-using Admitted = std::vector<Job>;
-
-void dispatch(Pipe& pipe, Admitted& admitted);
-void submit_admitted(Scheduler& scheduler, Pipe& pipe, Admitted& admitted);
-
-// Release the pipe in `mode` and admit whatever the release unblocks; notify a
-// `wait_until_idle` waiter if the pipe drained. The tail shared by every way a pipe access
-// ends (queued job body returning, inline body returning, `pipe_release`).
-void release_and_redispatch(Scheduler& scheduler, Pipe& pipe, Access mode)
+// A held grant's queue entry (`pipe_acquire`, the coroutine guards): a link with a null
+// `owner` plus the grant callback. The one allocating pipe path; freed when its admission
+// fires the callback. An immediate (uncontended) acquire allocates nothing.
+struct Hold_node
 {
-    Admitted admitted;
+    Pipe_link link;
+    std::move_only_function<void()> on_acquired;
+    Task_control_block* grant_owner = nullptr;   // published as `writer_owner` for a write hold
+};
+
+// The entries one admission pass granted, chained through their `next` fields (they left
+// the queue, so the field is free). Fired after the mutex is released.
+struct Granted
+{
+    Pipe_link* head = nullptr;
+    Pipe_link* tail = nullptr;
+
+    void push(Pipe_link* l)
+    {
+        l->next = nullptr;
+        (tail != nullptr ? tail->next : head) = l;
+        tail = l;
+    }
+};
+
+// Caller holds `pipe.mutex` for every function below that mutates admission state.
+
+void queue_push(Pipe& pipe, Pipe_link* l)
+{
+    l->next = nullptr;
+    (pipe.queue_tail != nullptr ? pipe.queue_tail->next : pipe.queue_head) = l;
+    pipe.queue_tail = l;
+}
+
+bool admissible(const Pipe& pipe, Access mode)
+{
+    if (mode == Access::read_only)
+        return !pipe.writer_active;
+    return !pipe.writer_active && pipe.active_readers == 0;
+}
+
+// Apply admission state for `l`: reader count / writer flag + grant-holder identity + the
+// harness's grant-window epoch.
+void admit_locked(Pipe& pipe, Pipe_link* l)
+{
+    if (l->mode == Access::read_only)
+    {
+        ++pipe.active_readers;
+        return;
+    }
+    pipe.writer_active = true;
+    Task_control_block* owner = l->owner != nullptr
+        ? l->owner
+        : reinterpret_cast<Hold_node*>(l)->grant_owner;   // `link` is the node's first member
+    pipe.writer_owner.store(owner, std::memory_order_release);
+#if TS_SAFETY_CHECKS
+    pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window opens
+#endif
+}
+
+// Admit as many queued entries as the reader/writer rules allow (FIFO: a blocked front
+// blocks everything behind it), collecting them for post-unlock firing.
+void collect_admissions(Pipe& pipe, Granted& granted)
+{
+    while (pipe.queue_head != nullptr && admissible(pipe, pipe.queue_head->mode))
+    {
+        Pipe_link* l = pipe.queue_head;
+        pipe.queue_head = l->next;
+        if (pipe.queue_head == nullptr)
+            pipe.queue_tail = nullptr;
+        admit_locked(pipe, l);
+        granted.push(l);
+    }
+}
+
+void pipe_enter_link(Pipe_link& l, Task_ptr* record);
+
+// An admitted task entry's turn: enter the owner's next link (the cascade), then fire the
+// pipe-turn prerequisite. Everything needed is read into locals first -- once `release`
+// drops the owner's last lock the task can run, settle, and be destroyed (links included)
+// on another thread, and this frame's entry ref is the only thing pinning it until then.
+void fire_task_turn(Pipe_link& l)
+{
+    Task_control_block* owner = l.owner;
+    std::uint8_t index = l.index;
+    Task_ptr keep(owner, Adopt_ref{});   // adopt the entry's ref (taken at enter)
+    if (index + 1 < owner->pipe_count)
+        pipe_enter_link(owner->pipe_links[index + 1], nullptr);
+    Task_control_block::release(keep);
+}   // `keep` drops the entry ref; the owner lives on via the queue/handle refs downstream
+
+// Fire one admission pass's granted entries, in admission order. Runs WITHOUT the mutex.
+void fire_granted(Granted& granted)
+{
+    Pipe_link* l = granted.head;
+    while (l != nullptr)
+    {
+        Pipe_link* next = l->next;   // read first: firing may free the entry's owner
+        if (l->owner != nullptr)
+        {
+            fire_task_turn(*l);
+        }
+        else
+        {
+            // A held grant: hand the pipe to the holder via its callback (scheduled, as a
+            // closure -- the holder resumes on a worker), then retire the node.
+            auto* node = reinterpret_cast<Hold_node*>(l);
+            submit_closure(global_scheduler(), std::move(node->on_acquired), Priority::normal);
+            delete node;
+        }
+        l = next;
+    }
+}
+
+// Release the pipe in `mode` and admit + fire whatever that unblocks; notify a
+// `wait_until_idle` waiter if the pipe drained. The tail shared by every way an access
+// ends (a settled task's `advance_pipe_links`, an inline body's release, `pipe_release`).
+void release_and_redispatch(Pipe& pipe, Access mode)
+{
+    Granted granted;
     {
         std::scoped_lock lock(pipe.mutex);
         if (mode == Access::read_only)
@@ -140,12 +242,13 @@ void release_and_redispatch(Scheduler& scheduler, Pipe& pipe, Access mode)
         else
         {
             pipe.writer_active = false;
+            pipe.writer_owner.store(nullptr, std::memory_order_release);   // write grant released
 #if TS_SAFETY_CHECKS
             pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window closes
 #endif
         }
 
-        dispatch(pipe, admitted);
+        collect_admissions(pipe, granted);
 
         // Drain notify under the mutex -- the standard-blessed condition_variable teardown
         // pattern ([thread.condition.condvar]: only the notify need happen-before the
@@ -156,234 +259,263 @@ void release_and_redispatch(Scheduler& scheduler, Pipe& pipe, Access mode)
         // (`EmptyEventRef` + a local copy taken before the last decrement -- their
         // `// use-after-free territory!`) precisely because its `FEventCount::Notify` is
         // lock-free/unlocked; notify-under-lock makes us structurally immune to that race.
-        // See docs/pipe-drain-race-handoff.md.
-        if (pipe.jobs.empty() && pipe.active_readers == 0 && !pipe.writer_active)
+        if (pipe.queue_head == nullptr && pipe.active_readers == 0 && !pipe.writer_active)
             pipe.idle.notify_all();
     }
-    // The only post-unlock pipe touch. `dispatch` admits nothing exactly when the idle
-    // predicate above held (admitting sets `writer_active`/`active_readers`), so a notify
-    // implies `admitted` is empty -- and only a notify can release the destroying waiter.
-    // Guarding on non-empty therefore means we never even bind `pipe&` after the waiter
-    // could have freed it: whenever the pipe may be dead, `admitted` is empty and the call
-    // is skipped. When `admitted` is non-empty the pipe has in-flight work and stays alive.
-    if (!admitted.empty())
-        submit_admitted(scheduler, pipe, admitted);
+    // Post-unlock, and deliberately pipe-free: `fire_granted` walks the granted LINKS (each
+    // pinned by its owner's entry ref) and never binds `Pipe&`, so a waiter that the notify
+    // above released may destroy the pipe concurrently with no lifetime question at all.
+    // (A notify also implies nothing was granted -- any admission sets
+    // `writer_active`/`active_readers` -- so the two cases do not even overlap.)
+    fire_granted(granted);
 }
 
-// Trampoline for an admitted pipe job (one per mode, so the mode needs no storage): the
-// block travels as the entry's `data_` (ref adopted from the queue), the owning pipe via
-// the block's `dispatch_arg` (free on this path -- a pipe block is created, dispatched once,
-// and never `reset`, so its generation is always 0). Runs the body on this worker, then
-// releases the pipe at body-return (the existing contract: nested tasks gate the task's
-// COMPLETION, not the pipe) and re-dispatches. Mirrors `run_block_dispatch` -- no heap
-// closure, so an async op allocates only its block.
-void run_pipe_job(void* data, Access mode)
+// Enter `l` into its pipe: admit immediately when the queue is empty and the mode rules
+// allow (the turn fires after unlock), else queue FIFO. The entry holds one ref on the
+// owner from here until its turn fires (`fire_task_turn` adopts it) -- the push-UAF
+// bracket: a fire-and-forget caller may drop its handle before the turn.
+void pipe_enter_link(Pipe_link& l, Task_ptr* record)
 {
-    Task_ptr block(static_cast<Task_control_block*>(data), Adopt_ref{});   // adopt the queued ref
-    Pipe& pipe = *reinterpret_cast<Pipe*>(
-        static_cast<std::uintptr_t>(block->dispatch_arg.load(std::memory_order_acquire)));
-
-    block->execute(block, /*gen*/ 0);   // async blocks always have a body; claim(0) de-dups
-
-    // This trampoline only ever runs on a worker of the scheduler the job was submitted to
-    // (pipe blocks are not retractable and never inline-dispatched), so the ambient scheduler
-    // is the right one for the re-dispatch. The pipe outlives this call: `wait_until_idle`
-    // (Guarded's dtor) can't pass until the release below.
-    release_and_redispatch(*current_scheduler, pipe, mode);
-}   // `block` decrements here -> releases the ref the queue held
-
-void run_pipe_job_read(void* data) { run_pipe_job(data, Access::read_only); }
-void run_pipe_job_write(void* data) { run_pipe_job(data, Access::read_write); }
-
-// Admit as many front jobs as the reader/writer rules allow, moving them into `admitted`
-// for the caller to submit AFTER `pipe.mutex` is released. Caller holds `pipe.mutex`.
-//   - readers: any number may run concurrently, but not alongside a writer
-//   - writer: runs alone (no readers, no other writer)
-//   - FIFO: a writer at the front holds back later jobs until prior readers drain
-// Admission mutates the pipe state (reader count / writer flag) under the lock, so the
-// admitted-but-not-yet-submitted window is invisible: `wait_until_idle` counts the job as
-// active, and no concurrent `dispatch` can admit it twice (it left the deque). Submission
-// happens outside the lock because a worker-less scheduler EXECUTES at submit -- a job body
-// releasing this same pipe under the held mutex would deadlock (and shorter critical
-// sections are better in every mode).
-void dispatch(Pipe& pipe, Admitted& admitted)
-{
-    while (!pipe.jobs.empty())
+    Pipe& pipe = *l.pipe;
+    intrusive_inc(l.owner);   // the entry's ref
+    bool now = false;
     {
-        Job& front = pipe.jobs.front();
-
-        if (front.mode == Access::read_only)
+        std::scoped_lock lock(pipe.mutex);
+        if (record != nullptr)
+            *record = Task_ptr(l.owner);   // enqueue-and-record, atomic under the mutex
+        l.owner->pipes_entered = static_cast<std::uint8_t>(l.index + 1);   // advance retires [0, entered)
+        if (pipe.queue_head == nullptr && admissible(pipe, l.mode))
         {
-            if (pipe.writer_active)
-                break;
-            ++pipe.active_readers;
+            admit_locked(pipe, &l);
+            now = true;
         }
         else
         {
-            if (pipe.writer_active || pipe.active_readers > 0)
-                break;
-            pipe.writer_active = true;
-#if TS_SAFETY_CHECKS
-            pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window opens
-#endif
+            queue_push(pipe, &l);
         }
-
-        admitted.push_back(std::move(front));
-        pipe.jobs.pop_front();
     }
-}
-
-// Submit one `dispatch` pass's admitted jobs, in admission order (FIFO preserved). Runs
-// WITHOUT `pipe.mutex`.
-void submit_admitted(Scheduler& scheduler, Pipe& pipe, Admitted& admitted)
-{
-    for (Job& job : admitted)
-    {
-        if (job.reservation)
-        {
-            // Signal the holder that it now owns the pipe; `writer_active`/`active_readers`
-            // stay set (the reservation is released explicitly via `pipe_release`, not on
-            // the callback's completion).
-            submit_closure(scheduler, std::move(job.on_acquired), job.priority);
-            continue;
-        }
-        // The `dispatch_arg` publish (release) is ordered before the submit that makes the
-        // block reachable; one dispatch per pipe block, so no later publish exists to race.
-        job.block->dispatch_arg.store(
-            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&pipe)),
-            std::memory_order_release);
-        Task_func_ptr trampoline = job.mode == Access::read_only ? &run_pipe_job_read
-                                                                 : &run_pipe_job_write;
-        // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
-        scheduler.submit(trampoline, job.block.release(), job.priority);
-    }
+    if (now)
+        fire_task_turn(l);
 }
 
 } // namespace
 
-void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block, Priority priority)
+void pipe_enter_first(Task_control_block* blk, Task_ptr* record)
 {
-    Admitted admitted;
-    {
-        std::scoped_lock lock(pipe.mutex);
-        pipe.jobs.push_back(Job{ mode, /*reservation*/ false, priority, std::move(block), {} });
-        dispatch(pipe, admitted);
-    }
-    submit_admitted(scheduler, pipe, admitted);
+    pipe_enter_link(blk->pipe_links[0], record);
 }
 
-bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired)
+void advance_pipe_links(Task_control_block* blk)
 {
-    std::scoped_lock lock(pipe.mutex);
-    // Admit at the front only if nothing is queued (FIFO) and the mode rule holds: a reader
-    // joins concurrent readers (no writer), a writer needs the pipe idle.
-    if (pipe.jobs.empty())
-    {
-        if (mode == Access::read_only)
-        {
-            if (!pipe.writer_active)
-            {
-                ++pipe.active_readers;   // acquired now; hold as a concurrent reader
-                return true;
-            }
-        }
-        else if (!pipe.writer_active && pipe.active_readers == 0)
-        {
-            pipe.writer_active = true;   // acquired now; hold as an exclusive writer
-#if TS_SAFETY_CHECKS
-            pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window opens
-#endif
-            return true;
-        }
-    }
-    // Deferred: sit behind the queued/active work; admitted (FIFO) when it drains. No
-    // dispatch here -- the blocking condition still holds, so nothing can be admitted yet;
-    // whatever releases it (a completing job or `pipe_release`) re-dispatches.
-    pipe.jobs.push_back(Job{ mode, /*reservation*/ true, Priority::normal, {}, std::move(on_acquired) });
-    return false;
+    for (std::uint8_t i = 0; i < blk->pipes_entered; ++i)
+        release_and_redispatch(*blk->pipe_links[i].pipe, blk->pipe_links[i].mode);
 }
 
-void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode)
+void pipe_links_on_complete(Task_control_block* blk)
 {
-    release_and_redispatch(scheduler, pipe, mode);
+    advance_pipe_links(blk);
 }
 
-void multi_acquire(Ref_ptr<Multi_async_state> state, Task_ptr block, std::size_t pos)
-{
-    if (pos == state->holds.size())
-    {
-        // All objects held -> run the body. A multi-async block is one-shot (never `reset`),
-        // so reading its generation here is race-free (it is constant 0 for its lifetime).
-        std::uint64_t gen = block->generation();
-        submit_ready(std::move(block), gen);
-        return;
-    }
-
-    auto [pipe, mode] = state->holds[pos];
-    bool acquired = pipe_acquire(*state->scheduler, *pipe, mode,
-        [state, block, pos]() mutable { multi_acquire(std::move(state), std::move(block), pos + 1); });
-
-    if (acquired)
-        multi_acquire(std::move(state), std::move(block), pos + 1);
-}
-
-#if TS_SAFETY_CHECKS
-// The `retract_or_wait` diagnostic (declared in task.h, defined here for the `Pipe`
-// layout): the caller established that the wait is about to park, an access scope is
-// active, and the target is non-retractable. Sharp message when the target is a
-// single-object pipe job on a pipe this scope holds -- that shape deadlocks (the job is
-// queued behind the very grant the waiter sits inside); general never-block warning
-// otherwise (multi-object jobs land here too: their `dispatch_arg` carries the reuse
-// generation, not a pipe, so the sharp match is out of reach for them).
-void blocking_sync_diagnose(const Task_control_block* blk) noexcept
-{
-    if (blk->flags.pipe_job)
-    {
-        const Pipe* pipe = reinterpret_cast<const Pipe*>(
-            static_cast<std::uintptr_t>(blk->dispatch_arg.load(std::memory_order_relaxed)));
-        if (pipe && current_access && current_access->holds_epoch(&pipe->write_epoch))
-        {
-            TS_ENSURE(false, "sync() on an access to an object this scope already holds -- "
-                "this deadlocks; use then/when_all or nested tasks");
-            return;
-        }
-    }
-    TS_ENSURE(false, "blocking sync() on non-retractable work inside an access scope -- "
-        "occupies a worker and risks deadlock; prefer continuations (then/when_all) or "
-        "nested tasks");
-}
-#endif
-
-bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_ptr& block)
+bool pipe_try_inline(Scheduler&, Pipe& pipe, Access mode, const Task_ptr& block)
 {
     {
         std::scoped_lock lock(pipe.mutex);
-        if (!pipe.jobs.empty())
-            return false;   // queued work ahead -- preserve FIFO, defer to the queue
-        if (mode == Access::read_only)
-        {
-            if (pipe.writer_active)
-                return false;
-            ++pipe.active_readers;   // join as a concurrent reader
-        }
-        else
-        {
-            if (pipe.writer_active || pipe.active_readers > 0)
-                return false;
-            pipe.writer_active = true;   // exclusive writer
-#if TS_SAFETY_CHECKS
-            pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window opens
-#endif
-        }
+        if (pipe.queue_head != nullptr || !admissible(pipe, mode))
+            return false;   // queued work ahead (FIFO) or mode-blocked -- defer to the queue
+        admit_locked(pipe, &block->pipe_links[0]);
+        block->pipes_entered = 1;   // settle's advance releases this admission
     }
 
     // Admitted: run the body inline on THIS thread (it installs its own access scope). The
-    // caller blocks for its duration. Then release + re-dispatch, mirroring `run_pipe_job`.
+    // caller blocks for its duration; the settle's `advance_pipe_links` releases the pipe.
     block->execute(block, /*gen*/ 0);
-
-    release_and_redispatch(scheduler, pipe, mode);
     return true;
 }
 
+bool pipe_acquire(Scheduler&, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired,
+                  Task_control_block* owner)
+{
+    std::scoped_lock lock(pipe.mutex);
+    // Admit at the front only if nothing is queued (FIFO) and the mode rule holds.
+    if (pipe.queue_head == nullptr && admissible(pipe, mode))
+    {
+        if (mode == Access::read_only)
+        {
+            ++pipe.active_readers;   // acquired now; hold as a concurrent reader
+        }
+        else
+        {
+            pipe.writer_active = true;   // acquired now; hold as an exclusive writer
+            pipe.writer_owner.store(owner, std::memory_order_release);
+#if TS_SAFETY_CHECKS
+            pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window opens
+#endif
+        }
+        return true;
+    }
+    // Deferred: queue behind the pending work; admitted (FIFO) when it drains, firing the
+    // callback. No admission pass here -- the blocking condition still holds.
+    auto* node = new Hold_node();
+    node->link.pipe = &pipe;
+    node->link.mode = mode;
+    node->on_acquired = std::move(on_acquired);
+    node->grant_owner = owner;
+    queue_push(pipe, &node->link);
+    return false;
+}
+
+void pipe_release(Scheduler&, Pipe& pipe, Access mode)
+{
+    release_and_redispatch(pipe, mode);
+}
+
+#if TS_SAFETY_CHECKS
+// ===== waits-for cycle detector (docs/coroutine-first.md §2) ================================
+//
+// One process-wide registry of {held pipe -> awaited pipe} edges, recorded by the coroutine
+// awaiters at a genuine suspension on a pipe and cleared at resume. A cycle among the edges
+// is the suspended-ABBA deadlock; it is checked on every insert under the registry mutex,
+// so whichever awaiter inserts the closing edge sees the rest and faults. Cold path only
+// (a deferred acquire / a suspending await), so a mutex + vector + DFS is plenty.
+namespace
+{
+
+struct Waits_edge
+{
+    const Pipe* held;
+    const Pipe* awaited;
+    const void* ticket;                  // the recording awaiter (identity for clear)
+    const Task_control_block* waiter;    // the suspending task, for the diagnostic
+};
+
+std::mutex waits_mutex;
+std::vector<Waits_edge> waits_edges;
+
+// Recover the owning `Pipe` from an `Access_context` entry's epoch source (the entry
+// stores `&pipe->write_epoch`). Diagnostic-only pointer arithmetic, confined to this TU
+// where the layout is known; `offsetof` on `Pipe` is conditionally-supported (non-
+// standard-layout) and accepted by every toolchain we build on.
+const Pipe* pipe_from_epoch(const std::atomic<std::uint64_t>* epoch) noexcept
+{
+    return reinterpret_cast<const Pipe*>(
+        reinterpret_cast<const char*>(epoch) - offsetof(Pipe, write_epoch));
+}
+
+const char* pipe_name(const Pipe* pipe) noexcept
+{
+    return pipe->debug_name != nullptr ? pipe->debug_name : "<unnamed>";
+}
+
+// Does a chain of edges lead from `from` back to `target`? (`held == from` edges step to
+// their awaited pipe.) Depth-bounded for safety; the registry is tiny (live suspensions).
+bool waits_reaches(const Pipe* from, const Pipe* target, int depth) noexcept
+{
+    if (from == target)
+        return true;
+    if (depth > 64)
+        return false;
+    for (const Waits_edge& e : waits_edges)
+    {
+        if (e.held == from && waits_reaches(e.awaited, target, depth + 1))
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
+bool waits_for_record(const Access_context* held, const void* ticket, const Task_control_block* waiter,
+                      Pipe* const* awaited, int count)
+{
+    if (held == nullptr || count == 0)
+        return false;
+    std::scoped_lock lock(waits_mutex);
+    bool recorded = false;
+    held->for_each_epoch([&](const std::atomic<std::uint64_t>* epoch)
+    {
+        const Pipe* held_pipe = pipe_from_epoch(epoch);
+        for (int i = 0; i < count; ++i)
+        {
+            const Pipe* awaited_pipe = awaited[i];
+            if (awaited_pipe == nullptr)
+                continue;
+            if (waits_reaches(awaited_pipe, held_pipe, 0))
+            {
+                // The closing edge. Find the counterpart edge out of the awaited pipe to
+                // name the other task; for a self-cycle (awaiting an object this task
+                // holds) there is none.
+                const Waits_edge* other = nullptr;
+                for (const Waits_edge& e : waits_edges)
+                {
+                    if (e.held == awaited_pipe)
+                    {
+                        other = &e;
+                        break;
+                    }
+                }
+                char message[512];
+                if (awaited_pipe == held_pipe)
+                {
+                    std::snprintf(message, sizeof message,
+                        "waits-for cycle: task (block %p) holding '%s' awaits the same object -- the "
+                        "access queues behind the very grant the awaiter holds and the frame never "
+                        "resumes; access it under the held grant instead (reentrancy covers the "
+                        "writer-owner case)",
+                        static_cast<const void*>(waiter), pipe_name(held_pipe));
+                }
+                else
+                {
+                    std::snprintf(message, sizeof message,
+                        "waits-for cycle: task (block %p) holding '%s' awaits '%s', while task "
+                        "(block %p) holding '%s' awaits '%s' -- a suspended ABBA deadlock (no thread "
+                        "parks; the frames simply never resume). Prefer the access hierarchy: declare "
+                        "the object on the node, read a Versioned snapshot, or stage via Deferred "
+                        "(docs/coroutine-first.md section 2)",
+                        static_cast<const void*>(waiter), pipe_name(held_pipe), pipe_name(awaited_pipe),
+                        static_cast<const void*>(other != nullptr ? other->waiter : nullptr),
+                        pipe_name(awaited_pipe),
+                        other != nullptr ? pipe_name(other->awaited) : "?");
+                }
+                ts::fatal(message);
+            }
+            waits_edges.push_back({ held_pipe, awaited_pipe, ticket, waiter });
+            recorded = true;
+        }
+    });
+    return recorded;
+}
+
+void waits_for_clear(const void* ticket) noexcept
+{
+    std::scoped_lock lock(waits_mutex);
+    std::erase_if(waits_edges, [&](const Waits_edge& e) { return e.ticket == ticket; });
+}
+
+// The `sync_wait` diagnostic (declared in task.h, defined here for the `Pipe` layout):
+// the caller established that the wait is about to park inside a task. Sharp message
+// when the wait target is a pipe task queued on a pipe the current scope's grant covers
+// -- that shape deadlocks (the entry sits behind the very grant the waiter holds). The
+// links carry the pipe identities, so multi-object jobs get the sharp match too.
+void blocking_sync_diagnose(const Task_control_block* blk) noexcept
+{
+    if (current_access != nullptr)
+    {
+        for (std::uint8_t i = 0; i < blk->pipe_count; ++i)
+        {
+            const Pipe_link& l = blk->pipe_links[i];
+            if (l.pipe != nullptr && current_access->holds_epoch(&l.pipe->write_epoch))
+            {
+                ts::fatal("sync() inside a task on an access to an object this task already "
+                    "holds -- this deadlocks; co_await it, or commit()/access under the held "
+                    "grant");
+            }
+        }
+    }
+    ts::fatal("blocking sync() inside a task -- parks a worker and risks pool-exhaustion "
+        "deadlock; co_await the task instead (or ts::nested / parallel_for for fork-join)");
+}
+#endif
+
 } // namespace detail
 } // namespace ts
+

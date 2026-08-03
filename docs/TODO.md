@@ -15,30 +15,47 @@ survives in git history (this file was condensed 2026-07).
 
 ## Shipped
 
-All layers built, tested (**504 checks** as of 2026-07, TSan/ASan clean, subprocess
+All layers built, tested (**501 checks** as of 2026-08, TSan/ASan clean, subprocess
 death tests), documented, and CI-gated.
 
-- **Task core** — `launch`/`task`/`after`, `then`, `when_all` (apply-style + void-drop +
-  move-only), `const& sync()` + `take()`, cooperative cancellation (+ `Cancel_callback` +
-  trailing-`Cancellation_token` body early-out), reusable tasks (hardened — two reuse×retraction
-  races fixed: token-immutable-per-block + capture-generation-before-`fetch_sub`), nested tasks,
-  retraction / deep-retraction, inline dispatch on all four routes.
-- **Guarded / access** — `access` (opportunistic) + `async` (scheduled) verb split, const-ness
-  deduction, multi-object `ts::access`/`ts::async` (canonical-order acquire, deadlock-free),
-  per-object reader/writer pipe. (MSVC fix: `Async_result` invocable-guard so a rejected
-  overload's return type doesn't hard-instantiate `invoke_result_t`.)
+- **Task core (coroutine-first, 2026-08)** — `Task<R>` is the one completion primitive:
+  awaitable from any task, `sync()`/`take()` legal ONLY outside tasks (in-task blocking is
+  fatal under `TS_SAFETY_CHECKS`). Composition is `co_await`; `ts::launch` (free-running) and
+  `ts::nested` (joins the caller's implicit scope) are the launch verbs, `Task_scope` the
+  explicit nursery. Cooperative cancellation (+ `Cancel_callback` + trailing-
+  `Cancellation_token` body early-out), `Signal` (+ `reset()`) as the awaitable event.
+  Deleted with the transformation: `then`, `when_all`, the `ts::task` builder + `after`,
+  retraction/deep-retraction, executable task reuse, the inline-dispatch trampoline
+  (`set_inline`/`run_inline`) — see [coroutine-first.md](coroutine-first.md) §3/§8.
+- **Guarded / access** — awaitable `co_await obj.access(fn)` (inline when the pipe is free or
+  the caller already owns the write grant, else suspends) + eager `async` (returns `Task<R>`,
+  callable from any color), const-ness deduction, multi-object `ts::access`/`ts::async`
+  (canonical-order cascade, deadlock-free), per-object reader/writer pipe.
+- **Pipe (evolved, 2026-08)** — one mutex per pipe with rebuilt internals: intrusive FIFO of
+  embedded `Pipe_link`s (no `Job`/`std::deque`/closures), pipe turns as `num_locks`
+  prerequisites, one unified multi-object cascade serving dynamic multi-object `async` AND
+  graph nodes (deleting `Multi_async_state`, `acquire_next`, `preheld`, the explicit graph
+  handoff), always-on `writer_owner` grant ownership. Design of record:
+  [pipe-rebase.md](pipe-rebase.md) §0.
 - **Static graph** — access-conflict-derived edges + explicit `after`/`before`, per-node
-  mode-aware acquire (objects free in the gaps), object handoff between accessors, inline nodes,
-  nested tasks in nodes, allocation-free re-runs.
+  mode-aware acquire (objects free in the gaps), coroutine node bodies, per-node implicit
+  scope, allocation-free re-runs.
 - **Scheduler (M2 stages 1–4)** — per-priority lock-free MPMC queues, Vyukov eventcount,
   per-worker Chase-Lev deques + stealing, low-starvation valve + spinner cap; idle policies
   (`spin` / `spin_then_block` default / `handoff`).
-- **Coroutines** — awaitable `Task`, `co_await ts::read_only/read_write` guards, per-segment
-  access-context threading, suspension detector, bounded resume trampoline.
+- **Coroutines** — mandatory, not optional: awaitable `Task`, `co_await ts::read_only/
+  read_write` guards, promise-carried access context reinstalled at every resumption,
+  implicit per-frame scope + `join_nested`, `Task_scope`, coroutine graph nodes, frame/block
+  fusion (one allocation — the promise embeds the block), the bounded resume trampoline, the
+  waits-for cycle detector for suspended-ABBA.
 - **Deferred / Versioned** — staged-write layer (`Journal`/`Recorder`/`Parallel_recorder`),
-  three-phase publish, replay/copy/overwrite resync, single-publisher enforcement.
-- **Allocation** — `launch` 1 · `async` 1 · `then` 3.86 · `when_all` 6.15 allocs/op
-  (intrusive refcount, per-dispatch `submit_closure` kill, `when_all` collapse).
+  ONE auto-dispatching `commit()` (inline under a held write grant, else an enqueued write —
+  `commit_async` removed), three-phase publish, replay/copy/overwrite resync,
+  single-publisher enforcement.
+- **Allocation** — `launch` 1 · `async` 1 · coroutine task 1 (frame/block fusion) allocs/op
+  (intrusive refcount, per-dispatch `submit_closure` kill). The `then`/`when_all` multi-alloc
+  offenders are gone with the verbs themselves; re-baseline `mem_profile` on the coroutine
+  shapes (10.14 territory).
 - **Build / public-prep** — MIT license, whole lib in `ts::`, CMake + presets, CI
   (MSVC / clang-cl / Linux-TSan), Shipping config (`TS_SAFETY_CHECKS=0`), v0.1.0,
   `ts.h` umbrella, `.clang-format`, `CONTRIBUTING` + issue/PR templates.
@@ -132,8 +149,25 @@ IDs — when an item is done, mark it, don't renumber.
        both viable; author verdict: B "interesting but too limited, maybe in the future"; A
        shelved with it. Page protection rejected on numbers. Escaped-ref coverage remains
        TSan's job per [limits.md](limits.md); revisit on a real adoption-blocking incident.
-   14. `[ ]` **(P2, designed 2026-07, benchmark-gated) Rebase the pipe onto the block machinery
-       (pipes-as-edges — UE `FPipe` generalized to reader/writer).** UE's pipe is lock-free not
+   14. `[x]` **DONE, but NOT as designed (2026-08) — the lock-free chain was implemented,
+       stress-tested, and RETIRED; what shipped is the evolved mutex pipe.** The R10 gate came
+       back negative (22 producers on one pipe: 798 ns/op vs ~1050 ns/op uncontended — the
+       mutex was never the bottleneck), and every reader-group piece of the chain burned
+       (walk double-claim, three custody/lifetime UAFs, claim-without-fire, the tenure/era ABA
+       that exists only because the chain is lock-free), while every serial UE-verbatim piece
+       worked immediately. What shipped instead: one mutex per pipe with rebuilt internals —
+       intrusive FIFO of embedded `Pipe_link`s, pipe turns as `num_locks` prerequisites, the
+       unified multi-object cascade (one path for dynamic multi-object `async` and graph nodes;
+       `Multi_async_state`/`acquire_next`/`preheld`/explicit handoff deleted), always-on
+       `writer_owner`, and the `wait_until_idle` drain kept as a CV notified under the mutex
+       (verified immune to the UE `FPipe` teardown UAF, which is a lock-free-notify artifact).
+       Design of record + the retirement evidence: [pipe-rebase.md](pipe-rebase.md) §0;
+       tests [pipe-rebase-tests.md](pipe-rebase-tests.md). The addenda below are kept as the
+       engineering record — note that the `Deferred::last_commit_` race they describe IS
+       dissolved (the enqueue-and-record seam under the pipe mutex; `commit_mutex_` deleted),
+       and the retraction addendum is moot (retraction is gone with the coroutine-first
+       transformation, 6.4). Original design text follows.
+       UE's pipe is lock-free not
        by clever atomics but by *not being a scheduler structure*: one atomic `LastTask`;
        push = exchange + `AddSubsequent` on the previous task — serialization compiled into
        dependency edges, with the existing task machinery doing all dispatch (verified in
@@ -211,6 +245,14 @@ IDs — when an item is done, mark it, don't renumber.
        and 6.1 (inline-when-free for awaited accesses); pairs with 10.11. Deliverable first: a
        route-by-route table (entry x default x inline-eligibility x alloc/dispatch cost) before
        changing anything.
+       **Partly answered (2026-08, 6.4).** (a) is settled for the dynamic surface: there is one
+       awaitable access verb whose default IS inline-when-free (plus reentrant-owner inline),
+       and one eager `async` — the split is now by *color*, not by policy, so there is no
+       inconsistent default left to pick between. What survives of this item: multi-object
+       `access` still has no inline arm (1.2), (b) the low-level-launch minimisation pass has
+       not been done (and should now count coroutine frames, not just task blocks — 6.2), and
+       (c) the zero-cost target is unmeasured on the new verbs. Redo the route table against
+       the coroutine surface before acting.
 
    16. `[ ]` **(P1, author 2026-07) Nested `Guarded`: investigate, then sample or hazard doc.**
        The case: a guarded resource whose member is itself guarded (a `Guarded<T>` where `T` holds
@@ -226,7 +268,7 @@ IDs — when an item is done, mark it, don't renumber.
 2. **Static task graph**
    1. `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.
    2. `[ ]` **(P2, raised within-band) Ambiguity detection** — `compile({.ambiguity = Warn|Error|Ignore})` determinism diagnostic; needs edge provenance; feeds profiler-guided reorder. **Research validation (2026-07, [research-static-vs-dynamic.md](research-static-vs-dynamic.md)):** ordering ambiguity is the top user-facing failure of access-derived schedules — Bevy shipped exactly this diagnostic (`ambiguity_detection`) after its stageless rework because users hit nondeterministic system order in practice. **PARKED (author, 2026-07).** Full analysis in [ordering-ambiguity.md](ordering-ambiguity.md): our declaration-index orientation is deterministic, so we lack Bevy's per-frame-nondeterminism bug class — the residual is *hidden, unratified* orientation (a refactor that swaps two `add_node` lines silently flips gameplay). The proposed feature (conflict provenance + a fragile-orientation lint + a commutativity annotation feeding the optimizer) is rescoped as optimizer infrastructure, not a safety feature — but the annotation-cost question (pairwise = combinatorial; object-level = the mitigation, unproven) is unresolved. Do nothing until real usage data (start with the tiebreak-only pair count on `game_frame`). Provenance itself is still needed by 2.4/2.5 and the DOT dump regardless.
-   3. `[ ]` **(P3) Pipelined execution** — more than one `execute()` in flight (frame overlap).
+   3. `[ ]` **(P3, pulled up 2026-08) Pipelined execution** — more than one `execute()` in flight (frame overlap). **Now also the relaxation path for nested graph runs** (6.9a): the v1 rule there is one instance per concurrent user, because a pre-compiled inner graph invoked from two concurrently-running parents collides with one-run-at-a-time. Run-queueing / pipelined runs is the general fix, so a demonstrated shared-inner-graph case promotes this item rather than adding new machinery.
    4. `[ ]` **(P2) Profiler-guided optimization** — reorder/rebucket from measured durations. **Manual dry-run done (2026-07, game_frame); the headline finding is about measurement, not levers.** Five configurations were tried (placement of staleness-tolerant `Versioned` readers early-vs-tail × priority ranking none/high-low/spine-high): all cells measured 4.9–5.6 ms within one session window, while the SAME baseline configuration measured 4.15 ms in an earlier window and 5.3 ms later — **cross-window ambient drift (~25%) dwarfed every within-window delta (~5–10%)**, so no lever's sign is established at single-run resolution. Everything below is therefore prerequisites + hypotheses to re-test under proper methodology:
       - **Measurement methodology is prerequisite #1**: interleaved runs (A/B/A/B to cancel drift), medians over N, controlled load, and the per-lane timeline capture from the graph-viz session (docs/graph-viz-handoff.md) — without this, optimization conclusions are noise. Ties to 10.1 (benchmark regression infra). **Capture landed (2026-07)**: `Graph_trace` streams per-node medians/variance, per-edge binding gaps, measured critical-path frequency, dispatch waits, and the critical-dead-time headline (makespan − critical work). First validated findings, from the permanent 4-worker starved run: dead time 22.5% vs 2.4% on 12 workers (scheduling- vs dependency-bound, now a one-line diagnosis); the priority lever is REFUTED for the occupancy case, and the ordering lever half-confirmed (gap closed, makespan −10% regression — `after` is completion-to-start). Full experiment record, lessons (makespan is the objective, dead time the diagnostic; the chain-extension guard; the missing yield/start-ordering primitive), and the three-tier tuner design in [profiler-guided-optimization.md](profiler-guided-optimization.md). Remaining prerequisite: interleaved A/B methodology.
       - **Mechanistic hypotheses recorded** (plausible, magnitudes unproven): (1) naive early gap-filling delays the serial spine — a ready critical-path node waits for a worker to finish its current slice, nothing evicts a runner → keep-out zones / finer filler granularity / reservation may be needed; (2) the current `Priority` enum cannot serve as rank: `low` is valve-gated background (a mislabeled dependency — hand-labeling got nav→ai and ui→submit wrong, which automated upward-rank would not — stalls its dependents), and `high` dispatches via the global MPMC queues instead of the per-worker deques (M2: only `normal` goes local) — a structural cost. Prerequisite either way: a rank mechanism native to the local-deque path (rank-ordered pop within `normal`, or M2 stage 5), plus **slice priority inheritance** — done (2026-07): `parallel_for`/`async_parallel_for` helpers now inherit the calling task's priority by default (`Parallel_options::priority` overrides), so a node's slices dispatch at the node's class rather than always `normal`.
@@ -314,41 +356,88 @@ IDs — when an item is done, mark it, don't renumber.
    5. `[ ]` **(P2) M2 stage 5** — promote high/low to per-worker deques (profiling-gated); a proper low-contention worker-submit benchmark.
    6. `[ ]` **(P2) Platform abstraction (~6 fns)** — `park`/`unpark`(+timeout), thread spawn/name/affinity, cpu_count/topology, `cpu_relax`. Unblocks eventcount timeout + standby workers; console fiber backend later. [§D4]
    7. `[ ]` **(P2, raised 2026-07) Pluggable scheduler + a foreground/background two-pool variant.** The `Scheduler` is one implementation of an interface; ship alternatives behind the same `Task` API (the ambient-scheduler work in 3.1 is the seam). The motivating variant: a **separate background worker pool on OS-low-priority threads**, deliberately OVERSUBSCRIBING the cores. The idea is OS-scheduler-assisted gap filling — background threads run only when the foreground pool leaves a core idle, and the OS *preempts them out* the instant foreground work is ready, so background work costs the foreground nothing (unlike userspace `low`, which can't evict a runner — the exact failure we measured: `audio` at `low` still occupied a core the critical spine needed). This is distinct from 3.5 (promoting high/low to per-worker deques) and from D6 (userspace priority propagation): it moves the arbitration to the OS for the *background* band only, where preemption is legitimate. Prior art + adjacent notes: UE's two-pool foreground/background design with per-pool OS priority + affinity ([task-systems-comparison.md](task-systems-comparison.md) §UE), the mobile QoS-over-fixed-pool note (§D4), and D6's "a fixed per-pool QoS-background attribute is the only legit OS-priority use." Costs to weigh: thread explosion / oversubscription tuning, the syscall/permission cost of OS priority, affinity interplay, and determinism (background timing becomes OS-dependent — keep it off the traced/asserted paths). Also relevant to this session's finding that a normal task buried in a local deque loses to global `low` because `find_work` steals last (see 3.5 and the pending steal-before-global-low reorder) — a two-pool split would let the background band be genuinely non-interfering instead of merely deprioritized. **Scope guidance (author, 2026-07, T26):** ship at most 2–3 interchangeable scheduler implementations behind the shared `Task` API, not a plugin zoo. Each may expose a wake/idle policy (as the current one does) but nothing fancier at this stage. The engineering constraint that matters: factor the scheduler so its reusable parts (eventcount, deques, MPMC queues, valve, the submit/steal loop) are shared building blocks a new implementation composes, rather than each scheduler being a monolith — a fancy future scheduler should reuse most of what exists. Design-doc note added (design.md §3).
-   **Two distinct oversubscription mechanisms (UE, verified from source — keep them separate, both are SCHEDULER-impl concerns behind the unchanged `Task` API, NOT task-layer):** (i) *background-band gap-filling* — the variant above: a standing low-OS-priority pool the OS preempts out the instant foreground work is ready. (ii) *dynamic oversubscription around a blocking region* — `FOversubscriptionScope` bumps a count that wakes a parked standby worker (or spawns one under dynamic thread creation, `IncrementOversubscription`); surplus workers self-retire via `ConditionalStandby` when the count drops. (ii) keeps the pool alive when a task genuinely BLOCKS (mutex / I/O / `Wait` on unrelated work) — the case our current scheduler does NOT cover (its only blocking-survival is `retract_or_wait`, which runs the *retractable fork-join* subtree inline but does nothing for arbitrary blocking or non-retractable waits — async pipe jobs, external `Signal`s). (ii) is the prior art for closing that gap in the alternative scheduler; see 5.3.
+   **Two distinct oversubscription mechanisms (UE, verified from source — keep them separate, both are SCHEDULER-impl concerns behind the unchanged `Task` API, NOT task-layer):** (i) *background-band gap-filling* — the variant above: a standing low-OS-priority pool the OS preempts out the instant foreground work is ready. (ii) *dynamic oversubscription around a blocking region* — `FOversubscriptionScope` bumps a count that wakes a parked standby worker (or spawns one under dynamic thread creation, `IncrementOversubscription`); surplus workers self-retire via `ConditionalStandby` when the count drops. (ii) keeps the pool alive when a task genuinely BLOCKS (mutex / I/O / `Wait` on unrelated work) — the case our current scheduler does NOT cover. (2026-08: awaits no longer belong on that list — a `co_await` suspends the frame and frees the worker, and retraction is gone. What is left uncovered is opaque blocking inside a body, with no suspension point for us to use; see 5.3.) (ii) is the prior art for closing that gap in the alternative scheduler; see 5.3.
    8. `[ ]` **(P3, micro-opt, raised 2026-07) De-correlated per-worker park-spin timing.** UE gives each worker a distinct prime-ish spin duration from a small table (`{719,991,1361,…}[worker_id % 8]`, the `YieldCycles` arg to the pre-park spin) so parked workers don't re-scan the queues in lockstep — a cheap thundering-herd mitigation. Our `spin_then_block`/`handoff` idle loops spin a uniform `spin_cycles` on every worker. Cheap to add (a per-worker offset seeded at construction); measure whether it cuts contended eventcount re-scans under a fully-parked burst/drain. Prior art: UE `FWaitingQueue::Park` ([task-systems-comparison.md](task-systems-comparison.md) §UE).
 
 4. **Allocation / control block**
    **Prior art (UE `FTask`, verified from source — concrete shapes for the items below):** `FTask` is exactly one cache line (`LOWLEVEL_TASK_SIZE = PLATFORM_CACHE_LINE_SIZE`) with the body stored INLINE via an SBO `TTaskDelegate` sized to the remaining bytes — validates 4.2 (size the tunable-SBO `Function` buffer so the common task functor never heaps). Per-size-class recycling is `TLockFreeFixedSizeAllocator_TLSCache<256, cacheline>` (TLS-cached, fixed-size, lock-free) — the concrete shape for 4.1 (each `Exec<Body,R>`/`Result_block<R>` instantiation is constant-size per type, so one free-list per size class). An oversized/overaligned closure falls back to a 64 KB-block linear (arena) allocator (`TConcurrentLinearAllocator`) — validates 4.6's SBO-overflow-to-arena path. Executable-task init refcount is 2 (one external handle + one in-system).
    1. `[ ]` **(P2)** Per-type recycling free-list (`Exec`/`Result_block`/bare block).
    2. `[ ]` **(P2)** Tunable-SBO `Function<Sig, N>` replacing `move_only_function`/`function` (also fixes the reservation-path closure alloc — inconsistency #5).
-   3. `[ ]` **(P2)** Small-vector / intrusive links for block `successors`/`prerequisites`/`continuations` (also shrinks the block ~72 B).
-   4. `[ ]` **(P2)** Shrink `Task_control_block` — `completed`/`cancelled`→bits; a futex wait primitive roughly halves the 288 B block (ties to platform layer).
+   3. `[~]` **(P2, partly overtaken 2026-08)** Small-vector / intrusive links for the block's edge vectors. `prerequisites` is gone (deleted with retraction — it existed only for the retraction walk) and pipe turns never touched the vectors, so the block is down to `successors` + `continuations`, 320 → 280 B. The remainder folds into 4.7.
+   4. `[ ]` **(P2)** Shrink `Task_control_block` — `completed`/`cancelled`→bits; a futex wait primitive roughly halves the block (now 280 B; ties to platform layer).
    5. `[ ]` **(P3)** Multi-object `async` `std::map`→sorted `vector`.
    6. `[ ]` **(P2)** Opt-in scoped bump arena (auto for `parallel_for`/graph-run, per-frame opt-in); rebase `journal.h` staging onto it.
    7. `[ ]` **(P1, author 2026-08) Review `continuations`; fold into `successors` (then-as-normal-task) + intrusive edge storage.** `Task_control_block::continuations` (type-erased `move_only_function` callbacks fired at settle) is a THIRD dependency mechanism next to `successors`/`prerequisites` — it predates the `then` rebase and doesn't feel right. Target: `then` launches a normal task everywhere (it already is a real block with the producer as a `num_locks` prerequisite — audit the remaining `attach()` users: `when_all`'s join, multi-async release, `Deferred`/`Versioned` internals) so `continuations` folds into `successors` and the block loses one of its three vectors. Pair with the storage fix (supersedes half of 4.3): a dependent knows its edge count at wiring time, so embed the edge nodes in the DEPENDENT's allocation and thread the producer's successor list intrusively through them (producer holds one head pointer, allocates nothing) — `successors` can never be a fixed array on the producer (fan-in is unbounded), which is exactly why the storage must live dependent-side. Nested-task edges stay dynamic by nature (data-dependent fan-out, count unknowable at allocation). The pipe rebase (1.14, branch `pipe-rebase`) already makes pipe-turn prerequisites vector-free (embedded `Pipe_link`s + the `pipe_count` trigger; no `successors`/`prerequisites` traffic); this item does the same for ordinary edges. Touches `then`/`when_all`/`settle`/retraction — its own project, after the pipe rebase lands.
-   8. `[ ]` **(P2, author 2026-08) Cache-line alignment audit across components.** A systematic pass over every hot shared structure for cache-line placement: separate fields written by different threads onto distinct lines (`alignas(std::hardware_destructive_interference_size)` where warranted), keep fields read/written together on one line, and check array elements for false sharing between adjacent entries. Inventory to cover: `Task_control_block` (the size-ordered cluster is packing-motivated, not sharing-motivated — e.g. `num_locks` (contended decrements) shares a line with `refcount`; check whether that pairing helps or hurts), the rebased `Pipe` (`tail` and `task_count` are both cross-thread hot — same line = every push invalidates every drain check), `Pipe_link` arrays (adjacent links of one task live on one line; different lines' traffic collides — measure before padding, links are per-task not global), scheduler queues/deques (Chase-Lev top/bottom, MPMC slots; `Busy_slot`/`Bucket_row` are already padded — verify the rest), journal slots, `Event_count`. Measure with the existing benchmarks (contention series + R10 pipe fixture) — padding trades memory for isolation, so each change needs a number, not a vibe.
+      **Re-scoped (2026-08, post-6.4).** Both landed prerequisites are in: the pipe is rebased
+      (1.14) and `then`/`when_all`/retraction are deleted, which took `prerequisites` with them
+      (block 320 → 280 B). What is LEFT is the actual item: `successors` and `continuations`
+      still coexist as two edge mechanisms on the block, and the dominant `continuations` user
+      is now the coroutine awaiter (usually exactly one waiter frame). Target shrinks
+      accordingly — fold the two into one intrusive waiter list whose nodes live in the
+      DEPENDENT (a frame or a block knows its own edge at await time), producer holds one head
+      pointer and allocates nothing. Pairs naturally with 6.2 (frame/block fusion): a fused
+      frame can embed its own waiter node. This is now the block-slimming remainder, and the
+      largest remaining structural cleanup in the task core.
+   8. `[ ]` **(P2, author 2026-08) Cache-line alignment audit across components.** A systematic pass over every hot shared structure for cache-line placement: separate fields written by different threads onto distinct lines (`alignas(std::hardware_destructive_interference_size)` where warranted), keep fields read/written together on one line, and check array elements for false sharing between adjacent entries. Inventory to cover: `Task_control_block` (the size-ordered cluster is packing-motivated, not sharing-motivated — e.g. `num_locks` (contended decrements) shares a line with `refcount`; check whether that pairing helps or hurts), the evolved `Pipe` (all queue state now lives under one mutex, so the interesting question shifted: is `writer_owner` — read lock-free by every `commit()` ownership check — on the right line relative to the mutex and the queue head, and does a coroutine frame's embedded link share a line with hot promise state), `Pipe_link` arrays (adjacent links of one task live on one line; different lines' traffic collides — measure before padding, links are per-task not global), scheduler queues/deques (Chase-Lev top/bottom, MPMC slots; `Busy_slot`/`Bucket_row` are already padded — verify the rest), journal slots, `Event_count`. Measure with the existing benchmarks (contention series + R10 pipe fixture) — padding trades memory for isolation, so each change needs a number, not a vibe.
 
 5. **Fork-join / parallel_for**
    1. `[ ]` **(P2) Intra-system entity interactions** — ship the primitive menu: `parallel_gather_apply` (mailbox), `parallel_for_colored` + `Interaction_coloring`, `Accumulator` (commutative), `Union_find` helper, + triage docs. Open author questions. [§D5]
    2. `[S]` **Priority propagation / inheritance** — designed (pipe / graph / dynamic; opt-in surfaces; not OS thread priority); revisit on a demonstrated inversion. [§D6]
-   3. `[ ]` **(P3) Reserve / standby workers** — sequenced after the platform layer. Caller-participation (`retract_or_wait`) covers the *retractable fork-join* case only; a task that blocks on a mutex / I/O or a non-retractable wait (async pipe job, external `Signal`) can still starve the pool. UE's answer is dynamic oversubscription: `FOversubscriptionScope` around the blocking region wakes/spawns a standby worker (`IncrementOversubscription`), `ConditionalStandby` retires it after (verified from source). This is scheduler-impl territory — belongs to the alternative two-pool scheduler (3.7), not the task layer; both mechanisms sit behind the unchanged `Task` API.
+   3. `[ ]` **(P3, re-scoped 2026-08) Reserve / standby workers** — sequenced after the platform layer. The framing changed with 6.4: retraction is gone, and a coroutine wait SUSPENDS rather than blocking, so the fork-join case this used to cover is structurally handled (a suspended frame holds no worker). What remains is genuine blocking a task system cannot see through — an OS mutex, a synchronous file read, a driver call inside a node body — which still occupies a worker with no suspension point. UE's answer is dynamic oversubscription: `FOversubscriptionScope` around the blocking region wakes/spawns a standby worker (`IncrementOversubscription`), `ConditionalStandby` retires it after (verified from source). This is scheduler-impl territory — belongs to the alternative two-pool scheduler (3.7), not the task layer; both mechanisms sit behind the unchanged `Task` API.
 
 6. **Coroutines**
-   1. `[ ]` **(P2)** Inline-when-free for awaited accesses — `co_await obj.access(fn)` should try inline at the await (safe: the coroutine would suspend anyway).
-   2. `[ ]` **(P2)** Coroutine-frame / control-block fusion — one alloc for frame + block (coroutines *reduce* allocs, not add).
+   1. `[x]` **DONE (2026-08, subsumed by 6.4).** Inline-when-free for awaited accesses is what
+      the awaitable access verb does: `co_await obj.access(fn)` is `await_ready` when the pipe
+      is free (runs `fn` on the caller) or when `writer_owner == current task` (reentrant,
+      under the held grant), and suspends only when it would actually have to wait.
+   2. `[x]` **DONE (2026-08, 6.4 stage 1).** Coroutine-frame / control-block fusion — one alloc for frame + block, not two. `Task_promise<R>` carries `Task_control_block core` as its FIRST member (so the block pointer doubles as the promise pointer) plus the result storage, and the block's `destroy` thunk destroys the coroutine frame. A coroutine task therefore allocates exactly the frame; coroutines reduce allocations rather than adding them, as the item required. Remaining allocation work is 4.1 (routing `operator new` on the promise to a size-class pool).
    3. `[ ]` **(P3)** Priority setter on the promise (it stores one; no config channel yet).
-   4. `[ ]` **(P3, research — borrow from UE) Symmetric task switching for coroutine resumption.** UE's runnable signature is `FTask*(bool)` — a body/segment can RETURN the next task, which the worker loop runs immediately on the same thread with zero queue/eventcount interaction ("Continuations were not themselves dequeued from any queue"); `CallAndMove` relocates the delegate storage in one step, so no second alloc for the returned continuation. This is the natural shape for a coroutine `co_await` handing back "resume me here next" — cleaner than routing the resume through our thread-local inline trampoline (`dispatch_ready`/`inline_pending`, task.h), which already gives same-thread + stack-safe execution but via a push+drain rather than a direct return-and-run. Scope the borrow to the coroutine path (pairs with 6.2's frame/control-block fusion — a fused frame that returns its own next segment); NOT a rework of general `then`/`dispatch_ready` dispatch, which stays framework-driven so a queued continuation still gets a priority and the scheduler can interleave. Verified against UE source (`FTask::ExecuteTask`, `FScheduler::ExecuteTask` loop). Prior art: [task-systems-comparison.md](task-systems-comparison.md) §UE.
+   4. `[x]` **DONE (2026-08, branch `pipe-rebase`) — coroutine-first transformation.** The shakeup: static graph + coroutines for everything dynamic; `then`/`when_all`/builder-`after`/retraction/reuse/inline-trampoline removed; `Task_scope` nursery + implicit per-frame scopes + coroutine graph nodes + awaitable access verb added; every illegal case a fatal with a companion how-to test. Design of record + staged plan: [coroutine-first.md](coroutine-first.md). Landed §7 stages 1–6; the remaining §11 action list is tracked as 6.9 below. Subsumed 6.1 (the awaitable access verb IS inline-when-free) and delivered 6.2 (frame/block fusion — the promise embeds the block, so a coroutine task is one allocation). Note the inline-dispatch trampoline was removed only from the DYNAMIC surface: `Graph_node::set_inline` and the `dispatch_ready`/`inline_pending` machinery survive as graph-internal.
+   5. `[x]` **DONE (2026-08) — waits-for cycle detector** (`TS_SAFETY_CHECKS`). The suspended-ABBA deadlock (a task holding G1 suspends awaiting G2's turn while a G2-holder awaits G1) parks no thread — both frames suspended, all workers free, the run silently never completes; graph-invisible by definition (the accesses are undeclared). At suspension-on-a-pipe record edge {holder's grants -> awaited pipe} (the harness knows both), clear at resume, cycle-check on insert, fatal naming both tasks + both objects. Gates blessing doctrine case (c) (coroutine-first.md §2) in the guide.
+   6. `[ ]` **(P2) Signal-from-OS-completion helper** — register an OVERLAPPED / fd / fence, get a `Signal` (the 9.2 packaging question, now pulled by the first-class cross-frame pattern, coroutine-first.md §4.7).
+   7. `[ ]` **(P2) Per-frame gate idiom** — a reusable frame-start `Signal` (`co_await next_frame`) so resumed cross-frame tasks align to frame boundaries; thin utility over `Signal::reset` + a doc'd low-priority-resumption default.
+   8. `[ ]` **(P3, research — borrow from UE) Symmetric task switching for coroutine resumption.** UE's runnable signature is `FTask*(bool)` — a body/segment can RETURN the next task, which the worker loop runs immediately on the same thread with zero queue/eventcount interaction ("Continuations were not themselves dequeued from any queue"); `CallAndMove` relocates the delegate storage in one step, so no second alloc for the returned continuation. This is the natural shape for a coroutine `co_await` handing back "resume me here next" — cleaner than routing the resume through our thread-local inline trampoline (`dispatch_ready`/`inline_pending`, task.h), which already gives same-thread + stack-safe execution but via a push+drain rather than a direct return-and-run. Scope the borrow to the coroutine path (pairs with 6.2's frame/control-block fusion — a fused frame that returns its own next segment); NOT a rework of general dispatch, which stays framework-driven so a queued resumption still gets a priority and the scheduler can interleave. Verified against UE source (`FTask::ExecuteTask`, `FScheduler::ExecuteTask` loop). Prior art: [task-systems-comparison.md](task-systems-comparison.md) §UE.
+      **Rescoped (2026-08, post-6.4):** the coroutine path now has its own equivalent — a
+      bounded thread-local *resume trampoline* (`resume_pending`/`schedule_resume`,
+      coroutine_support.h) that resumes a released frame on the settling/granting thread with
+      no queue hop, iteratively so the stack stays O(1). `dispatch_ready`/`inline_pending`
+      survive but are graph-internal (`Graph_node::set_inline`) and no longer carry resumption.
+      So the borrow narrows to the *worker-loop* half — a runnable that RETURNS its next
+      runnable, which would let a resume skip even the trampoline's push+drain. Measure the
+      trampoline first (10.14): if resumption dispatch is not visible in `coro chn`, this stays
+      a curiosity.
+
+   9. `[ ]` **(P1, author 2026-08) Coroutine-first post-initial action list.** The queue behind
+      the landed transformation, from [coroutine-first.md](coroutine-first.md) §11. In order:
+      (a) **nested graph runs v1** (§4.8 — the lend protocol: intersect the inner graph's
+      compiled access set with the caller's `Access_context`, per-run lent-mask, epoch-carrying
+      inner contexts; auto-scope-join default + explicit detach; the three fatals with
+      companions — mode-incompatible overlap, lending with a non-quiet scope, `execute()` while
+      a run is in flight, the last also closing the currently-unguarded concurrent-`execute()`
+      hole); (b) worker-less nested runs through the serial trampoline; (c) cancellation
+      composition (pass the outer token into `inner.execute({.token})`, test that outer
+      cancellation drains the inner run); (d) trace attribution across nesting (inner work must
+      not double-count in the outer trace's fold); (e) concurrent shared-object graphs
+      validation (task-internals §10 scenario 2 predates the evolved pipe — with per-node
+      admission + globally canonical acquisition it should now be deadlock-free; dedicated
+      stress with the `Rw_probe` oracle + TSan, and if it holds, relax the task-internals
+      contract line to "safe, nondeterministic cross-graph ordering"); (f) parameter-grants
+      sugar for shipped library sub-graphs (compile-time intent check only).
+      Open discussion queue: [coroutine-first.md](coroutine-first.md) §10 (doctrine
+      relaxations, HALO reality on MSVC/clang-cl, the graph-free usage model).
 
 7. **Deferred / Versioned**
    1. `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.
    2. `[ ]` **(P2) Lock-free `stage()`** — kill the per-slot mutex (it exists ONLY for the dynamic stage-vs-cut race; single producer per slot otherwise — handoff doc §5). Falls out of 7.1's arena step: single-producer chunked bump allocation makes `stage` a lock-free bump, and the cut becomes a chain-head exchange. `Parallel_recorder` already gives thread-keyed slots (per-worker + overflow lane); this removes the last lock on the staging path. Split out of 7.1 for referenceability — implement together with the arena.
 
 8. **Task chaining**
-   1. `[ ]` **(P3) Results-on-`after`** — leaning *no* (`when_all`+`then` covers it); revisit only if a concrete single-result-prerequisite use case appears.
+   1. `[—]` **MOOT (2026-08, 6.4).** Results-on-`after` — `after` and the whole builder are
+      deleted; a dynamic task that needs a prerequisite's result writes `auto r = co_await t;`.
+      Nothing left to design. (Typed results INTO a graph node remain open as 2.1.)
 
 9. **Research / shelved**
    1. `[S]` **std::execution senders** — shelved; model the concepts for interop, prototype *access-context-as-env* as the one novel spike; do **not** re-found the engine on senders (the monomorphic runtime block earns its keep). [§D7]
-   2. `[ ]` **(research note — T13.4) Async I/O story.** Untouched so far. The library is CPU-compute-first; async I/O (file/socket/GPU-transfer completion) is a different axis — a blocked I/O wait must not tie up a worker. Today the sanctioned bridge is `Signal`: an external completion (OS overlapped-IO callback, GPU fence, `io_uring` CQE) calls `signal.trigger()`, and a `then`/`when_all` resumes CPU work — fire-the-IO, gate-the-continuation, never block a worker. That covers "react to completion" without an I/O runtime. What we deliberately do NOT provide (and probably shouldn't, cf. Rayon/Tokio being separate pools by design): an I/O reactor, readiness polling, or a socket/timer API. Open question to revisit only on demonstrated demand: whether a thin `Signal`-from-OS-completion helper (register an OVERLAPPED / fd / fence, get a `Signal`) is worth packaging, or stays a documented idiom. Ties to the Signal-examples doc item (10.4).
+   2. `[ ]` **(research note — T13.4) Async I/O story.** Untouched so far. The library is CPU-compute-first; async I/O (file/socket/GPU-transfer completion) is a different axis — a blocked I/O wait must not tie up a worker. Today the sanctioned bridge is `Signal`: an external completion (OS overlapped-IO callback, GPU fence, `io_uring` CQE) calls `signal.trigger()`, and a `co_await` on that `Signal` resumes CPU work — fire-the-IO, suspend, never block a worker. (2026-08: the coroutine-first cross-frame pattern, coroutine-first.md §4.7, makes this the first-class shape rather than an idiom, which is what pulled 6.6 out of this note.) That covers "react to completion" without an I/O runtime. What we deliberately do NOT provide (and probably shouldn't, cf. Rayon/Tokio being separate pools by design): an I/O reactor, readiness polling, or a socket/timer API. Open question to revisit only on demonstrated demand: whether a thin `Signal`-from-OS-completion helper (register an OVERLAPPED / fd / fence, get a `Signal`) is worth packaging, or stays a documented idiom. Ties to the Signal-examples doc item (10.4).
    3. `[ ]` **(research note — T25) CPU transient aliasing.** Render graphs reuse one block of memory for two scratch resources whose lifetimes don't overlap ([research-deepdive.md](research-deepdive.md) §4.4), derived from declared first-write/last-read. The CPU analogue for us would be per-node *declared transient buffers* with `compile()` computing [first-writer, last-reader] windows and aliasing storage across non-overlapping windows — a potential differentiator, but it needs a task-system feature we don't have: a *declared transient-resource* concept distinct from a `Guarded` object (a scratch buffer owned by the graph, not a persistent guarded instance). The coarse version already exists (the per-run bump arena, 4.6 — everything dies at run end); the fine version is speculative and gated on that new concept. Record only; act only if a concrete workload needs graph-derived scratch-memory reuse.
 
    4. `[ ]` **(P2, research, author 2026-07) Survey high-level parallelisation patterns to
@@ -426,6 +515,41 @@ IDs — when an item is done, mark it, don't renumber.
         exhaustion (the never-block-in-a-node rule; establish whether retraction/nested cover it).
         Investigate feasibility first: if a clean composition pattern falls out, ship the sample,
         else document the constraints. Relates to 2.3 (pipelined execution) and 10.3.
+        **Update (2026-08):** the mechanism this sample needs is 6.9a (nested graph runs v1 —
+        `co_await inner.execute()` with the lend protocol); sequence the sample after it, and
+        the "does driving a sub-graph from a node risk worker exhaustion" question is already
+        answered (it does not: an awaited inner run suspends the outer frame, holding no worker).
+
+    13. `[ ]` **(P2, test debt from the pipe rebase) Wave-2 `writer_owner` tests F1–F4**
+        ([pipe-rebase-tests.md](pipe-rebase-tests.md) §F) — the grant-ownership invariants that
+        `Deferred::commit()`'s auto-dispatch keys off, currently covered only indirectly by the
+        commit tests. Re-scoped for the evolved pipe: **F1** (owner set inside a write body,
+        null outside) and **F4** (each pipe of a multi-object write names the same holding
+        block) stand as written; **F3** re-aims at the awaitable `access` inline arm (the
+        caller running the write inline must name its own block as owner for the body's
+        duration) and gains a reentrancy case (`writer_owner == current task` → the nested
+        access runs under the held grant, owner unchanged); **F2 is moot** — the explicit graph
+        write handoff it tested is deleted, so the successor case is now "release clears the
+        owner, the next admission sets it", which is worth one test in F2's place. Needs the
+        `Pipe_probe` white-box helper from the same plan.
+
+    14. `[ ]` **(P2, benchmark) Re-measure the coroutine chain on a quiet host.** `coro chn`
+        (chained `co_await`s) reads ~1970 ns/op against the ~104 ns/op single-`co_await` figure
+        — a 19x gap that the design does not obviously predict, and it was measured on a host
+        also running builds. Re-run several times on an idle machine, decompose (frame alloc vs
+        resumption dispatch vs symmetric-transfer misses), and record the verdict in
+        [pipe-rebase.md](pipe-rebase.md) §0.4 next to the other acceptance numbers. If the gap
+        is real it is the headline argument for 6.2 (frame/block fusion), so measure before
+        scheduling that work.
+
+    15. `[ ]` **(P1-cheap, CI) Gate Shipping (`TS_SAFETY_CHECKS=0`) on every push, not by hand.**
+        The safety-gated surface grew substantially (waits-for detector state, grant epochs,
+        scope bookkeeping, `writer_owner`'s always-on exception), and the convention is that
+        safety-only state is FULLY compiled out — a mis-gated field or an `#if`-invisible
+        behavioral dependency only shows as a Shipping build/link/behaviour break. Shipping is
+        currently built and stressed manually at merge points. Add it to CI alongside the
+        Release and TSan legs (build + `--tests` + `--stress`), so a mixed-config mistake fails
+        the push rather than the next release.
 
 ---
 

@@ -62,8 +62,8 @@ enum class Resync
 //   ts::Guarded<Transforms>& front = tf.state();     // its front -- a Guarded readers access
 //   auto rec = tf.recorder();
 //   rec.stage([b = std::move(out)](Transforms& t){ t.apply(b); });  // stage next version
-//   tf.publish();                                    // fire-and-forget, or .sync()
-//   front.access([](const Transforms& t){ render(t); });            // read the current version
+//   tf.publish();                                    // fire-and-forget, or await it
+//   co_await tf.read([](const Transforms& t){ render(t); });        // read the current version
 // Composes with `Static_task_graph`: a `ts::publish_body(tf)` node is the flip; declaring a
 // read on the front before it reads the previous version, after it the fresh one.
 //
@@ -206,8 +206,11 @@ public:
 #endif
         }
 
-        // Phase 1 runs once the previous publish's resync is done (shadow free).
-        prev.then([this, swapped, shadow_ready, opts]() mutable
+        // Phase 1 runs once the previous publish's resync is done (shadow free). Wired at
+        // the detail level (a waiter on `prev`'s block that submits phase 1 as a task at
+        // the publish's priority): the public continuation verb is gone (coroutine-first),
+        // and this chain runs on blue threads, so it cannot await.
+        auto phase1 = [this, swapped, shadow_ready, opts]() mutable
         {
             if (opts.token.is_cancel_requested())
             {
@@ -236,7 +239,14 @@ public:
                 start_resync(std::move(batch), std::move(shadow_ready));
                 swapped.trigger();
             }, { .priority = opts.priority });
-        }, { .priority = opts.priority });
+        };
+        detail::core_of(prev)->attach(
+            [phase1 = std::move(phase1), priority = opts.priority](void*, bool) mutable
+            {
+                auto core = detail::make_executable<void>(std::move(phase1), {});
+                core->flags.priority = priority;
+                detail::submit_ready(core, core->generation());
+            });
 
         return swapped;
     }
