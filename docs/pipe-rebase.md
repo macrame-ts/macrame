@@ -160,6 +160,34 @@ uncontended `ts_read` 896 vs 1036 ns (+14%), `ts_write` 1166 vs 1063 ns (−10%,
 release→dispatch hop), `graph` 5385 vs 5328 ns (unchanged — the handoff removal cost
 nothing measurable). Mixed within drift; no regression class.
 
+**The `coro chn` question, answered (2026-08).** The coroutine chain benchmark reads
+~1800–2100 ns/op against ~104 ns/op for a single `co_await`, which looked like a coroutine
+cost worth chasing. It is not. Two facts settle it. First, the units: `coro chn` awaits 50
+launched stages and reports 50 ops, so its figure is per STAGE, and each stage is a full
+scheduler round trip — submit, eventcount wake, worker pick-up, settle, cross-thread resume
+of the awaiting frame. Second, the decomposition: a new `coro nst` line runs the identical
+50-stage shape with each stage a plain coroutine call instead of a launched task. Tasks are
+eager, so the callee completes on the calling thread and the await takes the `await_ready`
+fast path — measuring per-stage coroutine machinery alone (frame allocation, promise setup,
+settled await, destruction). It reads **87.9 / 88.5 / 87.9 ns across three quiet-host runs
+(±0.6%)**, while `coro chn` reads **2138.9 / 1959.2 / 1809.3 ns (±8%)**.
+
+So the coroutine half is ~88 ns — under 5% of the chain figure — and the other ~1750–2050 ns
+is round-trip latency. It also cross-checks: `launch` (a blue-thread submit + wake + park +
+wake + `sync()`) measures 900–1070 ns in the same runs, and a chain stage costs roughly
+twice that, which is what the shape predicts — the awaiting frame resumes on a worker, so
+the next stage's submit comes FROM a worker and the awaiter suspends again, paying a wake in
+each direction rather than one wake plus a caller park.
+
+Conclusions: (a) `coro chn` is a scheduler-latency benchmark wearing a coroutine costume —
+read `coro nst` for coroutine cost and keep both; (b) there is no allocation-shaped gap to
+close (frame/block fusion already delivered — 88 ns/stage covers one fused allocation plus
+its destruction); (c) the lever, if this number ever matters, is wake/dispatch latency — the
+idle policy, and the worker-loop half of TODO 6.8 (a runnable returning its next runnable so
+a resume skips the queue entirely) — not TODO 4.1/6.2 allocation work. Note also that the
+chain runs on the default `spin_then_block` policy; a `spin` scheduler would move it
+substantially, which is itself evidence for the same conclusion.
+
 ## 1. Goal and non-goal
 
 Replace the mutex-guarded reader/writer deque (`detail::Pipe`, `src/guarded.cpp`) with a

@@ -404,8 +404,9 @@ IDs — when an item is done, mark it, don't renumber.
       survive but are graph-internal (`Graph_node::set_inline`) and no longer carry resumption.
       So the borrow narrows to the *worker-loop* half — a runnable that RETURNS its next
       runnable, which would let a resume skip even the trampoline's push+drain. Measure the
-      trampoline first (10.14): if resumption dispatch is not visible in `coro chn`, this stays
-      a curiosity.
+      trampoline first (10.14) -- **done, and it promotes this item**: `coro chn` is ~95%
+      wake/dispatch latency (2138/1959/1809 ns per stage, of which only ~88 ns is coroutine
+      machinery), so a resume that skips the queue entirely is where the remaining cost is.
 
    9. `[~]` **(P1, author 2026-08) Coroutine-first post-initial action list.** The queue behind
       the landed transformation, from [coroutine-first.md](coroutine-first.md) §11. In order:
@@ -543,14 +544,20 @@ IDs — when an item is done, mark it, don't renumber.
         predecessor's, never null). No `Pipe_probe` type was needed: `Guarded_access::pipe()`
         plus a local `owner_of()` reads the field directly. 517 → 536 checks.
 
-    14. `[ ]` **(P2, benchmark) Re-measure the coroutine chain on a quiet host.** `coro chn`
-        (chained `co_await`s) reads ~1970 ns/op against the ~104 ns/op single-`co_await` figure
-        — a 19x gap that the design does not obviously predict, and it was measured on a host
-        also running builds. Re-run several times on an idle machine, decompose (frame alloc vs
-        resumption dispatch vs symmetric-transfer misses), and record the verdict in
-        [pipe-rebase.md](pipe-rebase.md) §0.4 next to the other acceptance numbers. If the gap
-        is real it is the headline argument for 6.2 (frame/block fusion), so measure before
-        scheduling that work.
+    14. `[x]` **DONE (2026-08) — the coroutine chain re-measured and decomposed.** `coro chn`
+        reads ~1800–2100 ns/op against ~104 ns/op for a single `co_await`, which looked like a
+        coroutine cost worth chasing. It is not. Its figure is per STAGE (50 awaited launched
+        stages, 50 ops reported), and each stage is a full scheduler round trip. A new
+        `coro nst` benchmark runs the identical 50-stage shape with each stage a plain
+        coroutine call — eager tasks complete on the calling thread, so the await takes the
+        `await_ready` fast path and only coroutine machinery is measured: **87.9/88.5/87.9 ns
+        across three quiet-host runs (±0.6%)** vs `coro chn` **2138.9/1959.2/1809.3 (±8%)**.
+        Coroutine cost is therefore under 5% of the chain figure; the rest is wake/dispatch
+        latency (cross-checked against `launch` at 900–1070 ns — a chain stage costs ~2x, which
+        matches paying a wake in each direction). So there is no allocation-shaped gap here
+        (6.2 already landed), and the lever if it ever matters is the worker-loop half of 6.8
+        or the idle policy, NOT 4.1/6.2. Full verdict in
+        [pipe-rebase.md](pipe-rebase.md) §0.4; keep both benchmark lines.
 
     15. `[ ]` **(P1-cheap, CI) Gate Shipping (`TS_SAFETY_CHECKS=0`) on every push, not by hand.**
         The safety-gated surface grew substantially (waits-for detector state, grant epochs,

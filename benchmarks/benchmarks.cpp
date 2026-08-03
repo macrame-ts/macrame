@@ -328,6 +328,33 @@ std::vector<double> bench_coro_chain()
     });
 }
 
+// The decomposition partner of `coro chn`. Same shape -- K awaited stages, one op per stage
+// -- but each stage is a plain coroutine call instead of a launched task. Tasks are eager,
+// so the callee runs to completion on this thread and the await takes the `await_ready` fast
+// path: this measures the per-stage COROUTINE cost (frame allocation + promise setup +
+// settled-await + destruction) with no scheduler in the picture. `coro chn` minus this is
+// the round-trip (submit, worker wake, cross-thread resume), which is what that benchmark is
+// actually dominated by -- see docs/pipe-rebase.md §0.4.
+static ts::Task<int> add_one_coro(int v) { co_return v + 1; }
+
+static ts::Task<int> nest_coro(int chain)
+{
+    int v = 0;
+    for (int k = 0; k < chain; ++k)
+        v = co_await add_one_coro(v);
+    co_return v;
+}
+
+std::vector<double> bench_coro_nest()
+{
+    constexpr int chain = 50;
+    return measure([&]() -> uint64_t
+    {
+        (void)nest_coro(chain).sync();
+        return chain;
+    });
+}
+
 // Awaited join over 4 async reads (the coroutine-first form of the old typed join).
 std::vector<double> bench_coro_join()
 {
@@ -419,6 +446,7 @@ void run_benchmarks()
     report("launch", bench_launch_sync());
     report("coro", bench_coro_sync());
     report("coro chn", bench_coro_chain());
+    report("coro nst", bench_coro_nest());
     report("ts_write", bench_ts_write());
     report("ts_read", bench_ts_read());
     report("coro join", bench_coro_join());
