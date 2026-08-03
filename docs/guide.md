@@ -454,7 +454,12 @@ the same access (write / read, from const-ness) and both return `Task<R>`:
   runs the functor immediately on the *calling* thread — no scheduling — and
   otherwise queues it. That fast path suits the many short critical sections
   typical of this API, at the cost of briefly blocking the caller when it takes
-  it. This is the default; reach for it unless you have a reason not to.
+  it. This is the default; reach for it unless you have a reason not to. It is
+  also **reentrant**: if the calling task already holds this object's write
+  access (a graph node's declared write, an enclosing write body), the functor
+  runs under that access rather than queueing behind it — so a helper that
+  takes a `Guarded<T>&` and calls `access` works whether or not its caller
+  happens to hold the object.
 - **`async`** always schedules the functor onto a worker, never the caller's
   thread. Use it for a heavy functor you don't want running inline (it would
   block the caller and hold the object longer), or when you specifically want

@@ -276,9 +276,19 @@ them.
 4. `Task<R>` handles: `sync()` demoted to boundary-only; awaiting is the primary verb.
 5. Coroutines become **mandatory** (drop `__cpp_impl_coroutine` guards; C++23 baseline
    already assumes a conforming compiler).
-6. `access()` becomes awaitable-only (red); blue callers use `async()`. (The old blue
-   opportunistic-inline `access` disappears; measure whether a blue inline fast path is
-   ever missed before re-adding.)
+6. ~~`access()` becomes awaitable-only (red); blue callers use `async()`.~~ **Not what
+   landed (2026-08).** `access(fn, opts)` kept its eager, `Task<R>`-returning form and
+   stayed usable from BOTH colors: awaited from a coroutine, `sync()`ed or fire-and-forget
+   from a blue thread. The split between `access` and `async` is dispatch policy, not
+   color — `access` runs the body inline when the pipe is free right now, `async` always
+   enqueues — so there was nothing to take away from blue callers, and the opportunistic
+   inline fast path (the thing this flag proposed dropping) is exactly what §4.2 wanted to
+   keep. What the transformation actually ADDED to `access` is the reentrant arm
+   (`Pipe::writer_owner == current task` → run under the held grant, never queue behind
+   yourself), which is doctrine case (b) made real. The awaitable-only surface is the
+   separate held-grant form, `co_await ts::read_write(obj)` / `ts::read_only(obj)`, whose
+   guard holds the grant for a scope rather than for one body. Net: no behavior was
+   removed here; this flag is withdrawn.
 7. Allocation profile: +1 frame per dynamic task until fusion (§5.1) restores one-alloc.
 8. Async pipe release moved body-return→settle already landed with the evolved pipe;
    under coroutine nodes this generalizes to frame-completion (§2) — same direction.
