@@ -182,6 +182,61 @@ void run_death_scenario(const char* name)
         go.trigger();
         stray.sync();         // body writes `c` under the stale inherited grant -> fatal
     }
+    else if (std::strcmp(name, "graph_lend_mode_conflict") == 0)
+    {
+        // The outer node declares READ on `x`; the inner graph writes it. A read grant
+        // cannot be lent to a writer, and upgrading would re-acquire behind the caller's
+        // own hold -- fatal at the nested `execute()`, not a deadlock later.
+        ts::Guarded<int> x{ 0 };
+        ts::Static_task_graph inner;
+        inner.add_node([](int& v) { v += 1; }, x);
+        inner.compile();
+
+        ts::Static_task_graph outer;
+        outer.add_node([&inner](const int& v) -> ts::Task<void>
+        {
+            (void)v;
+            co_await inner.execute();   // -> fatal
+        }, x);
+        outer.compile();
+        outer.execute().sync();
+    }
+    else if (std::strcmp(name, "graph_lend_unquiet_scope") == 0)
+    {
+        // Lending while the caller still has unjoined scope children: the children run under
+        // the same grant, so they could race the lent-to graph on the lent object.
+        ts::Guarded<int> x{ 0 };
+        std::atomic<bool> release{ false };   // never set: the scope child stays live
+        ts::Static_task_graph inner;
+        inner.add_node([](int& v) { v += 1; }, x);
+        inner.compile();
+
+        ts::Static_task_graph outer;
+        outer.add_node([&inner, &release](int& v) -> ts::Task<void>
+        {
+            (void)v;
+            // Spin-waits rather than blocking on a `Signal`: an in-task `sync()` is itself
+            // fatal, which would kill the child for the wrong reason.
+            ts::nested([&release] { while (!release.load(std::memory_order_relaxed)) std::this_thread::yield(); });
+            co_await inner.execute();   // scope not quiet -> fatal
+        }, x);
+        outer.compile();
+        outer.execute().sync();
+    }
+    else if (std::strcmp(name, "graph_execute_in_flight") == 0)
+    {
+        // One run at a time: a node calling `execute()` on its OWN graph re-enters while the
+        // first run is still in flight (the shared `Run_state` would be overwritten).
+        ts::Guarded<int> x{ 0 };
+        ts::Static_task_graph g;
+        g.add_node([&g](int& v)
+        {
+            (void)v;
+            g.execute();   // -> fatal
+        }, x);
+        g.compile();
+        g.execute().sync();
+    }
     else if (std::strcmp(name, "graph_cycle") == 0)
     {
         ts::Guarded<int> a{ 0 }, b{ 0 };

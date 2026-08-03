@@ -449,6 +449,54 @@ proven to 50k depth), destruction through another (a deep chain of fused
 frames releases iteratively), and both retain capacity — no steady-state
 allocation.
 
+### 5.1 Nested graph runs: lend, don't re-acquire
+
+Coroutine nodes make `co_await inner.execute()` expressible, and composing a
+frame out of pre-compiled sub-graphs is the obvious use. The obvious
+implementation deadlocks: the inner node takes its own turn on an object its
+caller is currently holding, and the caller cannot release it because it is
+suspended waiting for the inner run.
+
+The fix is to notice that an *awaited* inner run is strictly contained in the
+caller's grant window, so the caller's exclusion is already exactly what the
+inner run needs. At the nested `execute()` we intersect the inner graph's
+compiled access set with the caller's `Access_context`; every overlap whose
+held mode covers the inner mode is **lent** for that run, and the inner nodes
+simply do not take turns on it. Recursion needs no extra rule — a grand-inner
+graph intersects against its own caller's context, which already carries the
+lent entries.
+
+Three properties make this cheap rather than clever:
+
+- **Binding is the mechanism.** Node pipe links live in a `compile()`-time
+  slab; lending re-binds the surviving links compactly and shortens each
+  node's link count. An unbound link is a turn that is never taken — no
+  bypass flag threaded through the pipe, no second code path in admission.
+- **Ordering is untouched.** The lend removes the *outer world's* exclusion,
+  never the compiled conflict edges, so inner nodes still sequence against
+  each other on a lent object exactly as they would standalone.
+- **The pipe never learns about it.** External `async`s queue behind the
+  caller's hold as before, so nothing outside the nesting can tell the
+  difference.
+
+The rest is refusing the cases where the containment argument fails. A caller
+holding *read* where the inner graph *writes* cannot lend (upgrading would
+re-acquire behind its own hold) — fatal, with the two restructurings named.
+Unjoined scope children run under the same grant and could race the lent-to
+graph, so lending requires a quiet scope — fatal, `co_await ts::join_nested()`
+first; already-settled children are filtered out, since only live ones are a
+hazard. And a detached run (`{.detach = true}`) is *not* contained in the
+caller's window, so it structurally receives no lend and queues like any
+external work. Un-awaited runs otherwise join the caller's scope, which makes
+"fire an inner run and forget it" safe by construction rather than by
+discipline.
+
+One limitation falls out and is worth stating rather than hiding: a graph runs
+one execution at a time, so a sub-graph shared between two concurrently
+running parents collides. That was previously an unguarded corruption; it is
+now a fatal naming the fix (an instance per caller), and the general
+relaxation — queued or pipelined runs — is roadmap work, not new machinery.
+
 ---
 
 ## 6. Deferred and versioned state

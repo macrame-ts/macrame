@@ -112,6 +112,20 @@ private:
     int index_ = -1;
 };
 
+// Per-run options for `Static_task_graph::execute` (an aggregate, house style alongside
+// `Launch_options` / `Access_options`; spelled `execute({.token = t})` at call sites).
+// Namespace-scope rather than nested so its default member initializers are usable in the
+// `execute(Execution_options = {})` default argument -- a nested type's initializers are not
+// available while the enclosing class is still being defined. `Static_task_graph` re-exports
+// the name, so `Static_task_graph::Execution_options` keeps working.
+struct Execution_options
+{
+    Cancellation_token token;
+    // Opt out of the nested-run defaults: a detached run neither joins the calling task's
+    // scope nor receives any lend. Ignored outside a task. See `execute`.
+    bool detach = false;
+};
+
 // Build once, execute many. Nodes declare access to `Guarded<>` systems and,
 // optionally, explicit ordering edges. `compile()` turns access conflicts (plus
 // explicit edges) into a DAG; `execute()` runs it, parallelizing independent
@@ -194,12 +208,7 @@ public:
     // `tools/dot_writer.h` for the style scheme); no-op when `TS_PROFILING` is 0.
     void compile(const char* DOT_path = nullptr);
 
-    // Per-run options for `execute`. An aggregate (house style: `Launch_options`,
-    // `Access_options`); spelled `execute({.token = t})` at call sites.
-    struct Execution_options
-    {
-        Cancellation_token token;
-    };
+    using Execution_options = ts::Execution_options;
 
     // Run the compiled graph; returns a completion handle. Re-runnable. If the token is
     // cancelled, not-yet-started nodes are skipped and the completion is cancelled
@@ -208,6 +217,30 @@ public:
     // `Scheduler_scope` to run on a specific pool for a scope -- including a worker-less
     // `{.single_threaded = true}` one, which runs the whole graph deterministically on the
     // calling thread).
+    //
+    // NESTED RUNS (docs/coroutine-first.md §4.8). Calling `execute()` from inside a task --
+    // typically `co_await inner.execute()` in a graph node -- is supported, and two things
+    // happen by default:
+    //  - **Lending.** Every object this graph declares that the calling task ALREADY holds a
+    //    covering grant on (write covers read and write, read covers read) is lent for the
+    //    run: the inner nodes skip their pipe turns on it, because the caller's grant already
+    //    excludes everyone else. Without this an inner node would queue behind the grant its
+    //    own caller is holding -- a deadlock. The compiled conflict edges still order the
+    //    inner nodes among themselves on a lent object, and the inner nodes' access contexts
+    //    carry the caller's grant window, so the harness stays live. Recursion works by
+    //    construction. External `async`s are unaffected: they queue behind the caller's hold
+    //    exactly as before, because the pipe never sees the lend.
+    //  - **Scope join.** The run joins the calling task's implicit scope, so the caller
+    //    cannot complete (and a node cannot release its objects) while the inner run is
+    //    still going. An un-awaited inner run therefore cannot float; pass `{.detach = true}`
+    //    when you deliberately want one to outlive its launcher, which also forgoes lending.
+    // Three misuses are fatal under `TS_SAFETY_CHECKS`: a mode-incompatible overlap (the
+    // caller holds read where the inner graph writes -- restructure so the caller declares
+    // the write, or hoist the writer out of the sub-graph); lending while the caller's scope
+    // still has unjoined children (`co_await ts::join_nested()` first -- they could race the
+    // lent-to graph on the same object, both "validly"); and calling `execute()` on a graph
+    // whose previous run is still in flight (one run at a time -- use a second instance, or
+    // order the callers).
     Task<void> execute(Execution_options opts = {});
 
     // Attach an aggregating runtime trace (tools/graph_trace.h), or detach with nullptr.
@@ -346,6 +379,11 @@ private:
     static void run_graph_node(const detail::Task_ptr& block, std::uint64_t generation);
     static void graph_node_completed(detail::Task_control_block* block);
 
+    // Resolve this run's lend set from the calling task's grants and (re)bind the node link
+    // slab to the objects the run must actually take turns on. Called at the top of every
+    // `execute()`; a plain top-level run resolves an empty lend set and rebinds nothing.
+    void bind_links_for_run(bool detach);
+
 #if TS_SAFETY_CHECKS
     // Fatal if a run is in flight (`where` names the misuse); balance the pipes'
     // `graph_refs` for the current `distinct_pipes_`. Called by the destructor, a
@@ -356,9 +394,16 @@ private:
     std::vector<Node> nodes_;
     std::vector<std::pair<int, int>> explicit_edges_;
     std::vector<detail::Pipe*> distinct_pipes_;        // every object the graph touches (address-sorted)
+    std::vector<const void*> pipe_instances_;          // the guarded instance behind each distinct pipe
+    std::vector<Access> pipe_modes_;                   // strongest mode ANY node uses on each distinct pipe
     // Every node's pipe links, contiguous per node: bound at compile() (`block->pipe_links`
     // points into this), re-armed each execute() -- runs stay allocation-free.
     std::unique_ptr<detail::Pipe_link[]> node_links_;
+    // Nested-run lend state (see `execute`). One flag per `distinct_pipes_` entry, recomputed
+    // per run; `links_lent_` records whether the link slab is currently bound to a lent
+    // subset, so the next plain run knows it must rebind the full set back.
+    std::vector<char> lent_;
+    bool links_lent_ = false;
     std::unique_ptr<Run_state> run_;                   // reused across execute() runs (one run at a time)
     bool compiled_ = false;
     // Attached via set_trace; not owned. Unconditional (one pointer) so the run logic
