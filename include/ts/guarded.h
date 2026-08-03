@@ -51,6 +51,9 @@ struct Job
     Priority priority = Priority::normal;          // queue position when this job is admitted
     Task_ptr block;                                // normal async job: the block IS the payload
     std::move_only_function<void()> on_acquired;   // reservation: signals the deferred holder
+    // Grant-holder identity for a write RESERVATION (`writer_owner` at admission): the
+    // graph node / multi-async block the hold belongs to. Normal jobs use `block` itself.
+    Task_control_block* owner = nullptr;
 };
 
 // A per-object reader/writer pipe. Jobs are admitted in FIFO order; consecutive
@@ -95,6 +98,14 @@ struct Pipe
     // referenced not copied. Consumed by the graph's DOT dump (edge tooltips) and future
     // profiling; kept in all builds (one pointer).
     const char* debug_name = nullptr;
+
+    // The block currently holding this pipe's WRITE grant, null outside a write window
+    // (docs/pipe-rebase.md §0.2). Always-on: behavior keys off it (`Deferred::commit`
+    // applies inline when the caller IS the holder), so it cannot live behind
+    // `TS_SAFETY_CHECKS`. Written under `mutex` at write admission/release (plus the
+    // graph's direct write handoff, which runs inside an exclusive write window); read
+    // lock-free by the ownership check. Identity only -- never dereferenced.
+    std::atomic<Task_control_block*> writer_owner{ nullptr };
 
     // Blocks until the pipe is fully drained and nothing is in flight.
     void wait_until_idle()
@@ -155,7 +166,11 @@ void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode, void* hold);
 // Enqueue `block` as a pipe job in `mode`; when admitted (reader/writer rules, FIFO) it is
 // dispatched to the scheduler as a raw block trampoline (`block->execute`, gen 0 -- pipe
 // blocks are never reset) and the pipe is released when the body returns. Allocation-free.
-void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block, Priority priority = Priority::normal);
+// `record`, when non-null, receives the enqueued block WHILE STILL UNDER the pipe mutex --
+// the atomic enqueue-and-record `Deferred::commit` needs so its recorded handle can never
+// lag the pipe's FIFO order (the race the deleted `commit_mutex_` used to close).
+void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block, Priority priority = Priority::normal,
+                  Task_ptr* record = nullptr);
 
 // Acquire a pipe for out-of-band direct access in `mode`, holding it (not auto-completing)
 // until `pipe_release`. A `Static_task_graph` node accesses its objects directly, bypassing
@@ -164,8 +179,11 @@ void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block,
 // async reader, overlap), a read_write holder is exclusive. Returns true if acquired now
 // (admissible at the front, per the reader/writer rules); false if deferred, in which case
 // `on_acquired` runs once the pipe drains to it (FIFO). Async coexistence is per-node,
-// not whole-run (see docs §10).
-bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired);
+// not whole-run (see docs §10). `owner` is the grant-holder block a WRITE hold publishes
+// through `Pipe::writer_owner` (the graph node / multi-async block; null when no block
+// identity exists, e.g. a coroutine guard).
+bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired,
+                  Task_control_block* owner = nullptr);
 
 // Release a hold taken by `pipe_acquire` in `mode`; admits queued jobs.
 void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode);
@@ -572,7 +590,7 @@ public:
 
 private:
     template<typename R, Access mode, typename Inst, typename Fn>
-    Task<R> launch(Inst* inst, Fn&& fn, Access_options opts, bool try_inline) const
+    Task<R> launch(Inst* inst, Fn&& fn, Access_options opts, bool try_inline, detail::Task_ptr* record = nullptr) const
     {
         // The body (stored in the block) runs `fn` under this object's access scope. If
         // `fn` takes a trailing token, the body does too and `Executable::run` forwards the
@@ -609,6 +627,8 @@ private:
 #if TS_PIPE_TAIL
         detail::bind_pipe_link(core.get(), 0, pipe_, mode);
         core->num_locks.store(1, std::memory_order_relaxed);   // the one pipe turn
+        if (record != nullptr)
+            *record = core;   // legacy config: no enqueue-and-record atomicity (chain retired)
         // Inline fast path (`access`): claim an idle line and run on this thread; otherwise
         // (or for `async`) enter the line -- the turn's release dispatches the body.
         if (try_inline && detail::pipe_try_inline(global_scheduler(), pipe_, mode, core))
@@ -632,7 +652,7 @@ private:
         // enqueue as usual.
         if (try_inline && detail::pipe_try_inline(global_scheduler(), pipe_, mode, core))
             return Task<R>(core);
-        detail::pipe_enqueue(global_scheduler(), pipe_, mode, core, opts.priority);
+        detail::pipe_enqueue(global_scheduler(), pipe_, mode, core, opts.priority, record);
         return Task<R>(core);
 #endif // TS_PIPE_TAIL
     }
@@ -660,7 +680,31 @@ struct Guarded_access
 {
     template<typename T> static T* instance(Guarded<T>& t) { return &t.instance_; }
     template<typename T> static Pipe& pipe(Guarded<T>& t) { return t.pipe_; }
+
+    // `Deferred::commit`'s enqueue arm: an ordinary write access whose block is recorded
+    // into `record` atomically with the enqueue (under the pipe mutex -- see
+    // `pipe_enqueue`), so the recorded handle can never lag FIFO order.
+    template<typename T, typename Fn>
+    static Task<void> commit_write(Guarded<T>& t, Fn&& fn, Access_options opts, Task_ptr* record)
+    {
+        return t.template launch<void, Access::read_write>(
+            &t.instance_, std::forward<Fn>(fn), opts, /*try_inline=*/false, record);
+    }
 };
+
+// Snapshot a slot written under `pipe`'s admission serialization (`Deferred`'s recorded
+// last commit) with the same ordering: on the mutex pipe, under its mutex. A destructor
+// racing live commits is already a use-after-free by contract; the lock only keeps the
+// sanctioned quiescent read well-defined.
+inline Task_ptr pipe_locked_snapshot([[maybe_unused]] Pipe& pipe, const Task_ptr& slot)
+{
+#if TS_PIPE_TAIL
+    return slot;   // legacy config: no pipe mutex (chain retired)
+#else
+    std::scoped_lock lock(pipe.mutex);
+    return slot;
+#endif
+}
 
 // An access-mode-tagged object argument, produced by `ts::as_read_only(g)` / `ts::as_read_write(g)`. It
 // lets a GENERIC lambda (`[](auto& x){...}`) declare per-object access explicitly: a generic

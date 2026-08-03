@@ -887,8 +887,15 @@ rec.stage([](Score_board& b) { b.add("alice", 10); });   // no access taken; nev
 rec.stage([](Score_board& b) { b.add("bob", 5); });
 
 // later, at a point you choose:
-ts::Task<void> applied = staged.commit_async();          // ONE write applies everything
+ts::Task<void> applied = staged.commit();                // ONE write applies everything
 ```
+
+`commit()` auto-dispatches on grant ownership. Called from the task that holds
+the target's write grant — a graph node that declared the write, an
+`async`/`access` write body — it applies **inline under that grant**, no second
+access acquisition, and returns an already-settled task. Called from anywhere
+else, it enqueues one ordinary async write on the target and returns that
+write's completion. One verb, both worlds; the old `commit_async` is gone.
 
 Contracts, briefly (full statements live in
 [deferred-versioned-state.md](deferred-versioned-state.md)):
@@ -906,14 +913,20 @@ Contracts, briefly (full statements live in
 - **Lost writes are loud**: destroying a `Deferred` with staged, uncommitted
   commands is fatal (under `TS_SAFETY_CHECKS`); `discard()` is the explicit
   escape.
-- **Sync before destroying**: destroying a `Deferred` while a `commit_async`
-  is still in flight is fatal (under `TS_SAFETY_CHECKS`) — sync the task it
-  returned first. The pending job uses the `Deferred`, and a destructor that
-  silently blocked on it would hide a bug. With the last commit settled the
-  destructor is non-blocking.
-
-Inside a graph node that already holds write access to the target, apply
-without a second pipe trip: `staged.commit()` (the bound object is implicit).
+- **Sync before destroying**: destroying a `Deferred` while an enqueued
+  `commit()` is still in flight is fatal (under `TS_SAFETY_CHECKS`) — sync the
+  task it returned first. The pending job uses the `Deferred`, and a destructor
+  that silently blocked on it would hide a bug. With the last commit settled
+  the destructor is non-blocking (inline commits finish in-call).
+- **The inline path's task carries no ordering**: when `commit()` applies
+  inline (you held the grant), the returned task settled *before* the apply —
+  it answers `is_done()` truthfully but provides no happens-before edge.
+  Observers of the data order through the object's pipe, which orders.
+- **Commit from the grant holder, not nested sub-work**: inside a node/body
+  that holds the write grant, call `commit()` there. Calling it from a nested
+  task running under the *inherited* grant is a misuse (the nested task is not
+  the holder; the enqueued write would queue behind the very grant it waits
+  out) — fatal under `TS_SAFETY_CHECKS`.
 
 For one logical producer parallelized internally (staging from inside a
 `parallel_for`), mint a `Parallel_recorder` instead: per-worker storage, no

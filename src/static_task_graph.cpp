@@ -390,7 +390,8 @@ void Static_task_graph::acquire_next(Run_state& run, int index, int pos, bool sy
     Access mode = node.pipe_modes[pos];
     Run_state* rp = &run;   // stable (run_ outlives the run)
     bool acquired = detail::pipe_acquire(*run.scheduler, *run.graph->distinct_pipes_[pi], mode,
-        [rp, index, pos] { acquire_next(*rp, index, pos + 1, /*synchronous*/ false); });
+        [rp, index, pos] { acquire_next(*rp, index, pos + 1, /*synchronous*/ false); },
+        node.block.get());   // a write hold publishes the node as `writer_owner`
 
     if (acquired)
         acquire_next(run, index, pos + 1, synchronous);   // still on the settling thread
@@ -547,12 +548,18 @@ void Static_task_graph::node_complete(Run_state& run, int index)
         if (target >= 0)
         {
             mark_preheld(run, target, pi);   // hand it directly -> no pipe op
+            // A write handoff elides the release + re-acquire, so the grant-holder identity
+            // transfers directly: the successor node owns the (still-open) write window. Runs
+            // inside an exclusive write window, so no other writer can be racing the store.
+            if (m == Access::read_write)
+                run.graph->distinct_pipes_[pi]->writer_owner.store(
+                    run.graph->nodes_[target].block.get(), std::memory_order_release);
 #if TS_SAFETY_CHECKS
-            // A write handoff elides the release + re-acquire, so bump the pipe's
-            // grant epoch by both edges at once (parity preserved: the window stays
-            // a write window, now the successor's). This node's inherited snapshots
-            // go stale here; the successor's context captures the new value when its
-            // body builds it (sequenced after this by the phase-3 release below).
+            // Same elision for the harness epoch: bump by both edges at once (parity
+            // preserved: the window stays a write window, now the successor's). This node's
+            // inherited snapshots go stale here; the successor's context captures the new
+            // value when its body builds it (sequenced after this by the phase-3 release
+            // below).
             if (m == Access::read_write)
                 run.graph->distinct_pipes_[pi]->write_epoch.fetch_add(2, std::memory_order_relaxed);
 #endif

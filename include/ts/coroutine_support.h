@@ -348,7 +348,10 @@ struct Pipe_guard_awaiter
 #if TS_PIPE_TAIL
         bool acquired = pipe_acquire(scheduler_, pipe_, Mode, std::move(on_acquired), hold_);
 #else
-        bool acquired = pipe_acquire(scheduler_, pipe_, Mode, std::move(on_acquired));
+        // A write hold publishes the awaiting coroutine's task as the grant holder (null on
+        // a non-task thread) -- so `Deferred::commit` under a coroutine write guard can take
+        // its held-grant fast path.
+        bool acquired = pipe_acquire(scheduler_, pipe_, Mode, std::move(on_acquired), current_task.get());
 #endif
         if (acquired)
             return false;   // held now -> don't suspend; `await_resume` builds the guard

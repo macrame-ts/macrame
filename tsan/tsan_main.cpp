@@ -977,14 +977,14 @@ void stress_deferred()
                     {
                         rec.stage([](int& v) { ++v; });
                         if ((k & 63) == 0)
-                            d.commit_async();   // commits race staging (cut at execution)
+                            d.commit();   // commits race staging (cut at execution)
                         if ((k & 31) == 0)
                             target.async([](const int& v) { (void)v; });   // readers race commits
                     }
                 });
             }
         }   // join stagers
-        d.commit_async().sync();
+        d.commit().sync();
         int final = target.async([](const int& v) { return v; }).sync();
         assert(final == threads * per);
     }
@@ -1000,9 +1000,9 @@ void stress_deferred()
         for (int r = 0; r < rounds_pr; ++r)
         {
             ts::parallel_for(per_pr, [&rec](int) { rec.stage([](int& v) { ++v; }); });
-            d.commit_async();
+            d.commit();
         }
-        d.commit_async().sync();
+        d.commit().sync();
         assert(target.async([](const int& v) { return v; }).sync() == rounds_pr * per_pr);
     }
 }

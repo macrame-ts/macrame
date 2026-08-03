@@ -47,15 +47,20 @@ struct Pipe
     Pipe_link* tail = nullptr;                 //   (Job / std::deque / closures: deleted)
     int active_readers = 0;                    // late reader join = ++active_readers
     bool writer_active = false;
-    Task_control_block* writer_owner = nullptr;   // ALWAYS-ON (goal 1): the block holding
-                                                  // the write grant; set/cleared/handed
-                                                  // off under `mutex`
-    Task_ptr last_write;                       // newest write's block: Deferred's ordering
-                                               // handle; `commit_mutex_` dies
+    std::atomic<Task_control_block*> writer_owner{ nullptr };   // ALWAYS-ON (goal 1): the
+                                               // block holding the write grant; written
+                                               // under `mutex` (plus the graph write
+                                               // handoff, inside an exclusive window);
+                                               // read lock-free by the ownership check
     std::condition_variable idle;              // drain (verdict: safe as-is, notify under lock)
     // write_epoch / graph_refs / debug_name as today (TS_SAFETY_CHECKS gating unchanged)
 };
 ```
+
+(`Pipe::last_write` from the first draft is dropped: a later unrelated async write
+pollutes it, so the `Deferred` contract must not key off it. The ordering mechanism is
+the enqueue-and-record seam below; a general last-write facility can return if a second
+consumer appears.)
 
 - **`Pipe_link` slims to a queue node**: `next` (plain pointer — the queue is
   mutex-guarded), `owner`, `pipe`, `mode`, `index`, `priority`. Deleted: `role`, `gate`,
@@ -69,6 +74,11 @@ struct Pipe
   turn dispatches through `dispatch_ready` (priority, inline, cancellation, worker-less
   uniform). Reader/writer/FIFO rules identical to the current pipe. The queue holds one
   ref on `owner` per queued link (taken at enqueue, released after the turn fires).
+  **Turn-firing happens OUTSIDE the mutex** (the trap): `release()` reaching zero
+  dispatches — a scheduler submit, possibly a wake syscall, and in worker-less mode the
+  submit EXECUTES the body in-call, so a body releasing the same pipe would self-deadlock
+  on the held mutex. Admission collects the granted links under the lock and fires their
+  releases after unlock — the same shape as today's `submit_admitted`.
 - **Multi-object, unified (goal 2)**: one wrapper allocation with embedded `(pipe, mode)`
   bindings; `num_locks = launch + ordinary + P`; at the `now == pipe_count` trigger, the
   sequential canonical cascade enqueues link[0]; each admission fires `release(owner)` and
@@ -76,26 +86,41 @@ struct Pipe
   `async` (deleting `Multi_async_state`, its `std::map`, and the `on_acquired` closures)
   AND graph nodes (deleting `acquire_next`'s pipe walk, `preheld`, `handoff_target`,
   `mark_preheld`; a node's cascade starts at data-ready). The explicit graph handoff goes
-  away: release + next admission happen in the same mutex pass, so the optimization it
-  bought is already structural; `write_epoch` parity is preserved by the normal
-  release/acquire bumps (+1 each, +2 total across a write→write boundary — same parity as
-  the old handoff's +2). `writer_owner` hand-off likewise becomes natural (release clears
-  it, the next admission sets it).
+  away; its optimization is recovered only when the successor's link is already queued at
+  the predecessor's release (release + next admission in one mutex pass) — NOT guaranteed
+  (a successor whose cascade has not reached this pipe yet queues later), and an async
+  write may now interleave between two conflicting nodes where the handoff used to splice
+  them airtight. Behavior change accepted (the old whole-run reservation already allowed
+  gaps elsewhere); re-measure the graph benchmark. `write_epoch` parity is preserved by
+  the normal release/acquire bumps (+1 each, +2 total across a write→write boundary —
+  same parity as the old handoff's +2). `writer_owner` hand-off likewise becomes natural
+  (release clears it, the next admission sets it).
 - **Held grants** (`pipe_acquire`/`pipe_release`, mode-aware) remain the coroutine-guard
   primitive, as on master. Reader holds join `active_readers`; writer holds set
   `writer_owner`.
-- **Goal 1, the unified verb**: `Deferred::commit(opts = {})` —
+- **Goal 1, the unified verb** (ladder amended per the author's design review):
+  `Deferred::commit(opts = {})` —
   1. `pipe.writer_owner == current_task.get()` → the caller already holds the write grant
      (graph node / async write body): apply inline under it; return a pre-settled
      `Task<void>` sentinel (one shared static settled block, no per-call allocation).
-  2. else, pipe front free for a writer → try-inline (apply on the caller, release), same
-     sentinel return.
-  3. else → enqueue as an ordinary pipe write (today's `commit_async` body); return its task.
-  `commit_async` is removed from the public API (goal 1 delivered). `last_write` is
-  maintained under the mutex at write enqueue, making the external `commit_mutex_`
-  unnecessary (delete it; the in-flight-at-destruction fatal keys off `last_write`'s
-  settled state). `Versioned::publish()` unification rides the same mechanism later —
-  out of scope for this pass.
+     **Sentinel ordering contract**: the pre-settled task provides no happens-before edge
+     (it settled before the apply) — observers of the data order through the object's
+     pipe; the handle only answers `is_done`/`sync` truthfully.
+  2. anyone else → enqueue as an ordinary pipe write (the old `commit_async` body);
+     return its task. The opportunistic front-free try-inline arm from the first draft
+     is DROPPED: it would silently turn fire-and-forget commit latency into a full batch
+     apply on the caller. May be relaxed later, behind evidence.
+  `commit_async` is removed from the public API (goal 1 delivered). The destructor's
+  in-flight check keys off the **enqueue-and-record seam**: the enqueue path stores the
+  new write's block into `Deferred::last_commit_` while still under the pipe's mutex —
+  atomic enqueue+record is what makes the external `commit_mutex_` deletable (a plain
+  post-enqueue store could lag FIFO order and let the settled-check miss a pending
+  write). **Nested-grant contract**: sub-work running under a parent's INHERITED write
+  grant is not the holder (`writer_owner` is the parent) — its commit() would enqueue
+  behind the very grant it waits out; fatal under `TS_SAFETY_CHECKS`
+  (`Access_context::holds_write_epoch`), call commit() from the grant-holding task.
+  `Versioned::publish()` unification rides the same mechanism later — out of scope for
+  this pass.
 - **Non-goals of this pass**: writer retraction (parked, R4 — pipe order is still not
   prerequisite edges; a writers-only chain behind the mutex admission remains possible
   later), the atomic reader fast path (a compatible future optimization: pack

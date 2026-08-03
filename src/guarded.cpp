@@ -142,6 +142,7 @@ void release_and_redispatch(Scheduler& scheduler, Pipe& pipe, Access mode)
         else
         {
             pipe.writer_active = false;
+            pipe.writer_owner.store(nullptr, std::memory_order_release);   // write grant released
 #if TS_SAFETY_CHECKS
             pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window closes
 #endif
@@ -208,6 +209,10 @@ void dispatch(Pipe& pipe, Admitted& admitted)
             if (pipe.writer_active || pipe.active_readers > 0)
                 break;
             pipe.writer_active = true;
+            // Publish the write-grant holder: the job's own block, or -- for a reservation --
+            // the holder block the acquire named (a graph node / multi-async block).
+            pipe.writer_owner.store(front.reservation ? front.owner : front.block.get(),
+                                    std::memory_order_release);
 #if TS_SAFETY_CHECKS
             pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window opens
 #endif
@@ -246,18 +251,22 @@ void submit_admitted(Scheduler& scheduler, Pipe& pipe, Admitted& admitted)
 
 } // namespace
 
-void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block, Priority priority)
+void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block, Priority priority,
+                  Task_ptr* record)
 {
     Admitted admitted;
     {
         std::scoped_lock lock(pipe.mutex);
+        if (record != nullptr)
+            *record = block;   // enqueue-and-record, atomic under the mutex (Deferred::commit)
         pipe.jobs.push_back(Job{ mode, /*reservation*/ false, priority, std::move(block), {} });
         dispatch(pipe, admitted);
     }
     submit_admitted(scheduler, pipe, admitted);
 }
 
-bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired)
+bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired,
+                  Task_control_block* owner)
 {
     std::scoped_lock lock(pipe.mutex);
     // Admit at the front only if nothing is queued (FIFO) and the mode rule holds: a reader
@@ -275,6 +284,7 @@ bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_
         else if (!pipe.writer_active && pipe.active_readers == 0)
         {
             pipe.writer_active = true;   // acquired now; hold as an exclusive writer
+            pipe.writer_owner.store(owner, std::memory_order_release);
 #if TS_SAFETY_CHECKS
             pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window opens
 #endif
@@ -284,7 +294,7 @@ bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_
     // Deferred: sit behind the queued/active work; admitted (FIFO) when it drains. No
     // dispatch here -- the blocking condition still holds, so nothing can be admitted yet;
     // whatever releases it (a completing job or `pipe_release`) re-dispatches.
-    pipe.jobs.push_back(Job{ mode, /*reservation*/ true, Priority::normal, {}, std::move(on_acquired) });
+    pipe.jobs.push_back(Job{ mode, /*reservation*/ true, Priority::normal, {}, std::move(on_acquired), owner });
     return false;
 }
 
@@ -306,7 +316,8 @@ void multi_acquire(Ref_ptr<Multi_async_state> state, Task_ptr block, std::size_t
 
     auto [pipe, mode] = state->holds[pos];
     bool acquired = pipe_acquire(*state->scheduler, *pipe, mode,
-        [state, block, pos]() mutable { multi_acquire(std::move(state), std::move(block), pos + 1); });
+        [state, block, pos]() mutable { multi_acquire(std::move(state), std::move(block), pos + 1); },
+        block.get());
 
     if (acquired)
         multi_acquire(std::move(state), std::move(block), pos + 1);
@@ -364,6 +375,7 @@ bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_p
             if (pipe.writer_active || pipe.active_readers > 0)
                 return false;
             pipe.writer_active = true;   // exclusive writer
+            pipe.writer_owner.store(block.get(), std::memory_order_release);
 #if TS_SAFETY_CHECKS
             pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window opens
 #endif

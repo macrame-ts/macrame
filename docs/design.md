@@ -422,6 +422,18 @@ single write access. Readers see none of a batch before the commit and all
 of it after (stable snapshots instead of racy prefixes). The pipe remains
 the only arbitration mechanism; the harness is untouched.
 
+`commit()` is one auto-dispatching verb. The pipe carries an always-on
+`writer_owner` — the task currently holding its write grant — so `commit()`
+called *by the holder* (a graph node's declared write, an `async` write body)
+applies inline under the grant it already has, while any other caller's
+commit becomes one enqueued write. The alternative — two spellings, the
+under-grant `commit()` and an acquiring `commit_async()` — pushed a
+scheduling decision onto the user that the pipe can answer itself, and made
+the common "call it from wherever the frame logic sits" case a foot-gun
+(the wrong spelling either double-acquires or deadlocks). Ownership is
+behavior-bearing state, so it lives outside `TS_SAFETY_CHECKS`; the
+diagnostic-only grant machinery stays gated.
+
 The rejected alternative here was a **"lazy `Guarded`"** — a mode where
 `async` writes queue but don't execute until a flush node runs. It fails on
 its own FIFO: parked writes at the queue's front either block every later

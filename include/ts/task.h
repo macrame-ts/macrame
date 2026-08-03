@@ -727,6 +727,23 @@ inline Task_ptr make_bare_block()
     return Task_ptr(b);   // refcount 0 -> 1
 }
 
+// Shared pre-settled void blocks for verbs whose fast path finishes the work in-call
+// (`Deferred::commit` applying inline under a held grant): one static block per outcome,
+// allocated once and never freed, so returning a `Task<void>` costs no allocation.
+// Ordering contract: a pre-settled task provides no happens-before edge to its observer
+// (it settled before the work it reports on) -- callers that need ordering must go through
+// the object's pipe, which orders; the settled handle only answers `is_done`/`sync` truthfully.
+inline const Task_ptr& settled_void_core()
+{
+    static Task_ptr core = [] { Task_ptr b = make_bare_block(); b->complete(); return b; }();
+    return core;
+}
+inline const Task_ptr& cancelled_void_core()
+{
+    static Task_ptr core = [] { Task_ptr b = make_bare_block(); b->cancel(); return b; }();
+    return core;
+}
+
 // Make a fresh block for a `Task<R>`; returns the handle core plus (for a non-void R) a RAW
 // pointer to the typed wrapper the producer stores into. The wrapper is owned by the block's
 // intrusive refcount (`core`), so the raw pointer stays valid as long as any `Task_ptr` to
@@ -950,6 +967,12 @@ template<typename Fn, typename... Args> struct Invoke_result_tok<Fn, true, Args.
 // The control block behind a `Task` handle (used to wire prerequisites).
 template<typename R>
 Task_ptr core_of(const Task<R>& t) noexcept;
+
+// `core_of`'s inverse: wrap an existing block in a handle. For detail-layer producers
+// (`Deferred::commit`'s pre-settled sentinel) that hand out a `Task` for a block they
+// did not create through the public builders.
+template<typename R>
+Task<R> task_from_core(Task_ptr core) noexcept;
 
 // Link `prereq` into `dependent`'s prerequisites as a RETRACTION HINT only — no lock
 // count, no successor, completion stays whatever drives `dependent` (a continuation
@@ -1179,6 +1202,8 @@ protected:
 private:
     template<typename R2>
     friend detail::Task_ptr detail::core_of(const Task<R2>&) noexcept;
+    template<typename R2>
+    friend Task<R2> detail::task_from_core(detail::Task_ptr) noexcept;
 
     // A continuation is a PROPER scheduled task (an `Executable`), not an inline callback:
     // its body runs `produce(producer's result)`, dispatched through the normal prerequisite
@@ -1215,6 +1240,9 @@ namespace detail
 
 template<typename R>
 Task_ptr core_of(const Task<R>& t) noexcept { return t.core_; }
+
+template<typename R>
+Task<R> task_from_core(Task_ptr core) noexcept { return Task<R>(std::move(core)); }
 
 } // namespace detail
 

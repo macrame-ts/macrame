@@ -38,7 +38,7 @@ summary + the forward plan.
 | file | contents |
 |---|---|
 | `journal.h` | `detail::Journal<T>` (slots, cut, free-list, `max_slots`), `Recorder<T>`, `Parallel_recorder<T>`, THE ORDERING CONTRACT comment |
-| `deferred.h` | `Deferred<T>`: `recorder()`, `parallel_recorder()`, `commit()` (under held grant, checked; bound object implicit), `commit_async(opts)`, `discard()` |
+| `deferred.h` | `Deferred<T>`: `recorder()`, `parallel_recorder()`, `commit(opts)` (auto-dispatching: inline under the caller's held write grant, else one enqueued write; bound object implicit — see contract 7a), `discard()` |
 | `versioned.h` | `Versioned<T>`: `read()`, `recorder()`, `parallel_recorder()`, `publish(opts)`, `publish_into(T&)`, `state()`, `Resync{replay,copy,overwrite}`, `set_copy`, `set_divergence_check`, `discard()`; `ts::publish_body(v)` for graph flip nodes |
 | `sample/physics.{h,cpp}` | machine/extract decomposition fixture (sealed `Guarded<Physics_world>`, `Deferred` inputs, `Versioned` poses, id reservation, batch extract, parallel drag staging); determinism self-check |
 | `sample/blackboard.cpp` | single file (extern'd in main.cpp, no header — by design): blackboard recipe with key-change subscriptions; determinism self-check |
@@ -73,11 +73,24 @@ summary + the forward plan.
    on mismatch (valid: no FP drift on one binary; partial hashes fine).
 7. **Lost writes are fatal** (`TS_SAFETY_CHECKS`): staged-but-unapplied at
    destruction; `discard()` is the escape. Also fatal: destroying a `Deferred`
-   with a `commit_async` still in flight — sync the returned task first (the
-   pending pipe job uses the `Deferred`; a silently blocking destructor would
-   hide the bug). Compliant destruction is non-blocking: pipe writes are FIFO,
-   so the last commit settling means no job references the `Deferred` (shipping
-   builds keep the pipe wait as the safety net for the violation case).
+   with an enqueued `commit()` still in flight — sync the returned task first
+   (the pending pipe job uses the `Deferred`; a silently blocking destructor
+   would hide the bug). Compliant destruction is non-blocking: pipe writes are
+   FIFO, so the last commit settling means no job references the `Deferred`
+   (shipping builds keep the pipe wait as the safety net for the violation
+   case; inline commits finish in-call and never pend).
+7a. **One `commit()`, auto-dispatching (2026-08, the pipe-outcome rework —
+   `commit_async` removed).** Called by the task holding the target's write
+   grant (`Pipe::writer_owner == current_task`) it applies inline under that
+   grant and returns a shared pre-settled task — which carries NO
+   happens-before edge (it settled before the apply; observers order through
+   the object's pipe). Any other caller's commit is one enqueued write whose
+   handle is recorded into `last_commit_` atomically with the enqueue (under
+   the pipe mutex — the property the deleted `commit_mutex_` enforced
+   externally). Misuse contract: nested sub-work under an INHERITED write
+   grant must not call `commit()` (it is not the holder; the enqueued write
+   would queue behind the very grant it waits out) — fatal under
+   `TS_SAFETY_CHECKS`; commit from the grant-holding task instead.
 8. **Recorder lifetime**: mint per producer, prefer setup-time; dtors recycle
    slots (free-list; staged-but-uncut commands survive release); >4096 alive
    recorders is fatal (`Journal::max_slots` — catches mint-and-retain); a
@@ -126,10 +139,11 @@ summary + the forward plan.
 6. **Per-slot mutex exists only for the dynamic stage-vs-cut race**;
    uncontended in one-producer use; graphs edge-order it away entirely. It is
    the thing the arena/record-stream rebase can remove.
-7. **`commit()` vs `commit_async()`**: the former applies to the bound object
-   under an already held write grant (verified via `access_check` on the bound
-   instance) — the graph-node / sim-boundary form; the latter is one ordinary
-   pipe write.
+7. **`commit()` dispatch (was `commit()` vs `commit_async()`)**: one verb since
+   the 2026-08 rework — `Pipe::writer_owner == current_task` picks the inline
+   under-grant apply (still `access_check`-verified on the bound instance, the
+   graph-node / sim-boundary form); every other caller gets one ordinary pipe
+   write. See contract 7a for the sentinel-ordering and nested-grant rules.
 8. **Producer→commit/flip edges are hand-wired** (`.after`); `Access::append`
    derivation was analyzed and deliberately NOT added (avoidable lattice
    dimension; staging needs no grant at all). Revisit only when the

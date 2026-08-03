@@ -236,11 +236,30 @@ void run_death_scenario(const char* name)
             ts::Deferred<int> d{ target };
             auto rec = d.recorder();
             rec.stage([](int& v) { ++v; });
-            d.commit_async();   // queued behind the blocker: still in flight
+            d.commit();   // queued behind the blocker: still in flight
             // `d` destroyed with the commit unsettled -> fatal (before the
             // staged-leftover check can fire)
         }
     }
+#if TS_SAFETY_CHECKS
+    else if (std::strcmp(name, "deferred_commit_nested_grant") == 0)
+    {
+        ts::Guarded<int> target{ 0 };
+        ts::Deferred<int> d{ target };
+        auto rec = d.recorder();
+        rec.stage([](int& v) { ++v; });
+        ts::Static_task_graph g;
+        g.add_node([&d](int&)
+        {
+            // The nested body inherits the node's write grant but is NOT the grant
+            // holder (`writer_owner` is the node); its commit() would enqueue behind
+            // the node's own hold -> the misuse diagnostic fatals at the call.
+            ts::nested([&d] { d.commit(); }).sync();
+        }, target);
+        g.compile();
+        g.execute().sync();
+    }
+#endif
     else if (std::strcmp(name, "recorder_empty_stage") == 0)
     {
         ts::Guarded<int> target{ 0 };

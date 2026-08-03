@@ -85,6 +85,19 @@ public:
         }
         return false;
     }
+
+    // As `holds_epoch`, but only a `read_write` entry matches -- "this scope holds the
+    // WRITE grant whose window `epoch` tracks". Distinguishes an inherited/parent write
+    // grant from a mere read grant (`Deferred::commit`'s misuse diagnostic).
+    bool holds_write_epoch(const std::atomic<std::uint64_t>* epoch) const noexcept
+    {
+        for (int i = 0; i < count_; ++i)
+        {
+            if (entries_[i].epoch == epoch && entries_[i].mode == Access::read_write)
+                return true;
+        }
+        return false;
+    }
 #endif
 
 private:
