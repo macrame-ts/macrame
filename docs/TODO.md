@@ -529,18 +529,19 @@ IDs — when an item is done, mark it, don't renumber.
         the "does driving a sub-graph from a node risk worker exhaustion" question is already
         answered (it does not: an awaited inner run suspends the outer frame, holding no worker).
 
-    13. `[ ]` **(P2, test debt from the pipe rebase) Wave-2 `writer_owner` tests F1–F4**
-        ([pipe-rebase-tests.md](pipe-rebase-tests.md) §F) — the grant-ownership invariants that
-        `Deferred::commit()`'s auto-dispatch keys off, currently covered only indirectly by the
-        commit tests. Re-scoped for the evolved pipe: **F1** (owner set inside a write body,
-        null outside) and **F4** (each pipe of a multi-object write names the same holding
-        block) stand as written; **F3** re-aims at the awaitable `access` inline arm (the
-        caller running the write inline must name its own block as owner for the body's
-        duration) and gains a reentrancy case (`writer_owner == current task` → the nested
-        access runs under the held grant, owner unchanged); **F2 is moot** — the explicit graph
-        write handoff it tested is deleted, so the successor case is now "release clears the
-        owner, the next admission sets it", which is worth one test in F2's place. Needs the
-        `Pipe_probe` white-box helper from the same plan.
+    13. `[x]` **DONE (2026-08) — Wave-2 `writer_owner` tests F1–F4**
+        ([pipe-rebase-tests.md](pipe-rebase-tests.md) §F), in `pipe_tests` §F. Re-scoped for the
+        evolved pipe: **F1** (owner set inside a write body, null outside — plus the other half
+        of the invariant, that a READER hold publishes no owner, or `commit()` would take its
+        inline arm under a read grant) and **F4** (each pipe of a multi-object write names the
+        same block; an untouched object stays unowned) as written; **F3** re-aimed at the two
+        inline arms — an `access` on a free pipe is a real admission and publishes its own
+        block, while the REENTRANT arm must leave the outer block as owner (republishing or
+        clearing on the inner settle would mis-dispatch `commit()` for the rest of the outer
+        body); **F2 re-scoped** — the explicit graph write handoff it tested is deleted, so it
+        now pins release-then-admit (two chained writes each name their own block, never the
+        predecessor's, never null). No `Pipe_probe` type was needed: `Guarded_access::pipe()`
+        plus a local `owner_of()` reads the field directly. 517 → 536 checks.
 
     14. `[ ]` **(P2, benchmark) Re-measure the coroutine chain on a quiet host.** `coro chn`
         (chained `co_await`s) reads ~1970 ns/op against the ~104 ns/op single-`co_await` figure
