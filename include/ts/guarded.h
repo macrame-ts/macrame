@@ -545,6 +545,22 @@ private:
             }
         }();
         core->flags.priority = opts.priority;
+        // Reentrant fast path (`access` only, docs/coroutine-first.md §4.2 / doctrine (b)):
+        // the caller's task already holds this pipe's write grant -- run the body inline
+        // UNDER that grant, touching the pipe not at all (no acquire, no turn; the held
+        // write is exclusive, so a read or write body is equally legal). Queueing instead
+        // would park the access behind the caller's own hold. `Executable::run` overwrites
+        // the unused pipe-turn lock when it arms the execution counter.
+        if (try_inline)
+        {
+            detail::Task_control_block* owner = pipe_.writer_owner.load(std::memory_order_acquire);
+            if (owner != nullptr && owner == detail::current_task.get())
+            {
+                detail::bind_pipe_link(core.get(), 0, pipe_, mode);   // diagnostics only; never enqueued
+                core->execute(core, 0);
+                return Task<R>(core);
+            }
+        }
         detail::bind_pipe_link(core.get(), 0, pipe_, mode);
         core->num_locks.store(1, std::memory_order_relaxed);   // the one pipe turn
         // Inline fast path (`access`): claim an idle pipe and run on this thread; otherwise

@@ -4,6 +4,10 @@
 #include "ts/static_task_graph.h"
 #include "ts/access.h"
 
+#if defined(__cpp_impl_coroutine)
+#include "ts/coroutine_support.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -283,6 +287,51 @@ std::vector<double> bench_pipe_contention(unsigned producers, int read_pct)
     return ops_per_sec;
 }
 
+// Bare task creation + boundary sync: the `make_executable` path (the fusion baseline).
+std::vector<double> bench_launch_sync()
+{
+    return measure([&]() -> uint64_t
+    {
+        (void)ts::launch([] { return 1; }).sync();
+        return 1;
+    });
+}
+
+#if defined(__cpp_impl_coroutine)
+// Coroutine task creation + boundary sync: the fused frame+block path (one allocation,
+// docs/coroutine-first.md §5.1). Target: at or below `launch` above.
+static ts::Task<int> trivial_coro() { co_return 1; }
+
+std::vector<double> bench_coro_sync()
+{
+    return measure([&]() -> uint64_t
+    {
+        (void)trivial_coro().sync();
+        return 1;
+    });
+}
+
+// Coroutine composition: await a chain of K eagerly-launched stages -- the coroutine-first
+// equivalent of the `then` chain benchmark below (the number to beat, §5.5).
+static ts::Task<int> chain_coro(int chain)
+{
+    int v = co_await ts::launch([] { return 0; });
+    for (int k = 0; k < chain; ++k)
+        v = co_await ts::launch([v] { return v + 1; });
+    co_return v;
+}
+
+std::vector<double> bench_coro_chain()
+{
+    constexpr int chain = 50;
+    return measure([&]() -> uint64_t
+    {
+        (void)chain_coro(chain).sync();
+        return chain;
+    });
+}
+#endif
+
 // Task::then: continuation chain length K fired off one producer.
 std::vector<double> bench_then()
 {
@@ -384,6 +433,11 @@ void run_benchmarks()
     report("50% rd",  bench_pipe_contention(hw, 50));
 
     std::printf("\nfeatures:\n");
+    report("launch", bench_launch_sync());
+#if defined(__cpp_impl_coroutine)
+    report("coro", bench_coro_sync());
+    report("coro chn", bench_coro_chain());
+#endif
     report("ts_write", bench_ts_write());
     report("ts_read", bench_ts_read());
     report("then", bench_then());

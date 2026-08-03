@@ -661,27 +661,9 @@ struct Task_control_block
         }
     }
 
-    static void retract_or_wait(const Task_ptr& blk)
-    {
-        retract(blk);
-        // Worker-less mode: the awaited work (an async access, a released successor) may be
-        // queued on THIS thread's serial trampoline behind the current frame -- run it
-        // before parking, or nothing ever would. No-op otherwise.
-        drain_serial_pending();
-#if TS_SAFETY_CHECKS
-        // About to genuinely block (retraction and the serial drain could not finish the
-        // target) under an access scope, on work a waiter cannot help along: the
-        // never-block-in-a-body rule, diagnosed at the violation instead of documented
-        // only. Retractable targets are exempt by the condition -- sanctioned fork-join
-        // (`parallel_for`, bare-task joins) retracts instead of parking. `ready` is an
-        // approximation (the target may complete concurrently after the check) -- a rare
-        // borderline report, never a missed hazard class.
-        if (current_access && !blk->flags.retractable
-            && !blk->ready.load(std::memory_order_acquire))
-            blocking_sync_diagnose(blk.get());
-#endif
-        blk->wait();
-    }
+    // Retract what we can, then wait; defined after `current_task` below (the in-task
+    // blocking fatal reads it).
+    static void retract_or_wait(const Task_ptr& blk);
 };
 
 // `Task_ptr` refcount ops (block is complete here). `dec` at 0 runs the wrapper's `destroy`.
@@ -760,6 +742,30 @@ auto make_block()
 // shared_ptr so a nested child can register the parent as its successor and keep it
 // alive until the child completes.
 inline thread_local Task_ptr current_task;
+
+inline void Task_control_block::retract_or_wait(const Task_ptr& blk)
+{
+    retract(blk);
+    // Worker-less mode: the awaited work (an async access, a released successor) may be
+    // queued on THIS thread's serial trampoline behind the current frame -- run it
+    // before parking, or nothing ever would. No-op otherwise.
+    drain_serial_pending();
+#if TS_SAFETY_CHECKS
+    // Coroutine-first (docs/coroutine-first.md §4.1): about to genuinely park INSIDE a
+    // task (retraction and the serial drain could not finish the target) on work the
+    // waiter cannot help along -- fatal, not a warning: the park occupies a worker and
+    // risks pool-exhaustion deadlock, and `co_await` is the sanctioned wait. Retractable
+    // targets are exempt UNTIL the retraction machinery is removed (stage 4) -- bare-task
+    // joins still retract above; `parallel_for` joins never route here (they wait on the
+    // group state directly, on provably running helpers). `ready` is an approximation
+    // (the target may complete concurrently after the check) -- a rare borderline fatal
+    // on a genuinely-parking call, never a missed hazard class.
+    if (current_task && !blk->flags.retractable
+        && !blk->ready.load(std::memory_order_acquire))
+        blocking_sync_diagnose(blk.get());
+#endif
+    blk->wait();
+}
 
 // Empty for `void`, so an executable `void` task pays nothing for a result.
 template<typename R> struct Result_storage { std::optional<R> result; };

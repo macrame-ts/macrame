@@ -762,33 +762,13 @@ void test_single_threaded_deterministic_order()
 }
 
 #if TS_SAFETY_CHECKS
-// The blocking-sync diagnostic fires -- once, deterministically -- when a node body
-// blocks on a pipe job for an object the scope does NOT hold, and the sync still
-// completes correctly. The blocker on `b`'s pipe spins until the report lands, so the
-// awaited write cannot finish before the check runs (no timing dependence).
-void test_blocking_sync_warns_but_completes()
+// Coroutine-first §4.1: a node body that would genuinely park on a pipe job (an object the
+// task does not hold) is FATAL, not a warning -- the park occupies a worker and risks
+// pool-exhaustion deadlock. The sanctioned form is `co_await` (companion:
+// `test_coro_await_access_in_node`, coroutine_tests).
+void test_blocking_sync_in_task_is_fatal()
 {
-    ts::test::Expected_ensures expect{ 1 };   // diagnostic fires on a worker thread; no F5 break
-    long long base = ts::ensure_failure_count();
-    ts::Guarded<tests::Counter> a;
-    ts::Guarded<int> b{ 0 };
-
-    ts::Static_task_graph g;
-    g.add_node([&b, base](tests::Counter& k)
-    {
-        ts::Task<void> blocker = b.async([base](int&)
-        {
-            while (ts::ensure_failure_count() == base)
-                std::this_thread::yield();
-        });
-        ts::Task<int> t = b.async([](int& v) { v = 7; return v; });
-        TS_CHECK(t.sync() == 7);   // reports (queued behind the blocker), then completes
-        k.add(1);
-    }, a);
-    g.compile();
-    g.execute().sync();
-
-    TS_CHECK(ts::ensure_failure_count() == base + 1);
+    TS_CHECK(ts::test::expect_death("sync_in_task"));
 }
 
 // Sanctioned fork-join inside a node produces zero reports: `parallel_for` joins via the
@@ -836,7 +816,7 @@ void run_integration_tests()
     run("single-threaded: sync inside body", test_single_threaded_sync_inside_body);
     run("single-threaded: deterministic order", test_single_threaded_deterministic_order);
 #if TS_SAFETY_CHECKS
-    run("blocking sync warns but completes", test_blocking_sync_warns_but_completes);
+    run("death: blocking sync in task", test_blocking_sync_in_task_is_fatal);
     run("parallel_for in node: no reports", test_parallel_for_in_node_no_reports);
 #endif
     run("multi async no deadlock", test_multi_async_no_deadlock);

@@ -197,6 +197,46 @@ void run_death_scenario(const char* name)
         t.reset();   // reset before the task has settled -> fatal
     }
 #if TS_SAFETY_CHECKS
+    else if (std::strcmp(name, "sync_in_task") == 0)
+    {
+        // A node body parking on a pipe job for an object the task does not hold: fatal
+        // (coroutine-first §4.1). The blocker keeps `b`'s pipe busy so the sync genuinely
+        // parks (no timing dependence: the fatal fires before the wait).
+        ts::Guarded<tests::Counter> a;
+        ts::Guarded<int> b{ 0 };
+        std::atomic<bool> release{ false };
+        ts::Static_task_graph g;
+        g.add_node([&b, &release](tests::Counter&)
+        {
+            ts::Task<void> blocker = b.async([&release](int&)
+            {
+                while (!release.load(std::memory_order_relaxed))
+                    std::this_thread::yield();
+            });
+            b.async([](int& v) { v = 7; return v; }).sync();   // parks inside a task -> fatal
+        }, a);
+        g.compile();
+        g.execute().sync();
+    }
+#endif
+#if defined(__cpp_impl_coroutine)
+    else if (std::strcmp(name, "await_cancelled_value") == 0)
+    {
+        // Awaiting a cancelled Task<R> with non-void R: no result to produce, no
+        // exceptions -- a precondition, mirroring sync(). Companion:
+        // `test_await_cancelled_checked` (coroutine_tests).
+        ts::Cancellation_source src;
+        src.request_cancel();
+        ts::Guarded<int> d{ 0 };
+        ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });
+        while (!t.is_done())
+            std::this_thread::yield();
+        [](ts::Task<int> cancelled) -> ts::Task<void>
+        {
+            co_await cancelled;   // -> fatal
+        }(std::move(t)).sync();
+    }
+#endif
     else if (std::strcmp(name, "after_post_launch") == 0)
     {
         ts::Signal gate;
@@ -204,7 +244,6 @@ void run_death_scenario(const char* name)
         t.launch();
         t.after(gate);   // prerequisites are frozen at launch -> fatal
     }
-#endif
     else if (std::strcmp(name, "deferred_drop_staged") == 0)
     {
         ts::Guarded<int> target{ 0 };

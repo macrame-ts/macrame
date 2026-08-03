@@ -6,6 +6,7 @@
 #include "ts/coroutine_support.h"
 #include "ts/guarded.h"
 #include "ts/parallel_for.h"
+#include "ts/static_task_graph.h"
 #include "test_util.h"
 
 #include <atomic>
@@ -290,6 +291,78 @@ void test_showcase()
     }
 }
 
+// --- coroutine-first §6 matrix companions ---------------------------------
+
+// Companion to the `sync_in_task` fatal: the sanctioned wait inside a task is `co_await` --
+// suspend (freeing the worker) until the access's turn, no park, no fatal. A blocker holds
+// the pipe first so the await genuinely suspends.
+Task<int> await_instead_of_sync(ts::Guarded<int>& b, std::atomic<bool>& release)
+{
+    ts::Task<void> blocker = b.async([&release](int&)
+    {
+        while (!release.load(std::memory_order_relaxed))
+            std::this_thread::yield();
+    });
+    ts::Task<int> write = b.async([](int& v) { v = 7; return v; });
+    release.store(true, std::memory_order_relaxed);
+    int v = co_await write;   // suspends behind the blocker, resumes when granted
+    co_return v;
+}
+
+void test_coro_await_instead_of_sync()
+{
+    ts::Guarded<int> b{ 0 };
+    std::atomic<bool> release{ false };
+    TS_CHECK(await_instead_of_sync(b, release).sync() == 7);
+}
+
+// Companion to the `await_cancelled_value` fatal: check `is_cancelled()` first, then branch --
+// the same precondition discipline as `sync()`.
+Task<int> await_cancelled_checked(ts::Task<int> maybe_cancelled)
+{
+    while (!maybe_cancelled.is_done())
+        std::this_thread::yield();
+    if (maybe_cancelled.is_cancelled())
+        co_return -1;             // handled: no await of a result that does not exist
+    co_return co_await maybe_cancelled;
+}
+
+void test_await_cancelled_checked()
+{
+    ts::Cancellation_source src;
+    src.request_cancel();
+    ts::Guarded<int> d{ 0 };
+    ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });
+    TS_CHECK(await_cancelled_checked(std::move(t)).sync() == -1);
+}
+
+#if TS_SAFETY_CHECKS
+void test_death_await_cancelled_value()
+{
+    TS_CHECK(ts::test::expect_death("await_cancelled_value"));
+}
+#endif
+
+// The reentrant access arm (coroutine-first §4.2, doctrine (b)): `access` from a task that
+// already holds the object's write grant runs inline under it instead of queueing behind
+// itself (which used to be the sharp same-object deadlock).
+void test_access_reentrant_under_own_grant()
+{
+    ts::Guarded<int> a{ 0 };
+    ts::Static_task_graph g;
+    std::atomic<int> seen{ -1 };
+    g.add_node([&a, &seen](int& v)
+    {
+        v = 5;
+        ts::Task<int> r = a.access([](const int& x) { return x; });   // reentrant: inline, done
+        TS_CHECK(r.is_done());
+        seen.store(r.sync());   // settled -> sync is a plain read, legal in-task
+    }, a);
+    g.compile();
+    g.execute().sync();
+    TS_CHECK(seen.load() == 5);
+}
+
 } // namespace
 
 void run_coroutine_tests()
@@ -307,6 +380,12 @@ void run_coroutine_tests()
     run("co guard loop", test_guard_loop);
     run("co guard contention", test_guard_contention);
     run("co await-under-guard fatal", test_death_await_under_guard);
+    run("co await instead of sync", test_coro_await_instead_of_sync);
+    run("co await cancelled checked", test_await_cancelled_checked);
+#if TS_SAFETY_CHECKS
+    run("death: await cancelled value", test_death_await_cancelled_value);
+#endif
+    run("co access reentrant under own grant", test_access_reentrant_under_own_grant);
     run("co showcase", test_showcase);
 }
 

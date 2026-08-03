@@ -386,15 +386,14 @@ void blocking_sync_diagnose(const Task_control_block* blk) noexcept
             const Pipe_link& l = blk->pipe_links[i];
             if (l.pipe != nullptr && current_access->holds_epoch(&l.pipe->write_epoch))
             {
-                TS_ENSURE(false, "sync() on an access to an object this scope already holds -- "
-                    "this deadlocks; use then/when_all or nested tasks");
-                return;
+                ts::fatal("sync() inside a task on an access to an object this task already "
+                    "holds -- this deadlocks; co_await it, or commit()/access under the held "
+                    "grant");
             }
         }
     }
-    TS_ENSURE(false, "blocking sync() on non-retractable work inside an access scope -- "
-        "occupies a worker and risks deadlock; prefer continuations (then/when_all) or "
-        "nested tasks");
+    ts::fatal("blocking sync() inside a task -- parks a worker and risks pool-exhaustion "
+        "deadlock; co_await the task instead (or ts::nested / parallel_for for fork-join)");
 }
 #endif
 

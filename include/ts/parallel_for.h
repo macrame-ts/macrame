@@ -191,6 +191,11 @@ void parallel_for(int n, Body&& body, Parallel_options opts = {})
         sched.submit(&detail::parallel_helper<std::decay_t<Body>>, st, prio);
 
     detail::parallel_loop(st);   // caller participates (its ref is `handle`, so no dec here)
+    // The one sanctioned in-task wait (docs/coroutine-first.md §4.1): the caller has already
+    // drained every unclaimed chunk itself, so this parks only on helpers that are RUNNING on
+    // workers right now -- bounded, deadlock-free (running work always finishes). It waits on
+    // the group state directly, never through `retract_or_wait`, so the in-task blocking fatal
+    // does not apply here.
     st->core.wait();             // block until done == n
 
     // `handle` releases the caller's ref on return; helpers release theirs on exit -> freed.
