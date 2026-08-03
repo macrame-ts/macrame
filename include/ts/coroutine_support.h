@@ -262,11 +262,10 @@ template<typename T, Access Mode>
 class Pipe_guard
 {
 public:
-    Pipe_guard(Scheduler& scheduler, Pipe& pipe, T* obj, void* hold)
+    Pipe_guard(Scheduler& scheduler, Pipe& pipe, T* obj)
         : scheduler_(scheduler)
         , pipe_(pipe)
         , obj_(obj)
-        , hold_(hold)
     {
         if (current_access)
             ctx_ = *current_access;   // extend the coroutine's existing grant, don't replace it
@@ -280,13 +279,7 @@ public:
     {
         current_access = prev_;
         --pipe_guard_depth;
-        // Admit queued jobs / the next guard. The tail pipe releases through the hold
-        // handle `pipe_acquire` returned; the mutex pipe by mode.
-#if TS_PIPE_TAIL
-        pipe_release(scheduler_, pipe_, Mode, hold_);
-#else
-        pipe_release(scheduler_, pipe_, Mode);
-#endif
+        pipe_release(scheduler_, pipe_, Mode);   // admit queued entries / the next guard
     }
 
     Pipe_guard(const Pipe_guard&) = delete;
@@ -312,7 +305,6 @@ private:
     Scheduler& scheduler_;
     Pipe& pipe_;
     T* obj_;
-    void* hold_ = nullptr;   // the tail pipe's acquire handle (unused by the mutex pipe)
     Access_context ctx_;
     const Access_context* prev_ = nullptr;
 };
@@ -345,14 +337,10 @@ struct Pipe_guard_awaiter
             if (state_.exchange(1, std::memory_order_acq_rel) == 2)
                 schedule_resume(h);   // re-install grant + resume (via the bounded trampoline)
         };
-#if TS_PIPE_TAIL
-        bool acquired = pipe_acquire(scheduler_, pipe_, Mode, std::move(on_acquired), hold_);
-#else
         // A write hold publishes the awaiting coroutine's task as the grant holder (null on
         // a non-task thread) -- so `Deferred::commit` under a coroutine write guard can take
         // its held-grant fast path.
         bool acquired = pipe_acquire(scheduler_, pipe_, Mode, std::move(on_acquired), current_task.get());
-#endif
         if (acquired)
             return false;   // held now -> don't suspend; `await_resume` builds the guard
 
@@ -368,13 +356,12 @@ struct Pipe_guard_awaiter
 
     Pipe_guard<T, Mode> await_resume() noexcept
     {
-        return Pipe_guard<T, Mode>(scheduler_, pipe_, obj_, hold_);   // prvalue -> elided into the local
+        return Pipe_guard<T, Mode>(scheduler_, pipe_, obj_);   // prvalue -> elided into the local
     }
 
     Scheduler& scheduler_;
     Pipe& pipe_;
     T* obj_;
-    void* hold_ = nullptr;   // the tail pipe's acquire handle, threaded into the guard
     std::atomic<int> state_{ 0 };
 };
 

@@ -8,9 +8,7 @@
 #include <concepts>
 #include <condition_variable>
 #include <cstdio>
-#include <deque>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <tuple>
@@ -39,48 +37,26 @@ namespace detail
 void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closure,
                     Priority priority = Priority::normal);
 
-// A queued pipe job, in one of two flavors. A normal async job carries its task BLOCK as the
-// payload (no closure -- the block is dispatched raw via a static trampoline, mirroring
-// `submit_ready`, so admitting a job allocates nothing). A `reservation` carries the
-// `pipe_acquire` on-acquired callback instead (the graph / multi-async path). The deque is
-// mutex-guarded, so `Job` may be any size -- unlike the 16-byte lock-free `Task_entry`.
-struct Job
-{
-    Access mode;
-    bool reservation = false;                      // if set, `on_acquired` is the payload
-    Priority priority = Priority::normal;          // queue position when this job is admitted
-    Task_ptr block;                                // normal async job: the block IS the payload
-    std::move_only_function<void()> on_acquired;   // reservation: signals the deferred holder
-    // Grant-holder identity for a write RESERVATION (`writer_owner` at admission): the
-    // graph node / multi-async block the hold belongs to. Normal jobs use `block` itself.
-    Task_control_block* owner = nullptr;
-};
-
-// A per-object reader/writer pipe. Jobs are admitted in FIFO order; consecutive
-// readers run concurrently (each is its own scheduler task), a writer runs alone
-// (no readers, no other writer). Different objects have independent pipes and run
-// in parallel. Non-blocking: callers never wait; admission is completion-driven.
+// A per-object reader/writer pipe (the evolved mutex pipe, docs/pipe-rebase.md §0.2).
+// Entries are admitted in FIFO order; consecutive readers run concurrently, a writer runs
+// alone (no readers, no other writer). Different objects have independent pipes and run in
+// parallel. Non-blocking: callers never wait; admission is completion-driven, and an
+// admitted entry's turn fires `release()` on its owner -- the pipe is a prerequisite
+// source for the block machinery, not a dispatcher. The queue is the tasks' own embedded
+// `Pipe_link`s threaded intrusively, so queueing allocates nothing.
 struct Pipe
 {
-#if TS_PIPE_TAIL
-    // The tail chain (docs/pipe-rebase.md §4-5): `tail` is a tagged pointer -- an aligned
-    // `Pipe_link*` with bit 0 = 1 for a reader entry, 0 for a writer; the whole word 0 =
-    // idle. The single-word atomic exchange is the line's linearization point. `task_count`
-    // counts outstanding entries and drives `wait_until_idle` (§7).
-    std::atomic<std::uintptr_t> tail{ 0 };
-    std::atomic<std::uint32_t> task_count{ 0 };
-#else
     std::mutex mutex;
     std::condition_variable idle;
-    std::deque<Job> jobs;
+    Pipe_link* queue_head = nullptr;   // waiting (not yet admitted) entries, FIFO
+    Pipe_link* queue_tail = nullptr;
     int active_readers = 0;
     bool writer_active = false;
-#endif
 #if TS_SAFETY_CHECKS
     // Grant-window epoch for the harness's stale-inherited-grant check (see
     // `Access_context`). Seqlock-style parity: bumped at every write-grant acquire and
-    // release (always under `mutex`; +2 on a graph write handoff, which elides both pipe
-    // ops), so it is odd while a writer holds and even during reader eras. Reader
+    // release (always under `mutex`), so it is odd while a writer holds and even during
+    // reader eras. Reader
     // acquires/releases do not bump -- a read grant goes stale exactly when a writer
     // acquires after its capture, which is the actual safety condition. Fully compiled
     // out with the harness (the gating convention: safety-only state carries no
@@ -110,19 +86,11 @@ struct Pipe
     // Blocks until the pipe is fully drained and nothing is in flight.
     void wait_until_idle()
     {
-#if TS_PIPE_TAIL
-        // Teardown-only waiter (§7): spin-yield on the atomic count. No event/CV to free out
-        // from under the last signaler -- its `task_count` decrement to zero is its final pipe
-        // touch, and this waiter frees the pipe only after observing zero.
-        while (task_count.load(std::memory_order_acquire) != 0)
-            std::this_thread::yield();
-#else
         std::unique_lock lock(mutex);
         idle.wait(lock, [this]
         {
-            return jobs.empty() && active_readers == 0 && !writer_active;
+            return queue_head == nullptr && active_readers == 0 && !writer_active;
         });
-#endif
     }
 };
 
@@ -139,56 +107,38 @@ inline const std::atomic<std::uint64_t>* pipe_epoch([[maybe_unused]] const Pipe&
 #endif
 }
 
-#if TS_PIPE_TAIL
+// Enter a pipe task's first link into its pipe's queue (starting the sequential canonical
+// cascade for a multi-object task -- each admitted turn enters the owner's next link and
+// fires `release(owner)`; the last turn's release dispatches through the standard
+// `dispatch_ready`). The block must have its links bound (`bind_pipe_link`) and
+// `num_locks` seeded with `pipe_count`. `record`, when non-null, receives the block WHILE
+// STILL UNDER the first pipe's mutex -- the atomic enqueue-and-record `Deferred::commit`
+// needs so its recorded handle can never lag the pipe's FIFO order (the race the deleted
+// `commit_mutex_` used to close).
+void pipe_enter_first(Task_control_block* blk, Task_ptr* record);   // default arg on the task.h declaration
 
-// Advance every entered link of a settled pipe task (defined in pipe_tail.cpp). The
-// settle-must-advance-links contract: every pipe-task creation site must route its settle
-// through this -- `make_piped_executable` installs it as `on_complete`; the graph's
-// `graph_node_completed` calls it first. A missed call wedges the affected lines.
+// Advance (release) every entered link of a settled pipe task. The settle-must-advance-
+// links contract: every pipe-task creation site must route its settle through this --
+// `make_piped_executable` installs it as `on_complete`; the graph's `graph_node_completed`
+// calls it first. A missed call wedges the affected pipes.
 void advance_pipe_links(Task_control_block* blk);
 
 // `on_complete` hook form of the above, for tasks whose settle needs nothing else.
 void pipe_links_on_complete(Task_control_block* blk);
 
 // Acquire a pipe as a held grant in `mode` (the coroutine guards' primitive -- everything
-// else rides links on its own block). Allocates a small hold node whose single link enters
-// the line like any task's; `hold` receives its handle. Returns true if the turn was
-// granted during the call (no callback will fire); false if deferred -- `on_acquired`
-// fires once when the line drains to it, possibly on another thread.
-bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode,
-                  std::move_only_function<void()> on_acquired, void*& hold);
-
-// Release a `pipe_acquire` hold: settles the hold node, advancing its line.
-void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode, void* hold);
-
-#else
-
-// Enqueue `block` as a pipe job in `mode`; when admitted (reader/writer rules, FIFO) it is
-// dispatched to the scheduler as a raw block trampoline (`block->execute`, gen 0 -- pipe
-// blocks are never reset) and the pipe is released when the body returns. Allocation-free.
-// `record`, when non-null, receives the enqueued block WHILE STILL UNDER the pipe mutex --
-// the atomic enqueue-and-record `Deferred::commit` needs so its recorded handle can never
-// lag the pipe's FIFO order (the race the deleted `commit_mutex_` used to close).
-void pipe_enqueue(Scheduler& scheduler, Pipe& pipe, Access mode, Task_ptr block, Priority priority = Priority::normal,
-                  Task_ptr* record = nullptr);
-
-// Acquire a pipe for out-of-band direct access in `mode`, holding it (not auto-completing)
-// until `pipe_release`. A `Static_task_graph` node accesses its objects directly, bypassing
-// the pipe, so it holds the pipe to keep async from racing that access -- but MODE-AWARE:
-// a read_only holder joins concurrent readers (so two reader nodes, or a reader node and an
-// async reader, overlap), a read_write holder is exclusive. Returns true if acquired now
-// (admissible at the front, per the reader/writer rules); false if deferred, in which case
-// `on_acquired` runs once the pipe drains to it (FIFO). Async coexistence is per-node,
-// not whole-run (see docs §10). `owner` is the grant-holder block a WRITE hold publishes
-// through `Pipe::writer_owner` (the graph node / multi-async block; null when no block
-// identity exists, e.g. a coroutine guard).
+// else rides links on its own block): a `read_only` hold joins concurrent readers, a
+// `read_write` hold is exclusive, released only by `pipe_release`. Returns true if
+// acquired in-call (no callback fires); false if deferred, in which case `on_acquired`
+// runs once the pipe drains to it (FIFO), scheduled on `scheduler`. `owner` is the
+// grant-holder block a WRITE hold publishes through `Pipe::writer_owner` (null when no
+// block identity exists). A deferred hold allocates one small queue node -- the one
+// allocating pipe path.
 bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired,
                   Task_control_block* owner = nullptr);
 
-// Release a hold taken by `pipe_acquire` in `mode`; admits queued jobs.
+// Release a hold taken by `pipe_acquire` in `mode`; admits queued entries.
 void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode);
-
-#endif // TS_PIPE_TAIL
 
 // Extracts the parameter type list of a callable's `operator()` (or a function pointer).
 // Non-generic lambdas / functors / function pointers only; generic `auto&` params aren't
@@ -302,10 +252,8 @@ constexpr Access accessor_mode()
     }
 }
 
-#if TS_PIPE_TAIL
-
-// An executable pipe task: the `Executable` wrapper plus its embedded per-line links --
-// ONE allocation for block + result + body + links (docs/pipe-rebase.md §5.2B). `exec` is
+// An executable pipe task: the `Executable` wrapper plus its embedded per-pipe links --
+// ONE allocation for block + result + body + links (docs/pipe-rebase.md §0.2). `exec` is
 // the first member and `Executable::core` its first, so the intrusive handle aliases the
 // whole wrapper as usual.
 template<typename Body, typename R, std::size_t N>
@@ -351,25 +299,6 @@ inline void bind_pipe_link(Task_control_block* core, std::uint8_t index, Pipe& p
     l.mode = mode;
     core->pipe_count = static_cast<std::uint8_t>(index + 1);
 }
-
-#else
-
-// The pipes a multi-object async acquired (canonical / pipe-address order, deduped
-// write-wins), released at the task's completion.
-struct Multi_async_state : Ref_counted<Multi_async_state>
-{
-    Scheduler* scheduler = nullptr;
-    std::vector<std::pair<Pipe*, Access>> holds;
-};
-
-// Acquire `state->holds[pos..]` in order (each held via `pipe_acquire`, mode-aware); once all
-// are held, dispatch `block`. Immediate acquisitions recurse; a contended one defers to the
-// callback. Canonical (pipe-address) order makes the multi-object acquire deadlock-free --
-// the same order the graph uses (`distinct_pipes_` is address-sorted), so nodes and
-// multi-object asyncs can't deadlock against each other.
-void multi_acquire(Ref_ptr<Multi_async_state> state, Task_ptr block, std::size_t pos);
-
-#endif // TS_PIPE_TAIL
 
 // Try to run a job INLINE on the calling thread instead of enqueuing it (the `access` verb's
 // fast path). Admissible only when the pipe is immediately free for this mode -- no queued jobs
@@ -624,49 +553,22 @@ private:
             }
         }();
         core->flags.priority = opts.priority;
-#if TS_PIPE_TAIL
         detail::bind_pipe_link(core.get(), 0, pipe_, mode);
         core->num_locks.store(1, std::memory_order_relaxed);   // the one pipe turn
-        if (record != nullptr)
-            *record = core;   // legacy config: no enqueue-and-record atomicity (chain retired)
-        // Inline fast path (`access`): claim an idle line and run on this thread; otherwise
-        // (or for `async`) enter the line -- the turn's release dispatches the body.
+        // Inline fast path (`access`): claim an idle pipe and run on this thread; otherwise
+        // (or for `async`) enqueue -- the admitted turn's release dispatches the body.
         if (try_inline && detail::pipe_try_inline(global_scheduler(), pipe_, mode, core))
             return Task<R>(core);
-        detail::pipe_enter_first(core.get());
+        detail::pipe_enter_first(core.get(), record);
         return Task<R>(core);
-#else
-#if TS_SAFETY_CHECKS
-        // Stamp the pipe identity for the blocking-sync diagnostic. Sound to set at
-        // creation: the admission path (`submit_admitted`) stores the same value, nothing
-        // reads `dispatch_arg` as a generation on the pipe route (pipe blocks always claim
-        // gen 0), and the inline fast path never reads it at all.
-        core->flags.pipe_job = true;
-        core->dispatch_arg.store(
-            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&pipe_)),
-            std::memory_order_relaxed);
-#endif
-
-        // The block IS the pipe job -- no closure. Inline fast-path (`access`): if `try_inline`
-        // and the pipe is free right now, run the body on this thread; otherwise (or for `async`)
-        // enqueue as usual.
-        if (try_inline && detail::pipe_try_inline(global_scheduler(), pipe_, mode, core))
-            return Task<R>(core);
-        detail::pipe_enqueue(global_scheduler(), pipe_, mode, core, opts.priority, record);
-        return Task<R>(core);
-#endif // TS_PIPE_TAIL
     }
 
-    // The per-flag block factory for a single-object access: a `Piped_executable` with one
-    // embedded link (tail pipe) or a plain `Executable` (mutex pipe).
+    // The block factory for a single-object access: a `Piped_executable` with one embedded
+    // link.
     template<typename R, typename Body>
     static detail::Task_ptr make_access_block(Body&& body, Cancellation_token token)
     {
-#if TS_PIPE_TAIL
         return detail::make_piped_executable<R, 1>(std::forward<Body>(body), std::move(token));
-#else
-        return detail::make_executable<R>(std::forward<Body>(body), std::move(token));
-#endif
     }
 
     T instance_;
@@ -696,14 +598,10 @@ struct Guarded_access
 // last commit) with the same ordering: on the mutex pipe, under its mutex. A destructor
 // racing live commits is already a use-after-free by contract; the lock only keeps the
 // sanctioned quiescent read well-defined.
-inline Task_ptr pipe_locked_snapshot([[maybe_unused]] Pipe& pipe, const Task_ptr& slot)
+inline Task_ptr pipe_locked_snapshot(Pipe& pipe, const Task_ptr& slot)
 {
-#if TS_PIPE_TAIL
-    return slot;   // legacy config: no pipe mutex (chain retired)
-#else
     std::scoped_lock lock(pipe.mutex);
     return slot;
-#endif
 }
 
 // An access-mode-tagged object argument, produced by `ts::as_read_only(g)` / `ts::as_read_write(g)`. It
@@ -736,40 +634,6 @@ template<typename A> inline constexpr bool is_guarded_v = is_guarded<std::remove
 template<typename A>
 concept Object_arg = is_guarded_v<A> || is_access_arg_v<A>;
 
-#if !TS_PIPE_TAIL
-// Shared tail for the multi-object builders: given the already-built `block` and this call's
-// per-object (pipe, mode) arrays, dedup write-wins into the canonical (ascending pipe-address)
-// acquire order, attach the release, and kick off `multi_acquire`. Identical for the deduced and
-// tagged paths -- only the body/mode source differs, above this.
-template<typename R>
-Task<R> async_dispatch(Task_ptr block, Pipe* const* pipes, const Access* modes, std::size_t n)
-{
-    std::map<Pipe*, Access> by_pipe;
-    for (std::size_t k = 0; k < n; ++k)
-    {
-        auto [it, inserted] = by_pipe.try_emplace(pipes[k], modes[k]);
-        if (!inserted && modes[k] == Access::read_write)
-            it->second = Access::read_write;
-    }
-
-    auto state = make_ref<Multi_async_state>();
-    state->scheduler = &global_scheduler();
-    for (const auto& [p, m] : by_pipe)
-        state->holds.push_back({ p, m });
-
-    // Release every held pipe once the body (and any nested sub-work) completes.
-    block->attach([state](void*, bool)
-    {
-        for (const auto& [p, m] : state->holds)
-            pipe_release(*state->scheduler, *p, m);
-    });
-
-    Task<R> result(block);
-    multi_acquire(std::move(state), std::move(block), 0);
-    return result;
-}
-#endif // !TS_PIPE_TAIL
-
 // The one multi-object builder: `fn(...)` under an `Access_context` declaring every object at
 // its (compile-time) `Modes...`, gated on holding all their pipes. Read positions are invoked
 // with `const T&` (`mode_ref`) so a mutating body under a read classification fails to compile.
@@ -791,7 +655,6 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
     };
     Pipe* pipes[] = { &Guarded_access::pipe(objs)... };
     Access modes[] = { Modes... };
-#if TS_PIPE_TAIL
     auto block = make_piped_executable<R, sizeof...(Ts)>(std::move(body), std::move(opts.token));
     block->flags.priority = opts.priority;
     // Dedup write-wins + insertion-sort by pipe address (canonical order), in place -- the
@@ -825,11 +688,6 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
     Task<R> result(block);
     pipe_enter_first(block.get());   // turns cascade canonically; the last release dispatches
     return result;
-#else
-    auto block = make_executable<R>(std::move(body), std::move(opts.token));
-    block->flags.priority = opts.priority;
-    return async_dispatch<R>(std::move(block), pipes, modes, sizeof...(Ts));
-#endif // TS_PIPE_TAIL
 }
 
 // Deduced path (bare args, introspectable functor): modes from the functor's parameter

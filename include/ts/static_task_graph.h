@@ -321,21 +321,6 @@ private:
     // [acquire, complete] window -- free in the gaps for async / other objects (no whole-run
     // reservation). See docs §10.
     static void on_data_ready(Run_state& run, int index);
-#if !TS_PIPE_TAIL
-    // `synchronous` tracks whether the whole acquire chain so far ran on the settling thread
-    // (no deferral) -- an inline node dispatches inline only if it stays true to the end. A
-    // pre-held object (handed from a predecessor, see `node_complete`) is skipped without a
-    // pipe op and keeps `synchronous`.
-    static void acquire_next(Run_state& run, int index, int pos, bool synchronous);
-    static void run_node(Run_state& run, int index);
-    // Object handoff (elide a release + re-acquire round-trip): the ready successor to hand
-    // object `pi` (held in mode `m`) to, or -1. Handoff iff exactly one ready successor
-    // accesses `pi`, in the same mode `m` -- then the pipe state (writer/reader) is already
-    // right for it, so releasing and re-acquiring is pure waste. `mark_preheld` sets the bit
-    // that makes that successor's `acquire_next` skip the object.
-    static int handoff_target(Run_state& run, const std::vector<int>& ready, int pi, Access m);
-    static void mark_preheld(Run_state& run, int node_index, int pi);
-#endif
     // Graph post-logic for a node whose body AND all its nested tasks have settled:
     // release the objects it held, release its successors, and settle the run when the
     // last node finishes. Runs via the node block's `on_complete` (see run_graph_node).
@@ -347,9 +332,6 @@ private:
     // so dispatching a node costs no per-run allocation.
     static void run_graph_node(const detail::Task_ptr& block, std::uint64_t generation);
     static void graph_node_completed(detail::Task_control_block* block);
-#if !TS_PIPE_TAIL
-    static void node_trampoline(void* node);
-#endif
 
 #if TS_SAFETY_CHECKS
     // Fatal if a run is in flight (`where` names the misuse); balance the pipes'
@@ -360,14 +342,10 @@ private:
 
     std::vector<Node> nodes_;
     std::vector<std::pair<int, int>> explicit_edges_;
-    std::vector<detail::Pipe*> distinct_pipes_;        // every object the graph touches (indexes pipe acquire)
-#if TS_PIPE_TAIL
-    // Every node's pipe links, contiguous per node (tail pipe): bound at compile()
-    // (`block->pipe_links` points into this), re-armed each execute() -- runs stay
-    // allocation-free. An array (not a vector): `Pipe_link` holds atomics, so it is
-    // neither movable nor copyable.
+    std::vector<detail::Pipe*> distinct_pipes_;        // every object the graph touches (address-sorted)
+    // Every node's pipe links, contiguous per node: bound at compile() (`block->pipe_links`
+    // points into this), re-armed each execute() -- runs stay allocation-free.
     std::unique_ptr<detail::Pipe_link[]> node_links_;
-#endif
     std::unique_ptr<Run_state> run_;                   // reused across execute() runs (one run at a time)
     bool compiled_ = false;
     // Attached via set_trace; not owned. Unconditional (one pointer) so the run logic

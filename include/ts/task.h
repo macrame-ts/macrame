@@ -327,16 +327,17 @@ private:
 // time; see `release` and `dispatch_arg` for the TOCTOU this closes.
 void submit_ready(Task_ptr block, std::uint64_t gen);
 
-// A task's per-line pipe entry (tail pipe; full definition in ts/detail/pipe_link.h).
+// A task's per-pipe queue entry (full definition in ts/detail/pipe_link.h).
 struct Pipe_link;
 
-// Enter the task's first pipe line (defined in the pipe layer, like `submit_ready` -- a
+// Enter the task's first pipe (defined in the pipe layer, like `submit_ready` -- a
 // scheduler-free seam). Called when the pipe turns are the only unmet locks: by
 // `release()` when the count drops to `pipe_count` (a task with ordinary prerequisites),
 // or directly by a creation site with none (`async`, a data-ready graph node). The
-// remaining lines are entered by the sequential canonical cascade as earlier turns arrive
-// (docs/pipe-rebase.md §5.2B.2).
-void pipe_enter_first(Task_control_block* blk);
+// remaining pipes are entered by the sequential canonical cascade as earlier turns
+// arrive (docs/pipe-rebase.md §0.2). `record`, when non-null, receives the block under
+// the first pipe's mutex (the enqueue-and-record seam; see guarded.h).
+void pipe_enter_first(Task_control_block* blk, Task_ptr* record = nullptr);
 
 // --- Task control block ----------------------------------------------------
 //
