@@ -5,6 +5,7 @@
 #include "ts/guarded.h"
 #include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
+#include "ts/frame_gate.h"
 #include "ts/task_scope.h"
 #include "test_util.h"
 
@@ -481,6 +482,80 @@ void test_death_waits_for_cycle()
 }
 #endif
 
+// --- Frame_gate (cross-frame realignment, coroutine-first.md §4.7) --------
+
+ts::Task<void> gate_waiter(ts::Frame_gate& gate, std::atomic<int>& woke_at, std::atomic<int>& frame)
+{
+    co_await gate.next();
+    woke_at.store(frame.load(std::memory_order_acquire), std::memory_order_release);
+}
+
+// A task parked on the gate resumes at the NEXT boundary, not this one and not two later.
+void test_frame_gate_releases_at_next_boundary()
+{
+    ts::Frame_gate gate;
+    std::atomic<int> frame{ 0 }, woke_at{ -1 };
+
+    ts::Task<void> waiter = gate_waiter(gate, woke_at, frame);
+    TS_CHECK(!waiter.is_done());   // parked: no boundary has passed
+
+    frame.store(1, std::memory_order_release);
+    gate.open();
+    waiter.sync();
+    TS_CHECK(woke_at.load() == 1);
+
+    // The gate re-arms: a second waiter parks on the fresh gate and needs its own boundary.
+    std::atomic<int> woke2{ -1 };
+    ts::Task<void> second = gate_waiter(gate, woke2, frame);
+    TS_CHECK(!second.is_done());
+    frame.store(2, std::memory_order_release);
+    gate.open();
+    second.sync();
+    TS_CHECK(woke2.load() == 2);
+}
+
+// Many waiters across several frames: each is released by exactly one boundary, and a
+// handle taken before a boundary is released BY it rather than missing it (the missed-wakeup
+// window a hand-rolled trigger/reset pair has).
+void test_frame_gate_many_waiters()
+{
+    constexpr int frames = 8, per_frame = 6;
+    ts::Frame_gate gate;
+    std::atomic<int> released{ 0 };
+
+    std::vector<ts::Task<void>> waiters;
+    for (int f = 0; f < frames; ++f)
+    {
+        for (int k = 0; k < per_frame; ++k)
+        {
+            waiters.push_back([](ts::Frame_gate& g, std::atomic<int>& count) -> ts::Task<void>
+            {
+                co_await g.next();
+                count.fetch_add(1, std::memory_order_relaxed);
+            }(gate, released));
+        }
+        gate.open();
+        for (ts::Task<void>& w : waiters)
+            w.sync();
+        TS_CHECK(released.load() == (f + 1) * per_frame);
+        waiters.clear();
+    }
+}
+
+// `open()` on an idle gate is a no-op with no waiters to release, and the gate stays usable.
+void test_frame_gate_idle_open()
+{
+    ts::Frame_gate gate;
+    gate.open();
+    gate.open();
+
+    std::atomic<int> frame{ 5 }, woke_at{ -1 };
+    ts::Task<void> waiter = gate_waiter(gate, woke_at, frame);
+    gate.open();
+    waiter.sync();
+    TS_CHECK(woke_at.load() == 5);
+}
+
 } // namespace
 
 void run_coroutine_tests()
@@ -515,4 +590,7 @@ void run_coroutine_tests()
     run("death: waits-for cycle", test_death_waits_for_cycle);
 #endif
     run("co showcase", test_showcase);
+    run("frame gate releases at next boundary", test_frame_gate_releases_at_next_boundary);
+    run("frame gate many waiters", test_frame_gate_many_waiters);
+    run("frame gate idle open", test_frame_gate_idle_open);
 }

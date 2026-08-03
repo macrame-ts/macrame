@@ -1092,6 +1092,60 @@ frame_start.trigger();   // idempotent; releases everything awaiting it
 (one use in flight; reset only after it settled and every awaiter resumed;
 re-arming an un-triggered signal is fatal).
 
+A `Signal` is also the bridge for completions that come from outside the task
+system entirely — an overlapped I/O callback, an `io_uring` completion, a GPU
+fence. The handle is refcounted, so the callback captures one by value and
+triggers it. One caveat is worth internalizing: **triggering releases the
+awaiting coroutines on the triggering thread.** In an OS callback context —
+an APC, an IOCP worker, a driver callback — that is the last place you want
+arbitrary user code to run, so hop first:
+
+```cpp
+// in the OS completion callback
+ts::launch([done]() mutable { done.trigger(); });   // release on a worker, return now
+```
+
+The library deliberately provides no I/O reactor (see §13); this idiom is the
+whole integration story, and it is the same reason `Frame_gate::open()` below
+releases through the scheduler rather than inline.
+
+### 10.4 `Frame_gate` — realigning cross-frame work
+
+Work that waits on something outside the schedule resumes at an arbitrary
+moment, quite possibly mid-frame, when the systems it wants to touch are
+half-updated. `ts::Frame_gate` (in `ts/frame_gate.h`, which the umbrella header
+does not pull in) parks a task until the next frame boundary:
+
+```cpp
+ts::Frame_gate gate;                 // owned by the frame loop
+
+// somewhere in a long-running task
+co_await io_done;                    // external completion, arbitrary timing
+co_await gate.next();                // realign: resume at the next frame start
+co_await world.access([](World& w) { w.apply(result); });
+
+// in the frame loop
+for (;;)
+{
+    gate.open();                     // release everyone waiting; re-arm for next frame
+    frame_graph.execute().sync();
+}
+```
+
+`next()` hands out the *current* frame's gate, so a handle taken just before a
+boundary is released by that boundary rather than missing it — the race a
+hand-rolled `trigger()`/`reset()` pair has, along with `reset()`'s precondition
+that every awaiter has already resumed. The cost is one small allocation per
+frame, which is nothing at frame scale; `Signal::reset()` remains available
+when you can guarantee the precondition and want zero.
+
+`open()` returns immediately and releases the waiters through the scheduler, at
+`Priority::low` by default (`set_release_priority` changes it). Releasing them
+inline would run every parked task — however many accumulated — on the frame
+loop's own thread before `open()` returned. The flip side is that "`open()`
+returned" does not mean "the waiters ran", which is the right semantics for a
+phase signal.
+
 ---
 
 ## 11. Patterns and rules of thumb
@@ -1132,6 +1186,7 @@ result, completion, or cancellation.
 | stable read view + atomic version flips | `Versioned` |
 | ordering gate between phases | `Signal` |
 | reusing a sub-graph inside a frame | `co_await inner.execute()` (§6.3) |
+| realigning cross-frame work to a frame start | `Frame_gate` (§10.4) |
 
 ---
 
