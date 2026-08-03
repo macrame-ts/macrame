@@ -16,14 +16,6 @@
 #include <utility>
 #include <vector>
 
-// Pipe implementation selector (docs/pipe-rebase.md). 0 (default) = the mutex-guarded
-// reader/writer deque; 1 = the lock-free tail chain (design B: writers chain FPipe-style,
-// reader groups via the head-reader walk). A dev flag during the rebase so the same tests
-// + TSan validate the new pipe before the default flips; removed once the rebase lands.
-#ifndef TS_PIPE_TAIL
-#define TS_PIPE_TAIL 0
-#endif
-
 namespace ts
 {
 

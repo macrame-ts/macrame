@@ -339,70 +339,8 @@ void test_graph_async_hammer()
             }
         });
     }
-#if TS_PIPE_TAIL
-    // TEMP DIAGNOSTIC: bounded sync + state dump on hang (revert after the hang is fixed).
-    // Tail-only fields, so the whole diagnostic (and the bounded-sync loop using it) is
-    // gated; the flag-off build runs the plain loop below.
-    auto dump_link = [](const char* tag, ts::detail::Pipe_link* l)
-    {
-        std::printf("    %s link=%p: mode=%d role=%d gate=%u next=%p tenure=%u claim=%d pin=%d idx=%d",
-            tag, static_cast<void*>(l), static_cast<int>(l->mode), static_cast<int>(l->role.load()),
-            l->gate.load(), reinterpret_cast<void*>(l->next.load()), l->tenure.load(),
-            static_cast<int>(l->turn_claim.load()), static_cast<int>(l->join_pin.load()),
-            static_cast<int>(l->index));
-        if (l->owner)
-            std::printf(" | owner=%p locks=%08x entered=%d pcount=%d ready=%d",
-                static_cast<void*>(l->owner), l->owner->num_locks.load(),
-                static_cast<int>(l->owner->pipes_entered), static_cast<int>(l->owner->pipe_count),
-                static_cast<int>(l->owner->ready.load()));
-        std::printf("\n");
-    };
-    auto dump_pipe = [&dump_link](const char* name, ts::detail::Pipe& p)
-    {
-        std::uintptr_t tw = p.tail.load();
-        std::printf("  pipe %s: tail=%p count=%u\n", name, reinterpret_cast<void*>(tw), p.task_count.load());
-        if (tw == 0)
-            return;
-        // Walk the custody chain backward to the FRONT of the line (each link's
-        // `prev_owner` names its predecessor's block; find that block's link on this
-        // pipe). The front region of a stuck line is quiescent, so this is safe enough
-        // for a post-mortem dump.
-        auto* l = reinterpret_cast<ts::detail::Pipe_link*>(tw & ~static_cast<std::uintptr_t>(63));
-        long depth = 0;
-        while (depth < 50000000)
-        {
-            ts::detail::Task_control_block* prev = l->prev_owner;
-            if (prev == nullptr)
-                break;
-            ts::detail::Pipe_link* pl = nullptr;
-            for (std::uint8_t k = 0; k < prev->pipe_count; ++k)
-            {
-                if (prev->pipe_links[k].pipe == &p)
-                {
-                    pl = &prev->pipe_links[k];
-                    break;
-                }
-            }
-            if (pl == nullptr)
-                break;
-            l = pl;
-            ++depth;
-        }
-        std::printf("    depth-from-tail=%ld\n", depth);
-        dump_link("front", l);
-        // And the front's forward chain, a few hops.
-        for (int hop = 0; hop < 3; ++hop)
-        {
-            std::uintptr_t nx = l->next.load();
-            if (nx == 0 || (nx & 3) != 0)
-            {
-                std::printf("    next-word=%p\n", reinterpret_cast<void*>(nx));
-                break;
-            }
-            l = reinterpret_cast<ts::detail::Pipe_link*>(nx);
-            dump_link("fwd", l);
-        }
-    };
+    // Bounded sync: a wedged run must FAIL the suite (exit 3), not hang it -- returning
+    // with the hammers live would crash, and a silent hang blocks the whole run.
     for (int r = 0; r < 60; ++r)
     {
         ts::Task<void> run = g.execute();
@@ -412,16 +350,10 @@ void test_graph_async_hammer()
         if (!run.is_done())
         {
             std::printf("HAMMER HANG at run %d\n", r);
-            dump_pipe("a", ts::detail::Guarded_access::pipe(a));
-            dump_pipe("b", ts::detail::Guarded_access::pipe(b));
             std::fflush(stdout);
             std::_Exit(3);
         }
     }
-#else
-    for (int r = 0; r < 60; ++r)
-        g.execute().sync();
-#endif
     stop.store(true, std::memory_order_relaxed);
     for (auto& h : hammers)
         h.join();

@@ -205,9 +205,9 @@ void Scheduler::run_serial(Task_func_ptr func, void* data)
         return;   // the active drain on this thread runs it, in order
 
     serial_draining = true;
-    // Install this scheduler as the thread's current one for the drain: pipe-job
-    // re-dispatch (`run_pipe_job` reaches the scheduler via `current_scheduler`) and any
-    // nested submits must resolve here even when the submitting thread is external.
+    // Install this scheduler as the thread's current one for the drain: nested submits
+    // (and anything else resolving the ambient scheduler) must land here even when the
+    // submitting thread is external.
     // `current_worker_index` stays -1 -- there are no workers, and the profiling
     // accumulators no-op on negative indices.
     Scheduler* prev = current_scheduler;

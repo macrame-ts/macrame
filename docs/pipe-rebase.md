@@ -151,6 +151,15 @@ compiles; the 10× graph-async-hammer loop clean (it must become boring — ther
 lock-free protocol left to race); full WSL TSan campaign clean; R10 bench non-regression
 vs the recorded baseline.
 
+**Verified (2026-08, at landing):** suite 543/0; the 10× hammer oracle 0/10 bad (was
+~50–60% hangs on the chain); three full WSL TSan campaigns clean end to end (including
+the reservation stage that stalled the chain); Shipping compiles. R10 bench vs the §13
+baseline (same machine, different session window — ±25% ambient drift documented):
+contended 100% rd 1.41 vs 1.25 M/s (+13%), 90% 0.89 vs 0.93, 50% 0.76 vs 0.85,
+uncontended `ts_read` 896 vs 1036 ns (+14%), `ts_write` 1166 vs 1063 ns (−10%, the
+release→dispatch hop), `graph` 5385 vs 5328 ns (unchanged — the handoff removal cost
+nothing measurable). Mixed within drift; no regression class.
+
 ## 1. Goal and non-goal
 
 Replace the mutex-guarded reader/writer deque (`detail::Pipe`, `src/guarded.cpp`) with a

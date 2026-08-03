@@ -401,20 +401,17 @@ struct Task_control_block
     //     therefore a generation whose run genuinely released to zero, so a stale entry reads
     //     either its own generation (claim fails after a reset) or a newer READY one (safe
     //     early run; `claim` de-dups) -- `claim` stays the correctness gate.
-    //   - `run_pipe_job_read/write` (pipe-job dispatch, `Guarded::async`): the owning `Pipe*`
-    //     (a pipe block is created, dispatched once, and never `reset`, so its generation is
-    //     always 0 and the slot is free to carry the pipe instead; plain store under the pipe
-    //     mutex -- the monotonic-gen scheme above never touches pipe blocks, disjoint path).
+    // Pipe tasks dispatch through the same trampoline at generation 0 (their blocks are
+    // never `reset`), so the slot's meaning is uniform.
     std::atomic<std::uint64_t> dispatch_arg{ 0 };
-    // The task's pipe entries (tail pipe, docs/pipe-rebase.md §5.2B): an array of
-    // `pipe_count` per-line links embedded in the owning allocation (`Piped_executable`,
-    // an `Acquire_node`, or the graph's per-node slab), in canonical (ascending
-    // pipe-address) order. Null / 0 for a non-pipe task. `pipe_count` doubles as the
-    // `release()` trigger threshold (pipes are entered when it is the only remaining
-    // lock count -- §5.5 pipes-entered-last); `pipes_entered` is the cascade's progress,
-    // and settle advances exactly links `[0, pipes_entered)`. Both byte fields are
-    // written single-threaded (creation / the sequential cascade) and published by the
-    // atomics around them.
+    // The task's pipe entries (docs/pipe-rebase.md §0.2): an array of `pipe_count` links
+    // embedded in the owning allocation (`Piped_executable` or the graph's per-node slab),
+    // in canonical (ascending pipe-address) order. Null / 0 for a non-pipe task.
+    // `pipe_count` doubles as the `release()` trigger threshold (pipes are entered when it
+    // is the only remaining lock count -- pipes-entered-last); `pipes_entered` is the
+    // cascade's progress, and settle advances exactly links `[0, pipes_entered)`. Both
+    // byte fields are written single-threaded (creation / the sequential cascade) and
+    // published by the atomics around them.
     Pipe_link* pipe_links = nullptr;
     Cancellation_token token;          // checked by `execute` before running the body
 
@@ -446,11 +443,6 @@ struct Task_control_block
         Priority priority : 2 = Priority::normal;   // queue position when dispatched
         bool retractable : 1 = false;               // safe to run inline from a waiter (no pipe/access binding)
         bool run_inline : 1 = false;                // dispatch on the settling thread, not the queue
-        // Single-object pipe job of the MUTEX pipe: `dispatch_arg` carries the owning
-        // `Pipe*` (stamped at creation). A spare bit consumed by the blocking-sync
-        // diagnostic; written only under `TS_SAFETY_CHECKS`. The tail pipe
-        // (`TS_PIPE_TAIL`) identifies pipe tasks by `pipe_links` instead.
-        bool pipe_job : 1 = false;
     };
     Flags flags;
     // -----------------------------------------------------------------------------------
