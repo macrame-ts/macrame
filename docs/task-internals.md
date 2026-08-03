@@ -48,7 +48,7 @@ Three types on the Task tier; two private, two public handles (one shared).
 
 - **`Task_control_block`** (private) — **fully monomorphic** (not templated at all):
   the refcounted completion/dependency core — completion signal, `ready`/`cancelled`,
-  successors, the lock-counter — plus two type-erased hooks: `void* result_ptr`
+  the gating parent, the lock-counter — plus two type-erased hooks: `void* result_ptr`
   (nullptr ⇒ no result: `void` or bodyless) and
   `void (*execute)(const Task_ptr&, uint64)` (nullptr ⇒ no body: bodyless). Internal
   continuations are stored erased too
@@ -282,7 +282,7 @@ spawned.
   per-task `Access_context`).
 - Registration (`detail::add_nested`, spelled `ts::nested` publicly): the
   nested task `++`s the parent's `num_locks` and records the parent in its
-  `successors`, so its settle releases the parent; the parent completes only
+  `nested_parent` slot, so its settle releases the parent; the parent completes only
   once all nested tasks do (§4). In a coroutine segment the child is also
   recorded in the frame's implicit scope list, so `co_await ts::join_nested()`
   can await the children mid-body; `ts::Task_scope` is the explicit-scope
