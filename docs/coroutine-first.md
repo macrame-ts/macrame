@@ -73,7 +73,7 @@ not release grants; body-return is not completion.
 |---|---|
 | `then(fn, opts)` + apply-style traits | `co_await t;` then the next line |
 | `when_all(...)` + `Join_state` + tuple traits | sequential `co_await`s (tasks already run eagerly; last one gates) |
-| nested tasks: `ts::nested`, `add_nested`, the `execution_flag` counting mode | the coroutine doesn't `co_return` until it awaited its children; deep fan-out collects into a `Task_scope` (§4.3) |
+| the `execution_flag` counting mode + `add_nested`-on-`num_locks` plumbing | the implicit per-node/per-frame scope (§4.3); **`ts::nested` survives as the scoped-launch verb**, joining it; a coroutine's `co_return` gates on the scope draining |
 | `Task_builder`, `after()`, `add_prerequisite`, frozen-at-launch enforcement | `co_await x; co_await y;` at the top of the coroutine (dynamic edges become code) |
 | retraction: deep `retract`, `retractable`, hints, `retract_or_wait`, the claim/generation reuse machinery (`run_state` fusion, monotonic-max `dispatch_arg`, release-time gen capture, reuse forensics) | waits are suspensions — pool exhaustion is structurally gone; the inline-execution optimization survives as eager start + symmetric transfer (§5.2) |
 | reusable executable tasks (`Task_builder::reset`) | call the coroutine again (frames are one-shot); `Signal::reset` stays |
@@ -105,22 +105,54 @@ the explicit exemption (waits on running work only).
 - Multi-object: `co_await ts::access(fn, objs...)` rides the same cascade; the guard
   forms keep the held-across-suspension fatal.
 
-### 4.3 `Task_scope` (the nursery)
-For dynamic fan-out spawned deep in call stacks (the old nested-task motivation):
-`scope.spawn(fn)` launches eagerly and records; `co_await scope.join()` awaits all.
-Children inherit the owner's grants (the `with_inherited_access` model, promise-carried).
-Destroying a scope with unjoined children is **fatal** (lost children — the analogue of
-the journal's lost-writes fatal).
+### 4.3 Scoped launches: implicit per-node scope + `ts::nested` (author revision)
+Dynamic fan-out launched deep in call stacks must not require threading a scope object
+through every call. Instead every node/coroutine frame owns an **implicit scope**, carried
+in TLS and reinstalled at resumption exactly like the grant, and **`ts::nested(fn)`
+survives as the scoped-launch verb** — it launches eagerly and joins the caller's implicit
+scope. The join is implicit at the end: a functor node completes when body + scope have
+drained (completion-gated, non-blocking — the old nested semantics); a coroutine frame
+completes at `co_return` only after its scope drains (`final_suspend` gates on it). A
+mid-body join is `co_await ts::join_nested()`. Honest note: for functor nodes this is the
+old nested *capability* with cleaner plumbing — what §3 deletes is the `execution_flag`
+counting *regime* inside `num_locks`, replaced by a scope object that exists only when
+used. Rules: plain `ts::launch` never auto-joins (cross-frame tasks stay free); a nested
+child's own `ts::nested` joins the child's scope (transitive gating, as today). The
+**explicit** `Task_scope` remains for advanced shapes (several scopes, handing a scope to
+helpers): `scope.launch(fn)` / `co_await scope.join()`; only the explicit form can leak,
+so only it carries the unjoined-children **fatal**.
 
 ### 4.4 Coroutine graph nodes
-`add_node` accepts a body returning `Task<void>` (a coroutine): the node's completion
-gates on the frame's completion (one waiter on the returned task — the mechanism that
-replaces nested-gating for graphs). Grants per §2. Functor nodes stay the zero-frame
-common case.
+`add_node` accepts a body returning `Task<void>` (a coroutine): access modes deduce from
+the parameters exactly as for functor nodes; the node's completion gates on the *frame's*
+completion (one waiter on the returned task). Grants per §2 — suspension frees the worker,
+never the grant. Functor nodes stay the zero-frame common case.
+
+```cpp
+graph.add_node([&audio](Physics& phys, const Nav& nav) -> ts::Task<void>
+{
+    auto islands = phys.discover_islands();              // under the node's write grant
+
+    for (auto& island : islands)                         // data-dependent fan-out
+        ts::nested([&phys, island] { phys.solve(island); });   // joins the node's implicit scope
+
+    co_await ts::join_nested();                          // solves needed mid-body?
+                                                         // (otherwise: implicit at co_return)
+
+    float mix = co_await audio.access([](const Audio& a) { return a.mix_level(); });
+    // foreign read under held grants -- doctrine (c): short, read-mode, acyclic
+
+    phys.apply(mix);
+    co_return;   // frame completes (scope already drained) -> node completes ->
+                 // grants release -> successors unlock
+});
+```
 
 ### 4.5 Cancellation
 Tokens unchanged. Awaiting a cancelled `Task<void>` resumes normally (query
-`is_cancelled()`); awaiting a cancelled value task is fatal (mirror of `sync`). The
+`is_cancelled()`); awaiting a cancelled `Task<R>` with non-void `R` is fatal — there is
+no result to produce and no exceptions to signal with, so it is a precondition, exactly
+as `sync()` on one is today (check `is_cancelled()` first). The
 `prereq_cancelled` propagation machinery shrinks to the awaiter (no successor edges left
 to propagate through). A coroutine's own token rides its promise.
 
@@ -209,8 +241,29 @@ them.
 ## 9. Risks
 
 - **`execution_flag` deletion** touches `Executable::run`/`settle` — the §8 invariant
-  must be re-proven via frame-gating (stage 4 has a dedicated TSan pass on the graph
-  nested→frame conversion).
+  must be re-proven via scope/frame-gating (stage 4 has a dedicated TSan pass on the
+  graph nested→scope conversion).
+
+## 10. Parallel discussion queue (author, 2026-08 — revisit alongside implementation)
+
+Not blockers; to be worked through while the stages land:
+
+1. **Doctrine limitations (§2)** — which of the three cases' restrictions can be safely
+   relaxed, and whether we should (e.g. is foreign-await-under-grant safe enough to bless
+   before the detector, for read-only accesses?).
+2. **HALO (§5.4)** — currently treated as unavailable; explore what coroutine shapes /
+   compiler flags / annotations actually elide frames on MSVC and clang-cl, and whether
+   any hot path can be structured to qualify.
+3. **Nested graphs** — a graph run launched from within another graph's node (or a
+   coroutine): limitations, object-overlap rules (task-internals §10 scenarios 2–3),
+   whether the coroutine model makes an inner `co_await g.execute()` safe and useful.
+4. **Revoking grants on suspension** — instead of holding grants across a suspension
+   (§2), could a node release its grants at suspend and re-acquire at resume (epoch-style
+   revalidation, mutation-in-progress hazards, fairness)? Would shrink held-idle windows
+   at the cost of atomicity of the node's view.
+5. **Library without static graphs** — the coroutine-first story for users who never
+   build a graph: what the pure-dynamic usage model looks like (access verbs + scopes +
+   pipes only), what guarantees weaken, what the guide should say.
 - **Allocation regression window** between stages 3 and the fusion landing — fusion is
   stage 1 for exactly this reason.
 - **MSVC/clang-cl coroutine codegen** — measure early (stage 1 microbench), not assume.
