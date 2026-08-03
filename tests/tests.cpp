@@ -6,6 +6,7 @@
 
 #if defined(__cpp_impl_coroutine)
 #include "ts/coroutine_support.h"
+#include "ts/task_scope.h"
 #endif
 
 #include "scheduler_tests.h"
@@ -220,6 +221,18 @@ void run_death_scenario(const char* name)
     }
 #endif
 #if defined(__cpp_impl_coroutine)
+    else if (std::strcmp(name, "scope_unjoined") == 0)
+    {
+        // Dropping an explicit Task_scope with recorded children loses their join -- fatal
+        // (the lost-children analogue of the journal's lost-writes). Companion:
+        // `test_task_scope_join` (co_await scope.join() before scope exit).
+        static std::atomic<bool> hold{ true };
+        {
+            ts::Task_scope scope;
+            scope.launch([] { while (hold.load(std::memory_order_relaxed)) std::this_thread::yield(); });
+        }   // -> fatal (child recorded, never joined)
+        hold.store(false);
+    }
     else if (std::strcmp(name, "await_cancelled_value") == 0)
     {
         // Awaiting a cancelled Task<R> with non-void R: no result to produce, no

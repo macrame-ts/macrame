@@ -232,6 +232,12 @@ struct Promise_base
     // segment is installed. Written/read only by the thread running the segment (the
     // suspension handshake orders cross-thread handoffs).
     Task_ptr prev_task_;
+    // The frame's implicit scope (docs/coroutine-first.md §4.3): children launched via
+    // `ts::nested` in any segment are recorded here (in addition to the completion locks
+    // they take), so `co_await ts::join_nested()` can await them mid-body. Same
+    // single-thread-per-segment discipline as `prev_task_`.
+    std::vector<Task_ptr> scope_children_;
+    std::vector<Task_ptr>* prev_scope_ = nullptr;
     // The coroutine's dispatch priority, carried onto the block for queued uses of its task.
     Priority priority_ = Priority::normal;
 
@@ -257,11 +263,14 @@ struct Promise_base
     {
         prev_task_ = std::move(current_task);
         current_task = Task_ptr(&core);
+        prev_scope_ = current_scope_children;
+        current_scope_children = &scope_children_;
     }
 
     void exit_segment()
     {
         current_task = std::move(prev_task_);
+        current_scope_children = prev_scope_;
     }
 
     std::suspend_never initial_suspend() const noexcept { return {}; }
@@ -456,7 +465,80 @@ public:
     std::atomic<int> state_{ 0 };
 };
 
+// Awaiter joining a set of tasks: resumes once every one has settled. Shared by
+// `ts::join_nested()` (the frame's implicit scope) and `Task_scope::join()`. Owns the
+// handles; a countdown over the un-settled children plus the same two-state handshake as
+// `Task_awaiter` (the last child's callback vs `await_suspend` finishing). `remaining_` is
+// armed to the full count BEFORE any callback attaches, so a child settling mid-attach
+// decrements early and the zero-transition still fires exactly once, on the true last.
+struct Join_awaiter
+{
+    explicit Join_awaiter(std::vector<Task_ptr> children) noexcept
+        : children_(std::move(children))
+    {}
+
+    Join_awaiter(const Join_awaiter&) = delete;
+    Join_awaiter& operator=(const Join_awaiter&) = delete;
+
+    bool await_ready()
+    {
+        std::erase_if(children_, [](const Task_ptr& c)
+        {
+            return c->ready.load(std::memory_order_acquire);
+        });
+        remaining_.store(static_cast<int>(children_.size()), std::memory_order_relaxed);
+        return children_.empty();
+    }
+
+    template<typename P>
+    bool await_suspend(std::coroutine_handle<P> h)
+    {
+        if (pipe_guard_depth > 0)
+            ts::fatal("co_await while holding a Guarded guard (pipe held across suspension)");
+
+        exit_segment_if_ours(h.promise());
+
+        for (Task_ptr& c : children_)
+        {
+            c->attach([this, h](void*, bool)
+            {
+                if (remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1
+                    && state_.exchange(1, std::memory_order_acq_rel) == 2)
+                    schedule_resume(h);
+            });
+        }
+
+        if (state_.exchange(2, std::memory_order_acq_rel) == 1)
+        {
+            enter_segment_if_ours(h.promise());
+            return false;   // the last child settled synchronously during the attach loop
+        }
+        return true;
+    }
+
+    void await_resume() const noexcept {}
+
+    std::vector<Task_ptr> children_;
+    std::atomic<int> remaining_{ 0 };
+    std::atomic<int> state_{ 0 };
+};
+
 } // namespace detail
+
+// Mid-body join of the implicit scope (docs/coroutine-first.md §4.3): awaits every child
+// launched so far via `ts::nested` in this coroutine, then resumes; the list resets, so
+// later launches join a later `join_nested` (or gate `co_return` via the counter as usual).
+// Outside a coroutine frame there is no implicit scope and the await is a no-op.
+inline detail::Join_awaiter join_nested()
+{
+    std::vector<detail::Task_ptr> children;
+    if (detail::current_scope_children != nullptr)
+    {
+        children = std::move(*detail::current_scope_children);
+        detail::current_scope_children->clear();
+    }
+    return detail::Join_awaiter(std::move(children));
+}
 
 // `co_await task` -> suspend until `task` settles, then resume with its result (`const R&`,
 // non-consuming; `void` for a void task). ADL finds these in namespace `ts`.

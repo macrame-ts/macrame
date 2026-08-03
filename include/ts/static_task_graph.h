@@ -270,7 +270,20 @@ private:
             (ctx.add(static_cast<const void*>(std::get<I>(instances)), Modes,
                      std::get<I>(epochs)), ...);
             Access_scope scope(ctx);
-            fn(detail::mode_ref<Modes>(std::get<I>(instances))...);
+            using Body_result = decltype(fn(detail::mode_ref<Modes>(std::get<I>(instances))...));
+            if constexpr (std::is_same_v<Body_result, Task<void>>)
+            {
+                // A coroutine node body (docs/coroutine-first.md §4.4): the returned frame's
+                // task gates the node's completion via the nested mechanism -- the node
+                // completes (releasing grants and successors) when the frame completes, not
+                // at the first suspension. The frame inherits the node's grant snapshot at
+                // creation, so resumed segments keep the declared accesses.
+                add_nested(fn(detail::mode_ref<Modes>(std::get<I>(instances))...));
+            }
+            else
+            {
+                fn(detail::mode_ref<Modes>(std::get<I>(instances))...);
+            }
         };
     }
 

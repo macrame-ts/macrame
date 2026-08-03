@@ -743,6 +743,13 @@ auto make_block()
 // alive until the child completes.
 inline thread_local Task_ptr current_task;
 
+// The running segment's implicit-scope child list (docs/coroutine-first.md §4.3): a
+// coroutine frame installs its own per-frame list around each segment (see
+// `coroutine_support.h`), so `ts::nested` can record children for a mid-body
+// `co_await ts::join_nested()`. Null for functor bodies (no await, counter-gated only)
+// and outside tasks.
+inline thread_local std::vector<Task_ptr>* current_scope_children = nullptr;
+
 inline void Task_control_block::retract_or_wait(const Task_ptr& blk)
 {
     retract(blk);
@@ -1409,6 +1416,11 @@ void add_nested(const Task<R>& child)
     parent->num_locks.fetch_add(1, std::memory_order_relaxed);   // a completion lock on the parent
 
     detail::Task_ptr child_core = detail::core_of(child);
+    // Record for a mid-body `co_await ts::join_nested()` when the caller's segment carries an
+    // implicit scope (a coroutine frame installs one; functor bodies have none -- they cannot
+    // await, and their children gate completion via the counter alone).
+    if (detail::current_scope_children != nullptr)
+        detail::current_scope_children->push_back(child_core);
     {
         std::scoped_lock lock(child_core->mutex);
         if (!child_core->completed)
