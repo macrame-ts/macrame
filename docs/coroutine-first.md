@@ -204,6 +204,16 @@ lend, so `commit()` from an inner node hits the existing inherited-grant fatal �
 contract as scope children. The declared "parameter grants" form (an inner graph asserting
 it expects a lend) demotes to optional future sugar for shipped library sub-graphs.
 
+Author note (2026-08): the expected usage is a **pre-compiled** inner graph merely
+*executed* inside a parent node (build-once/run-many), not constructed there. All of the
+above is unaffected — the lend depends only on the compiled access set and the caller's
+grants at await time, and the lent-mask is per-run state — but pre-compilation makes the
+in-flight fatal guard a plausible *pattern*, not just misuse: a shared inner-graph
+instance invoked from two concurrently-running parents collides with one-run-at-a-time.
+v1 rule: one instance per concurrent user (compile a clone, or order the parents via
+edges); the relaxation is run-queueing / pipelined runs — existing TODO 2.3, not new
+machinery.
+
 ## 5. Performance workstream (the price and its payment)
 
 1. **Frame/block fusion first** (TODO 6.2, promoted to the critical path): one allocation
