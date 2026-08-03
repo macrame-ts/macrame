@@ -171,6 +171,20 @@ helper (6.6), per-frame gate idiom (6.7), low-priority resumption default (doc).
 
 ### 4.8 Nested graph runs (author-revised: lend, don't fatal)
 
+**Status: IMPLEMENTED (2026-08), as designed below.** The lend is applied by
+`Static_task_graph::bind_links_for_run` (src/static_task_graph.cpp) at every `execute()`:
+it intersects the compiled access set with `detail::current_access` and re-binds the
+`compile()`-time link slab to the objects the run must actually take turns on — an unbound
+link IS a skipped turn, so no bypass flag threads through the pipe. All three fatals landed
+with companions, plus the auto-scope-join default and `Execution_options{.detach}`. Two
+refinements against the text below: the non-quiet-scope check filters out already-SETTLED
+scope children (only live ones are a hazard, and the scope list drops entries at a join, so
+plain emptiness would fatal on a fire-and-settle child earlier in the body); and the
+in-flight fatal is `TS_SAFETY_CHECKS`-gated like the other two. Worker-less nested runs
+(§11.2) fell out working and are covered by a test. Tests: `graph_tests` "nested run *"
+(9 cases incl. recursion and worker-less) + three death scenarios; `stress_graph_nested_runs`
+under TSan.
+
 `co_await inner.execute()` from a node is supported. An **awaited** inner run is strictly
 contained in the outer node's grant window (the outer body is suspended for its duration),
 so overlapping objects are **lent**, not re-acquired: at the call, intersect the inner
@@ -336,13 +350,14 @@ Not blockers; to be worked through while the stages land:
 
 Queued behind the §7 stages; numbers reference the nested-graphs review discussion.
 
-1. **Nested graph runs v1** (§4.8): the lend protocol (intersection + lent-mask +
-   epoch-carrying contexts), auto-scope-join default + explicit detach, and the three
-   fatals with companions (mode-incompatible overlap; non-quiet-scope lend; execute
-   while in flight — the last also fixes the currently-unguarded concurrent `execute()`
-   on one graph).
-2. **(3.3) Worker-less nested runs** — inline execution through the serial trampoline;
-   depth bounded by nesting; dedicated test.
+1. ~~**Nested graph runs v1** (§4.8)~~ — **DONE (2026-08)**, see the §4.8 status note: the
+   lend protocol (intersection + link re-binding + epoch-carrying contexts),
+   auto-scope-join default + explicit detach, and the three fatals with companions
+   (mode-incompatible overlap; non-quiet-scope lend; execute while in flight — the last
+   also fixed the previously-unguarded concurrent `execute()` on one graph).
+2. ~~**(3.3) Worker-less nested runs**~~ — **DONE (2026-08)**, no work needed: inline
+   execution through the serial trampoline already handles it (the lend is what keeps it
+   from self-deadlocking on the caller's own hold), and a dedicated test pins it.
 3. **(3.4) Cancellation composition** — the documented pattern: pass the outer node's
    token into `inner.execute({.token})`; test that outer cancellation drains the inner
    run.

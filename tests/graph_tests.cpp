@@ -1,4 +1,5 @@
 #include "graph_tests.h"
+#include "ts/coroutine_support.h"
 #include "ts/guarded.h"
 #include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
@@ -919,6 +920,245 @@ void test_reader_node_overlaps_async()
     TS_CHECK(gate.met());
 }
 
+// --- Nested graph runs (docs/coroutine-first.md §4.8) ----------------------
+
+// The marquee case: an outer node holds a WRITE grant on `x` and awaits an inner graph that
+// also writes `x`. Without lending the inner node's pipe turn queues behind the outer node's
+// own hold -- which the outer cannot release, because it is suspended waiting for the inner
+// run -- so this test hangs rather than fails if the lend regresses. With lending the inner
+// node skips the turn and runs under the outer's grant.
+void test_nested_run_lends_write_grant()
+{
+    ts::Guarded<int> x{ 0 };
+
+    ts::Static_task_graph inner;
+    inner.add_node([](int& v) { v += 10; }, x);
+    inner.compile();
+
+    ts::Static_task_graph outer;
+    outer.add_node([&inner](int& v) -> ts::Task<void>
+    {
+        v += 1;                          // under the outer node's write grant
+        co_await inner.execute();        // lent: the inner writer skips its turn on `x`
+        v += 100;                        // still granted after the inner run
+    }, x);
+    outer.compile();
+
+    outer.execute().sync();
+    TS_CHECK(read_value(x) == 111);
+
+    outer.execute().sync();   // re-run: the link slab rebinds cleanly both ways
+    TS_CHECK(read_value(x) == 222);
+}
+
+// A lent object still orders the INNER nodes among themselves: skipping the pipe turn drops
+// only the outer world's exclusion, never the compiled conflict edges. Three inner writers
+// on the lent object must apply in declaration order.
+void test_nested_run_inner_edges_survive_lend()
+{
+    ts::Guarded<std::string> log;
+
+    ts::Static_task_graph inner;
+    inner.add_node([](std::string& s) { s += "a"; }, log);
+    inner.add_node([](std::string& s) { s += "b"; }, log);
+    inner.add_node([](std::string& s) { s += "c"; }, log);
+    inner.compile();
+
+    ts::Static_task_graph outer;
+    outer.add_node([&inner](std::string& s) -> ts::Task<void>
+    {
+        s += "[";
+        co_await inner.execute();
+        s += "]";
+    }, log);
+    outer.compile();
+
+    outer.execute().sync();
+    TS_CHECK(log.async([](const std::string& s) { return s; }).sync() == "[abc]");
+}
+
+// A nested run over objects the caller does NOT hold takes its turns normally -- lending is
+// an intersection, not a blanket bypass. The inner graph's write must serialize against a
+// concurrent async on the same object (the oracle would flag an overlap).
+void test_nested_run_without_overlap_takes_turns()
+{
+    ts::Guarded<int> held{ 0 };
+    ts::Guarded<tests::Rw_probe> other;
+
+    ts::Static_task_graph inner;
+    inner.add_node([](tests::Rw_probe& p) { p.observe_write(1); }, other);
+    inner.compile();
+
+    ts::Static_task_graph outer;
+    outer.add_node([&inner](int& v) -> ts::Task<void>
+    {
+        v = 7;
+        co_await inner.execute();
+    }, held);
+    outer.compile();
+
+    ts::Task<void> hammer = other.async([](const tests::Rw_probe& p) { p.observe_read(2); });
+    outer.execute().sync();
+    hammer.sync();
+
+    TS_CHECK(read_value(held) == 7);
+    TS_CHECK(probe_ok(other));
+    TS_CHECK(probe_writes(other) == 1);
+}
+
+// An un-awaited inner run joins the caller's scope by default, so the OUTER run's completion
+// gates on it: after `outer.execute().sync()` the inner work has already happened. (Without
+// the auto-join the inner run would float and the read below would race it.)
+void test_nested_run_auto_joins_scope()
+{
+    ts::Guarded<int> x{ 0 };
+    std::atomic<int> inner_done{ 0 };
+
+    ts::Static_task_graph inner;
+    inner.add_node([&inner_done](int& v) { std::this_thread::sleep_for(20ms); v += 5; inner_done.fetch_add(1); }, x);
+    inner.compile();
+
+    ts::Static_task_graph outer;
+    outer.add_node([&inner](int& v)
+    {
+        v += 1;
+        inner.execute();   // handle dropped: the scope join is what keeps it honest
+    }, x);
+    outer.compile();
+
+    outer.execute().sync();
+    TS_CHECK(inner_done.load() == 1);
+    TS_CHECK(read_value(x) == 6);
+}
+
+// A detached run opts out of both defaults: it does not gate the caller, and it receives no
+// lend -- so it takes its turns and simply queues behind the caller's hold, finishing after
+// the outer node releases. Awaited from the blue boundary afterwards.
+void test_nested_run_detached()
+{
+    ts::Guarded<int> x{ 0 };
+
+    ts::Static_task_graph inner;
+    inner.add_node([](int& v) { v += 5; }, x);
+    inner.compile();
+
+    ts::Task<void> detached;
+    ts::Static_task_graph outer;
+    outer.add_node([&inner, &detached](int& v)
+    {
+        v += 1;
+        detached = inner.execute({ .detach = true });   // queues behind this node's own hold
+    }, x);
+    outer.compile();
+
+    outer.execute().sync();
+    detached.sync();
+    TS_CHECK(read_value(x) == 6);
+}
+
+// Recursion: a grand-inner graph intersects against ITS caller's context, which already
+// carries the lent entries, so the lend composes without extra machinery.
+void test_nested_run_recursive()
+{
+    ts::Guarded<int> x{ 0 };
+
+    ts::Static_task_graph deepest;
+    deepest.add_node([](int& v) { v += 100; }, x);
+    deepest.compile();
+
+    ts::Static_task_graph middle;
+    middle.add_node([&deepest](int& v) -> ts::Task<void>
+    {
+        v += 10;
+        co_await deepest.execute();
+    }, x);
+    middle.compile();
+
+    ts::Static_task_graph outer;
+    outer.add_node([&middle](int& v) -> ts::Task<void>
+    {
+        v += 1;
+        co_await middle.execute();
+    }, x);
+    outer.compile();
+
+    outer.execute().sync();
+    TS_CHECK(read_value(x) == 111);
+}
+
+// Companion to the mode-incompatible fatal: the sanctioned form is for the calling node to
+// declare the WRITE, which then covers the inner graph's writer.
+void test_nested_run_write_covers_inner_write()
+{
+    ts::Guarded<int> x{ 0 };
+
+    ts::Static_task_graph inner;
+    inner.add_node([](int& v) { v += 2; }, x);
+    inner.compile();
+
+    ts::Static_task_graph outer;
+    outer.add_node([&inner](int& v) -> ts::Task<void>   // write, not const& -- covers the inner write
+    {
+        co_await inner.execute();
+        v += 1;
+    }, x);
+    outer.compile();
+
+    outer.execute().sync();
+    TS_CHECK(read_value(x) == 3);
+}
+
+// Companion to the non-quiet-scope fatal: join the scope children first, then lend.
+void test_nested_run_join_scope_then_lend()
+{
+    ts::Guarded<int> x{ 0 };
+
+    ts::Static_task_graph inner;
+    inner.add_node([](int& v) { v += 100; }, x);
+    inner.compile();
+
+    ts::Static_task_graph outer;
+    outer.add_node([&inner](int& v) -> ts::Task<void>
+    {
+        ts::nested([&v] { v += 1; });      // a scope child, running under the node's grant
+        co_await ts::join_nested();        // quiesce before lending
+        co_await inner.execute();
+    }, x);
+    outer.compile();
+
+    outer.execute().sync();
+    TS_CHECK(read_value(x) == 101);
+}
+
+// Worker-less: every submit executes inline on the submitting thread, so a nested run
+// unwinds through the serial trampoline inside the outer node's body. Depth is bounded by
+// the nesting, and the lend is what keeps it from self-deadlocking on the outer's own hold.
+void test_nested_run_worker_less()
+{
+    ts::Scheduler_scope scope{ ts::Scheduler_config{ .single_threaded = true } };
+    ts::Guarded<int> x{ 0 };
+
+    ts::Static_task_graph inner;
+    inner.add_node([](int& v) { v += 10; }, x);
+    inner.compile();
+
+    ts::Static_task_graph outer;
+    outer.add_node([&inner](int& v) -> ts::Task<void>
+    {
+        v += 1;
+        co_await inner.execute();
+        v += 100;
+    }, x);
+    outer.compile();
+
+    outer.execute().sync();
+    TS_CHECK(read_value(x) == 111);
+}
+
+void test_death_nested_run_mode_conflict() { TS_CHECK(ts::test::expect_death("graph_lend_mode_conflict")); }
+void test_death_nested_run_unquiet_scope() { TS_CHECK(ts::test::expect_death("graph_lend_unquiet_scope")); }
+void test_death_execute_in_flight()        { TS_CHECK(ts::test::expect_death("graph_execute_in_flight")); }
+
 } // namespace
 
 void run_graph_tests()
@@ -958,6 +1198,18 @@ void run_graph_tests()
     run("graph trace task count", test_graph_trace_task_count);
     run("graph trace overhead", test_graph_trace_overhead);
     run("graph trace overhead end-to-end", test_graph_trace_overhead_end_to_end);
+    run("nested run lends the write grant", test_nested_run_lends_write_grant);
+    run("nested run: inner edges survive the lend", test_nested_run_inner_edges_survive_lend);
+    run("nested run without overlap takes turns", test_nested_run_without_overlap_takes_turns);
+    run("nested run auto-joins the caller's scope", test_nested_run_auto_joins_scope);
+    run("nested run detached", test_nested_run_detached);
+    run("nested run recursive", test_nested_run_recursive);
+    run("nested run: outer write covers inner write", test_nested_run_write_covers_inner_write);
+    run("nested run: join scope, then lend", test_nested_run_join_scope_then_lend);
+    run("nested run worker-less", test_nested_run_worker_less);
+    run("death: nested run mode conflict", test_death_nested_run_mode_conflict);
+    run("death: nested run with an unquiet scope", test_death_nested_run_unquiet_scope);
+    run("death: execute while a run is in flight", test_death_execute_in_flight);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: undeclared access", test_death_undeclared);

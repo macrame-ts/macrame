@@ -197,6 +197,25 @@ void Static_task_graph::compile(const char* DOT_path)
     for (int i = 0; i < static_cast<int>(distinct_pipes_.size()); ++i)
         index_of[distinct_pipes_[i]] = i;
 
+    // Per distinct pipe: the guarded instance behind it and the strongest mode any node uses
+    // on it. Both feed the nested-run lend decision (`bind_links_for_run`), which asks the
+    // caller's `Access_context` -- keyed by instance address, not by pipe -- whether its
+    // grant covers what this graph needs. A node's `pipes[k]` and `access[k]` are parallel.
+    pipe_instances_.assign(distinct_pipes_.size(), nullptr);
+    pipe_modes_.assign(distinct_pipes_.size(), Access::read_only);
+    for (const Node& node : nodes_)
+    {
+        for (std::size_t k = 0; k < node.pipes.size(); ++k)
+        {
+            int pi = index_of[node.pipes[k]];
+            pipe_instances_[pi] = node.access[k].first;
+            if (node.access[k].second == Access::read_write)
+                pipe_modes_[pi] = Access::read_write;
+        }
+    }
+    lent_.assign(distinct_pipes_.size(), 0);
+    links_lent_ = false;
+
     // Per node: the deduped pipe indices it touches (ascending = canonical acquire order)
     // and its effective access mode per pipe (write wins if it lists one both ways). Drives
     // the per-node mode-aware acquire/release (on_data_ready / node_complete).
@@ -435,11 +454,120 @@ void Static_task_graph::node_complete(Run_state& run, int index)
     }
 }
 
+// Resolve the lend set for the run about to start and bind the node link slab accordingly.
+//
+// A LENT object is one the calling task already holds a covering grant on: the inner nodes
+// then skip their pipe turns on it entirely. That is not an optimization -- taking the turn
+// would queue the inner node behind the very grant its caller holds, and the caller is
+// suspended waiting for the inner run, so the run would never finish. Skipping is safe
+// because the caller's grant is what excludes everyone else for the whole nested run (an
+// awaited inner run is strictly contained in the caller's grant window), and the compiled
+// conflict edges still order the inner nodes among THEMSELVES on that object.
+//
+// Binding is the whole mechanism: a link that is not bound is a turn that is never taken.
+// The slab keeps its per-node offsets, so the surviving links are packed at the front of
+// each node's range with sequential `index` values -- the cascade's only requirement.
+void Static_task_graph::bind_links_for_run(bool detach)
+{
+    // A detached run structurally receives no lend (and no inherited context): it may outlive
+    // the launcher, so the containment argument above does not hold. It simply queues behind
+    // the caller's holds like any external work.
+    const Access_context* ctx = detach ? nullptr : detail::current_access;
+    bool any = false;
+    for (std::size_t i = 0; i < distinct_pipes_.size(); ++i)
+    {
+        char lend = 0;
+        if (ctx != nullptr && pipe_instances_[i] != nullptr)
+        {
+            if (ctx->grants(pipe_instances_[i], pipe_modes_[i]))
+            {
+                lend = 1;
+            }
+#if TS_SAFETY_CHECKS
+            else if (pipe_modes_[i] == Access::read_write && ctx->grants(pipe_instances_[i], Access::read_only))
+            {
+                // Mode-incompatible overlap: the caller holds a READ grant on an object this
+                // graph writes. A read grant cannot cover a write, and upgrading would mean
+                // re-acquiring the pipe -- behind the caller's own read hold, which the
+                // caller cannot release while it waits. Fatal at the cause.
+                ts::fatal("Static_task_graph::execute -- the calling task holds READ access on an object this "
+                          "graph writes; a read grant cannot be lent to a writer (declare the write on the "
+                          "calling node, or move the writing node out of the nested graph)");
+            }
+#endif
+        }
+        lent_[i] = lend;
+        any = any || lend != 0;
+    }
+
+#if TS_SAFETY_CHECKS
+    if (any && detail::current_scope_children != nullptr)
+    {
+        // Lending hands the caller's exclusivity to the inner run, but LIVE scope children are
+        // also running under that same grant -- so both could touch the lent object at once,
+        // each "validly". Conservative rule: quiesce the scope first. Settled children are not
+        // a hazard, and the scope list only drops them at a join, so filter on `ready` rather
+        // than on emptiness (else a fire-and-settle child earlier in the body would fatal).
+        for (const detail::Task_ptr& child : *detail::current_scope_children)
+        {
+            if (!child->ready.load(std::memory_order_acquire))
+            {
+                ts::fatal("Static_task_graph::execute -- lending an object to a nested run while the calling "
+                          "task has unjoined scope children still running (co_await ts::join_nested() before "
+                          "the nested run)");
+            }
+        }
+    }
+#endif
+
+    if (!any && !links_lent_)
+        return;   // the common case: full binding already in place, nothing to rebind
+
+    std::size_t offset = 0;
+    for (Node& node : nodes_)
+    {
+        std::size_t bound = 0;
+        for (std::size_t k = 0; k < node.pipe_indices.size(); ++k)
+        {
+            if (any && lent_[node.pipe_indices[k]] != 0)
+                continue;
+            detail::Pipe_link& link = node_links_[offset + bound];
+            link.owner = node.block.get();
+            link.pipe = distinct_pipes_[node.pipe_indices[k]];
+            link.index = static_cast<std::uint8_t>(bound);
+            link.mode = node.pipe_modes[k];
+            ++bound;
+        }
+        node.block->pipe_links = (bound == 0) ? nullptr : &node_links_[offset];
+        node.block->pipe_count = static_cast<std::uint8_t>(bound);
+        offset += node.pipe_indices.size();
+    }
+    links_lent_ = any;
+}
+
 Task<void> Static_task_graph::execute(Execution_options opts)
 {
     Cancellation_token token = std::move(opts.token);
     if (!compiled_)
         ts::fatal("Static_task_graph::execute called before compile()");
+
+#if TS_SAFETY_CHECKS
+    // One run at a time. Previously unguarded (only the destructor checked quiescence), which
+    // made a second concurrent `execute()` corrupt the shared `Run_state` silently. It became
+    // a plausible mistake rather than pure misuse once nested runs landed: a pre-compiled
+    // sub-graph invoked from two concurrently running parents collides here. v1 rule is one
+    // instance per concurrent user (compile a clone, or order the parents with an edge);
+    // run-queueing is TODO 2.3.
+    if (run_ && run_->remaining_nodes.load(std::memory_order_acquire) != 0)
+    {
+        ts::fatal("Static_task_graph::execute called while a run of this graph is still in flight "
+                  "(one run at a time -- await the previous run, or use a separate graph instance)");
+    }
+#endif
+
+    // Resolve lending and bind the links BEFORE the per-node re-arm below, which seeds each
+    // block's lock counter from its (possibly reduced) `pipe_count`.
+    bind_links_for_run(opts.detach);
 
     // Runs on the one global scheduler (whatever a `Scheduler_scope` currently has it
     // configured as).
@@ -484,6 +612,14 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     run.remaining_nodes.store(static_cast<int>(nodes_.size()), std::memory_order_relaxed);
 
     Task<void> result(run.done);
+
+    // A nested run joins the calling task's implicit scope by default, so an un-awaited inner
+    // run cannot float past its launcher: the caller (a node, a coroutine frame) completes --
+    // and a node releases its objects -- only after the run settles. Attached BEFORE kickoff,
+    // so the run cannot settle in the window. `{.detach = true}` opts out, and a run started
+    // outside any task has nothing to join.
+    if (!opts.detach && detail::current_task)
+        detail::add_nested(run.done);
 
     if (nodes_.empty())
     {

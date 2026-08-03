@@ -772,6 +772,59 @@ no-argument `show_graph.bat` renders the structure dump and opens both.
 side by side: which optimisations the trace says are worth trying, and which
 it says not to bother with.
 
+### 6.3 Running a graph inside a graph
+
+A node body may run another compiled graph and await it. This is how you build
+a large frame out of reusable sub-graphs: compile the sub-graph once, execute
+it from whichever node needs it.
+
+```cpp
+ts::Static_task_graph inner;                     // compiled once, elsewhere
+inner.add_node([](Physics& p) { p.solve(); }, physics);
+inner.compile();
+
+outer.add_node([&inner](Physics& p) -> ts::Task<void>
+{
+    p.begin_step();
+    co_await inner.execute();                    // runs under this node's grant
+    p.end_step();
+}, physics);
+```
+
+Note that both graphs declare `physics`, and the outer node is holding it when
+the inner run starts. Two things make that work, and both are automatic:
+
+- **Lending.** Objects the calling task already holds a covering grant on
+  (a write grant covers reads and writes, a read grant covers reads) are *lent*
+  to the inner run: its nodes skip taking their own turn on them. They do not
+  need one — the caller's grant is what already excludes everyone else, and it
+  stays held for the whole nested run. Without this the inner node would queue
+  behind the grant its own caller is holding while that caller waits for it: a
+  deadlock. Ordering *within* the inner graph is unaffected — its compiled
+  conflict edges still sequence its own nodes on a lent object — and code
+  outside sees nothing different, because the pipe never learns about the lend:
+  an unrelated `async` still queues behind the outer node's hold. Nesting
+  composes to any depth.
+- **Scope join.** The inner run joins the calling task's scope, so you may fire
+  it without awaiting and still be sure it finished before the caller
+  completes. Pass `{.detach = true}` for a run that should genuinely outlive
+  its launcher; a detached run also forgoes lending (it is no longer contained
+  in the caller's grant window), so it simply queues like any external work.
+
+Three mistakes are caught with a fatal in checked builds:
+
+- The calling node declares **read** on an object the inner graph **writes**. A
+  read grant cannot be lent to a writer. Declare the write on the calling node,
+  or move the writing node out of the sub-graph.
+- Lending while the calling task still has **unjoined scope children running**.
+  They hold the same grant, so they could touch the lent object concurrently
+  with the inner graph, each of them "validly". `co_await ts::join_nested()`
+  first.
+- Calling `execute()` on a graph whose **previous run is still in flight**. One
+  run at a time: give each concurrent caller its own instance, or order the
+  callers with an edge. (This also catches the plain single-threaded mistake of
+  starting a second run without awaiting the first.)
+
 ---
 
 ## 7. `parallel_for`
@@ -1078,6 +1131,7 @@ result, completion, or cancellation.
 | many writers, batched visibility | `Deferred` |
 | stable read view + atomic version flips | `Versioned` |
 | ordering gate between phases | `Signal` |
+| reusing a sub-graph inside a frame | `co_await inner.execute()` (§6.3) |
 
 ---
 
@@ -1122,6 +1176,10 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
 - **Generic by-value parameters** (`[](auto v)`) in access-deduced positions
   classify as reads and copy the resource — writes hit the copy, silently.
   Undetectable at the declaration level (§3.1); use references.
+- **One run per graph instance** — a compiled graph runs one execution at a
+  time (checked, §6.3), so a sub-graph shared by two concurrently running
+  parents needs one instance per caller. Queued/pipelined runs are on the
+  roadmap.
 
 ---
 

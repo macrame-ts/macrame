@@ -407,14 +407,23 @@ IDs — when an item is done, mark it, don't renumber.
       trampoline first (10.14): if resumption dispatch is not visible in `coro chn`, this stays
       a curiosity.
 
-   9. `[ ]` **(P1, author 2026-08) Coroutine-first post-initial action list.** The queue behind
+   9. `[~]` **(P1, author 2026-08) Coroutine-first post-initial action list.** The queue behind
       the landed transformation, from [coroutine-first.md](coroutine-first.md) §11. In order:
-      (a) **nested graph runs v1** (§4.8 — the lend protocol: intersect the inner graph's
-      compiled access set with the caller's `Access_context`, per-run lent-mask, epoch-carrying
-      inner contexts; auto-scope-join default + explicit detach; the three fatals with
-      companions — mode-incompatible overlap, lending with a non-quiet scope, `execute()` while
-      a run is in flight, the last also closing the currently-unguarded concurrent-`execute()`
-      hole); (b) worker-less nested runs through the serial trampoline; (c) cancellation
+      (a) `[x]` **nested graph runs v1 — DONE (2026-08).** The lend protocol landed as
+      designed: `bind_links_for_run` intersects the compiled access set with the caller's
+      `Access_context` at every `execute()` and re-binds the `compile()`-time link slab to the
+      objects the run must actually take turns on — an unbound link IS a skipped turn, so no
+      bypass flag threads through the pipe and admission keeps one code path. Inner conflict
+      edges are untouched (they order inner nodes among themselves on a lent object) and the
+      pipe never sees the lend (external `async`s queue behind the caller's hold as before).
+      Auto-scope-join default + `Execution_options{.detach}` (a detached run gets no lend --
+      it is not contained in the caller's grant window); all three fatals with companions.
+      Two refinements vs the design text: the non-quiet-scope check filters SETTLED scope
+      children (the scope list only drops entries at a join, so plain emptiness would fatal on
+      a fire-and-settle child), and the in-flight fatal is `TS_SAFETY_CHECKS`-gated like its
+      siblings. 10 tests + 3 death scenarios + `stress_graph_nested_runs` under TSan;
+      (b) `[x]` worker-less nested runs — DONE, no work needed (the serial trampoline already
+      handles it; test added); (c) cancellation
       composition (pass the outer token into `inner.execute({.token})`, test that outer
       cancellation drains the inner run); (d) trace attribution across nesting (inner work must
       not double-count in the outer trace's fold); (e) concurrent shared-object graphs
