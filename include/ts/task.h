@@ -6,7 +6,6 @@
 #include "ts/detail/ref_count.h"   // intrusive Ref_ptr / Ref_counted (preferred over shared_ptr)
 #include "ts/detail/trace_owner.h"   // scheduler-free trace seam: owner inheritance + busy attribution
 
-#include <array>
 #include <atomic>
 #include <concepts>
 #include <condition_variable>
@@ -16,7 +15,6 @@
 #include <mutex>
 #include <optional>
 #include <thread>
-#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -731,8 +729,8 @@ struct Result_block
     }
 };
 
-// A bare block (no result, no body -- `Signal`, a `when_all` void join): one allocation,
-// destroyed as a plain `Task_control_block` when its refcount hits 0.
+// A bare block (no result, no body -- `Signal`): one allocation, destroyed as a plain
+// `Task_control_block` when its refcount hits 0.
 inline Task_ptr make_bare_block()
 {
     auto* b = new Task_control_block();
@@ -969,21 +967,6 @@ Task_ptr core_of(const Task<R>& t) noexcept;
 // did not create through the public builders.
 template<typename R>
 Task<R> task_from_core(Task_ptr core) noexcept;
-
-// Link `prereq` into `dependent`'s prerequisites as a RETRACTION HINT only — no lock
-// count, no successor, completion stays whatever drives `dependent` (a continuation
-// callback for `then`/`when_all`). It lets a blocking `sync()` on `dependent` walk to
-// `prereq` and run it inline (deep retraction) when `prereq` is retractable and
-// un-started, instead of parking a worker. Skipped if `prereq` already settled (nothing
-// to retract; its callback has fired or will fire). Pushed under `prereq`'s mutex like
-// `add_prerequisite`, and only before `dependent` is exposed, so it doesn't race
-// `dependent`'s later settle/retract.
-inline void add_retraction_hint(const Task_ptr& prereq, const Task_ptr& dependent)
-{
-    std::scoped_lock lock(prereq->mutex);
-    if (!prereq->completed)
-        dependent->prerequisites.push_back(prereq);
-}
 
 // Register `succ` as a successor of `prereq` (bumping its lock count), unless `prereq`
 // has already settled. `after` orders `succ` after `prereq` and propagates cancellation:
@@ -1317,141 +1300,6 @@ auto nested(Fn&& fn, Launch_options opts = {})
     auto t = launch(std::forward<Fn>(fn), std::move(opts));
     add_nested(t);
     return t;
-}
-
-namespace detail
-{
-
-// The tuple of the non-void prerequisite results (voids drop out).
-template<typename... Rs>
-using Kept_tuple_t = decltype(std::tuple_cat(
-    std::declval<std::conditional_t<std::is_void_v<Rs>, std::tuple<>, std::tuple<Rs>>>()...));
-
-// `when_all` result: void when nothing is kept (all prerequisites void), else the
-// kept tuple.
-template<typename... Rs>
-using When_all_result_t = std::conditional_t<
-    std::tuple_size_v<Kept_tuple_t<Rs...>> == 0, void, Kept_tuple_t<Rs...>>;
-
-template<typename> struct To_optionals;
-template<typename... Ts> struct To_optionals<std::tuple<Ts...>>
-{
-    using type = std::tuple<std::optional<Ts>...>;
-};
-
-// Slot index of each prerequisite in the kept tuple (-1 for a void prerequisite).
-template<typename... Rs>
-constexpr std::array<int, sizeof...(Rs)> when_all_slots()
-{
-    std::array<bool, sizeof...(Rs)> is_void{ std::is_void_v<Rs>... };
-    std::array<int, sizeof...(Rs)> slot{};
-    int next = 0;
-    for (std::size_t i = 0; i < sizeof...(Rs); ++i)
-        slot[i] = is_void[i] ? -1 : next++;
-    return slot;
-}
-
-// A `when_all` join's shared state: one intrusive allocation shared by every prerequisite's
-// continuation + the finish.
-// `next_core` (owned) keeps the join block alive; for a value join the block is a
-// `Result_block<Result>` that `next_core` aliases, recovered by `reinterpret_cast` in `finish`.
-template<typename Slots, typename Result>
-struct Join_state : Ref_counted<Join_state<Slots, Result>>
-{
-    Slots slots;
-    std::atomic<int> remaining;
-    std::atomic<bool> any_cancelled{ false };   // set if any prerequisite settled cancelled
-    Task_ptr next_core;
-
-    explicit Join_state(int n) : remaining(n) {}
-
-    // A prerequisite settled: store its result (or flag cancel), decrement; the last to settle
-    // runs `finish`.
-    template<int Slot, typename R>
-    void settle_one(void* r, bool cancelled)
-    {
-        if (cancelled)
-            any_cancelled.store(true, std::memory_order_relaxed);
-        else if constexpr (!std::is_void_v<R>)
-            std::get<Slot>(slots).emplace(std::move(*static_cast<R*>(r)));   // move out of the prerequisite
-        if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1)
-            finish();
-    }
-
-    void finish()
-    {
-        if (any_cancelled.load(std::memory_order_relaxed))
-        {
-            next_core->cancel();   // some slots empty (cancelled prereqs) -> no complete tuple
-            return;
-        }
-        if constexpr (!std::is_void_v<Result>)
-        {
-            auto* wrapper = reinterpret_cast<Result_block<Result>*>(next_core.get());
-            [&]<std::size_t... J>(std::index_sequence<J...>)
-            {
-                wrapper->store(Result(std::move(*std::get<J>(slots))...));   // move (move-only ok)
-            }(std::make_index_sequence<std::tuple_size_v<Slots>>{});
-        }
-        next_core->complete();
-    }
-};
-
-template<int Slot, typename R, typename Join>
-void when_all_attach_one(Task<R> prereq, const Task_ptr& next_core, Ref_ptr<Join> state)
-{
-    // Attach directly to the prerequisite (NOT via `.then`, which skips its continuation
-    // on cancellation and would leave the join's `remaining` counter stuck above 0 -- the
-    // join would never settle). Each continuation holds one `Ref_ptr<Join_state>`.
-    Task_ptr prereq_core = core_of(prereq);
-    prereq_core->attach(
-        [state = std::move(state)](void* r, bool cancelled) mutable
-        {
-            state->template settle_one<Slot, R>(r, cancelled);
-        });
-    add_retraction_hint(prereq_core, next_core);   // deep-retractable: sync() can run each prereq inline
-}
-
-} // namespace detail
-
-// Typed join: completes when every prerequisite completes. Void prerequisites act as
-// pure ordering (they drop out of the result); the results of the non-void ones are
-// carried as a tuple (as `void` if all prerequisites are void). Results may be
-// move-only. Consume with `.then` — either the tuple, or, apply-style, its elements
-// unpacked (`then([](A& a, B& b){ ... })`). If any prerequisite is cancelled the join
-// settles **cancelled** (it cannot form a complete tuple) rather than stalling; query
-// with `Task::is_cancelled()`, and a `.then` off it propagates the cancellation.
-template<typename... Rs>
-Task<detail::When_all_result_t<Rs...>> when_all(Task<Rs>... prerequisites)
-{
-    static_assert(sizeof...(Rs) > 0, "when_all needs at least one task");
-
-    using Result = detail::When_all_result_t<Rs...>;
-    using Slots = typename detail::To_optionals<detail::Kept_tuple_t<Rs...>>::type;
-    using Join = detail::Join_state<Slots, Result>;
-
-    // The join block: a bare block for a void result, else a `Result_block<Result>` whose
-    // handle the `Join_state` recovers by aliasing (see `Join_state::finish`).
-    detail::Task_ptr next_core;
-    if constexpr (std::is_void_v<Result>)
-        next_core = detail::make_bare_block();
-    else
-        next_core = std::get<0>(detail::make_block<Result>());
-    next_core->flags.retractable = true;   // a blocking sync() can retract the (retractable) prerequisites
-
-    // ONE allocation for all the join's shared state (was four `make_shared`).
-    auto state = detail::make_ref<Join>(static_cast<int>(sizeof...(Rs)));
-    state->next_core = next_core;
-
-    constexpr auto slot = detail::when_all_slots<Rs...>();
-    auto prereqs = std::make_tuple(std::move(prerequisites)...);
-
-    [&]<std::size_t... I>(std::index_sequence<I...>)
-    {
-        (detail::when_all_attach_one<slot[I]>(std::get<I>(std::move(prereqs)), next_core, state), ...);
-    }(std::index_sequence_for<Rs...>{});
-
-    return Task<Result>(std::move(next_core));
 }
 
 // A manually-completed synchronization point: a bodyless `Task<void>` (no work is
