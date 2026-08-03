@@ -1,10 +1,9 @@
 #pragma once
 
 // Coroutine support -- makes `ts::Task<R>` awaitable and provides a `promise_type`
-// so a coroutine can return `Task<R>` and `co_await` other tasks. Header-only, opt-in
-// include (nothing else pulls it in). Guarded on `__cpp_impl_coroutine`, so a toolchain
-// without coroutines simply sees an empty header (mandatory-coroutines is a later stage of
-// docs/coroutine-first.md).
+// so a coroutine can return `Task<R>` and `co_await` other tasks. Header-only;
+// coroutines are mandatory (docs/coroutine-first.md), so the library assumes a
+// coroutine-capable toolchain.
 //
 // Frame/block fusion (coroutine-first stage 1): the promise EMBEDS the task's
 // `Task_control_block` (+ result storage) -- one allocation per coroutine task (the frame),
@@ -39,9 +38,6 @@
 // iteratively, O(1) stack).
 
 #include "ts/task.h"
-
-#if defined(__cpp_impl_coroutine)
-
 #include "ts/guarded.h"   // Pipe, pipe_acquire/release, Guarded(_access), global_scheduler
 
 #include <atomic>
@@ -580,5 +576,3 @@ struct std::coroutine_traits<ts::Task<R>, Args...>
 {
     using promise_type = ts::detail::Task_promise<R>;
 };
-
-#endif // __cpp_impl_coroutine

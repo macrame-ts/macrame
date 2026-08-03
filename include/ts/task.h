@@ -968,40 +968,6 @@ Task_ptr core_of(const Task<R>& t) noexcept;
 template<typename R>
 Task<R> task_from_core(Task_ptr core) noexcept;
 
-// Register `succ` as a successor of `prereq` (bumping its lock count), unless `prereq`
-// has already settled. `after` orders `succ` after `prereq` and propagates cancellation:
-// a cancelled `prereq` still releases `succ`, but marks `succ->prereq_cancelled` so it
-// settles cancelled rather than running (see `release` / `Executable::run`).
-inline void add_prerequisite(const Task_ptr& prereq, const Task_ptr& succ)
-{
-    std::scoped_lock lock(prereq->mutex);
-    if (!prereq->completed)
-    {
-        [[maybe_unused]] std::uint32_t prev = succ->num_locks.fetch_add(1, std::memory_order_relaxed);
-#if TS_SAFETY_CHECKS
-        // The prerequisite set is FROZEN at launch (docs/task-internals.md §4): every legal
-        // caller holds a standing lock on `succ` here (the builder's "not launched" lock, a
-        // `then`'s "not attached" lock), so `prev == 0` means `succ` was already launched --
-        // its dispatch can race this lock and the ordering would be silently dropped (the
-        // body claims and runs regardless; see `Executable::run`). A count above
-        // `execution_flag` means `succ` is already RUNNING (only nested-task locks may be
-        // added then, via `add_nested`, never this). Both are misuse; fatal here at the
-        // cause instead of a silent ordering violation.
-        if (prev == 0 || prev >= Task_control_block::execution_flag)
-            ts::fatal("add_prerequisite on a launched task -- the prerequisite set is frozen at launch()");
-#endif
-        prereq->successors.push_back(succ);
-        succ->prerequisites.push_back(prereq);   // backward link, for deep retraction
-    }
-    else if (prereq->cancelled)
-    {
-        // Already settled cancelled -> `release` won't run, so propagate here: `succ`
-        // settles cancelled instead of running (a `then` would otherwise read a missing
-        // result). Under `prereq`'s mutex, so `cancelled` is consistent.
-        succ->prereq_cancelled.store(true, std::memory_order_relaxed);
-    }
-}
-
 } // namespace detail
 
 // Options for a `Guarded` access (`access` / `async`, single- and multi-object). Deliberately
@@ -1016,10 +982,8 @@ struct Access_options
 };
 
 // Dispatch options for launching a standalone task (`ts::launch`) or a nested one
-// (`ts::nested`). Deliberately WITHOUT `run_inline`: `launch`/`nested` have no prerequisites,
-// so there is no settling thread to inline onto — inline dispatch is a builder capability
-// (`ts::task(fn).set_inline()`). `token` makes it skippable before it runs; `priority` sets
-// its queue position.
+// (`ts::nested`). `token` makes it skippable before it runs; `priority` sets its queue
+// position.
 struct Launch_options
 {
     Cancellation_token token = {};
@@ -1110,134 +1074,6 @@ Task<R> task_from_core(Task_ptr core) noexcept { return Task<R>(std::move(core))
 
 } // namespace detail
 
-// A configured-but-not-launched task: attach prerequisites, then `launch()`. Built by
-// `ts::task(fn)`; owns the executable block until launched. `launch()` removes the
-// "not launched" lock, so the task runs once every prerequisite has settled.
-//
-// The builder is also the **reusable** handle: it retains the block after `launch()`
-// (which hands out a `Task<R>` aliasing the same block, but the builder keeps its own
-// reference), so a body + result storage allocated once can be re-run many times. The
-// pattern is `t.reset().after(...).launch(); r = t.sync();` — `reset()` re-arms the block
-// and the "not launched" lock for another run, prerequisites are re-established each run.
-// One run in flight; `reset()` only after the prior run settled and its result was
-// consumed. This avoids reallocation (pooling doesn't help — reuse is the point).
-template<typename R>
-class Task_builder
-{
-public:
-    // Run after each prerequisite settles. Call before `launch()` (each run): the
-    // prerequisite set is frozen at launch -- an `after()` on a launched, un-reset builder
-    // is fatal under `TS_SAFETY_CHECKS` (the added edge could race the dispatch and be
-    // silently ignored; see `add_prerequisite`).
-    template<typename... Ps>
-    Task_builder& after(const Task<Ps>&... prerequisites)
-    {
-#if TS_SAFETY_CHECKS
-        if (launched_)
-            ts::fatal("Task_builder::after() after launch() -- prerequisites are frozen at "
-                "launch; reset() first (reuse) or wire them before launching");
-#endif
-        (detail::add_prerequisite(detail::core_of(prerequisites), core_), ...);
-        return *this;
-    }
-
-    // Set the queue priority for the run (applied when the task dispatches). Call before
-    // `launch()`.
-    Task_builder& priority(Priority p)
-    {
-        core_->flags.priority = p;
-        return *this;
-    }
-
-    // Dispatch this task INLINE — run it on the thread that settles its last prerequisite,
-    // rather than queueing it. For latency-sensitive / very small dependents. Trade-offs:
-    // it runs on a nondeterministic thread (possibly external — see docs), bypasses
-    // priority, and must not block; a deep inline chain is bounded by a trampoline. Call
-    // before `launch()`.
-    Task_builder& set_inline()
-    {
-        core_->flags.run_inline = true;
-        return *this;
-    }
-
-    // Set the cancellation token for the task. Call BEFORE the first `launch()` — the token
-    // is fixed dispatch config, not per-run: `launch()` must NOT rewrite it, because a
-    // *reused* block can have a prior run's worker still reading `token` (in `Executable::run`)
-    // when the next round would write it, and that read/write is unsynchronized across the
-    // reuse×retraction path — a data race. Setting it once, before any dispatch, is
-    // happens-before the read. To re-run under a different token, make a fresh `ts::task`.
-    Task_builder& token(Cancellation_token t)
-    {
-        core_->token = std::move(t);
-        return *this;
-    }
-
-    Task<R> launch()
-    {
-#if TS_SAFETY_CHECKS
-        launched_ = true;
-#endif
-        detail::Task_control_block::release(core_);   // remove the launch lock
-        return Task<R>(core_);
-    }
-
-    // Re-arm for another run: re-arm the block and restore the "not launched" lock, so
-    // `after(...).launch()` runs it again. Precondition: the prior run settled and its
-    // result was consumed (one run in flight). Chain: `t.reset().after(x).launch()`.
-    // The cancellation `token` is NOT reset — it is fixed dispatch config (set once via
-    // `.token()` before the first launch) and carries over every reuse round; `reset()`
-    // cannot swap it. Since cancellation is one-way, a reused task whose token was cancelled
-    // stays cancelled on every re-run — for a fresh cancellation scope, make a new `ts::task`.
-    // (Rewriting `token` per run would race a prior run's worker still reading it — see the
-    // `.token()` note.)
-    Task_builder& reset()
-    {
-        core_->reset();
-        core_->num_locks.store(1, std::memory_order_relaxed);   // the "not launched" lock
-#if TS_SAFETY_CHECKS
-        launched_ = false;   // prerequisites may be wired for the next run
-#endif
-        return *this;
-    }
-
-    // Read this run's result by `const&` (see `Task<R>::sync`) / move it out (`take`) / query
-    // completion. The builder is the handle; equivalently `launch()`'s returned `Task<R>` can
-    // be used. The block outlives the temporary `Task` here (the builder's `core_` keeps it).
-    decltype(auto) sync() { return Task<R>(core_).sync(); }
-    R take() requires (!std::is_void_v<R>) { return Task<R>(core_).take(); }
-    bool is_done() const noexcept { return Task<R>(core_).is_done(); }
-    bool is_cancelled() const noexcept { return Task<R>(core_).is_cancelled(); }
-
-private:
-    template<typename Fn> requires detail::Task_body<Fn> friend auto task(Fn&& fn);
-
-    explicit Task_builder(detail::Task_ptr core) noexcept
-        : core_(std::move(core))
-    {}
-
-    detail::Task_ptr core_;
-#if TS_SAFETY_CHECKS
-    // Launched-and-not-reset: guards `after()` (prerequisites frozen at launch). Safety-only
-    // state, fully gated per the convention (no shipping bytes for the harness).
-    bool launched_ = false;
-#endif
-};
-
-// Configure a standalone task (body + prerequisites) to launch later. `fn` takes no
-// arguments (a bare scheduler task). Runs once all prerequisites (added via
-// `.after(...)`) have settled. Inherits the launcher's access grant (like `ts::launch`),
-// so a builder task used as nested sub-work may touch the parent's guarded data.
-template<typename Fn>
-    requires detail::Task_body<Fn>
-auto task(Fn&& fn)
-{
-    using R = detail::Task_result_t<Fn>;
-    auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), {});
-    core->num_locks.store(1, std::memory_order_relaxed);   // the "not launched" lock
-    core->flags.retractable = true;   // bare scheduler task: safe to run inline from a waiter
-    return Task_builder<R>(std::move(core));
-}
-
 // Launch a standalone task on the scheduler — a bare functor with no access target (the
 // primitive `async` for work that touches no guarded object). Returns a `Task<R>`; a
 // `Launch_options{token, priority}` makes it skippable before it runs and sets its queue
@@ -1260,25 +1096,27 @@ auto launch(Fn&& fn, Launch_options opts = {})
     return Task<R>(core);
 }
 
-// Attach `child` as a NESTED task of the currently-executing task: that task will not
-// complete until `child` settles (completed or cancelled). Call from within a task
-// body (async / launch / task); fatal if there is no running task. `child` can be
-// launched any way — nesting is a completion dependency, orthogonal to how it runs.
-template<typename R>
-void add_nested(const Task<R>& child)
+namespace detail
 {
-    detail::Task_ptr parent = detail::current_task;
+
+// Attach `child` as a NESTED task of the currently-executing task: that task will not
+// complete until `child` settles (completed or cancelled). Fatal if there is no running
+// task. Detail-level -- the public spellings are `ts::nested` (launch + attach) and the
+// graph's coroutine-node wiring; nesting is a completion dependency, orthogonal to how
+// the child runs.
+inline void add_nested(Task_ptr child_core)
+{
+    Task_ptr parent = current_task;
     if (!parent)
-        ts::fatal("add_nested called outside a running task");
+        ts::fatal("ts::nested called outside a running task");
 
     parent->num_locks.fetch_add(1, std::memory_order_relaxed);   // a completion lock on the parent
 
-    detail::Task_ptr child_core = detail::core_of(child);
     // Record for a mid-body `co_await ts::join_nested()` when the caller's segment carries an
     // implicit scope (a coroutine frame installs one; functor bodies have none -- they cannot
     // await, and their children gate completion via the counter alone).
-    if (detail::current_scope_children != nullptr)
-        detail::current_scope_children->push_back(child_core);
+    if (current_scope_children != nullptr)
+        current_scope_children->push_back(child_core);
     {
         std::scoped_lock lock(child_core->mutex);
         if (!child_core->completed)
@@ -1287,18 +1125,20 @@ void add_nested(const Task<R>& child)
             return;
         }
     }
-    detail::Task_control_block::release(parent);   // child already settled -> release the lock now
+    Task_control_block::release(parent);   // child already settled -> release the lock now
 }
 
+} // namespace detail
+
 // Launch a task and attach it as a nested task of the currently-executing task (its
-// completion gates the parent's). Sugar for `launch` + `add_nested`; call from within a
-// task body.
+// completion gates the parent's): the parent will not complete until the child settles.
+// Call from within a task body; fatal outside one.
 template<typename Fn>
     requires detail::Task_body<Fn>
 auto nested(Fn&& fn, Launch_options opts = {})
 {
     auto t = launch(std::forward<Fn>(fn), std::move(opts));
-    add_nested(t);
+    detail::add_nested(detail::core_of(t));
     return t;
 }
 

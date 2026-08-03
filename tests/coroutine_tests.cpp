@@ -1,8 +1,6 @@
 ﻿#include "coroutine_tests.h"
 #include "harness.h"
 
-#if defined(__cpp_impl_coroutine)
-
 #include "ts/coroutine_support.h"
 #include "ts/guarded.h"
 #include "ts/parallel_for.h"
@@ -481,9 +479,3 @@ void run_coroutine_tests()
 #endif
     run("co showcase", test_showcase);
 }
-
-#else   // no coroutine support in this toolchain
-
-void run_coroutine_tests() {}
-
-#endif

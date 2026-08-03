@@ -225,7 +225,6 @@ void run_death_scenario(const char* name)
         g.execute().sync();
     }
 #endif
-#if defined(__cpp_impl_coroutine)
     else if (std::strcmp(name, "scope_unjoined") == 0)
     {
         // Dropping an explicit Task_scope with recorded children loses their join -- fatal
@@ -254,7 +253,6 @@ void run_death_scenario(const char* name)
             co_await cancelled;   // -> fatal
         }(std::move(t)).sync();
     }
-#endif
     else if (std::strcmp(name, "deferred_drop_staged") == 0)
     {
         ts::Guarded<int> target{ 0 };
@@ -420,13 +418,11 @@ void run_death_scenario(const char* name)
         ts::Access_scope scope(ctx);
         v.publish_into(other);   // not this Versioned's front -> fatal
     }
-#if defined(__cpp_impl_coroutine)
     else if (std::strcmp(name, "coro_await_under_guard") == 0)
     {
         ts::Guarded<Counter> w;
         ts::Signal never;
         coro_await_under_guard(w, never).sync();   // fatals during the coroutine's eager run
     }
-#endif
     // unknown scenario: return without dying -> parent's expect_death fails
 }

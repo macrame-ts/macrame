@@ -15,8 +15,4 @@
 #include "ts/versioned.h"          // ts::Versioned<T>
 #include "ts/access.h"             // TS_CHECK_ACCESS, Access_context (for instrumenting guarded types)
 
-// Coroutine support is optional -- only pulled in when the compiler enables
-// coroutines (it is header-only and self-contained otherwise).
-#if defined(__cpp_impl_coroutine)
 #include "ts/coroutine_support.h"  // co_await a Task, ts::read_only/ts::read_write access guards
-#endif

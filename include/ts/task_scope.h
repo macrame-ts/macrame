@@ -11,9 +11,6 @@
 // coroutine/task.
 
 #include "ts/task.h"
-
-#if defined(__cpp_impl_coroutine)
-
 #include "ts/coroutine_support.h"
 
 #include <utility>
@@ -65,5 +62,3 @@ private:
 };
 
 } // namespace ts
-
-#endif // __cpp_impl_coroutine

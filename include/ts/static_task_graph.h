@@ -278,7 +278,7 @@ private:
                 // completes (releasing grants and successors) when the frame completes, not
                 // at the first suspension. The frame inherits the node's grant snapshot at
                 // creation, so resumed segments keep the declared accesses.
-                add_nested(fn(detail::mode_ref<Modes>(std::get<I>(instances))...));
+                detail::add_nested(detail::core_of(fn(detail::mode_ref<Modes>(std::get<I>(instances))...)));
             }
             else
             {
