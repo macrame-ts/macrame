@@ -44,10 +44,10 @@ void drain_serial_pending() noexcept;
 #if TS_SAFETY_CHECKS
 struct Task_control_block;
 // Defined in guarded.cpp (it needs the `Pipe` layout this header deliberately lacks):
-// diagnose a blocking `sync()` on non-retractable work issued under an access scope -- a
-// `TS_ENSURE` failure with the sharp same-object message when the target is an async access
-// on an object the current context holds (certain deadlock), the general never-block warning
-// otherwise. Called by `retract_or_wait` only when the wait is genuinely about to park.
+// diagnose a blocking `sync()` issued from inside a task -- fatal, with the sharp
+// same-object message when the target is an async access on an object the current
+// context holds (certain deadlock), the general never-park message otherwise. Called
+// by `sync_wait` only when the wait is genuinely about to park.
 void blocking_sync_diagnose(const Task_control_block* blk) noexcept;
 #endif
 
@@ -191,75 +191,6 @@ namespace detail
 {
 
 struct Task_control_block;
-
-#if defined(TS_REUSE_FORENSICS)
-// Diagnostic-only lock-free event ring for the stress_reuse flake hunt (see the
-// `TS_REUSE_ONLY` driver in tsan/tsan_main.cpp). Compiled ONLY under TS_REUSE_FORENSICS;
-// the default build sees no-op macros and is unaffected. Hooks filter on one `watched`
-// block (the reused `dep`), record {event, a, b, tid} with relaxed atomics (minimal
-// perturbation, TSan-clean by construction), and the driver dumps the tail on a capture.
-namespace forensics
-{
-enum Event : std::uint32_t
-{
-    E_none = 0,
-    E_round,          // a = round i, b = outer iter        (driver)
-    E_reset,          // a = new gen                        (Task_control_block::reset)
-    E_release,        // a = num_locks after, b = prereq_cancelled (release)
-    E_submit,         // a = gen published to dispatch_arg  (submit_ready)
-    E_pop,            // a = gen read from dispatch_arg     (run_block_dispatch)
-    E_claim_ok,       // a = gen, b = path (1 queue, 2 retract, 3 other)
-    E_claim_fail,     // a = gen, b = path
-    E_cancel_branch,  // token/prereq-cancel skip taken     (Executable::run)
-    E_body,           // a = log value read, b = run_state raw (driver body)
-    E_prereq_body,    // a = i                              (driver prereq body)
-    E_settle,         // a = cancel flag, b = already-completed (settle, under lock)
-    E_retract_exec,   // a = gen about to execute inline    (retract)
-    E_sync_ret,       // a = value returned, b = round i    (driver)
-};
-
-struct Entry
-{
-    std::atomic<std::uint64_t> a{ 0 };
-    std::atomic<std::uint64_t> b{ 0 };
-    std::atomic<std::uint32_t> id{ 0 };
-    std::atomic<std::uint32_t> tid{ 0 };
-};
-
-inline constexpr std::uint32_t ring_size = 1u << 17;   // ~131k events, wraps
-inline Entry ring[ring_size];
-inline std::atomic<std::uint32_t> ring_idx{ 0 };
-inline std::atomic<Task_control_block*> watched{ nullptr };
-inline thread_local std::uint64_t claim_path = 0;   // 1 queue-dispatch, 2 retract, 3 other
-
-inline std::uint32_t tid_hash() noexcept
-{
-    return static_cast<std::uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xffffu);
-}
-
-inline void rec(Event id, std::uint64_t a, std::uint64_t b) noexcept
-{
-    std::uint32_t i = ring_idx.fetch_add(1, std::memory_order_relaxed) & (ring_size - 1);
-    ring[i].a.store(a, std::memory_order_relaxed);
-    ring[i].b.store(b, std::memory_order_relaxed);
-    ring[i].tid.store(tid_hash(), std::memory_order_relaxed);
-    ring[i].id.store(id, std::memory_order_relaxed);
-}
-
-inline void rec_if(const Task_control_block* c, Event id, std::uint64_t a, std::uint64_t b) noexcept
-{
-    if (c && c == watched.load(std::memory_order_relaxed))
-        rec(id, a, b);
-}
-} // namespace forensics
-#define TS_FORENSIC(c, ev, a, b) ::ts::detail::forensics::rec_if((c), ::ts::detail::forensics::ev, (a), (b))
-#define TS_FORENSIC_G(ev, a, b) ::ts::detail::forensics::rec(::ts::detail::forensics::ev, (a), (b))
-#define TS_FORENSIC_PATH(p) (::ts::detail::forensics::claim_path = (p))
-#else
-#define TS_FORENSIC(c, ev, a, b) ((void)0)
-#define TS_FORENSIC_G(ev, a, b) ((void)0)
-#define TS_FORENSIC_PATH(p) ((void)0)
-#endif
 
 // Intrusive strong-refcount ownership of a `Task_control_block`. The count + a `destroy`
 // thunk live IN the block (no separate control block), so a handle is ONE pointer (half a
@@ -433,12 +364,11 @@ struct Task_control_block
     std::uint8_t pipe_count = 0;
     std::uint8_t pipes_entered = 0;
     // Static dispatch properties, packed into one byte (all set at creation, never
-    // mutated once the block is shared, so non-atomic is race-free). `priority` and
-    // `run_inline` are read together at dispatch; `retractable` in the retraction guard.
+    // mutated once the block is shared, so non-atomic is race-free). Read together at
+    // dispatch. `run_inline` is graph-internal (`Graph_node::set_inline`).
     struct Flags
     {
         Priority priority : 2 = Priority::normal;   // queue position when dispatched
-        bool retractable : 1 = false;               // safe to run inline from a waiter (no pipe/access binding)
         bool run_inline : 1 = false;                // dispatch on the settling thread, not the queue
     };
     Flags flags;
@@ -463,13 +393,8 @@ struct Task_control_block
     bool claim(std::uint64_t gen) noexcept
     {
         std::uint64_t expected = gen << 1;
-        const bool ok = run_state.compare_exchange_strong(
+        return run_state.compare_exchange_strong(
             expected, (gen << 1) | 1u, std::memory_order_acq_rel, std::memory_order_relaxed);
-#if defined(TS_REUSE_FORENSICS)
-        forensics::rec_if(this, ok ? forensics::E_claim_ok : forensics::E_claim_fail,
-                          gen, forensics::claim_path);
-#endif
-        return ok;
     }
 
     void complete() { settle(false); }
@@ -488,15 +413,9 @@ struct Task_control_block
             blk->prereq_cancelled.store(true, std::memory_order_relaxed);
         // Capture the generation BEFORE the decrement. Our not-yet-released lock pins the
         // current run (it cannot start, so it cannot complete, so `reset()` cannot re-arm
-        // it), so this read names exactly the run this lock belongs to. Reading it AFTER
-        // the decrement is a TOCTOU: once the count hits zero the run can complete via
-        // retraction and be re-armed, and a releaser preempted in that window would stamp
-        // its dispatch with the NEXT generation -- which then claims a run whose
-        // prerequisites are not yet met (proven by the stress_reuse forensics: `got == i-1`
-        // with the current generation claimed; see tsan/reuse_hunt.sh).
+        // it), so this read names exactly the run this lock belongs to.
         std::uint64_t gen = blk->generation();
         std::uint32_t now = blk->num_locks.fetch_sub(1, std::memory_order_acq_rel) - 1;
-        TS_FORENSIC(blk.get(), E_release, now, prereq_cancelled ? 1 : 0);
         if (now == 0)
             dispatch_ready(blk, gen);     // pre-execution: all locks (incl. pipe turns) met
         else if (now == execution_flag)
@@ -518,7 +437,7 @@ struct Task_control_block
     // vector grows). `clear()` at the end retains capacity -> no steady-state allocation.
     // Each entry carries the GENERATION captured at release time (same TOCTOU as the queued
     // path: re-reading `generation()` at drain time could see a newer gen if the block was
-    // retracted + re-armed between the push and the drain step).
+    // re-armed between the push and the drain step).
     inline static thread_local std::vector<std::pair<Task_ptr, std::uint64_t>> inline_pending;
     inline static thread_local bool inline_draining = false;
 
@@ -555,7 +474,6 @@ struct Task_control_block
         void* r = nullptr;               // the result for continuations, captured under the lock
         {
             std::scoped_lock lock(mutex);
-            TS_FORENSIC(this, E_settle, cancel_ ? 1 : 0, completed ? 1 : 0);
             if (completed)
                 return;
             completed = true;
@@ -621,46 +539,11 @@ struct Task_control_block
         prereq_cancelled.store(false, std::memory_order_relaxed);
         num_locks.store(0, std::memory_order_relaxed);
         ready.store(false, std::memory_order_release);
-        TS_FORENSIC(this, E_reset, generation(), 0);
     }
 
-    // Deep retraction: run the un-started part of `blk`'s dependency subtree inline on
-    // the *calling* thread instead of parking on it — so a waiter under worker
-    // exhaustion (nested fork-join) makes progress rather than deadlocking. Retract
-    // `blk`'s prerequisites first (recursively), then, once its prerequisites are met
-    // and it hasn't started, run its body inline. `execute` claims via `run_state`, so a
-    // worker and a retractor never both run a body; non-retractable prerequisites
-    // (async accesses, externally-triggered `Signal`s) are left to complete on their own.
-    static void retract(const Task_ptr& blk)
-    {
-        if (!blk->flags.retractable || blk->ready.load(std::memory_order_acquire))
-            return;
-
-        std::vector<Task_ptr> prereqs;
-        {
-            std::scoped_lock lock(blk->mutex);
-            prereqs = blk->prerequisites;   // snapshot (they clear as they settle)
-        }
-        for (const auto& p : prereqs)
-            retract(p);
-
-        // Reading `generation()` after the locks check is safe HERE (unlike `release`): the
-        // retractor is a `sync()` caller of the CURRENT run, and only the resetter advances
-        // the generation -- the builder contract (one run in flight; `reset()` only after the
-        // prior run settled and was consumed) means no thread can be re-arming the block
-        // while a same-run retractor is inside this call.
-        if (blk->execute && blk->num_locks.load(std::memory_order_acquire) == 0)
-        {
-            TS_FORENSIC(blk.get(), E_retract_exec, blk->generation(), 0);
-            TS_FORENSIC_PATH(2);
-            blk->execute(blk, blk->generation());   // ready & not started -> run inline (no-op if a worker beat us)
-            TS_FORENSIC_PATH(0);
-        }
-    }
-
-    // Retract what we can, then wait; defined after `current_task` below (the in-task
-    // blocking fatal reads it).
-    static void retract_or_wait(const Task_ptr& blk);
+    // Blocking wait for `blk` to settle (the blue-thread `sync()` path); defined after
+    // `current_task` below (the in-task blocking fatal reads it).
+    static void sync_wait(const Task_ptr& blk);
 };
 
 // `Task_ptr` refcount ops (block is complete here). `dec` at 0 runs the wrapper's `destroy`.
@@ -786,25 +669,21 @@ inline thread_local Task_ptr current_task;
 // and outside tasks.
 inline thread_local std::vector<Task_ptr>* current_scope_children = nullptr;
 
-inline void Task_control_block::retract_or_wait(const Task_ptr& blk)
+inline void Task_control_block::sync_wait(const Task_ptr& blk)
 {
-    retract(blk);
     // Worker-less mode: the awaited work (an async access, a released successor) may be
     // queued on THIS thread's serial trampoline behind the current frame -- run it
     // before parking, or nothing ever would. No-op otherwise.
     drain_serial_pending();
 #if TS_SAFETY_CHECKS
     // Coroutine-first (docs/coroutine-first.md §4.1): about to genuinely park INSIDE a
-    // task (retraction and the serial drain could not finish the target) on work the
-    // waiter cannot help along -- fatal, not a warning: the park occupies a worker and
-    // risks pool-exhaustion deadlock, and `co_await` is the sanctioned wait. Retractable
-    // targets are exempt UNTIL the retraction machinery is removed (stage 4) -- bare-task
-    // joins still retract above; `parallel_for` joins never route here (they wait on the
-    // group state directly, on provably running helpers). `ready` is an approximation
-    // (the target may complete concurrently after the check) -- a rare borderline fatal
-    // on a genuinely-parking call, never a missed hazard class.
-    if (current_task && !blk->flags.retractable
-        && !blk->ready.load(std::memory_order_acquire))
+    // task on work the waiter cannot help along -- fatal, not a warning: the park
+    // occupies a worker and risks pool-exhaustion deadlock, and `co_await` is the
+    // sanctioned wait. `parallel_for` joins never route here (they wait on the group
+    // state directly, on provably running helpers). `ready` is an approximation (the
+    // target may complete concurrently after the check) -- a rare borderline fatal on
+    // a genuinely-parking call, never a missed hazard class.
+    if (current_task && !blk->ready.load(std::memory_order_acquire))
         blocking_sync_diagnose(blk.get());
 #endif
     blk->wait();
@@ -817,9 +696,8 @@ template<> struct Result_storage<void> {};
 // An executable task: the monomorphic block (FIRST member, so a `Task_control_block*`
 // aliases / `reinterpret_cast`s back to it) + result storage + the body + a token.
 // `run` is wired into `core.execute`; the scheduler/pipe invokes it via
-// `block->execute(block)`. The body lives here (reachable from the block for future
-// reuse/retraction); its type is erased behind the `execute` function pointer, so the
-// block and everything downstream stay monomorphic.
+// `block->execute(block)`. The body lives here, its type erased behind the `execute`
+// function pointer, so the block and everything downstream stay monomorphic.
 template<typename Body, typename R>
 struct Executable
 {
@@ -839,7 +717,6 @@ struct Executable
         auto* self = reinterpret_cast<Executable*>(c.get());
         if (c->token.is_cancel_requested() || c->prereq_cancelled.load(std::memory_order_acquire))
         {
-            TS_FORENSIC(c.get(), E_cancel_branch, gen, 0);
             c->cancel();   // own token, or a prerequisite cancelled (no result to consume)
             return;
         }
@@ -925,7 +802,7 @@ concept Task_body = std::invocable<std::decay_t<Fn>&>
 // Wrap `fn` so the task runs under the access grant active where it was BUILT (see
 // access.h): sub-work launched from a task body inherits the launcher's permissions and
 // may touch the launcher's guarded data. The snapshot is by value, so it is valid after
-// the launcher unwinds and on whatever worker (or retractor) runs the body; a top-level
+// the launcher unwinds and on whatever worker runs the body; a top-level
 // build (no active grant) captures nothing, so the scope is a no-op. Shared by
 // `ts::launch` and `ts::task` so both the eager and the builder path inherit alike. If
 // `fn` takes a trailing `Cancellation_token`, the wrapper does too (forwarded by
@@ -1027,7 +904,7 @@ public:
     // attached callback may still be running (or not yet started) when `sync()` returns.
     decltype(auto) sync()
     {
-        detail::Task_control_block::retract_or_wait(core_);
+        detail::Task_control_block::sync_wait(core_);
         if constexpr (std::is_void_v<R>)
         {
             return;
@@ -1045,7 +922,7 @@ public:
     // consume (see the block's result-consumption contract). Fatal if the task was cancelled.
     R take() requires (!std::is_void_v<R>)
     {
-        detail::Task_control_block::retract_or_wait(core_);
+        detail::Task_control_block::sync_wait(core_);
         if (core_->cancelled)
             ts::fatal("Task::take() on a cancelled task; check is_cancelled() first");
         return std::move(*static_cast<R*>(core_->result_ptr));
@@ -1090,7 +967,6 @@ auto launch(Fn&& fn, Launch_options opts = {})
 {
     using R = detail::Task_result_t<Fn>;
     auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), std::move(opts.token));
-    core->flags.retractable = true;   // bare scheduler task (no pipe binding): safe to run inline from a waiter
     core->flags.priority = opts.priority;
     detail::submit_ready(core, core->generation());   // fresh block, pre-dispatch: gen 0, race-free read
     return Task<R>(core);

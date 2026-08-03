@@ -75,13 +75,10 @@ static void run_block_dispatch(void* data)
 {
     Task_ptr block(static_cast<Task_control_block*>(data), Adopt_ref{});   // adopt the queued ref
     std::uint64_t gen = block->dispatch_arg.load(std::memory_order_acquire);
-    TS_FORENSIC(block.get(), E_pop, gen, 0);
-    TS_FORENSIC_PATH(1);
     if (block->execute)
         block->execute(block, gen);              // claims `gen` internally (dedup + stale-skip)
     else if (block->claim(gen))                  // bodyless: claim so a stale/duplicate no-ops
         block->complete();
-    TS_FORENSIC_PATH(0);
 }   // `block` decrements here -> releases the ref the queue held
 
 // A block whose prerequisites are all met: schedule it to run (its body, or, if
@@ -109,7 +106,6 @@ void submit_ready(Task_ptr block, std::uint64_t gen)
                cur, gen, std::memory_order_release, std::memory_order_relaxed))
     {
     }
-    TS_FORENSIC(block.get(), E_submit, gen, 0);
     // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
     global_scheduler().submit(&run_block_dispatch, block.release(), priority);
 }
@@ -371,12 +367,11 @@ void pipe_release(Scheduler&, Pipe& pipe, Access mode)
 }
 
 #if TS_SAFETY_CHECKS
-// The `retract_or_wait` diagnostic (declared in task.h, defined here for the `Pipe`
-// layout): the caller established that the wait is about to park, an access scope is
-// active, and the target is non-retractable. Sharp message when the wait target is a pipe
-// task queued on a pipe this scope's grant covers -- that shape deadlocks (the entry sits
-// behind the very grant the waiter holds). The links carry the pipe identities, so
-// multi-object jobs get the sharp match too.
+// The `sync_wait` diagnostic (declared in task.h, defined here for the `Pipe` layout):
+// the caller established that the wait is about to park inside a task. Sharp message
+// when the wait target is a pipe task queued on a pipe the current scope's grant covers
+// -- that shape deadlocks (the entry sits behind the very grant the waiter holds). The
+// links carry the pipe identities, so multi-object jobs get the sharp match too.
 void blocking_sync_diagnose(const Task_control_block* blk) noexcept
 {
     if (current_access != nullptr)

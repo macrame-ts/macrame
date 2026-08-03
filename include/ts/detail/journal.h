@@ -231,8 +231,8 @@ private:
 // scheduler worker owns a private slot, so staging is contention-free under any
 // chunking (guided, work-stealing, long tail), with no lane math and no
 // balance/lane-count coupling. Slot 0 is the overflow lane for non-worker
-// threads: the `parallel_for` caller's own share, retraction-inline bodies,
-// `set_inline` bodies on external threads, workers of a different scheduler.
+// threads: the `parallel_for` caller's own share, `set_inline` bodies on
+// external threads, workers of a different scheduler.
 //
 // The trade (vs index-keyed `Recorder` lanes): placement follows scheduling, so
 // the CROSS-thread apply order is nondeterministic run to run (intra-thread

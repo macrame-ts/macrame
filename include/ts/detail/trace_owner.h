@@ -52,7 +52,7 @@ inline thread_local int current_trace_owner = -1;
 inline thread_local bool current_in_functor = false;
 // Set by `run_task` around the body it dispatches: the task's whole span is booked as
 // machinery there, so this body's span must be netted back OUT of machinery (and into
-// body). An inline-dispatched or retracted body bypasses `run_task`, so this is false for
+// body). An inline-dispatched body bypasses `run_task`, so this is false for
 // it -- it only adds to body (nothing to net). Captured-and-cleared per body scope, so a
 // nested inline body inside a `run_task` body correctly reads false.
 inline thread_local bool trace_body_under_run_task = false;

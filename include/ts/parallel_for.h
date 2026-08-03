@@ -194,7 +194,7 @@ void parallel_for(int n, Body&& body, Parallel_options opts = {})
     // The one sanctioned in-task wait (docs/coroutine-first.md §4.1): the caller has already
     // drained every unclaimed chunk itself, so this parks only on helpers that are RUNNING on
     // workers right now -- bounded, deadlock-free (running work always finishes). It waits on
-    // the group state directly, never through `retract_or_wait`, so the in-task blocking fatal
+    // the group state directly, never through `sync_wait`, so the in-task blocking fatal
     // does not apply here.
     st->core.wait();             // block until done == n
 
