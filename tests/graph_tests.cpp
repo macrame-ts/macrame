@@ -1130,6 +1130,47 @@ void test_nested_run_join_scope_then_lend()
     TS_CHECK(read_value(x) == 101);
 }
 
+// Two DIFFERENT graphs over overlapping objects, running concurrently. task-internals §10
+// scenario 2 called this unsupported, but the reason was the per-graph `Run_state` being
+// single-run -- which says nothing about two graphs. Each graph's nodes take their pipe turns
+// in canonical (pipe-address) order over the same address-sorted objects, so no wait cycle
+// can form; the pipe serializes the two graphs' conflicting nodes against each other exactly
+// as it serializes a node against an async. The Rw_probe oracle catches any overlap the
+// harness structurally cannot (both sides declare their access).
+void test_concurrent_graphs_shared_objects()
+{
+    constexpr int rounds = 60;
+    ts::Guarded<tests::Rw_probe> shared_a, shared_b;
+
+    ts::Static_task_graph g1;
+    g1.add_node([](tests::Rw_probe& p) { p.observe_write(1); }, shared_a);
+    g1.add_node([](const tests::Rw_probe& p) { p.observe_read(2); }, shared_b);
+    g1.compile();
+
+    // Opposite declaration order on the same two objects: the canonical order is the pipes'
+    // addresses, not the declaration order, so this cannot invert anyone's acquisition.
+    ts::Static_task_graph g2;
+    g2.add_node([](tests::Rw_probe& p) { p.observe_write(3); }, shared_b);
+    g2.add_node([](tests::Rw_probe& p, const tests::Rw_probe& q) { p.observe_write(4); (void)q; },
+                shared_a, shared_b);
+    g2.compile();
+
+    {
+        std::jthread second([&]
+        {
+            for (int i = 0; i < rounds; ++i)
+                g2.execute().sync();
+        });
+        for (int i = 0; i < rounds; ++i)
+            g1.execute().sync();
+    }   // join
+
+    TS_CHECK(probe_ok(shared_a));
+    TS_CHECK(probe_ok(shared_b));
+    TS_CHECK(probe_writes(shared_a) == 2 * rounds);   // g1's writer + g2's multi-object writer
+    TS_CHECK(probe_writes(shared_b) == rounds);
+}
+
 // Worker-less: every submit executes inline on the submitting thread, so a nested run
 // unwinds through the serial trampoline inside the outer node's body. Depth is bounded by
 // the nesting, and the lend is what keeps it from self-deadlocking on the outer's own hold.
@@ -1207,6 +1248,7 @@ void run_graph_tests()
     run("nested run: outer write covers inner write", test_nested_run_write_covers_inner_write);
     run("nested run: join scope, then lend", test_nested_run_join_scope_then_lend);
     run("nested run worker-less", test_nested_run_worker_less);
+    run("concurrent graphs, shared objects", test_concurrent_graphs_shared_objects);
     run("death: nested run mode conflict", test_death_nested_run_mode_conflict);
     run("death: nested run with an unquiet scope", test_death_nested_run_unquiet_scope);
     run("death: execute while a run is in flight", test_death_execute_in_flight);
