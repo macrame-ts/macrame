@@ -501,6 +501,66 @@ IDs — when an item is done, mark it, don't renumber.
       Open discussion queue: [coroutine-first.md](coroutine-first.md) §10 (doctrine
       relaxations, HALO reality on MSVC/clang-cl, the graph-free usage model).
 
+   10. `[ ]` **(P1, author 2026-08) Check the rule, not the incident — structural in-task
+       `sync()` fatal.** The diagnostic in `sync_wait` is gated on `!blk->ready`, so it fires
+       only when the wait would *genuinely park*. That inverts its coverage: an in-task
+       `sync()` whose target is usually already settled never trips in dev (checked builds
+       skew further toward "already done" via their own overhead), then parks a worker on the
+       one frame a prerequisite runs long — and in shipping the check is compiled out entirely.
+       A safety check whose trigger condition is the hazard's *timing* inherits the hazard's
+       nondeterminism. Fix: make it unconditional — `sync()` inside a task is illegal whether
+       or not the target has settled — which is what the doctrine already says (coroutine-first
+       §8 flag 4, `sync()` demoted to boundary-only). Deterministic: the first execution of the
+       path fails, regardless of timing. **Depends on 6.12** — the legitimate
+       `if (t.is_done()) v = t.sync();` idiom needs a non-blocking spelling before the
+       unconditional fatal removes it. `parallel_for` joins stay structurally exempt.
+
+   11. `[ ]` **(P1, author 2026-08) Same fix for the guard-across-suspension fatal.** The
+       `pipe_guard_depth > 0` check lives in `await_suspend`, so a `co_await` that happens to
+       complete synchronously is never examined — the same timing-luck coverage as 6.10, one
+       degree less bad (the check is not `TS_SAFETY_CHECKS`-gated, so the latent case aborts in
+       shipping rather than silently serializing). Fix: hoist the test to `co_await` *entry*
+       (`await_ready`) so any await under a held guard is illegal whether or not it suspends;
+       cost is one branch on a TLS counter on a path that already branches. Not purely
+       mechanical: today the reentrancy exemption is **emergent** (a reentrant same-object
+       access never suspends, so it never reaches the check). Hoisting forces it to be stated —
+       an awaiter for an object already in the grant set skips the check, everything else does
+       not — which makes the rule legible rather than implicit. Land with 6.10; same principle,
+       same test-matrix rows.
+
+   12. `[ ]` **(P1, author 2026-08) Non-blocking result accessors — `try_take()` /
+       `as_optional()`.** Fatal-on-cancelled is the wrong default for a value `sync()`: the
+       caller cannot check-then-take without a race, and the fatal punishes them for a state
+       the callee chose. Do NOT change `sync()`'s return type — every call site that cannot be
+       cancelled (no token in play, the common case) would pay an unwrap forever. Three
+       spellings instead: `sync()` unchanged (blocking, boundary-only, fatal on cancelled — the
+       "this cannot be cancelled" assertion); **`try_take()`** — non-blocking, empty when
+       unsettled *or* cancelled, and legal inside a task (it never parks), which is also the
+       escape valve 6.10 needs; **`co_await t.as_optional()`** — the red-side equivalent,
+       replacing the fatal-on-awaiting-cancelled with a branch. Void asymmetry: define
+       `ts::Maybe<R>` as `optional<R>` for non-void and **`optional<std::monostate>`** for void
+       — presence-testing *and* dereference stay uniform, so generic code needs no
+       `if constexpr`. (The `bool`-for-void variant buys only the declaration: `*m` is invalid
+       for `bool`, so every generic consumer that extracts still branches — barely worth a name.)
+
+   13. `[ ]` **(P1, author 2026-08) Global quiescence deadlock detector.** The waits-for
+       detector (6.5) fires *before* a deadlock and names the participants, but only for the
+       shapes it models: an edge is recorded solely when a task suspends on a pipe job while
+       holding grants. Cycles mediated by a task-await edge are invisible — N holds G1 and
+       awaits foreign task T (not a pipe job, no edge), while T awaits G1 (holds nothing, no
+       edge); both frames suspend forever and nothing fires. The sound complement is Go's
+       `all goroutines are asleep` check: **every worker idle + un-settled work outstanding +
+       nothing external able to wake us ⇒ progress is impossible ⇒ fatal**, dumping every
+       suspended frame. O(1), no waits-for graph, and it misses no deadlock shape — including
+       lost-wakeup bugs that are not cycles at all. Two requirements: (a) an
+       **outstanding-external-wakeup counter** — anything completable by a non-worker thread
+       (I/O, a `Signal` triggered off-pool, `Frame_gate`) registers while pending, so
+       quiescence with a zero count is a genuine deadlock and not a legitimate wait; (b) idle
+       must be an explicit idle-worker count + empty queues + zero in-flight, since `spin`
+       workers never park. Relationship: quiescence is the safety net (always-on candidate),
+       6.5's graph stays the precise dev-mode diagnostic. Ranks first of 6.10–6.13 — it also
+       retires the blind spot above.
+
 7. **Deferred / Versioned**
    1. `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.
    2. `[ ]` **(P2) Lock-free `stage()`** — kill the per-slot mutex (it exists ONLY for the dynamic stage-vs-cut race; single producer per slot otherwise — handoff doc §5). Falls out of 7.1's arena step: single-producer chunked bump allocation makes `stage` a lock-free bump, and the cut becomes a chain-head exchange. `Parallel_recorder` already gives thread-keyed slots (per-worker + overflow lane); this removes the last lock on the staging path. Split out of 7.1 for referenceability — implement together with the arena.
