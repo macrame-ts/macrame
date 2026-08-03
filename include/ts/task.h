@@ -286,8 +286,9 @@ struct Task_control_block
     // NOTE: members are ordered for size, not logic -- the sub-8-byte fields are clustered
     // (below the 8-byte block) so they share padding instead of each punching a hole between
     // pointers/atomics, and the two 32-bit atomics sit together to fill one 8-byte slot.
-    // sizeof shrank 336 -> 320 by this reorder alone, then 320 -> 280 when the coroutine-first
-    // deletions dropped the `prerequisites` vector (clang-cl x64). See docs/task-internals.md §2.
+    // sizeof shrank 336 -> 320 by this reorder alone, 320 -> 280 when the coroutine-first
+    // deletions dropped the `prerequisites` vector, and 280 -> 264 when `successors` collapsed
+    // to the single `nested_parent` slot (clang-cl x64). See docs/task-internals.md §2.
 
     // Intrusive strong refcount (see `Task_ptr`) + `num_locks`. Two 32-bit atomics packed
     // adjacent = one 8-byte slot, no padding. `refcount` starts at 0 (first `Task_ptr` -> 1).
@@ -368,7 +369,14 @@ struct Task_control_block
     std::mutex mutex;
     std::condition_variable done_cv;   // wakes N waiters (a `Signal` is a barrier)
 
-    std::vector<Task_ptr> successors;      // released on settle (nested children -> parent)
+    // The one block whose completion lock this block holds -- i.e. the parent a nested child
+    // releases when it settles. A single slot, not a vector: `add_nested` is the sole producer
+    // and it runs once per child (`ts::nested` launches its own task; a coroutine node's frame
+    // and a nested graph run are each attached once), so the fan-out here is structurally 0 or
+    // 1. A vector cost 24 bytes plus a heap allocation on the first push for a link that is
+    // always a single pointer. Double-nesting is rejected under safety checks rather than
+    // silently dropped -- see `add_nested`.
+    Task_ptr nested_parent;
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
     // This block's current re-arm generation — the high bits of `run_state`, above the
@@ -464,7 +472,7 @@ struct Task_control_block
     void settle(bool cancel_)
     {
         std::vector<std::move_only_function<void(void*, bool)>> conts;
-        std::vector<Task_ptr> succs;
+        Task_ptr parent;
         void* r = nullptr;               // the result for continuations, captured under the lock
         {
             std::scoped_lock lock(mutex);
@@ -480,19 +488,19 @@ struct Task_control_block
             // `completed` also observes `ready`.
             ready.store(true, std::memory_order_release);
             conts = std::move(continuations);
-            succs = std::move(successors);
+            parent = std::move(nested_parent);
             // Read `result_ptr` for the continuations HERE, under the lock -- not after the
             // notify below. Otherwise a re-armable block's waiter (woken by the notify) can
             // `reset()` + re-run and the new run overwrites `result_ptr` while this settle
-            // tail still reads it (a data race under TSan). The moved-out `conts`/`succs`
+            // tail still reads it (a data race under TSan). The moved-out `conts`/`parent`
             // are local, so firing them after the notify is fine.
             r = cancel_ ? nullptr : result_ptr;
         }
         done_cv.notify_all();   // `completed` set under the lock above: no lost wakeup
         for (auto& c : conts)
             c(r, cancel_);
-        for (auto& s : succs)
-            release(s, cancel_);   // propagate cancellation to dependents
+        if (parent)
+            release(parent, cancel_);   // propagate cancellation to the gating parent
         if (on_complete)
             on_complete(this);
     }
@@ -517,9 +525,10 @@ struct Task_control_block
     }
 
     // Re-arm this settled block for another run (`Signal::reset`, the graph's per-run
-    // re-arm). `successors`/`continuations` were drained by `settle`,
+    // re-arm). `nested_parent`/`continuations` were drained by `settle`,
     // and the result storage is overwritten by the next run's body, so only the
-    // completion scalars reset here. Leaves `num_locks` at 0 (the caller re-applies
+    // completion scalars reset here (`nested_parent` likewise moved out at settle). Leaves
+    // `num_locks` at 0 (the caller re-applies
     // any launch lock). Precondition: settled and quiescent — one run in flight, prior
     // result consumed; the `ready` gate rejects re-arming a task that has not settled.
     void reset()
@@ -988,9 +997,17 @@ inline void add_nested(Task_ptr child_core)
         current_scope_children->push_back(child_core);
     {
         std::scoped_lock lock(child_core->mutex);
+#if TS_SAFETY_CHECKS
+        // One gating parent per child, by construction at every call site (`ts::nested`
+        // launches its own task; a coroutine node's frame and a nested graph run are attached
+        // once each). The block carries a single slot for that link, so a second attachment
+        // would silently drop the first parent's lock and hang it forever.
+        if (child_core->nested_parent)
+            ts::fatal("detail::add_nested: this task already gates another parent");
+#endif
         if (!child_core->completed)
         {
-            child_core->successors.push_back(std::move(parent));   // child releases parent when it settles
+            child_core->nested_parent = std::move(parent);   // child releases parent when it settles
             return;
         }
     }

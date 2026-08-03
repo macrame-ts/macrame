@@ -363,21 +363,40 @@ IDs — when an item is done, mark it, don't renumber.
    **Prior art (UE `FTask`, verified from source — concrete shapes for the items below):** `FTask` is exactly one cache line (`LOWLEVEL_TASK_SIZE = PLATFORM_CACHE_LINE_SIZE`) with the body stored INLINE via an SBO `TTaskDelegate` sized to the remaining bytes — validates 4.2 (size the tunable-SBO `Function` buffer so the common task functor never heaps). Per-size-class recycling is `TLockFreeFixedSizeAllocator_TLSCache<256, cacheline>` (TLS-cached, fixed-size, lock-free) — the concrete shape for 4.1 (each `Exec<Body,R>`/`Result_block<R>` instantiation is constant-size per type, so one free-list per size class). An oversized/overaligned closure falls back to a 64 KB-block linear (arena) allocator (`TConcurrentLinearAllocator`) — validates 4.6's SBO-overflow-to-arena path. Executable-task init refcount is 2 (one external handle + one in-system).
    1. `[ ]` **(P2)** Per-type recycling free-list (`Exec`/`Result_block`/bare block).
    2. `[ ]` **(P2)** Tunable-SBO `Function<Sig, N>` replacing `move_only_function`/`function` (also fixes the reservation-path closure alloc — inconsistency #5).
-   3. `[~]` **(P2, partly overtaken 2026-08)** Small-vector / intrusive links for the block's edge vectors. `prerequisites` is gone (deleted with retraction — it existed only for the retraction walk) and pipe turns never touched the vectors, so the block is down to `successors` + `continuations`, 320 → 280 B. The remainder folds into 4.7.
-   4. `[ ]` **(P2)** Shrink `Task_control_block` — `completed`/`cancelled`→bits; a futex wait primitive roughly halves the block (now 280 B; ties to platform layer).
+   3. `[~]` **(P2, mostly overtaken 2026-08)** Small-vector / intrusive links for the block's edge vectors. `prerequisites` is gone (deleted with retraction — it existed only for the retraction walk), pipe turns never touched the vectors, and `successors` collapsed to a single `nested_parent` pointer: 320 → 280 → 264 B. Only `continuations` is left, and its fix is 4.7 step 2 (an intrusive waiter list with dependent-side nodes), not a small-vector.
+   4. `[ ]` **(P2)** Shrink `Task_control_block` — `completed`/`cancelled`→bits; a futex wait primitive roughly halves the block (now 264 B, of which `std::mutex` + `condition_variable` are the dominant term; ties to the platform layer).
    5. `[ ]` **(P3)** Multi-object `async` `std::map`→sorted `vector`.
    6. `[ ]` **(P2)** Opt-in scoped bump arena (auto for `parallel_for`/graph-run, per-frame opt-in); rebase `journal.h` staging onto it.
    7. `[ ]` **(P1, author 2026-08) Review `continuations`; fold into `successors` (then-as-normal-task) + intrusive edge storage.** `Task_control_block::continuations` (type-erased `move_only_function` callbacks fired at settle) is a THIRD dependency mechanism next to `successors`/`prerequisites` — it predates the `then` rebase and doesn't feel right. Target: `then` launches a normal task everywhere (it already is a real block with the producer as a `num_locks` prerequisite — audit the remaining `attach()` users: `when_all`'s join, multi-async release, `Deferred`/`Versioned` internals) so `continuations` folds into `successors` and the block loses one of its three vectors. Pair with the storage fix (supersedes half of 4.3): a dependent knows its edge count at wiring time, so embed the edge nodes in the DEPENDENT's allocation and thread the producer's successor list intrusively through them (producer holds one head pointer, allocates nothing) — `successors` can never be a fixed array on the producer (fan-in is unbounded), which is exactly why the storage must live dependent-side. Nested-task edges stay dynamic by nature (data-dependent fan-out, count unknowable at allocation). The pipe rebase (1.14, branch `pipe-rebase`) already makes pipe-turn prerequisites vector-free (embedded `Pipe_link`s + the `pipe_count` trigger; no `successors`/`prerequisites` traffic); this item does the same for ordinary edges. Touches `then`/`when_all`/`settle`/retraction — its own project, after the pipe rebase lands.
       **Re-scoped (2026-08, post-6.4).** Both landed prerequisites are in: the pipe is rebased
       (1.14) and `then`/`when_all`/retraction are deleted, which took `prerequisites` with them
-      (block 320 → 280 B). What is LEFT is the actual item: `successors` and `continuations`
-      still coexist as two edge mechanisms on the block, and the dominant `continuations` user
-      is now the coroutine awaiter (usually exactly one waiter frame). Target shrinks
-      accordingly — fold the two into one intrusive waiter list whose nodes live in the
-      DEPENDENT (a frame or a block knows its own edge at await time), producer holds one head
-      pointer and allocates nothing. Pairs naturally with 6.2 (frame/block fusion): a fused
-      frame can embed its own waiter node. This is now the block-slimming remainder, and the
-      largest remaining structural cleanup in the task core.
+      (block 320 → 280 B).
+      **Step 1 DONE (2026-08): `successors` → a single `nested_parent` slot, 280 → 264 B**
+      (clang-cl x64, measured). The audit that motivated the note found `successors` had
+      exactly one producer left — `add_nested` — and it runs once per child (`ts::nested`
+      launches its own task; a coroutine node's frame and a nested graph run are each attached
+      once), so the fan-out was structurally 0 or 1. A `std::vector<Task_ptr>` was costing 24
+      bytes plus a heap allocation on first push to hold one pointer. Now a bare `Task_ptr`,
+      with a `TS_SAFETY_CHECKS` fatal on a second attachment (which would previously have
+      silently queued a second parent, and would now silently drop one).
+      **Step 2, the remainder — designed, NOT implemented.** `continuations`
+      (`std::vector<move_only_function<void(void*, bool)>>`, 24 B + a closure allocation past
+      SBO) is the last edge vector. Three users: the coroutine `Task_awaiter` (one per awaiting
+      frame), `Join_awaiter` (one per joined child), and `Versioned::publish`'s internal chain.
+      Fan-in is unbounded in principle (N coroutines may await one handle) but is 0 or 1 in
+      every measured path. The target shape is an **intrusive waiter list with the nodes in the
+      DEPENDENT**: an awaiting frame knows its own edge at `await_suspend` time and already has
+      a frame to embed the node in (this is exactly where 6.2's fusion pays off a second time),
+      so the producer keeps one head pointer and allocates nothing, and `settle` walks a list
+      instead of draining a vector. Estimated win: 16 B of block plus one allocation per
+      suspended await. **Why it is not done here:** unlike step 1 it is not a local change —
+      it rewrites `settle`'s drain (the most concurrency-sensitive function in the core, whose
+      current shape is load-bearing: everything is moved out UNDER the lock and fired after the
+      notify, for the reset-race reason documented at the site), and it must re-prove the
+      awaiter's two-state resume handshake against a list the awaiter now owns storage for.
+      That is a project with its own TSan campaign, not a slimming pass. Sequence it after
+      4.1/4.2 (a size-class pool and an SBO callable would independently remove the allocation
+      half, which may make the remaining 16 B not worth the risk — measure first).
    8. `[ ]` **(P2, author 2026-08) Cache-line alignment audit across components.** A systematic pass over every hot shared structure for cache-line placement: separate fields written by different threads onto distinct lines (`alignas(std::hardware_destructive_interference_size)` where warranted), keep fields read/written together on one line, and check array elements for false sharing between adjacent entries. Inventory to cover: `Task_control_block` (the size-ordered cluster is packing-motivated, not sharing-motivated — e.g. `num_locks` (contended decrements) shares a line with `refcount`; check whether that pairing helps or hurts), the evolved `Pipe` (all queue state now lives under one mutex, so the interesting question shifted: is `writer_owner` — read lock-free by every `commit()` ownership check — on the right line relative to the mutex and the queue head, and does a coroutine frame's embedded link share a line with hot promise state), `Pipe_link` arrays (adjacent links of one task live on one line; different lines' traffic collides — measure before padding, links are per-task not global), scheduler queues/deques (Chase-Lev top/bottom, MPMC slots; `Busy_slot`/`Bucket_row` are already padded — verify the rest), journal slots, `Event_count`. Measure with the existing benchmarks (contention series + R10 pipe fixture) — padding trades memory for isolation, so each change needs a number, not a vibe.
 
 5. **Fork-join / parallel_for**
