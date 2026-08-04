@@ -416,6 +416,25 @@ IDs — when an item is done, mark it, don't renumber.
       That is a project with its own TSan campaign, not a slimming pass. Sequence it after
       4.1/4.2 (a size-class pool and an SBO callable would independently remove the allocation
       half, which may make the remaining 16 B not worth the risk — measure first).
+      **Note (author, 2026-08) — "the shipping block size" is no longer one number.** This item
+      has been assuming 264 B is what ships. That stops being true once users take up the
+      standing invitation to leave part of the harness enabled in a shipping build, because two
+      independent things then follow the rule policy rather than `TS_SAFETY_CHECKS`:
+      (a) the task's `Named` (24 B, `task.h`) is currently gated on `TS_SAFETY_CHECKS`, but the
+      rules that *print* task identity are not all dev-only — `deadlock_net` (6.13) is available
+      in shipping and its entire value is dumping the suspended frames, which without names is a
+      list of pointers; `in_task_sync` (6.10) is likewise shipping-available. So the field's
+      gate should follow "is any name-printing rule compiled in", not `TS_SAFETY_CHECKS`, and
+      the block's shipping size becomes a function of `TS_ENABLED_RULES`. (Object and node names
+      are already kept in shipping, so `access_rank`'s and the waits-for detector's *object*
+      naming is unaffected — this is only about task identity.)
+      (b) 6.14's rank field on `Guarded` has the same shape.
+      Consequences for this item: size targets must be stated per rule-policy, not absolutely;
+      and the interning idea rejected in the 2026-08 naming discussion (a global registry +
+      an 8-byte pointer, dismissed because shipping paid nothing for names) **acquires a real
+      target** in exactly this configuration — that was the recorded trigger condition, and this
+      is it. Do not act now; settle it when 6.13 lands and the shipping-harness story is
+      concrete.
    8. `[ ]` **(P2, author 2026-08) Cache-line alignment audit across components.** A systematic pass over every hot shared structure for cache-line placement: separate fields written by different threads onto distinct lines (`alignas(std::hardware_destructive_interference_size)` where warranted), keep fields read/written together on one line, and check array elements for false sharing between adjacent entries. Inventory to cover: `Task_control_block` (the size-ordered cluster is packing-motivated, not sharing-motivated — e.g. `num_locks` (contended decrements) shares a line with `refcount`; check whether that pairing helps or hurts), the evolved `Pipe` (all queue state now lives under one mutex, so the interesting question shifted: is `writer_owner` — read lock-free by every `commit()` ownership check — on the right line relative to the mutex and the queue head, and does a coroutine frame's embedded link share a line with hot promise state), `Pipe_link` arrays (adjacent links of one task live on one line; different lines' traffic collides — measure before padding, links are per-task not global), scheduler queues/deques (Chase-Lev top/bottom, MPMC slots; `Busy_slot`/`Bucket_row` are already padded — verify the rest), journal slots, `Event_count`. Measure with the existing benchmarks (contention series + R10 pipe fixture) — padding trades memory for isolation, so each change needs a number, not a vibe.
 
 5. **Fork-join / parallel_for**
