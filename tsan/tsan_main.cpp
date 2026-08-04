@@ -209,6 +209,42 @@ void stress_pipe_lifetime()
     }
 }   // join
 
+// The synced variant of the same drain, which is the sharper ordering: a task settles as
+// settle -> notify waiters -> `on_complete` -> pipe release, so a returned `sync()` says
+// nothing about the grant -- the release is still ahead of the settling thread. Destroying
+// the object at exactly that point leaves the drain to catch a release the destroyer has
+// already been woken past. Heap objects (not stack) so the freed pipe is a distinct address
+// TSan/ASan can attribute; both the reader-last and writer-last release paths, plus a
+// multi-object task whose links are released one at a time while the first object's
+// destructor may already be running.
+void stress_pipe_sync_then_destroy()
+{
+    constexpr int threads = 4, iters = 1500;
+    std::vector<std::jthread> ths;
+    for (int t = 0; t < threads; ++t)
+    {
+        ths.emplace_back([]
+        {
+            for (int i = 0; i < iters; ++i)
+            {
+                auto* obj = new ts::Guarded<int>{ 0 };
+                obj->async([](int& v) { ++v; });   // queued ahead of the sync target
+                if (i & 1)
+                    obj->async([](int& v) { v *= 10; return v; }).sync();
+                else
+                    obj->async([](const int& v) { return v; }).sync();
+                delete obj;
+
+                auto* first = new ts::Guarded<int>{ 1 };
+                auto* second = new ts::Guarded<int>{ 2 };
+                ts::async([](int& x, const int& y) { x += y; return x; }, *first, *second).sync();
+                delete first;
+                delete second;
+            }
+        });
+    }
+}   // join
+
 // Reservation coexistence: a graph run holding shared objects per-node while async hammers
 // the same objects -- the per-node acquire must exclude a writer node from any async and
 // let a reader node overlap an async read (the docs/task-internals.md §10 race). TSan on
@@ -1042,6 +1078,7 @@ int main()
     std::puts("tsan: pipe rw stress");       stress_pipe_rw();
     std::puts("tsan: pipe rw worker-less");  stress_pipe_rw_worker_less();
     std::puts("tsan: pipe lifetime stress"); stress_pipe_lifetime();
+    std::puts("tsan: sync-then-destroy stress"); stress_pipe_sync_then_destroy();
     std::puts("tsan: pipe reservation stress"); stress_pipe_reservation();
     std::puts("tsan: inline async stress");  stress_inline_async();
     std::puts("tsan: signal stress");       stress_signal();

@@ -488,7 +488,10 @@ and `async` alike (a cancellation token, a scheduling priority). There is no
   not by an option. From inside a graph node, prefer `async` for anything
   non-trivial — an inline `access` blocks the worker for the body's duration.
 - The destructor waits until the pipe drains; the object outlives every
-  pending accessor. Two lifetime mistakes are caught with fatals (in
+  pending accessor — including the one you just `sync()`ed. A task wakes its
+  waiters before it releases the objects it held, so a returned `sync()` means
+  "this task settled", not "the object is free"; the destructor's drain is what
+  makes `t.sync(); /* destroy the object */` safe. Two lifetime mistakes are caught with fatals (in
   `TS_SAFETY_CHECKS` builds): destroying a `Guarded` while a compiled
   `Static_task_graph` still references it, and destroying (or move-assigning
   over) a graph while a run is in flight — both would otherwise dangle and

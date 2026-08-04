@@ -111,6 +111,76 @@ void test_destructor_waits()
     TS_CHECK(done.load() == count);
 }
 
+// A task settles in the order settle -> notify waiters -> `on_complete` -> pipe release
+// (`Task_control_block::settle`), so `sync()` returns while the settling thread still holds
+// the object's pipe grant: the release TRAILS the waiter's wake. Destroying the object right
+// there is nevertheless defined, because `~Guarded` drains through `Pipe::wait_until_idle` --
+// the destructor cannot pass the drain until `release_and_redispatch` has cleared the grant,
+// and that notify happens under `Pipe::mutex`, so the signaler is done with the pipe before
+// the waiter can reacquire it and return. This loop is the regression guard: the objects are
+// heap-allocated, so a release that outlived its destructor surfaces as a use-after-free
+// under ASan/TSan instead of as a rare hang. The concurrent threads keep the pool busy, which
+// is what makes the settling worker likely to be preempted inside the window.
+void test_sync_then_destroy()
+{
+    constexpr int threads = 4;
+    constexpr int iterations = 2000;
+    std::atomic<int> mismatches{ 0 };
+    {
+        std::vector<std::jthread> racers;
+        for (int t = 0; t < threads; ++t)
+        {
+            racers.emplace_back([&]
+            {
+                for (int i = 0; i < iterations; ++i)
+                {
+                    auto* data = new ts::Guarded<int>{ 0 };
+                    data->async([](int& v) { ++v; });   // fire-and-forget, queued ahead of the target
+                    // Alternate the mode of the LAST access: a writer release clears
+                    // `writer_active`, a reader release decrements `active_readers`, and both
+                    // run the drain notify.
+                    int seen = i % 2 == 0
+                        ? data->async([](const int& v) { return v; }).sync()
+                        : data->async([](int& v) { v *= 10; return v; }).sync();
+                    delete data;   // immediately after the wake, while release may still be pending
+                    if (seen != (i % 2 == 0 ? 1 : 10))
+                        mismatches.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+        }
+    }   // join
+    TS_CHECK(mismatches.load() == 0);
+}
+
+// The multi-object shape of the same window: `advance_pipe_links` releases the block's links
+// in order, so the first object's destructor can run while the settling thread is still
+// walking the rest of the array. Each pipe is drained by its own destructor, and the link
+// array belongs to the block (kept alive by the running frame's reference), not to any pipe.
+void test_multi_sync_then_destroy()
+{
+    constexpr int iterations = 2000;
+    int mismatches = 0;
+    for (int i = 0; i < iterations; ++i)
+    {
+        auto* first = new ts::Guarded<int>{ 1 };
+        auto* second = new ts::Guarded<int>{ 2 };
+        if (ts::async([](int& x, const int& y) { x += y; return x; }, *first, *second).sync() != 3)
+            ++mismatches;
+        // Both deletion orders, so whichever pipe the cascade released first is covered.
+        if (i % 2 == 0)
+        {
+            delete first;
+            delete second;
+        }
+        else
+        {
+            delete second;
+            delete first;
+        }
+    }
+    TS_CHECK(mismatches == 0);
+}
+
 // --- D: reader/writer pipe ------------------------------------------------
 
 void test_serial_correctness()
@@ -413,6 +483,8 @@ void run_guarded_tests()
     run("write then read", test_write_then_read);
     run("async returns value", test_async_returns_value);
     run("destructor waits", test_destructor_waits);
+    run("sync then destroy", test_sync_then_destroy);
+    run("multi-object sync then destroy", test_multi_sync_then_destroy);
     run("serial correctness", test_serial_correctness);
     run("concurrent readers", test_concurrent_readers);
     run("writer exclusion", test_writer_exclusion);

@@ -453,8 +453,16 @@ public:
         pipe_.debug_name = name.literal;
     }
 
-    // Identity matters (it is the access key); waits out pending accesses so the
-    // object outlives its last one.
+    // Identity matters (it is the access key); waits out pending accesses so the object
+    // outlives its last one. The drain is load-bearing even when every access was already
+    // `sync()`ed: a task settles in the order settle -> notify waiters -> `on_complete` ->
+    // pipe release (`Task_control_block::settle`), so `sync()` returns while the settling
+    // thread still holds this object's grant and is about to run
+    // `release_and_redispatch` on `pipe_`. `wait_until_idle` is what makes destroying the
+    // object right after that `sync()` defined; without it the trailing release lands on
+    // freed (or already recycled) pipe state. The waiter cannot outrun the signaler
+    // either -- the drain notify is done under `Pipe::mutex`, and nothing touches the pipe
+    // after that unlock.
     ~Guarded()
     {
 #if TS_SAFETY_CHECKS

@@ -497,6 +497,14 @@ struct Task_control_block
             r = cancel_ ? nullptr : result_ptr;
         }
         done_cv.notify_all();   // `completed` set under the lock above: no lost wakeup
+        // Waiters are woken BEFORE the settle tail runs, deliberately: the tail can be
+        // unbounded (a continuation resumes a frame, `on_complete` releases the task's pipes
+        // and thereby dispatches successors), and none of it is work the waiter is waiting
+        // for. The consequence is a contract, not a bug: a returned `sync()` says this task
+        // settled, never that its downstream work ran or that its pipe grants are released.
+        // Teardown must therefore not infer pipe state from completion -- `~Guarded` drains
+        // the pipe itself (`Pipe::wait_until_idle`), which is what makes destroying an object
+        // immediately after `sync()`ing its last access defined.
         for (auto& c : conts)
             c(r, cancel_);
         if (parent)
