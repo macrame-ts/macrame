@@ -256,7 +256,8 @@ void test_cancel_skips_nodes()
     TS_CHECK(ran.load() == 0);          // every node skipped
 }
 
-// A node fans out nested tasks; the run must not complete until every one settles.
+// A node fans out sub-work with parallel_for; the synchronous join gates the body, so the
+// run cannot complete until every helper settles.
 void test_nested_gates_completion()
 {
     constexpr int n = 8;
@@ -266,17 +267,16 @@ void test_nested_gates_completion()
     ts::Static_task_graph g;
     g.add_node(ts::Named{}, [&done_count](int&)
     {
-        for (int k = 0; k < n; ++k)
-            ts::nested([&done_count] { done_count.fetch_add(1, std::memory_order_relaxed); });
+        ts::parallel_for(n, [&done_count](int) { done_count.fetch_add(1, std::memory_order_relaxed); });
     }, owned);
     g.compile();
 
     g.execute().sync();
-    TS_CHECK(done_count.load() == n);   // get() returned only after every nested task
+    TS_CHECK(done_count.load() == n);   // get() returned only after every helper
 }
 
-// A nested task touches the node's OWNED guarded object; it runs under the node's
-// inherited access grant, so the harness must accept it.
+// parallel_for sub-work touches the node's OWNED guarded object; the helpers inherit the
+// node's access grant (Access_context snapshot), so the harness must accept it.
 void test_nested_inherits_access()
 {
     ts::Guarded<tests::Counter> c{ ts::Named{} };
@@ -284,7 +284,7 @@ void test_nested_inherits_access()
     ts::Static_task_graph g;
     g.add_node(ts::Named{}, [](tests::Counter& counter)
     {
-        ts::nested([&counter] { counter.add(5); });   // guarded write, on a worker
+        ts::parallel_for(1, [&counter](int) { counter.add(5); });   // guarded write under the inherited grant
     }, c);
     g.compile();
 
@@ -293,8 +293,9 @@ void test_nested_inherits_access()
     TS_CHECK(v == 5);
 }
 
-// Nested sub-work gates a conflicting successor: the reader node must see every write
-// the writer node's nested tasks made (they gate its completion, which orders the edge).
+// Sub-work gates a conflicting successor: the reader node must see every write the writer
+// node's parallel_for made (the synchronous join gates the writer's completion, which
+// orders the edge).
 void test_nested_before_successor()
 {
     constexpr int n = 16;
@@ -304,8 +305,7 @@ void test_nested_before_successor()
     ts::Static_task_graph g;
     g.add_node(ts::Named{}, [](std::array<int, n>& a)
     {
-        for (int k = 0; k < n; ++k)
-            ts::nested([&a, k] { a[k] = k + 1; });   // disjoint elements: no race
+        ts::parallel_for(n, [&a](int k) { a[k] = k + 1; });   // disjoint elements: no race
     }, arr);
     g.add_node(ts::Named{}, [&sum_seen](const std::array<int, n>& a)
     {
@@ -316,7 +316,7 @@ void test_nested_before_successor()
     g.compile();
 
     g.execute().sync();
-    TS_CHECK(sum_seen.load() == n * (n + 1) / 2);   // reader ran after every nested write
+    TS_CHECK(sum_seen.load() == n * (n + 1) / 2);   // reader ran after every write
 }
 
 // Per-node priority: a writer root gates three reader successors, released together when
@@ -1110,21 +1110,27 @@ void test_nested_run_write_covers_inner_write()
     TS_CHECK(read_value(x) == 3);
 }
 
-// Companion to the non-quiet-scope fatal: join the scope children first, then lend.
-void test_nested_run_join_scope_then_lend()
+// Companion to the non-quiet-scope fatal: await the earlier nested run first, then lend the
+// next. Both runs lend `x` from the outer node's write grant; awaiting the first quiesces the
+// frame's scope, so the second lends cleanly.
+void test_nested_run_await_previous_then_lend()
 {
     ts::Guarded<int> x{ ts::Named{}, 0 };
 
-    ts::Static_task_graph inner;
-    inner.add_node(ts::Named{}, [](int& v) { v += 100; }, x);
-    inner.compile();
+    ts::Static_task_graph first;
+    first.add_node(ts::Named{}, [](int& v) { v += 1; }, x);
+    first.compile();
+
+    ts::Static_task_graph second;
+    second.add_node(ts::Named{}, [](int& v) { v += 100; }, x);
+    second.compile();
 
     ts::Static_task_graph outer;
-    outer.add_node(ts::Named{}, [&inner](int& v) -> ts::Task<void>
+    outer.add_node(ts::Named{}, [&first, &second](int& v) -> ts::Task<void>
     {
-        ts::nested([&v] { v += 1; });      // a scope child, running under the node's grant
-        co_await ts::join_nested();        // quiesce before lending
-        co_await inner.execute();
+        (void)v;
+        co_await first.execute();    // quiesce: awaited, settles
+        co_await second.execute();   // scope quiet -> lend is clean
     }, x);
     outer.compile();
 
@@ -1248,7 +1254,7 @@ void run_graph_tests()
     run("nested run detached", test_nested_run_detached);
     run("nested run recursive", test_nested_run_recursive);
     run("nested run: outer write covers inner write", test_nested_run_write_covers_inner_write);
-    run("nested run: join scope, then lend", test_nested_run_join_scope_then_lend);
+    run("nested run: await previous, then lend", test_nested_run_await_previous_then_lend);
     run("nested run worker-less", test_nested_run_worker_less);
     run("concurrent graphs, shared objects", test_concurrent_graphs_shared_objects);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: nested run mode conflict", test_death_nested_run_mode_conflict);

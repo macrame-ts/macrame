@@ -91,22 +91,7 @@ void test_launch_captures_call_site()
 #endif
 }
 
-// 4. Same guarantee through `nested`, which forwards its caller's site into `launch`
-// rather than letting `launch`'s own default fire inside `task.h`.
-void test_nested_captures_call_site()
-{
-#if TS_SAFETY_CHECKS
-    std::string captured;
-    ts::launch([&captured]
-    {
-        ts::Task<void> child = ts::nested([] {});
-        captured = ts::detail::core_of(child)->name.file;
-    }).sync();
-    TS_CHECK_MSG(is_this_file(captured.c_str()), "nested() must forward the caller's site");
-#endif
-}
-
-// 5. And through an access verb.
+// 5. Through an access verb.
 void test_access_verb_captures_call_site()
 {
 #if TS_SAFETY_CHECKS
@@ -159,7 +144,6 @@ void run_named_tests()
     run("named forms", test_named_forms);
     run("named display", test_named_display);
     run("named launch captures call site", test_launch_captures_call_site);
-    run("named nested captures call site", test_nested_captures_call_site);
     run("named access verb captures call site", test_access_verb_captures_call_site);
     run("named node block carries name", test_node_block_carries_name);
     run("named object captures construction site", test_object_captures_construction_site);

@@ -102,8 +102,8 @@ void access_violation(const char* type_name, Access mode, bool stale) noexcept
     {
         std::snprintf(message, sizeof message,
             "access violation: %s accessed for %s under a stale inherited grant "
-            "(the task outlived the access scope it inherited from; gate it with "
-            "ts::nested)",
+            "(the task outlived the access scope it inherited from; acquire fresh via "
+            "obj.async / co_await obj.access, or fan out with ts::parallel_for)",
             type_name, mode == Access::read_write ? "read_write" : "read_only");
     }
     else

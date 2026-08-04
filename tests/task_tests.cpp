@@ -472,37 +472,6 @@ void test_death_signal_reset_awaited()
     TS_CHECK(ts::test::expect_death("signal_reset_awaited"));
 }
 
-// --- K: nested tasks (scoped launches) -------------------------------------
-
-// A nested task launched inside a parent's body gates the parent's completion.
-void test_nested_gates_parent()
-{
-    std::atomic<int> nested_done{ 0 };
-    ts::Task<void> parent = ts::launch([&]
-    {
-        ts::nested([&] { std::this_thread::sleep_for(10ms); nested_done.fetch_add(1); });
-        // parent body returns now, but the task must not complete until nested does
-    });
-    parent.sync();
-    TS_CHECK(nested_done.load() == 1);   // nested finished before the parent completed
-}
-
-void test_nested_multiple()
-{
-    std::atomic<int> count{ 0 };
-    ts::launch([&]
-    {
-        for (int i = 0; i < 3; ++i)
-            ts::nested([&] { std::this_thread::sleep_for(5ms); count.fetch_add(1); });
-    }).sync();
-    TS_CHECK(count.load() == 3);   // all nested tasks done before the parent completed
-}
-
-void test_death_nested_outside()
-{
-    TS_CHECK(ts::test::expect_death("nested_outside"));   // no running task
-}
-
 } // namespace
 
 void run_task_tests()
@@ -543,7 +512,4 @@ void run_task_tests()
     run("signal reset", test_signal_reset);
     run("death: reset unsettled", test_death_reset_unsettled);
     run("death: signal reset while awaited", test_death_signal_reset_awaited);
-    run("nested gates parent", test_nested_gates_parent);
-    run("nested multiple", test_nested_multiple);
-    run("death: nested outside", test_death_nested_outside);
 }

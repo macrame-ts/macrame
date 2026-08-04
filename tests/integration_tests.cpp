@@ -663,8 +663,8 @@ void test_single_threaded_end_to_end()
     for (int v : data) sum += v;
     TS_CHECK(sum == 64 * 63 / 2);   // every slice ran, all on the main thread
 
-    // Graph: conflict edge (writer -> reader on the same object) + a nested task in the
-    // writer; the reader must observe both writes, and every body runs on the main thread.
+    // Graph: conflict edge (writer -> reader on the same object) + parallel_for sub-work in
+    // the writer; the reader must observe both writes, and every body runs on the main thread.
     ts::Guarded<tests::Counter> g_obj{ ts::Named{} };
     std::atomic<int> reader_saw{ -1 };
     std::atomic<bool> off_thread{ false };
@@ -673,7 +673,7 @@ void test_single_threaded_end_to_end()
     {
         if (std::this_thread::get_id() != main_id) off_thread.store(true);
         k.add(1);
-        ts::nested([&k, main_id, &off_thread]
+        ts::parallel_for(1, [&k, main_id, &off_thread](int)
         {
             if (std::this_thread::get_id() != main_id) off_thread.store(true);
             k.add(2);

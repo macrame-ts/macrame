@@ -5,7 +5,6 @@
 #include "ts/static_task_graph.h"
 
 #include "ts/coroutine_support.h"
-#include "ts/task_scope.h"
 
 #include "scheduler_tests.h"
 #include "access_tests.h"
@@ -192,10 +191,10 @@ void run_death_scenario(const char* name)
         ts::Static_task_graph g;
         g.add_node(ts::Named{}, [&stray, &go](Counter& k)
         {
-            // Deliberately NOT `ts::nested`: the coroutine inherits the node's grant (its
-            // promise snapshots it at creation, here inside the body) but does not gate the
-            // node's completion. Suspended on `go`, it resumes only after the node has
-            // completed and released its write hold on `c`.
+            // A detached coroutine: it inherits the node's grant (its promise snapshots the
+            // ambient context at creation, here inside the body) but does not gate the node's
+            // completion. Suspended on `go`, it resumes only after the node has completed and
+            // released its write hold on `c`.
             stray = stale_stray(k, go);
         }, c);
         g.compile();
@@ -239,22 +238,27 @@ void run_death_scenario(const char* name)
     }
     else if (std::strcmp(name, "graph_lend_unquiet_scope") == 0)
     {
-        // Lending while the caller still has unjoined scope children: the children run under
-        // the same grant, so they could race the lent-to graph on the lent object.
+        // Lending while an earlier un-awaited nested run of the caller is still in flight: that
+        // run is executing under the same grant, so it could race the lent-to graph on the lent
+        // object. `hold` never releases, so the first run stays live (its node spin-waits rather
+        // than blocking on a `Signal` -- an in-task `sync()` is itself fatal, which would kill it
+        // for the wrong reason); the second run's `execute()` fatals on the non-quiet scope.
         ts::Guarded<int> x{ ts::Named{}, 0 };
-        std::atomic<bool> release{ false };   // never set: the scope child stays live
-        ts::Static_task_graph inner;
-        inner.add_node(ts::Named{}, [](int& v) { v += 1; }, x);
-        inner.compile();
+        static std::atomic<bool> hold{ true };   // never cleared: the first run stays live
+        ts::Static_task_graph inner_live;
+        inner_live.add_node(ts::Named{}, [](int& v) { (void)v; while (hold.load(std::memory_order_relaxed)) std::this_thread::yield(); }, x);
+        inner_live.compile();
+
+        ts::Static_task_graph inner_lend;
+        inner_lend.add_node(ts::Named{}, [](int& v) { v += 1; }, x);
+        inner_lend.compile();
 
         ts::Static_task_graph outer;
-        outer.add_node(ts::Named{}, [&inner, &release](int& v) -> ts::Task<void>
+        outer.add_node(ts::Named{}, [&inner_live, &inner_lend](int& v) -> ts::Task<void>
         {
             (void)v;
-            // Spin-waits rather than blocking on a `Signal`: an in-task `sync()` is itself
-            // fatal, which would kill the child for the wrong reason.
-            ts::nested([&release] { while (!release.load(std::memory_order_relaxed)) std::this_thread::yield(); });
-            co_await inner.execute();   // scope not quiet -> fatal
+            inner_live.execute();          // un-awaited: joins the frame's scope, stays live
+            co_await inner_lend.execute(); // scope not quiet -> fatal
         }, x);
         outer.compile();
         outer.execute().sync();
@@ -306,10 +310,6 @@ void run_death_scenario(const char* name)
         while (!t.is_done()) std::this_thread::yield();
         t.sync();   // cancelled value task has no result -> fatal
     }
-    else if (std::strcmp(name, "nested_outside") == 0)
-    {
-        ts::nested([] {});   // no currently-executing task to scope to -> fatal
-    }
     else if (std::strcmp(name, "reset_unsettled") == 0)
     {
         ts::Signal s;   // never triggered -> not settled
@@ -338,18 +338,6 @@ void run_death_scenario(const char* name)
         g.execute().sync();
     }
 #endif
-    else if (std::strcmp(name, "scope_unjoined") == 0)
-    {
-        // Dropping an explicit Task_scope with recorded children loses their join -- fatal
-        // (the lost-children analogue of the journal's lost-writes). Companion:
-        // `test_task_scope_join` (co_await scope.join() before scope exit).
-        static std::atomic<bool> hold{ true };
-        {
-            ts::Task_scope scope;
-            scope.launch([] { while (hold.load(std::memory_order_relaxed)) std::this_thread::yield(); });
-        }   // -> fatal (child recorded, never joined)
-        hold.store(false);
-    }
     else if (std::strcmp(name, "await_cancelled_value") == 0)
     {
         // Awaiting a cancelled Task<R> with non-void R: no result to produce, no
@@ -412,10 +400,11 @@ void run_death_scenario(const char* name)
         ts::Static_task_graph g;
         g.add_node(ts::Named{}, [&d](int&)
         {
-            // The nested body inherits the node's write grant but is NOT the grant
-            // holder (`writer_owner` is the node); its commit() would enqueue behind
-            // the node's own hold -> the misuse diagnostic fatals at the call.
-            ts::nested([&d] { d.commit(); }).sync();
+            // A detached coroutine inherits the node's write grant (its promise snapshots the
+            // ambient context at creation) but is NOT the grant holder (`writer_owner` is the
+            // node, `current_task` is the frame); its commit() would enqueue behind the node's
+            // own hold -> the misuse diagnostic fatals at the call (during the eager body).
+            [&d]() -> ts::Task<void> { d.commit(); co_return; }();
         }, target);
         g.compile();
         g.execute().sync();

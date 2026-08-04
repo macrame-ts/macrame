@@ -6,7 +6,6 @@
 #include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
 #include "ts/frame_gate.h"
-#include "ts/task_scope.h"
 #include "test_util.h"
 
 #include <atomic>
@@ -238,13 +237,13 @@ Task<int> co_showcase(ts::Guarded<tests::Counter>& world, ts::Signal& phase, Can
     int a = co_await hi;                                                    // 3
     int b = co_await lo;                                                    // 4
 
-    // (b) nested tasks: a task body forks nested work; its completion gates on them.
-    // `nested_sum` lives in the coroutine frame, so it outlives the forked nested tasks.
+    // (b) a launched task forks work; the co_await gates on its completion.
+    // `nested_sum` lives in the coroutine frame, so it outlives the launched task.
     std::atomic<int> nested_sum{ 0 };
     co_await ts::launch([&nested_sum]
     {
         for (int k = 0; k < 4; ++k)
-            ts::nested([&nested_sum, k] { nested_sum.fetch_add(k, std::memory_order_relaxed); });
+            nested_sum.fetch_add(k, std::memory_order_relaxed);
     });                                                                     // nested_sum == 6
 
     // (c) Guarded write-guard: a critical section over the object, in place.
@@ -483,11 +482,11 @@ void test_access_reentrant_under_own_grant()
     TS_CHECK(seen.load() == 5);
 }
 
-// --- stage 2: implicit scope, Task_scope, coroutine nodes -----------------
+// --- stage 2: coroutine nodes ---------------------------------------------
 
-// The §4.4 shape: a coroutine node body -- nested fan-out joins the node's implicit scope,
-// a mid-body join makes the results usable, a foreign read awaits under held grants, and
-// the node completes (releasing grants, unlocking successors) only at frame completion.
+// The §4.4 shape: a coroutine node body -- a data-parallel fan-out under the node's grant,
+// a foreign read awaits under held grants, and the node completes (releasing grants,
+// unlocking successors) only at frame completion.
 void test_coroutine_graph_node()
 {
     // The node holds `phys` and `result` and dynamically awaits `audio`, so all three carry a
@@ -504,10 +503,10 @@ void test_coroutine_graph_node()
     g.add_node(ts::Named{}, [&audio, &total](const std::vector<int>& islands, int& out) -> ts::Task<void>
     {
         total.store(0);                                             // re-run-safe
-        for (int island : islands)                                  // data-dependent fan-out
-            ts::nested([&total, island] { total.fetch_add(island); });
-
-        co_await ts::join_nested();                                 // solves needed mid-body
+        // Data-parallel fan-out over the node's owned read: the helpers inherit the node's
+        // grant (Access_context snapshot), and the synchronous join gates the body -- the one
+        // sanctioned in-task wait (it waits on running work only).
+        ts::parallel_for(islands.size(), [&](std::size_t i) { total.fetch_add(islands[i]); });
         TS_CHECK(total.load() == 6);
 
         int mix = co_await audio.access([](const int& a) { return a; });   // foreign read (c)
@@ -526,51 +525,6 @@ void test_coroutine_graph_node()
     g.execute().sync();   // re-run: the node re-arms; the frame is per-run
     TS_CHECK(successor_runs.load() == 2);
 }
-
-// join_nested resets the list: children launched after the join gate co_return as usual.
-Task<int> two_phase_nested(std::atomic<int>& counter)
-{
-    ts::nested([&counter] { counter.fetch_add(1); });
-    co_await ts::join_nested();
-    int after_first = counter.load();
-    ts::nested([&counter] { counter.fetch_add(10); });   // gates completion via the counter
-    co_return after_first;
-}
-
-void test_join_nested_two_phase()
-{
-    std::atomic<int> counter{ 0 };
-    ts::Task<int> t = two_phase_nested(counter);
-    TS_CHECK(t.sync() == 1);          // the join saw phase one...
-    TS_CHECK(counter.load() == 11);   // ...and completion gated on phase two
-}
-
-// Explicit Task_scope: launch several, join once; the handle stays usable individually.
-Task<int> scoped_fanout()
-{
-    ts::Task_scope scope;
-    std::atomic<int>* sum = new std::atomic<int>{ 0 };
-    for (int i = 1; i <= 4; ++i)
-        scope.launch([sum, i] { sum->fetch_add(i); });
-    co_await scope.join();
-    int v = sum->load();
-    delete sum;
-    co_return v;
-}
-
-void test_task_scope_join()
-{
-    TS_CHECK(scoped_fanout().sync() == 10);
-}
-
-#if TS_SAFETY_CHECKS
-// Companion pair for the lost-children fatal: joining before scope exit is the sanctioned
-// form (above); dropping a scope with recorded children is fatal.
-void test_death_scope_unjoined()
-{
-    TS_CHECK(ts::test::expect_death("scope_unjoined"));
-}
-#endif
 
 // Companion for the circular-wait fatal (docs/coroutine-first.md §2 hierarchy, step 1):
 // the same cross-object communication with BOTH objects declared -- compile() derives the
@@ -711,11 +665,6 @@ void run_coroutine_tests()
 #endif
     run("co access reentrant under own grant", test_access_reentrant_under_own_grant);
     run("co graph node", test_coroutine_graph_node);
-    run("co join_nested two-phase", test_join_nested_two_phase);
-    run("co task_scope join", test_task_scope_join);
-#if TS_SAFETY_CHECKS
-    run("death: task_scope unjoined", test_death_scope_unjoined);
-#endif
     run("co cross-object declared", test_cross_object_declared);
 #if TS_SAFETY_CHECKS
     run_if(with_rule_circular_wait, "TS_RULE_CIRCULAR_WAIT off", "death: circular wait", test_death_circular_wait);

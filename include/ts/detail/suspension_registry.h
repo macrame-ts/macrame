@@ -48,7 +48,6 @@ struct Suspension_record
     Named task{ nullptr };            // the suspended task
     Named awaited_task{ nullptr };    // set when awaiting a task
     const Pipe* awaited_pipe = nullptr;   // set when awaiting an object's turn/guard
-    bool joining_scope = false;       // set when awaiting the frame's own children
 
     // Held pipe-backed grants, as their epoch sources (the report resolves them to names --
     // the pipes outlive the report by construction: we are wedged, nothing is being freed).

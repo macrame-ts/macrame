@@ -572,7 +572,7 @@ private:
     {
         // The body (stored in the block) runs `fn` under this object's access scope. If
         // `fn` takes a trailing token, the body does too and `Executable::run` forwards the
-        // block's token (uniform with the bare-task path's `with_inherited_access`).
+        // block's token (uniform with the bare-task `ts::launch` path).
         // The context captures the pipe's write-epoch at body start (inside the grant
         // window), so an inherited snapshot that outlives this access goes stale.
         auto core = [&]
@@ -881,7 +881,7 @@ auto access(Fn&& fn, Objs&&... objs)
     return async(std::forward<Fn>(fn), std::forward<Objs>(objs)...);
 }
 
-// `ts::launch` / `ts::nested` (bare scheduler tasks) live in task.h now — they dispatch
+// `ts::launch` (bare scheduler task) lives in task.h now — it dispatches
 // through the `submit_ready` bridge and touch no `Guarded`, so they belong with the task core.
 
 } // namespace ts

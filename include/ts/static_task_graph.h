@@ -213,9 +213,9 @@ public:
     //    when you deliberately want one to outlive its launcher, which also forgoes lending.
     // Three misuses are fatal under `TS_SAFETY_CHECKS`: a mode-incompatible overlap (the
     // caller holds read where the inner graph writes -- restructure so the caller declares
-    // the write, or hoist the writer out of the sub-graph); lending while the caller's scope
-    // still has unjoined children (`co_await ts::join_nested()` first -- they could race the
-    // lent-to graph on the same object, both "validly"); and calling `execute()` on a graph
+    // the write, or hoist the writer out of the sub-graph); lending while an earlier un-awaited
+    // nested run of the caller is still in flight (`co_await` the previous run first -- it could
+    // race the lent-to graph on the same object, both "validly"); and calling `execute()` on a graph
     // whose previous run is still in flight (one run at a time -- use a second instance, or
     // order the callers).
     Task<void> execute(Execution_options opts = {});

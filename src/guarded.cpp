@@ -620,19 +620,11 @@ void report_all_suspensions(char* buffer, std::size_t size, std::size_t& used) n
         {
             ++total;
             char who[96], awaited[96];
-            if (record->joining_scope)
-            {
-                report_append(buffer, size, used, "\n    task '%s' awaits its own scope children",
-                    named_display(record->task, who, sizeof who, "<unnamed task>"));
-            }
-            else
-            {
-                const char* what = record->awaited_pipe != nullptr
-                    ? pipe_name(record->awaited_pipe, awaited, sizeof awaited)
-                    : named_display(record->awaited_task, awaited, sizeof awaited, "<unnamed task>");
-                report_append(buffer, size, used, "\n    task '%s' awaits '%s'",
-                    named_display(record->task, who, sizeof who, "<unnamed task>"), what);
-            }
+            const char* what = record->awaited_pipe != nullptr
+                ? pipe_name(record->awaited_pipe, awaited, sizeof awaited)
+                : named_display(record->awaited_task, awaited, sizeof awaited, "<unnamed task>");
+            report_append(buffer, size, used, "\n    task '%s' awaits '%s'",
+                named_display(record->task, who, sizeof who, "<unnamed task>"), what);
             for (int i = 0; i < record->held_count; ++i)
             {
                 char held[96];

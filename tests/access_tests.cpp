@@ -2,6 +2,7 @@
 #include "ts/access.h"
 #include "ts/fatal.h"
 #include "ts/guarded.h"
+#include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
 #include "harness.h"
 #include "test_util.h"
@@ -164,16 +165,16 @@ void test_death_stale_grant()   { TS_CHECK(ts::test::expect_death("stale_inherit
 // faults deterministically as undeclared access (docs/coroutine-first.md §2).
 void test_death_detached_launch(){ TS_CHECK(ts::test::expect_death("detached_launch_undeclared")); }
 
-// Companion to the detached-launch death test: the sanctioned form. A `ts::nested` child IS
-// gated -- its completion joins the launcher, so the launcher's grant provably outlives it --
-// so it inherits the grant and may touch the launcher's guarded data legally.
+// Companion to the detached-launch death test: the sanctioned form. `ts::parallel_for` helpers
+// inherit the caller's grant (an Access_context snapshot), and the synchronous join keeps them
+// strictly within the node's grant window -- so they may touch the node's guarded data legally.
 void test_nested_child_touches_guarded()
 {
     ts::Guarded<tests::Counter> c{ ts::Named{ "c" } };
     ts::Static_task_graph g;
     g.add_node("writer", [](tests::Counter& k)
     {
-        ts::nested([&k] { k.add(5); });   // gated child: legal guarded write under the inherited grant
+        ts::parallel_for(1, [&k](int) { k.add(5); });   // grant-inheriting sub-work: legal guarded write
     }, c);
     g.compile();
     g.execute().sync();

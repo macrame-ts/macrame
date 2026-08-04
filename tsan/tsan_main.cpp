@@ -363,11 +363,11 @@ void stress_graph()
     g.set_trace(nullptr);
 }
 
-// A graph node fans out NESTED tasks over disjoint elements of the object it owns,
+// A graph node fans out parallel_for sub-work over disjoint elements of the object it owns,
 // re-executed in a loop with a conflicting reader successor. Stresses the node-as-block
-// path: current_task set/restore on a graph node, the execution_flag/num_locks switch,
-// add_nested racing nested completion, the node_complete continuation gating the run and
-// the successor, and inherited-access-scope reads on the shared array.
+// path: current_task set/restore on a graph node, the synchronous join gating the node's
+// completion, the node_complete continuation gating the run and the successor, and
+// inherited-access-scope reads/writes on the shared array from the helpers.
 void stress_graph_nested()
 {
     constexpr int n = 32;
@@ -377,8 +377,7 @@ void stress_graph_nested()
     ts::Static_task_graph g;
     g.add_node(ts::Named{}, [](std::array<int, n>& a)
     {
-        for (int k = 0; k < n; ++k)
-            ts::nested([&a, k] { a[k] = k; });
+        ts::parallel_for(n, [&a](int k) { a[k] = k; });
     }, arr);
     g.add_node(ts::Named{}, [&sum](const std::array<int, n>& a)
     {
@@ -575,24 +574,6 @@ void stress_awaited_forkjoin()
         for (auto& t : tasks)
             t.sync();
         assert(total.load() == outer * 3);
-    }
-}
-
-// Nested tasks: a parent spawns several nested tasks; the parent must not complete
-// until all settle. Stresses the execution_flag mode switch, add_nested's fetch_add
-// racing nested completion (release reaching execution_flag), and the body-end
-// self-lock drop racing those completions.
-void stress_nested()
-{
-    for (int i = 0; i < 1500; ++i)
-    {
-        std::atomic<int> count{ 0 };
-        ts::launch([&]
-        {
-            for (int k = 0; k < 4; ++k)
-                ts::nested([&] { count.fetch_add(1, std::memory_order_relaxed); });
-        }).sync();
-        assert(count.load() == 4);   // all nested done before the parent completed
     }
 }
 
@@ -1098,7 +1079,6 @@ int main()
     std::puts("tsan: signal stress");       stress_signal();
     std::puts("tsan: launch stress");        stress_launch();
     std::puts("tsan: awaited fork-join stress"); stress_awaited_forkjoin();
-    std::puts("tsan: nested stress");        stress_nested();
     std::puts("tsan: cancel stress");        stress_cancel();
     std::puts("tsan: token body stress");    stress_token_body();
     std::puts("tsan: cancel callback stress"); stress_cancel_callback();

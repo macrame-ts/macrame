@@ -67,7 +67,7 @@ struct Parallel_state
     // The caller's access grant, snapshotted BY VALUE on the calling thread at creation --
     // helpers install it around their loop, so a chunk touching guarded state the caller
     // owns passes the harness on any worker (and, for `async_parallel_for`, even after the
-    // caller's own scope unwinds). Same inheritance model as `ts::launch`/`ts::nested`.
+    // caller's own scope unwinds). A by-value grant snapshot, like the coroutine promise's.
     std::optional<Access_context> inherited_ctx;
     int inherited_owner;          // trace owner (graph node index), snapshotted like inherited_ctx
     std::atomic<int> next{ 0 };   // next item index to claim
@@ -202,7 +202,7 @@ void parallel_for(int n, Body&& body, Parallel_options opts = {})
 }
 
 // Non-blocking parallel_for: returns a Task<void> that completes when all items are done.
-// Composable (`co_await` it, or gate work on it via `ts::nested`). One heap allocation (the
+// Composable (`co_await` it). One heap allocation (the
 // returned Task's block holds the state). Do NOT block on it inside a graph node.
 template<typename Body>
     requires std::invocable<Body&, int>

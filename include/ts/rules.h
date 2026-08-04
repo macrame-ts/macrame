@@ -178,8 +178,8 @@ namespace detail
 
 #if TS_RULES_ANY
 // Rules relaxed for the running scope. Thread-local, but carried with the ambient task state
-// rather than with the thread: a coroutine's segments re-install it (`Relaxed_carrier`) and
-// launched sub-work inherits it (`Relaxed_snapshot`), exactly as grants propagate.
+// rather than with the thread: a coroutine's segments re-install it (`Relaxed_carrier`),
+// exactly as grants propagate.
 inline thread_local unsigned relaxed_rules = 0;
 // Process-wide baseline, OR-ed into every lookup ("the rules as advice" setting).
 inline std::atomic<unsigned> default_relaxed_rules_bits{ 0 };
@@ -233,9 +233,8 @@ inline Rule default_relaxed_rules() noexcept
 // Opt out of one or more ADVISORY rules for a scope -- "I uphold this rule by means the
 // library cannot see". Documents the claim at the site and leaves the rest of the program
 // checked. The opt-out follows the ambient task state, not the thread: it is re-installed
-// around every segment of a coroutine that entered it, and inherited by sub-work launched
-// under it (`ts::launch` / `ts::nested`) -- wider than the lexical scope, and deliberately
-// so, since a child inherits the grant and therefore the hazard.
+// around every segment of a coroutine that entered it -- wider than the lexical scope, and
+// deliberately so, since a resumed segment inherits the grant and therefore the hazard.
 //
 // Passing a non-advisory rule is a diagnosed no-op for those bits (`TS_ENSURE`): the escape
 // for a structural rule is the sanctioned form, and for the quiescence net it is
@@ -298,46 +297,6 @@ struct Relaxed_carrier
 #else
     void enter() noexcept {}
     void exit() noexcept {}
-#endif
-};
-
-// By-value capture of the launcher's relaxation, for sub-work that inherits its grant
-// (`with_inherited_access`). Empty when no rule is compiled in.
-struct Relaxed_snapshot
-{
-#if TS_RULES_ANY
-    unsigned bits = relaxed_rules;
-#endif
-};
-
-// Installs a `Relaxed_snapshot` for the duration of a scope (the inherited-grant analogue of
-// `Inherited_access_scope`).
-class Inherited_relaxed_scope
-{
-public:
-    explicit Inherited_relaxed_scope(const Relaxed_snapshot& snapshot) noexcept
-    {
-#if TS_RULES_ANY
-        prev_ = relaxed_rules;
-        relaxed_rules = snapshot.bits;
-#else
-        (void)snapshot;
-#endif
-    }
-
-    ~Inherited_relaxed_scope()
-    {
-#if TS_RULES_ANY
-        relaxed_rules = prev_;
-#endif
-    }
-
-    Inherited_relaxed_scope(const Inherited_relaxed_scope&) = delete;
-    Inherited_relaxed_scope& operator=(const Inherited_relaxed_scope&) = delete;
-
-private:
-#if TS_RULES_ANY
-    unsigned prev_ = 0;
 #endif
 };
 

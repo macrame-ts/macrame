@@ -405,9 +405,9 @@ struct Task_control_block
 
     // The one block whose completion lock this block holds -- i.e. the parent a nested child
     // releases when it settles. A single slot, not a vector: `add_nested` is the sole producer
-    // and it runs once per child (`ts::nested` launches its own task; a coroutine node's frame
-    // and a nested graph run are each attached once), so the fan-out here is structurally 0 or
-    // 1. A vector cost 24 bytes plus a heap allocation on the first push for a link that is
+    // and it runs once per child (a coroutine node's frame and a nested graph run are each
+    // attached once), so the fan-out here is structurally 0 or 1. A vector cost 24 bytes plus
+    // a heap allocation on the first push for a link that is
     // always a single pointer. Double-nesting is rejected under safety checks rather than
     // silently dropped -- see `add_nested`.
     Task_ptr nested_parent;
@@ -789,11 +789,10 @@ inline const char* task_name(const Task_control_block* blk, char* buf, std::size
 // alive until the child completes.
 inline thread_local Task_ptr current_task;
 
-// The running segment's implicit-scope child list (docs/coroutine-first.md §4.3): a
-// coroutine frame installs its own per-frame list around each segment (see
-// `coroutine_support.h`), so `ts::nested` can record children for a mid-body
-// `co_await ts::join_nested()`. Null for functor bodies (no await, counter-gated only)
-// and outside tasks.
+// The running segment's implicit-scope child list: a coroutine frame installs its own
+// per-frame list around each segment (see `coroutine_support.h`), so `detail::add_nested`
+// records a nested graph run there for the graph's non-quiet-scope lending check. Null for
+// functor bodies (counter-gated only) and outside tasks.
 inline thread_local std::vector<Task_ptr>* current_scope_children = nullptr;
 
 // A coroutine frame has no call site to capture (a promise sees the coroutine's arguments,
@@ -870,8 +869,8 @@ struct Executable
         auto prev = std::move(current_task);
         current_task = c;
 
-        // The body may take the task's token (opt-in cooperative cancellation, see
-        // `with_inherited_access`); pass it if so, otherwise invoke nullary.
+        // The body may take the task's token (opt-in cooperative cancellation via a trailing
+        // `Cancellation_token` parameter); pass it if so, otherwise invoke nullary.
         if constexpr (std::is_void_v<R>)
         {
             if constexpr (std::is_invocable_v<Body&, const Cancellation_token&>)
@@ -932,7 +931,7 @@ template<typename Fn> using Task_result_t = typename Task_result<std::decay_t<Fn
 // plain-`false` form is C++23 but not yet uniform across the toolchains we build on).
 template<typename...> inline constexpr bool always_false = false;
 
-// A bare task body (`ts::task`/`launch`/`nested`): no parameters, or a single trailing
+// A bare task body (`ts::launch`): no parameters, or a single trailing
 // `Cancellation_token` (cooperative cancellation, see `takes_token_v`). Gated at the
 // entry points so a wrong shape rejects at the call site naming this concept instead
 // of hard-erroring inside `Task_result`. (For a *generic* wrong body the token-arity
@@ -941,53 +940,6 @@ template<typename...> inline constexpr bool always_false = false;
 template<typename Fn>
 concept Task_body = std::invocable<std::decay_t<Fn>&>
     || std::invocable<std::decay_t<Fn>&, const Cancellation_token&>;
-
-// Wrap `fn` so the task runs under the access grant active where it was BUILT (see
-// access.h): structurally-gated sub-work inherits the launcher's permissions and may touch
-// the launcher's guarded data. The snapshot is by value, so it is valid after the launcher
-// unwinds and on whatever worker runs the body; a top-level build (no active grant) captures
-// nothing, so the scope is a no-op. Used ONLY by the GATED launches -- `ts::nested` and
-// `Task_scope::launch` -- whose completion is joined to the launcher, so the launcher's grant
-// provably outlives the child (docs/coroutine-first.md §2). A detached `ts::launch`/`ts::task`
-// does NOT wrap: its handle may be dropped, the grant window can close while the child still
-// runs, and an inherited-but-stale grant makes an undeclared touch fault only on TIMING (late
-// touch) or not at all in shipping -- so it inherits nothing and faults deterministically on
-// the first touch instead. If `fn` takes a trailing `Cancellation_token`, the wrapper does too
-// (forwarded by `Executable::run` from the block's token), so the body can poll for
-// cancellation.
-template<typename R, typename Fn>
-auto with_inherited_access(Fn&& fn)
-{
-    // Also snapshot the trace owner (graph-node index) so this sub-work's busy is attributed
-    // to its owning node; `Trace_busy_scope` measures the body while the owner is live. Both
-    // no-op under TS_PROFILING=0 (owner is -1, the scopes empty). The launcher's rule
-    // relaxation (`ts::Relaxed_scope`) rides along the same way: a child inherits the grant,
-    // so it inherits the hazard the opt-out speaks for (docs/waiting-rule-policy.md §4).
-    if constexpr (takes_token_v<std::decay_t<Fn>>)
-    {
-        return [fn = std::forward<Fn>(fn), ctx = snapshot_access(), owner = trace_owner(),
-                relaxed = Relaxed_snapshot{}](const Cancellation_token& tok) mutable -> R
-        {
-            Trace_owner_scope trace_owner_scope(owner);
-            Trace_busy_scope trace_busy_scope;
-            Inherited_access_scope scope(ctx);
-            Inherited_relaxed_scope relaxed_scope(relaxed);
-            return fn(tok);
-        };
-    }
-    else
-    {
-        return [fn = std::forward<Fn>(fn), ctx = snapshot_access(), owner = trace_owner(),
-                relaxed = Relaxed_snapshot{}]() mutable -> R
-        {
-            Trace_owner_scope trace_owner_scope(owner);
-            Trace_busy_scope trace_busy_scope;
-            Inherited_access_scope scope(ctx);
-            Inherited_relaxed_scope relaxed_scope(relaxed);
-            return fn();
-        };
-    }
-}
 
 // The control block behind a `Task` handle (for detail-layer wiring).
 template<typename R>
@@ -1070,8 +1022,8 @@ inline void set_deadlock_net_window(std::chrono::milliseconds window) noexcept
 #endif
 }
 
-// Dispatch options for launching a standalone task (`ts::launch`) or a nested one
-// (`ts::nested`). `token` makes it skippable before it runs; `priority` sets its queue
+// Dispatch options for launching a standalone task (`ts::launch`). `token` makes it
+// skippable before it runs; `priority` sets its queue
 // position; `name` gives it a debug identity (a literal -- the launch SITE is captured by
 // the verb, so an unnamed task is still identified).
 struct Launch_options
@@ -1197,24 +1149,20 @@ Task<R> task_from_core(Task_ptr core) noexcept { return Task<R>(std::move(core))
 namespace detail
 {
 
-// Shared builder for the bare-task entry points. `Inherit` selects grant inheritance:
-// the structurally-gated launches (`ts::nested`, `Task_scope::launch`) wrap the body in
-// `with_inherited_access` so it runs under the launcher's grant + rule relaxation and may
-// touch the launcher's guarded data; a detached `ts::launch`/`ts::task` passes the body raw,
-// so it runs under an empty context (the same no-current-task case a blue-boundary launch
-// installs) and an undeclared touch faults deterministically on the first access rather than
-// racing the launcher's closing grant window (docs/coroutine-first.md §2). The raw body keeps
-// its shape (a trailing-`Cancellation_token` overload is preserved), so `Executable::run`
-// forwards the token either way.
-template<bool Inherit, typename Fn>
+// Shared builder for the bare-task entry point (`ts::launch`). The body is passed raw and
+// runs under an empty access context (the same no-current-task case a blue-boundary launch
+// installs): a detached launch's handle may be dropped, so the launcher's grant cannot be
+// guaranteed to outlive the child, and an undeclared touch of the launcher's guarded data
+// faults deterministically on the first access rather than racing the launcher's closing
+// grant window (docs/coroutine-first.md §2). The raw body keeps its shape (a
+// trailing-`Cancellation_token` overload is preserved), so `Executable::run` forwards the
+// token either way. To fan work out over a node's owned data, use `ts::parallel_for` (its
+// helpers inherit the caller's grant) or acquire fresh via `obj.async` / `co_await obj.access`.
+template<typename Fn>
 auto build_bare_task(Fn&& fn, Launch_options opts, std::source_location site)
 {
     using R = detail::Task_result_t<Fn>;
-    Task_ptr core;
-    if constexpr (Inherit)
-        core = make_executable<R>(with_inherited_access<R>(std::forward<Fn>(fn)), std::move(opts.token));
-    else
-        core = make_executable<R>(std::forward<Fn>(fn), std::move(opts.token));
+    Task_ptr core = make_executable<R>(std::forward<Fn>(fn), std::move(opts.token));
     core->flags.priority = opts.priority;
     set_task_name(core, named_from(opts, site));
     submit_ready(core, core->generation());   // fresh block, pre-dispatch: gen 0, race-free read
@@ -1230,7 +1178,7 @@ auto build_bare_task(Fn&& fn, Launch_options opts, std::source_location site)
 // independent). The launched task inherits NOTHING from the launcher — its handle may be
 // dropped (the detached case), so the launcher's grant cannot be guaranteed to outlive the
 // child; a body that touches the launcher's guarded data faults as undeclared access. To
-// touch the launcher's data, gate the child: `ts::nested` (joins the launcher's completion)
+// touch the launcher's data, use `ts::parallel_for` (its helpers inherit the caller's grant)
 // or acquire fresh via `obj.async(...)` / `co_await obj.access(...)`.
 // (Deduced return -- `Task<Task_result_t<Fn>>` -- rather than a trailing return type:
 // the trailing form substitutes during overload resolution, BEFORE the constraint is
@@ -1244,7 +1192,7 @@ template<typename Fn>
 auto launch(Fn&& fn, Launch_options opts = {},
             std::source_location site = std::source_location::current())
 {
-    return detail::build_bare_task<false>(std::forward<Fn>(fn), std::move(opts), site);
+    return detail::build_bare_task(std::forward<Fn>(fn), std::move(opts), site);
 }
 
 namespace detail
@@ -1252,29 +1200,30 @@ namespace detail
 
 // Attach `child` as a NESTED task of the currently-executing task: that task will not
 // complete until `child` settles (completed or cancelled). Fatal if there is no running
-// task. Detail-level -- the public spellings are `ts::nested` (launch + attach) and the
-// graph's coroutine-node wiring; nesting is a completion dependency, orthogonal to how
-// the child runs.
+// task. Detail-level graph plumbing -- the callers are the coroutine graph node's frame
+// gating (static_task_graph.h) and a nested graph run (`add_nested(run.done)`,
+// static_task_graph.cpp); nesting is a completion dependency, orthogonal to how the child runs.
 inline void add_nested(Task_ptr child_core)
 {
     Task_ptr parent = current_task;
     if (!parent)
-        ts::fatal("ts::nested called outside a running task");
+        ts::fatal("detail::add_nested called outside a running task");
 
     parent->num_locks.fetch_add(1, std::memory_order_relaxed);   // a completion lock on the parent
 
-    // Record for a mid-body `co_await ts::join_nested()` when the caller's segment carries an
-    // implicit scope (a coroutine frame installs one; functor bodies have none -- they cannot
-    // await, and their children gate completion via the counter alone).
+    // Record the child on the caller frame's implicit scope so the graph's non-quiet-scope
+    // lending check (static_task_graph.cpp) can see a still-running nested graph run. A
+    // coroutine frame installs the scope; functor bodies have none (nullptr), and a coroutine
+    // node's frame is attached at the functor node's block, where the scope is likewise absent.
     if (current_scope_children != nullptr)
         current_scope_children->push_back(child_core);
     {
         std::scoped_lock lock(child_core->mutex);
 #if TS_SAFETY_CHECKS
-        // One gating parent per child, by construction at every call site (`ts::nested`
-        // launches its own task; a coroutine node's frame and a nested graph run are attached
-        // once each). The block carries a single slot for that link, so a second attachment
-        // would silently drop the first parent's lock and hang it forever.
+        // One gating parent per child, by construction at every call site (a coroutine node's
+        // frame and a nested graph run are attached once each). The block carries a single slot
+        // for that link, so a second attachment would silently drop the first parent's lock and
+        // hang it forever.
         if (child_core->nested_parent)
             ts::fatal("detail::add_nested: this task already gates another parent");
 #endif
@@ -1288,22 +1237,6 @@ inline void add_nested(Task_ptr child_core)
 }
 
 } // namespace detail
-
-// Launch a task and attach it as a nested task of the currently-executing task (its
-// completion gates the parent's): the parent will not complete until the child settles.
-// Call from within a task body; fatal outside one. Unlike the detached `ts::launch`, a
-// nested child INHERITS the launcher's grant (+ rule relaxation): the gating makes the
-// launcher's grant provably outlive the child, so touching the launcher's guarded data is
-// sound (docs/coroutine-first.md §2). `site` forwarded, not re-defaulted.
-template<typename Fn>
-    requires detail::Task_body<Fn>
-auto nested(Fn&& fn, Launch_options opts = {},
-            std::source_location site = std::source_location::current())
-{
-    auto t = detail::build_bare_task<true>(std::forward<Fn>(fn), std::move(opts), site);
-    detail::add_nested(detail::core_of(t));
-    return t;
-}
 
 // A manually-completed synchronization point: a bodyless `Task<void>` (no work is
 // scheduled or executed) that you `trigger()` by hand. It is both producer and

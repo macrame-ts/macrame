@@ -357,11 +357,11 @@ void Static_task_graph::on_data_ready(Run_state& run, int index)
 
 // The node block's `execute`. Mirrors `Executable::run`, but reaches the body via
 // graph+index (no stored body) and completes via the block's `on_complete` hook: it
-// installs `current_task` + the execution-flag self-lock so the body may spawn NESTED
-// tasks (`ts::nested`) that gate the node's completion, then completes once the self-lock
-// and all nested tasks release. The block carries the run's `token`, so a cancelled node
-// skips its body (settling cancelled) -- `on_complete` still fires, keeping the drain
-// going.
+// installs `current_task` + the execution-flag self-lock so a coroutine-node body's frame
+// (or a nested graph run) can gate the node's completion via `detail::add_nested`, then
+// completes once the self-lock and any nested completions release. The block carries the
+// run's `token`, so a cancelled node skips its body (settling cancelled) -- `on_complete`
+// still fires, keeping the drain going.
 void Static_task_graph::run_graph_node(const detail::Task_ptr& block, std::uint64_t gen)
 {
     using Block = detail::Task_control_block;
@@ -506,18 +506,19 @@ void Static_task_graph::bind_links_for_run(bool detach)
 #if TS_SAFETY_CHECKS
     if (any && detail::current_scope_children != nullptr)
     {
-        // Lending hands the caller's exclusivity to the inner run, but LIVE scope children are
-        // also running under that same grant -- so both could touch the lent object at once,
-        // each "validly". Conservative rule: quiesce the scope first. Settled children are not
-        // a hazard, and the scope list only drops them at a join, so filter on `ready` rather
-        // than on emptiness (else a fire-and-settle child earlier in the body would fatal).
+        // Lending hands the caller's exclusivity to the inner run, but a still-running earlier
+        // nested run is also executing under that same grant -- so both could touch the lent
+        // object at once, each "validly". Conservative rule: no un-awaited nested run may be in
+        // flight when another lends. Settled runs are not a hazard, and the scope list only drops
+        // them at completion, so filter on `ready` rather than on emptiness (else a fire-and-settle
+        // run earlier in the body would fatal).
         for (const detail::Task_ptr& child : *detail::current_scope_children)
         {
             if (!child->ready.load(std::memory_order_acquire))
             {
-                ts::fatal("Static_task_graph::execute -- lending an object to a nested run while the calling "
-                          "task has unjoined scope children still running (co_await ts::join_nested() before "
-                          "the nested run)");
+                ts::fatal("Static_task_graph::execute -- lending an object to a nested run while an earlier "
+                          "un-awaited nested run of the calling task is still in flight (co_await the previous "
+                          "nested run before starting another)");
             }
         }
     }

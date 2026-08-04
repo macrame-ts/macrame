@@ -23,13 +23,12 @@
 // via the resume trampoline; every genuine suspension restores the previous value before
 // the thread leaves the frame (`exit_segment` in the awaiters, ordered before the
 // suspension handshake publishes the frame for resumption -- no cross-thread overlap on
-// the save slots). `ts::nested` inside any segment therefore attaches to the COROUTINE
-// (its implicit scope), not to whatever task happened to launch it: the promise arms the
-// block's `execution_flag` + self-lock exactly like `Executable::run`, the body-end drops
-// the self-lock, and the last nested child completes the task. Children hold refs on the
-// block, which keeps the frame -- and the coroutine's PARAMETERS -- alive until they
-// settle; locals die at `co_return` as in any function, so children must not capture
-// parent locals by reference past the join (`co_await ts::join_nested()` first).
+// the save slots). A nested graph run started inside any segment therefore attaches to the
+// COROUTINE (via `detail::add_nested`), not to whatever task happened to launch it: the
+// promise arms the block's `execution_flag` + self-lock exactly like `Executable::run`, the
+// body-end drops the self-lock, and the last nested completion completes the task. A gating
+// child holds a ref on the block, which keeps the frame -- and the coroutine's PARAMETERS --
+// alive until it settles.
 //
 // Resume scheduling: a resume goes through a bounded coroutine-resume trampoline
 // (`schedule_resume`) on the settling/granting thread -- the eager-task equivalent of
@@ -387,10 +386,10 @@ Optional_awaiter<R> operator co_await(Optional_awaitable<R> awaitable)
 // The shared (result-agnostic) half of the fused promise. The block is the FIRST member,
 // so `Task_control_block* == promise*` (the `Executable` pattern) and the block's `destroy`
 // destroys the whole coroutine frame. `num_locks` is armed to `execution_flag + 1`
-// (executing + the body self-lock) in the constructor, so `ts::nested` attaches children to
-// this coroutine across all its segments; the final awaiter drops the self-lock -- the task
-// completes at `co_return` when no children are pending, else when the last child settles
-// (the functor-node semantics of docs/coroutine-first.md §4.3).
+// (executing + the body self-lock) in the constructor, so `detail::add_nested` can attach a
+// gating child (a nested graph run) to this coroutine across all its segments; the final
+// awaiter drops the self-lock -- the task completes at `co_return` when no children are
+// pending, else when the last child settles.
 template<typename Derived>
 struct Promise_base
 {
@@ -403,10 +402,10 @@ struct Promise_base
     // segment is installed. Written/read only by the thread running the segment (the
     // suspension handshake orders cross-thread handoffs).
     Task_ptr prev_task_;
-    // The frame's implicit scope (docs/coroutine-first.md §4.3): children launched via
-    // `ts::nested` in any segment are recorded here (in addition to the completion locks
-    // they take), so `co_await ts::join_nested()` can await them mid-body. Same
-    // single-thread-per-segment discipline as `prev_task_`.
+    // The frame's implicit scope: a nested graph run started in any segment is recorded here
+    // (in addition to the completion lock it takes) so the graph's non-quiet-scope lending
+    // check (static_task_graph.cpp) can see a still-running run. Same single-thread-per-segment
+    // discipline as `prev_task_`.
     std::vector<Task_ptr> scope_children_;
     std::vector<Task_ptr>* prev_scope_ = nullptr;
     // The frame's rule relaxation (`ts::Relaxed_scope`), carried across suspensions the same
@@ -691,102 +690,7 @@ public:
 #endif
 };
 
-// Awaiter joining a set of tasks: resumes once every one has settled. Shared by
-// `ts::join_nested()` (the frame's implicit scope) and `Task_scope::join()`. Owns the
-// handles; a countdown over the un-settled children plus the same two-state handshake as
-// `Task_awaiter` (the last child's callback vs `await_suspend` finishing). `remaining_` is
-// armed to the full count BEFORE any callback attaches, so a child settling mid-attach
-// decrements early and the zero-transition still fires exactly once, on the true last.
-struct Join_awaiter
-{
-    explicit Join_awaiter(std::vector<Task_ptr> children) noexcept
-        : children_(std::move(children))
-    {}
-
-    Join_awaiter(const Join_awaiter&) = delete;
-    Join_awaiter& operator=(const Join_awaiter&) = delete;
-
-    bool await_ready()
-    {
-        // Checked before the settled children are erased: whether the scope happens to be
-        // drained at this instant is exactly the timing the rule must not depend on.
-        check_await_under_guard(
-            "co_await a scope join while holding a Guarded access guard: the children may not "
-            "be settled, and the guard's pipe would be held across the wait. Join the scope "
-            "before acquiring the guard, or release the guard first");
-        std::erase_if(children_, [](const Task_ptr& c)
-        {
-            return c->ready.load(std::memory_order_acquire);
-        });
-        remaining_.store(static_cast<int>(children_.size()), std::memory_order_relaxed);
-        return children_.empty();
-    }
-
-    template<typename P>
-    bool await_suspend(std::coroutine_handle<P> h)
-    {
-#if TS_SUSPENSION_REGISTRY
-        suspension_.joining_scope = true;
-        suspension_link(suspension_);
-        registered_ = true;
-#endif
-
-        exit_segment_if_ours(h.promise());
-
-        for (Task_ptr& c : children_)
-        {
-            c->attach([this, h](void*, bool)
-            {
-                if (remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1
-                    && state_.exchange(1, std::memory_order_acq_rel) == 2)
-                    schedule_resume(h);
-            });
-        }
-
-        if (state_.exchange(2, std::memory_order_acq_rel) == 1)
-        {
-            enter_segment_if_ours(h.promise());
-            return false;   // the last child settled synchronously during the attach loop
-        }
-        return true;
-    }
-
-    void await_resume() noexcept
-    {
-#if TS_SUSPENSION_REGISTRY
-        if (registered_)
-        {
-            suspension_unlink(suspension_);
-            registered_ = false;
-        }
-#endif
-    }
-
-    std::vector<Task_ptr> children_;
-    std::atomic<int> remaining_{ 0 };
-    std::atomic<int> state_{ 0 };
-#if TS_SUSPENSION_REGISTRY
-    Suspension_record suspension_;
-    bool registered_ = false;
-#endif
-};
-
 } // namespace detail
-
-// Mid-body join of the implicit scope (docs/coroutine-first.md §4.3): awaits every child
-// launched so far via `ts::nested` in this coroutine, then resumes; the list resets, so
-// later launches join a later `join_nested` (or gate `co_return` via the counter as usual).
-// Outside a coroutine frame there is no implicit scope and the await is a no-op.
-inline detail::Join_awaiter join_nested()
-{
-    std::vector<detail::Task_ptr> children;
-    if (detail::current_scope_children != nullptr)
-    {
-        children = std::move(*detail::current_scope_children);
-        detail::current_scope_children->clear();
-    }
-    return detail::Join_awaiter(std::move(children));
-}
 
 // `co_await task` -> suspend until `task` settles, then resume with its result (`const R&`,
 // non-consuming; `void` for a void task). ADL finds these in namespace `ts`.

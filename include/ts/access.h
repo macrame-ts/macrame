@@ -223,9 +223,9 @@ extern thread_local const Access_context* current_access;
 [[noreturn]] void access_violation(const char* type_name, Access mode, bool stale = false) noexcept;
 
 // Snapshot the calling thread's access grant by value (empty if no task is running).
-// Used to propagate a task's grants to sub-work launched from it (`ts::launch` /
-// `ts::nested`): the copy has independent lifetime, so the launched task may run --
-// possibly on another thread, possibly after the launcher's body unwinds -- still
+// Used to propagate a task's grants to grant-inheriting sub-work (the `parallel_for`
+// helpers, a coroutine frame's promise): the copy has independent lifetime, so the sub-work
+// may run -- possibly on another thread, possibly after the launcher's body unwinds -- still
 // holding the launcher's grant.
 inline std::optional<Access_context> snapshot_access()
 {
