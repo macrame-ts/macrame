@@ -292,6 +292,7 @@ struct Promise_base
         // Executing + body self-lock: nested children add completion locks (task.h §4 regime).
         core.num_locks.store(Task_control_block::execution_flag + 1, std::memory_order_relaxed);
         core.flags.priority = priority_;
+        inherit_task_name(core);   // before `enter_segment` installs this frame as current
         enter_segment();   // the eager body runs on the caller right after the promise ctor
     }
 

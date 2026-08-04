@@ -105,11 +105,14 @@ public:
 #endif
     }
 
-    // Named form (`ts::Named`): names the front instance for the graph's DOT dump.
-    explicit Versioned(Named name, Resync policy = Resync::replay)
+    // Named form: leading `ts::Named` (a literal, or `ts::Named{}` for the construction
+    // site) names the front instance for the DOT dump, the trace and the diagnostics.
+    template<typename N>
+        requires std::same_as<std::remove_cvref_t<N>, Named>
+    explicit Versioned(N&& name, Resync policy = Resync::replay)
         : Versioned(policy)
     {
-        detail::Guarded_access::pipe(front_).debug_name = name.literal;
+        detail::Guarded_access::pipe(front_).debug_name = name;
     }
 
     // Two destruction contracts, both fatal under TS_SAFETY_CHECKS (same severity as

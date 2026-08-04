@@ -62,10 +62,11 @@ struct Pipe
     // lifetime misuse, caught at the cause instead of crashing far from it).
     std::atomic<int> graph_refs{ 0 };
 #endif
-    // Debug name of the owning `Guarded`/`Versioned` (`ts::Named`): a static literal,
-    // referenced not copied. Consumed by the graph's DOT dump (edge tooltips) and future
-    // profiling; kept in all builds (one pointer).
-    const char* debug_name = nullptr;
+    // Identity of the owning `Guarded`/`Versioned` (`ts::Named`): a literal or the
+    // construction site, referenced not copied. Consumed by the graph's DOT dump (edge
+    // tooltips), the trace, and the access diagnostics; kept in all builds (three words --
+    // a handful of objects, and the consumers are shipping-capable).
+    Named debug_name{ nullptr };
 
     // The block currently holding this pipe's WRITE grant, null outside a write window
     // (docs/pipe-rebase.md §0.2). Always-on: behavior keys off it (`Deferred::commit`
@@ -408,21 +409,6 @@ namespace detail
 struct Guarded_access;
 }
 
-// A debug name for a `Guarded`/`Versioned` instance: a static-storage literal, referenced
-// not copied. A distinct wrapper type (not a bare leading `const char*`) so it can never be
-// mistaken for `T`'s own first constructor argument:
-//   ts::Guarded<Transforms> transforms{ ts::Named{"transforms"}, entity_count };
-// Names label the object in the graph's DOT dump (edge tooltips: `transforms: W->R`
-// instead of `obj3: W->R`); unnamed objects fall back to an `objN` ordinal.
-struct Named
-{
-    explicit Named(const char* name) noexcept
-        : literal(name)
-    {}
-
-    const char* literal;
-};
-
 template<typename T>
 class Guarded
 {
@@ -444,13 +430,18 @@ public:
         : instance_(std::forward<Args>(args)...)
     {}
 
-    // Named form: leading `ts::Named`, then `T`'s constructor arguments as usual.
-    template<typename... Args>
-        requires std::constructible_from<T, Args...>
-    explicit Guarded(Named name, Args&&... args)
+    // Named form: leading `ts::Named` -- a literal or `ts::Named{}` for the construction
+    // site -- then `T`'s constructor arguments as usual. The first parameter must BE a
+    // `Named`, not something convertible to one: `Named(const char*)` is implicit (so
+    // `add_node("physics", ...)` reads well), and without this constraint
+    // `Guarded<std::string> g{ "hello" }` would silently mean "named hello,
+    // default-constructed string" rather than failing to compile.
+    template<typename N, typename... Args>
+        requires std::same_as<std::remove_cvref_t<N>, Named> && std::constructible_from<T, Args...>
+    explicit Guarded(N&& name, Args&&... args)
         : instance_(std::forward<Args>(args)...)
     {
-        pipe_.debug_name = name.literal;
+        pipe_.debug_name = name;
     }
 
     // Identity matters (it is the access key); waits out pending accesses so the object
@@ -468,11 +459,12 @@ public:
 #if TS_SAFETY_CHECKS
         if (pipe_.graph_refs.load(std::memory_order_acquire) != 0)
         {
-            char msg[192];
+            char label[128];
+            char msg[256];
             std::snprintf(msg, sizeof msg,
-                "Guarded object%s%s destroyed while a compiled Static_task_graph still "
+                "Guarded object '%s' destroyed while a compiled Static_task_graph still "
                 "references it (destroy or recompile the graph first)",
-                pipe_.debug_name ? " " : "", pipe_.debug_name ? pipe_.debug_name : "");
+                named_display(pipe_.debug_name, label, sizeof label));
             ts::fatal(msg);
         }
 #endif
@@ -502,49 +494,58 @@ public:
     // All four overloads gate on `Read_only_accessor`/`Read_write_accessor` -- the
     // mode-first constraint pair (see the concepts for why the order is load-bearing).
 
+    // The trailing `site` on each verb is the naming boundary (ts/named.h): a defaulted
+    // `source_location` captures its CALLER, so it is declared here, on the function the
+    // user calls, and the resulting `Named` is passed down explicitly.
+
     // access, read_write.
     template<typename Fn>
         requires detail::Read_write_accessor<Fn, T>
-    auto access(Fn&& fn, Access_options opts = {})
+    auto access(Fn&& fn, Access_options opts = {},
+                std::source_location site = std::source_location::current())
         -> Task<detail::Accessor_result_t<Fn, T, Access::read_write>>
     {
         return launch<detail::Accessor_result_t<Fn, T, Access::read_write>, Access::read_write>(
-            &instance_, std::forward<Fn>(fn), opts, /*try_inline=*/true);
+            &instance_, std::forward<Fn>(fn), opts, detail::named_from(opts, site), /*try_inline=*/true);
     }
 
     // access, read_only.
     template<typename Fn>
         requires detail::Read_only_accessor<Fn, T>
-    auto access(Fn&& fn, Access_options opts = {}) const
+    auto access(Fn&& fn, Access_options opts = {},
+                std::source_location site = std::source_location::current()) const
         -> Task<detail::Accessor_result_t<Fn, T, Access::read_only>>
     {
         return launch<detail::Accessor_result_t<Fn, T, Access::read_only>, Access::read_only>(
-            &instance_, std::forward<Fn>(fn), opts, /*try_inline=*/true);
+            &instance_, std::forward<Fn>(fn), opts, detail::named_from(opts, site), /*try_inline=*/true);
     }
 
     // async, read_write: always enqueued (never inline).
     template<typename Fn>
         requires detail::Read_write_accessor<Fn, T>
-    auto async(Fn&& fn, Access_options opts = {})
+    auto async(Fn&& fn, Access_options opts = {},
+               std::source_location site = std::source_location::current())
         -> Task<detail::Accessor_result_t<Fn, T, Access::read_write>>
     {
         return launch<detail::Accessor_result_t<Fn, T, Access::read_write>, Access::read_write>(
-            &instance_, std::forward<Fn>(fn), opts, /*try_inline=*/false);
+            &instance_, std::forward<Fn>(fn), opts, detail::named_from(opts, site), /*try_inline=*/false);
     }
 
     // async, read_only: always enqueued (never inline).
     template<typename Fn>
         requires detail::Read_only_accessor<Fn, T>
-    auto async(Fn&& fn, Access_options opts = {}) const
+    auto async(Fn&& fn, Access_options opts = {},
+               std::source_location site = std::source_location::current()) const
         -> Task<detail::Accessor_result_t<Fn, T, Access::read_only>>
     {
         return launch<detail::Accessor_result_t<Fn, T, Access::read_only>, Access::read_only>(
-            &instance_, std::forward<Fn>(fn), opts, /*try_inline=*/false);
+            &instance_, std::forward<Fn>(fn), opts, detail::named_from(opts, site), /*try_inline=*/false);
     }
 
 private:
     template<typename R, Access mode, typename Inst, typename Fn>
-    Task<R> launch(Inst* inst, Fn&& fn, Access_options opts, bool try_inline, detail::Task_ptr* record = nullptr) const
+    Task<R> launch(Inst* inst, Fn&& fn, Access_options opts, Named name, bool try_inline,
+                   detail::Task_ptr* record = nullptr) const
     {
         // The body (stored in the block) runs `fn` under this object's access scope. If
         // `fn` takes a trailing token, the body does too and `Executable::run` forwards the
@@ -578,6 +579,7 @@ private:
             }
         }();
         core->flags.priority = opts.priority;
+        detail::set_task_name(core, name);
         // Reentrant fast path (`access` only, docs/coroutine-first.md §4.2 / waiting rule (b)):
         // the caller's task already holds this pipe's write grant -- run the body inline
         // UNDER that grant, touching the pipe not at all (no acquire, no turn; the held
@@ -628,10 +630,10 @@ struct Guarded_access
     // into `record` atomically with the enqueue (under the pipe mutex -- see
     // `pipe_enqueue`), so the recorded handle can never lag FIFO order.
     template<typename T, typename Fn>
-    static Task<void> commit_write(Guarded<T>& t, Fn&& fn, Access_options opts, Task_ptr* record)
+    static Task<void> commit_write(Guarded<T>& t, Fn&& fn, Access_options opts, Named name, Task_ptr* record)
     {
         return t.template launch<void, Access::read_write>(
-            &t.instance_, std::forward<Fn>(fn), opts, /*try_inline=*/false, record);
+            &t.instance_, std::forward<Fn>(fn), opts, name, /*try_inline=*/false, record);
     }
 };
 
@@ -698,6 +700,13 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
     Access modes[] = { Modes... };
     auto block = make_piped_executable<R, sizeof...(Ts)>(std::move(body), std::move(opts.token));
     block->flags.priority = opts.priority;
+    // Multi-object `ts::access`/`ts::async` end in an object pack, so no trailing defaulted
+    // `source_location` is expressible and there is no call site to capture: an unnamed
+    // multi-object access carries only whatever literal the options gave it. Name it with
+    // `{.name = "..."}` when a diagnostic would need to point at it.
+    Named name{ nullptr };
+    name.literal = opts.name;
+    set_task_name(block, name);
     // Dedup write-wins + insertion-sort by pipe address (canonical order), in place -- the
     // pack is small, and this replaces the old per-call `std::map`.
     std::size_t n = 0;

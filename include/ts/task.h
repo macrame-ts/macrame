@@ -2,6 +2,7 @@
 
 #include "ts/access.h"   // grant inheritance for launched/nested sub-work (snapshot_access)
 #include "ts/fatal.h"
+#include "ts/named.h"   // ts::Named -- debug identity for tasks (and nodes and objects)
 #include "ts/priority.h"
 #include "ts/rules.h"   // rule policy: which waiting-rule checks run, and their scoped opt-out
 #include "ts/detail/ref_count.h"   // intrusive Ref_ptr / Ref_counted (preferred over shared_ptr)
@@ -380,6 +381,15 @@ struct Task_control_block
     Task_ptr nested_parent;
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
+#if TS_SAFETY_CHECKS
+    // Debug identity (`ts::Named`): the literal from the launching verb's options, else the
+    // creation call site, else empty (a coroutine frame, whose promise sees no call site).
+    // Diagnostics only -- the waits-for fatal, the quiescence dump -- so it is fully gated
+    // and shipping carries no bytes for it (the block is deliberately small; see TODO 4.7).
+    // Cold tail placement: the hot clusters above keep their layout.
+    Named name{ nullptr };
+#endif
+
     // This block's current re-arm generation — the high bits of `run_state`, above the
     // claim bit (`run_state >> 1`). Bumped by `reset()` on each re-arm. A dispatch
     // captures this value and passes it to `claim(gen)`. See `run_state`.
@@ -668,6 +678,40 @@ auto make_block()
     }
 }
 
+// Record `name` on a freshly created block (no-op in shipping, where the block has no
+// name field). Call at the public verb, with the `Named` that verb captured.
+inline void set_task_name(const Task_ptr& core, const Named& name) noexcept
+{
+#if TS_SAFETY_CHECKS
+    core->name = name;
+#else
+    (void)core;
+    (void)name;
+#endif
+}
+
+// The `Named` a public verb records: its options' literal when given, at the site the verb
+// captured. Both option aggregates carry a `const char* name`, so one helper serves all.
+template<typename Options>
+inline Named named_from(const Options& opts, const std::source_location& site) noexcept
+{
+    return opts.name != nullptr ? Named(opts.name, site) : Named(site);
+}
+
+// Display identity of a block for a diagnostic; never null. `buf` must outlive the use.
+inline const char* task_name(const Task_control_block* blk, char* buf, std::size_t size) noexcept
+{
+#if TS_SAFETY_CHECKS
+    if (blk != nullptr)
+        return named_display(blk->name, buf, size, "<unnamed task>");
+#else
+    (void)blk;
+    (void)buf;
+    (void)size;
+#endif
+    return "<task>";
+}
+
 // The task currently executing on this thread (for nested-task attachment). A
 // shared_ptr so a nested child can register the parent as its successor and keep it
 // alive until the child completes.
@@ -679,6 +723,20 @@ inline thread_local Task_ptr current_task;
 // `co_await ts::join_nested()`. Null for functor bodies (no await, counter-gated only)
 // and outside tasks.
 inline thread_local std::vector<Task_ptr>* current_scope_children = nullptr;
+
+// A coroutine frame has no call site to capture (a promise sees the coroutine's arguments,
+// not where it was called), so it inherits the identity of the task it was created inside
+// -- typically the graph node whose body it is. That is the identity a diagnostic wants
+// anyway: the participant the user declared. Frames created outside any task stay unnamed.
+inline void inherit_task_name(Task_control_block& core) noexcept
+{
+#if TS_SAFETY_CHECKS
+    if (current_task)
+        core.name = current_task->name;
+#else
+    (void)core;
+#endif
+}
 
 inline void Task_control_block::sync_wait(const Task_ptr& blk)
 {
@@ -873,15 +931,21 @@ struct Access_options
 {
     Cancellation_token token = {};
     Priority priority = Priority::normal;
+    // Optional debug identity for the access task. A literal only: the call SITE is
+    // captured by the verb itself (its own defaulted `std::source_location`), so an
+    // unnamed access is still identified in diagnostics.
+    const char* name = nullptr;
 };
 
 // Dispatch options for launching a standalone task (`ts::launch`) or a nested one
 // (`ts::nested`). `token` makes it skippable before it runs; `priority` sets its queue
-// position.
+// position; `name` gives it a debug identity (a literal -- the launch SITE is captured by
+// the verb, so an unnamed task is still identified).
 struct Launch_options
 {
     Cancellation_token token = {};
     Priority priority = Priority::normal;
+    const char* name = nullptr;
 };
 
 // Handle to an async result. `co_await` it from a coroutine task (the sanctioned
@@ -978,13 +1042,18 @@ Task<R> task_from_core(Task_ptr core) noexcept { return Task<R>(std::move(core))
 // the trailing form substitutes during overload resolution, BEFORE the constraint is
 // checked, so a wrong body shape would hard-error inside `Task_result` instead of
 // failing the `Task_body` gate.)
+// `site` is the naming boundary (ts/named.h): a defaulted `source_location` captures the
+// CALLER, so it must sit on the outermost function the user calls -- `launch` -- and the
+// resulting `Named` is passed down explicitly, never re-defaulted in a helper.
 template<typename Fn>
     requires detail::Task_body<Fn>
-auto launch(Fn&& fn, Launch_options opts = {})
+auto launch(Fn&& fn, Launch_options opts = {},
+            std::source_location site = std::source_location::current())
 {
     using R = detail::Task_result_t<Fn>;
     auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), std::move(opts.token));
     core->flags.priority = opts.priority;
+    detail::set_task_name(core, detail::named_from(opts, site));
     detail::submit_ready(core, core->generation());   // fresh block, pre-dispatch: gen 0, race-free read
     return Task<R>(core);
 }
@@ -1036,9 +1105,10 @@ inline void add_nested(Task_ptr child_core)
 // Call from within a task body; fatal outside one.
 template<typename Fn>
     requires detail::Task_body<Fn>
-auto nested(Fn&& fn, Launch_options opts = {})
+auto nested(Fn&& fn, Launch_options opts = {},
+            std::source_location site = std::source_location::current())
 {
-    auto t = launch(std::forward<Fn>(fn), std::move(opts));
+    auto t = launch(std::forward<Fn>(fn), std::move(opts), site);   // site forwarded, not re-defaulted
     detail::add_nested(detail::core_of(t));
     return t;
 }

@@ -129,7 +129,8 @@ public:
     // nested task is not the holder, and the enqueued write would queue behind the very
     // grant it waits out (fatal under `TS_SAFETY_CHECKS`, a silent deadlock-on-sync
     // otherwise).
-    Task<void> commit(Access_options opts = {})
+    Task<void> commit(Access_options opts = {},
+                      std::source_location site = std::source_location::current())
     {
         detail::Pipe& pipe = detail::Guarded_access::pipe(*target_);
         detail::Task_control_block* owner = pipe.writer_owner.load(std::memory_order_acquire);
@@ -150,7 +151,8 @@ public:
                   "commit from the task holding the grant (the node/async body) instead");
 #endif
         return detail::Guarded_access::commit_write(
-            *target_, [this](T&) { apply_under_grant(); }, opts, &last_commit_);
+            *target_, [this](T&) { apply_under_grant(); }, opts, detail::named_from(opts, site),
+            &last_commit_);
     }
 
     // Drop everything staged so far, explicitly. The escape hatch for teardown.

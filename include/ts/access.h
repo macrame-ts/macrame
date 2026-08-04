@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ts/named.h"
+
 #include <atomic>
 #include <cstdint>
 #include <optional>

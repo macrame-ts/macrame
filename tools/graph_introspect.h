@@ -34,26 +34,28 @@ namespace ts::tools
 // `name`/`name_site`/`has_name_site`, `access` (instance pointer + `Access` pairs),
 // `pipes` (parallel to `access`), and `priority`.
 
-// A node's display label: its `Node_name` literal, else the named add_node's call site
-// (`file:line`, basename only), else `node<N>`.
+// Display form of a `ts::Named`: its literal, else the captured site (`file:line`,
+// basename only), else empty (an entity nothing named -- the ordinal fallbacks below).
+inline std::string named_string(const Named& name)
+{
+    if (name.literal != nullptr)
+        return name.literal;
+    if (name.file == nullptr)
+        return {};
+    return std::string(detail::path_basename(name.file)) + ":" + std::to_string(name.line);
+}
+
+// A node's display label: its `ts::Named`, else `node<N>`.
 template<typename Node>
 std::string node_label(const Node& node, int index)
 {
-    if (node.name)
-        return node.name;
-    if (node.has_name_site)
-    {
-        std::string_view file = node.name_site.file_name();
-        if (auto pos = file.find_last_of("/\\"); pos != std::string_view::npos)
-            file.remove_prefix(pos + 1);
-        return std::string(file) + ":" + std::to_string(node.name_site.line());
-    }
-    return "node" + std::to_string(index);
+    std::string label = named_string(node.name);
+    return label.empty() ? "node" + std::to_string(index) : label;
 }
 
-// Object labels: the owning pipe's `debug_name` (`ts::Named`) when set, else an `objN`
-// ordinal in first-declaration order. `access` and `pipes` are parallel arrays (same
-// argument order), so an instance's pipe is at the same position.
+// Object labels: the owning pipe's `ts::Named` when set, else an `objN` ordinal in
+// first-declaration order. `access` and `pipes` are parallel arrays (same argument order),
+// so an instance's pipe is at the same position.
 template<typename Nodes>
 std::map<const void*, std::string> object_labels(const Nodes& nodes)
 {
@@ -62,8 +64,9 @@ std::map<const void*, std::string> object_labels(const Nodes& nodes)
     {
         for (size_t k = 0; k < node.access.size(); ++k)
         {
-            const char* name = node.pipes[k]->debug_name;
-            label.try_emplace(node.access[k].first, name ? std::string(name) : "obj" + std::to_string(label.size()));
+            std::string name = named_string(node.pipes[k]->debug_name);
+            label.try_emplace(node.access[k].first,
+                name.empty() ? "obj" + std::to_string(label.size()) : name);
         }
     }
     return label;

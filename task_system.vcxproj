@@ -41,6 +41,7 @@
     <ClCompile Include="sample\physics.cpp" />
     <ClCompile Include="tests\access_tests.cpp" />
     <ClCompile Include="tests\rules_tests.cpp" />
+    <ClCompile Include="tests\named_tests.cpp" />
     <ClCompile Include="tests\graph_tests.cpp" />
     <ClCompile Include="tests\parallel_tests.cpp" />
     <ClCompile Include="tests\coroutine_tests.cpp" />
@@ -87,6 +88,8 @@
     <ClInclude Include="benchmarks\benchmarks.h" />
     <ClInclude Include="tests\access_tests.h" />
     <ClInclude Include="tests\rules_tests.h" />
+    <ClInclude Include="tests\named_tests.h" />
+    <ClInclude Include="include\ts\named.h" />
     <ClInclude Include="tests\graph_tests.h" />
     <ClInclude Include="tests\parallel_tests.h" />
     <ClInclude Include="tests\coroutine_tests.h" />

@@ -401,9 +401,12 @@ const Pipe* pipe_from_epoch(const std::atomic<std::uint64_t>* epoch) noexcept
         reinterpret_cast<const char*>(epoch) - offsetof(Pipe, write_epoch));
 }
 
-const char* pipe_name(const Pipe* pipe) noexcept
+// Display identity of a pipe's object. `buf` must outlive the use (each caller keeps one
+// per name it prints in a single message).
+const char* pipe_name(const Pipe* pipe, char* buf, std::size_t size) noexcept
 {
-    return pipe->debug_name != nullptr ? pipe->debug_name : "<unnamed>";
+    return pipe != nullptr ? named_display(pipe->debug_name, buf, size, "<unnamed object>")
+                           : "<none>";
 }
 
 // Does a chain of edges lead from `from` back to `target`? (`held == from` edges step to
@@ -453,28 +456,37 @@ bool waits_for_record(const Access_context* held, const void* ticket, const Task
                         break;
                     }
                 }
-                char message[512];
+                // One buffer per name printed in the message: `named_display` may return a
+                // pointer into the buffer it was handed.
+                char held_buf[96], awaited_buf[96], other_awaited_buf[96];
+                char waiter_buf[96], other_waiter_buf[96];
+                char message[768];
                 if (awaited_pipe == held_pipe)
                 {
                     std::snprintf(message, sizeof message,
-                        "waits-for cycle: task (block %p) holding '%s' awaits the same object -- the "
+                        "waits-for cycle: task '%s' holding '%s' awaits the same object -- the "
                         "access queues behind the very grant the awaiter holds and the frame never "
                         "resumes; access it under the held grant instead (reentrancy covers the "
                         "writer-owner case)",
-                        static_cast<const void*>(waiter), pipe_name(held_pipe));
+                        task_name(waiter, waiter_buf, sizeof waiter_buf),
+                        pipe_name(held_pipe, held_buf, sizeof held_buf));
                 }
                 else
                 {
                     std::snprintf(message, sizeof message,
-                        "waits-for cycle: task (block %p) holding '%s' awaits '%s', while task "
-                        "(block %p) holding '%s' awaits '%s' -- a suspended ABBA deadlock (no thread "
+                        "waits-for cycle: task '%s' holding '%s' awaits '%s', while task "
+                        "'%s' holding '%s' awaits '%s' -- a suspended ABBA deadlock (no thread "
                         "parks; the frames simply never resume). Prefer the access hierarchy: declare "
                         "the object on the node, read a Versioned snapshot, or stage via Deferred "
                         "(docs/coroutine-first.md section 2)",
-                        static_cast<const void*>(waiter), pipe_name(held_pipe), pipe_name(awaited_pipe),
-                        static_cast<const void*>(other != nullptr ? other->waiter : nullptr),
-                        pipe_name(awaited_pipe),
-                        other != nullptr ? pipe_name(other->awaited) : "?");
+                        task_name(waiter, waiter_buf, sizeof waiter_buf),
+                        pipe_name(held_pipe, held_buf, sizeof held_buf),
+                        pipe_name(awaited_pipe, awaited_buf, sizeof awaited_buf),
+                        task_name(other != nullptr ? other->waiter : nullptr,
+                                  other_waiter_buf, sizeof other_waiter_buf),
+                        pipe_name(awaited_pipe, awaited_buf, sizeof awaited_buf),
+                        pipe_name(other != nullptr ? other->awaited : nullptr,
+                                  other_awaited_buf, sizeof other_awaited_buf));
                 }
                 ts::fatal(message);
             }

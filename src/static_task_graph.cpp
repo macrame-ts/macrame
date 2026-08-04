@@ -253,6 +253,9 @@ void Static_task_graph::compile(const char* DOT_path)
         wrapper->core.execute = &run_graph_node;
         wrapper->core.on_complete = &graph_node_completed;
         nodes_[i].block = detail::Task_ptr(&wrapper->core);
+        // The node's block carries the node's identity, so every diagnostic that names a
+        // task names the node -- including the pipe entries it takes, which ARE this block.
+        detail::set_task_name(nodes_[i].block, nodes_[i].name);
     }
 
     // Bind every node's pipe links into one slab (tail pipe): the node's `pipe_indices`

@@ -34,24 +34,9 @@ namespace tools
 class Graph_trace;
 }
 
-// A node's debug name: an optional static-storage string plus the `add_node` call site.
-// Implicit from a literal -- `g.add_node("propagation", fn, objs...)` -- and
-// default-constructible: `g.add_node({}, fn, objs...)` captures the call site alone, so
-// the node still labels usefully (`file:line`). The string is referenced, not copied --
-// pass a literal (or anything outliving the graph).
-struct Node_name
-{
-    Node_name(std::source_location site = std::source_location::current()) noexcept
-        : site(site)
-    {}
-    Node_name(const char* name, std::source_location site = std::source_location::current()) noexcept
-        : literal(name)
-        , site(site)
-    {}
-
-    const char* literal = nullptr;
-    std::source_location site;
-};
+// A node's identity is `ts::Named` (ts/named.h), the same type guarded objects and tasks
+// use: implicit from a literal -- `g.add_node("propagation", fn, objs...)` -- or
+// `g.add_node({}, fn, objs...)` to identify the node by its `add_node` call site.
 
 // Handle to a node in a `Static_task_graph`, returned by `add_node`. Identifies
 // the node for explicit ordering edges (`after`/`before`). It is build-time
@@ -189,17 +174,15 @@ public:
         return Graph_node(this, index);
     }
 
-    // Named form: the leading `Node_name` (implicit from a string literal, or `{}` for the
-    // call site alone) labels the node in the DOT dump; unnamed nodes label as `node<N>`.
+    // Named form: the leading `ts::Named` (implicit from a string literal, or `{}` for the
+    // call site alone) labels the node in the DOT dump, the trace and every diagnostic that
+    // names a task -- the node's task block carries it.
     template<typename Fn, typename... Objs>
         requires (detail::Object_arg<Objs> && ...)
-    Graph_node add_node(Node_name name, Fn&& fn, Objs&&... objs)
+    Graph_node add_node(Named name, Fn&& fn, Objs&&... objs)
     {
         Graph_node handle = add_node(std::forward<Fn>(fn), std::forward<Objs>(objs)...);
-        Node& node = nodes_[static_cast<std::size_t>(handle.index())];
-        node.name = name.literal;
-        node.name_site = name.site;
-        node.has_name_site = true;
+        nodes_[static_cast<std::size_t>(handle.index())].name = name;
         return handle;
     }
 
@@ -265,9 +248,7 @@ private:
         std::vector<int> successors;
         std::vector<int> ready_buf;             // scratch: successors made ready by this node's completion (reused; single completion/run)
         int indegree = 0;
-        const char* name = nullptr;             // static literal from `Node_name`, or null
-        std::source_location name_site{};       // the named add_node's call site
-        bool has_name_site = false;             // set only by the named overload
+        Named name{ nullptr };                  // literal or `add_node` call site; empty if unnamed
         Priority priority = Priority::normal;   // applied to `block` at compile()
         bool inline_dispatch = false;           // run on the settling thread if its acquires all succeed synchronously
         // The node's reusable task block (a `Graph_node_block`, allocated once in

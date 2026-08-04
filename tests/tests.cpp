@@ -10,6 +10,7 @@
 #include "scheduler_tests.h"
 #include "access_tests.h"
 #include "rules_tests.h"
+#include "named_tests.h"
 #include "guarded_tests.h"
 #include "pipe_tests.h"
 #include "task_tests.h"
@@ -35,6 +36,7 @@ void run_all_tests()
     run_scheduler_tests();
     run_access_tests();
     run_rules_tests();
+    run_named_tests();
     run_guarded_tests();
     run_pipe_tests();
     run_task_tests();
@@ -512,8 +514,10 @@ void run_death_scenario(const char* name)
         ts::Guarded<Counter> a{ ts::Named{ "objA" } };
         ts::Guarded<Counter> b{ ts::Named{ "objB" } };
         ts::Static_task_graph graph;
-        graph.add_node([&b](Counter& own) { return abba_body(own, b); }, a);
-        graph.add_node([&a](Counter& own) { return abba_body(own, a); }, b);
+        // Named, so the fatal identifies both participants by node rather than by block
+        // pointer -- the coroutine body's frame inherits its node's identity.
+        graph.add_node("nodeA", [&b](Counter& own) { return abba_body(own, b); }, a);
+        graph.add_node("nodeB", [&a](Counter& own) { return abba_body(own, a); }, b);
         graph.compile();
         graph.execute().sync();
     }
