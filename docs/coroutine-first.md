@@ -32,7 +32,7 @@ Companions: `docs/pipe-rebase.md` §0 (the evolved pipe this builds on),
 - **`Deferred`/`Versioned`** — unchanged contracts; returned tasks become awaitable like
   any `Task`.
 
-## 2. The suspension-under-grant doctrine
+## 2. The waiting rules
 
 The rule that unifies nested tasks (retired), coroutine node bodies, guard fatals, and
 dynamic cross-object access:
@@ -98,7 +98,7 @@ the explicit exemption (waits on running work only).
 ### 4.2 Access verbs
 - `co_await obj.access(fn)` — the awaitable form: `await_ready` when the pipe is free
   (runs `fn` inline on the caller — the old opportunistic `access`) or when
-  `writer_owner == current task` (reentrant, runs under the held grant — doctrine (b));
+  `writer_owner == current task` (reentrant, runs under the held grant — waiting rule (b));
   otherwise suspends until the turn arrives. Grant lives only for `fn`.
 - `obj.async(fn)` — the eager fire verb, unchanged: returns `Task<R>`, usable from any
   color (fire-and-forget from blue; awaitable from red).
@@ -140,7 +140,7 @@ graph.add_node([&audio](Physics& phys, const Nav& nav) -> ts::Task<void>
                                                          // (otherwise: implicit at co_return)
 
     float mix = co_await audio.access([](const Audio& a) { return a.mix_level(); });
-    // foreign read under held grants -- doctrine (c): short, read-mode, acyclic
+    // foreign read under held grants -- waiting rule (c): short, read-mode, acyclic
 
     phys.apply(mix);
     co_return;   // frame completes (scope already drained) -> node completes ->
@@ -276,7 +276,7 @@ them.
    (dynamic surface only, as landed) → block slimming (vectors → waiter list; landed as
    `successors` → bare `Task_ptr`, 280 → 264 B — the `continuations` half is TODO 4.7
    step 2). Suite green after each sub-step.
-5. **The detector** (TODO 6.5) + the remaining matrix rows; doctrine section into
+5. **The detector** (TODO 6.5) + the remaining matrix rows; the waiting-rules section into
    task-internals (rewritten §4/§6/§7/§8).
 6. **Validation + docs** — benches vs §5.5 targets, full TSan campaigns, ASan/stress,
    Shipping, alloc audit (`mem_profile` on frames); guide/design rewrites (composition
@@ -301,7 +301,7 @@ them.
    inline fast path (the thing this flag proposed dropping) is exactly what §4.2 wanted to
    keep. What the transformation actually ADDED to `access` is the reentrant arm
    (`Pipe::writer_owner == current task` → run under the held grant, never queue behind
-   yourself), which is doctrine case (b) made real. The awaitable-only surface is the
+   yourself), which is waiting rule (b) made real. The awaitable-only surface is the
    separate held-grant form, `co_await ts::read_write(obj)` / `ts::read_only(obj)`, whose
    guard holds the grant for a scope rather than for one body. Net: no behavior was
    removed here; this flag is withdrawn.

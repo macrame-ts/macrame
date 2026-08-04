@@ -313,7 +313,7 @@ is an optimization, not only a correctness net (executing an un-started dependen
 on the waiting core is never slower than a park + worker round-trip — retraction is to
 `sync()` what symmetric transfer is to `co_await`); (b) a graph node with pending nested
 tasks is already a suspension point holding grants, so the real rule is *what* you await
-under a grant, not *whether* (the suspension-under-grant doctrine,
+under a grant, not *whether* (the waiting rules (suspension under access),
 [coroutine-first.md](coroutine-first.md) §2); (c) partial retraction coverage plus
 coloring made "coroutines replace it" incomplete while both colors existed.
 

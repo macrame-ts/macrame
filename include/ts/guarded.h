@@ -578,7 +578,7 @@ private:
             }
         }();
         core->flags.priority = opts.priority;
-        // Reentrant fast path (`access` only, docs/coroutine-first.md §4.2 / doctrine (b)):
+        // Reentrant fast path (`access` only, docs/coroutine-first.md §4.2 / waiting rule (b)):
         // the caller's task already holds this pipe's write grant -- run the body inline
         // UNDER that grant, touching the pipe not at all (no acquire, no turn; the held
         // write is exclusive, so a read or write body is equally legal). Queueing instead

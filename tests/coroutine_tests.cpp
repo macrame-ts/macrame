@@ -344,7 +344,7 @@ void test_death_await_cancelled_value()
 }
 #endif
 
-// The reentrant access arm (coroutine-first §4.2, doctrine (b)): `access` from a task that
+// The reentrant access arm (coroutine-first §4.2, waiting rule (b)): `access` from a task that
 // already holds the object's write grant runs inline under it instead of queueing behind
 // itself (which used to be the sharp same-object deadlock).
 void test_access_reentrant_under_own_grant()

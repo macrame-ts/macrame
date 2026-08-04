@@ -605,7 +605,7 @@ IDs — when an item is done, mark it, don't renumber.
       stress with the `Rw_probe` oracle + TSan, and if it holds, relax the task-internals
       contract line to "safe, nondeterministic cross-graph ordering"); (f) parameter-grants
       sugar for shipped library sub-graphs (compile-time intent check only).
-      Open discussion queue: [coroutine-first.md](coroutine-first.md) §10 (doctrine
+      Open discussion queue: [coroutine-first.md](coroutine-first.md) §10 (waiting-rule
       relaxations, HALO reality on MSVC/clang-cl, the graph-free usage model).
 
    10. `[ ]` **(P1, author 2026-08) Check the rule, not the incident — structural in-task
@@ -616,7 +616,7 @@ IDs — when an item is done, mark it, don't renumber.
        one frame a prerequisite runs long — and in shipping the check is compiled out entirely.
        A safety check whose trigger condition is the hazard's *timing* inherits the hazard's
        nondeterminism. Fix: make it unconditional — `sync()` inside a task is illegal whether
-       or not the target has settled — which is what the doctrine already says (coroutine-first
+       or not the target has settled — which is what the waiting rules already say (coroutine-first
        §8 flag 4, `sync()` demoted to boundary-only). Deterministic: the first execution of the
        path fails, regardless of timing. **Depends on 6.12** — the legitimate
        `if (t.is_done()) v = t.sync();` idiom needs a non-blocking spelling before the
@@ -781,6 +781,22 @@ IDs — when an item is done, mark it, don't renumber.
        before building: the 6.8 benchmark is a strictly serial chain, the case that maximally
        rewards locality; a realistic fan-out workload may show much less. Do not reintroduce
        blocking retraction.
+
+   18. `[ ]` **(P3, evaluated 2026-08) `TS_CAPABILITY` / `TS_ACQUIRED_BEFORE` macros — a free
+       static mirror of 6.14's ranks.** Report + compiler output:
+       [static-order-checking-and-ww-mutex.md](static-order-checking-and-ww-mutex.md).
+       Ship thin macros wrapping Clang's thread-safety attributes (no-ops on MSVC, verified
+       zero-noise; clang-cl 22.1.3 ships in VS 18, so `ACQUIRED_BEFORE` is default-on under
+       plain `-Wthread-safety` and is silent over the current headers) plus a guide recipe for
+       the one shape that works: node body annotated `REQUIRES(<declared set>)` + a
+       `SCOPED_CAPABILITY` order token at the dynamic await, which produces the exact ABBA
+       diagnostic with zero false positives in free-function, lambda and coroutine forms.
+       P3 because it is strictly a subset of 6.14 at higher cost: function locals cannot carry
+       the attribute at all (~9% repo coverage, ~75% of samples), the held side must be
+       hand-written per body (42 sites in `game_frame`) and can drift silently from what
+       `compile()` derives, there is no declaration-level cycle check (use-driven only), and
+       `ACQUIRED_AFTER` is silently source-order-dependent. Do 6.14 first; revisit this as an
+       opt-in extra for users who want a compile-time signal on their own named state.
 
 7. **Deferred / Versioned**
    1. `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.

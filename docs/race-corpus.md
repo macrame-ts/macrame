@@ -260,7 +260,7 @@ exists to sweep. B4 is the fork-join pool-exhaustion deadlock again (cf.
 G5), independently rediscovered in a Rust engine — caller participation in
 `parallel_for` plus retraction removes the shape. O3 is the corpus's one
 clean `TS_ENSURE` row: a blocking wait inside a job on work owned by the
-blocked thread — the diagnostic's exact target shape, and the doctrine
+blocked thread — the diagnostic's exact target shape, and the waiting rules
 ("never block inside a node") it enforces. O2 is a classic two-mutex
 lock-order inversion; under `Guarded` there are no user-held mutexes and
 multi-object acquisition is canonical-order by pipe address, so the
