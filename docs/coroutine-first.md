@@ -319,9 +319,59 @@ them.
 
 Not blockers; to be worked through while the stages land:
 
-1. **Doctrine limitations (§2)** — which of the three cases' restrictions can be safely
-   relaxed, and whether we should (e.g. is foreign-await-under-grant safe enough to bless
-   before the detector, for read-only accesses?).
+1. **Waiting-rule limitations (§2) — ANSWERED (2026-08) by a field survey; one gap
+   identified.** ("Doctrine" renamed to **the waiting rules** — author, 2026-08: the old
+   name oversold a short list of ordinary rules.)
+
+   The concern was that the rules fight the architecture: we advocate parallelising at the
+   highest level (fat nodes holding many objects), and fat nodes look like more deadlock
+   surface. **The survey says the risk is misattributed.** A fat DECLARED access set carries
+   no deadlock risk at all — it is acquired in canonical order, all-or-nothing, and never
+   released mid-acquisition to wait for something outside the set; that is conservative 2PL,
+   deadlock-free by construction regardless of cardinality. Every system that predeclares the
+   most (Bevy's executor takes the whole set or nothing; BoC proves it for arbitrary cown
+   sets; Legion tasks declare dozens of region requirements) is deadlock-free *because* it
+   predeclares. All of the risk comes from DYNAMIC acquisition on top of the declared set,
+   which is independent of fatness — and the two are in fact anti-correlated: the fatter the
+   node, the cheaper it is to declare one more object instead of awaiting it. A thin node
+   faces the sharp choice; a fat one has already paid. So "parallelise high" and "don't
+   foreign-await" are the same advice, not competing advice.
+
+   Searched specifically for a deadlock caused by declared-access fatness in Bevy, Unity
+   DOTS, Legion, Orleans, oneTBB and the Rust ecosystem: **none found, in any system.** Every
+   reported deadlock is a wait inside work — Bevy's `block_on` under a starved pool, Unity's
+   forbidden `Complete()` from a job, Legion's inline mapping, Orleans grain-call cycles,
+   oneTBB's work-stealing re-entrancy (the UE TaskGraph failure mode). The rules target
+   exactly what users hit.
+
+   Relative strictness: we are the LOOSE end of the distribution, not the strict end. Bevy,
+   Unity, StarPU, OpenMP/OmpSs, Kokkos and BoC all FORBID what we merely discourage — StarPU
+   returns `-EDEADLK` for precisely `co_await obj.access(fn)` from inside a task; Unity's
+   docs name deadlock as the reason `Complete()` is main-thread only, calling the general
+   case "provably impossible to solve". Legion permits it and documents the resulting
+   deadlocks (plus an open unfixed hole since 2019). Tier 1–4 maps 1:1 onto the field's
+   shipped mitigations (declare = C2PL/Bevy/Legion privileges; snapshot + stage = `Commands`
+   / `EntityCommandBuffer` + sync points). What is unusual about our design is that we permit
+   tier 4 at all.
+
+   **The one real gap:** the canonical total order covers BATCH acquisition (`multi_acquire`,
+   node declared sets) but nothing relates a held grant to a LATER dynamic await. That is the
+   whole hole, and the field's cheap answer is a declared rank — see TODO 6.14.
+
+   Two cautions the survey turned up, both recorded against their items: order-learning over
+   *wait/completion* edges (as opposed to lock edges) has failed to merge into Linux twice in
+   eight years on false positives (cross-release reverted in 4.15; DEPT unmerged after 4+
+   years) — keep the waits-for detector scoped to grant edges and let quiescence (6.13) carry
+   the general case. And Go's quiescence check has a documented blind spot (any live
+   background thread masks a partial deadlock), which is why 6.13's outstanding-external-
+   wakeup counter is load-bearing rather than optional.
+
+   Also noted, not planned: `ww_mutex` (wound-wait with the restartable unit shrunk to a
+   side-effect-free acquisition prologue) is the only production precedent under our exact
+   constraints — dynamic, caller-ordered acquisition over non-rollbackable in-place objects.
+   It is the answer if a workload ever needs runtime-chosen access targets, since it
+   *recovers* where we would fatal. Recorded in the design space; not worth building on
+   suspicion.
 2. **HALO (§5.4)** — currently treated as unavailable; explore what coroutine shapes /
    compiler flags / annotations actually elide frames on MSVC and clang-cl, and whether
    any hot path can be structured to qualify.
