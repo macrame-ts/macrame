@@ -203,6 +203,21 @@ void run_death_scenario(const char* name)
         go.trigger();
         stray.sync();         // body writes `c` under the stale inherited grant -> fatal
     }
+    else if (std::strcmp(name, "detached_launch_undeclared") == 0)
+    {
+        // A detached `ts::launch` inherits no grant (docs/coroutine-first.md §2): a child that
+        // touches the launcher's guarded data runs under an empty context, so the harness
+        // faults on the FIRST access -- deterministically, in every checked run. (Contrast the
+        // stale-grant scenario above, where an inherited grant lets an early touch pass and
+        // only a late touch faults; a detached child has no such timing window.)
+        ts::Guarded<Counter> c{ ts::Named{} };
+        ts::Task<void> child;
+        c.access([&child](Counter& k)
+        {
+            child = ts::launch([&k] { k.add(1); });   // detached: touches the launcher's data
+        }).sync();
+        child.sync();   // blue-thread wait keeps us alive until the child runs -> undeclared-access fatal
+    }
     else if (std::strcmp(name, "graph_lend_mode_conflict") == 0)
     {
         // The outer node declares READ on `x`; the inner graph writes it. A read grant

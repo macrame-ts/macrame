@@ -103,20 +103,27 @@ and not airtight; the design position is that a cheap, always-on-in-dev
 *runtime oracle* beats both unverifiable convention and a compile-time
 scheme that would constrain the programming model (§7.9 on Rust/Pony).
 
-Grant *inheritance* makes the model compose: sub-work launched from a task
-body (nested tasks, `parallel_for` chunks, coroutine segments after
-suspension) carries the parent's grant set by value. That one rule lets a
-graph node fan out dynamic work over its declared data without new
-declarations, and it is what coroutine support reuses wholesale (§5).
+Grant *inheritance* makes the model compose, but only for **structurally
+gated** sub-work — `ts::nested` tasks, `Task_scope` children, `parallel_for`
+chunks, coroutine segments after suspension — which carries the parent's
+grant set by value. Gating is the soundness condition: the parent's
+completion waits for the child, so the grant provably outlives it. That one
+rule lets a graph node fan out dynamic work over its declared data without
+new declarations, and it is what coroutine support reuses wholesale (§5). A
+detached `ts::launch` is *not* gated (its handle may be dropped), so it
+inherits nothing and runs under an empty context — a touch of the parent's
+data faults deterministically as undeclared access, rather than racing the
+next acquirer on a timing window.
 
-Inheritance is bounded by **grant-window validity**: each pipe carries a
-write-epoch with seqlock parity (bumped at write-grant acquire and release;
-+2 on a graph write handoff, which elides both pipe operations), and every
-context entry declared under a pipe grant captures the epoch at declaration.
-A snapshot that outlives its window — a non-nested `ts::launch` running
-after the node that spawned it released its objects — fails the comparison
-at the next instrumented access and faults with a stale-grant diagnostic
-rather than silently racing the next acquirer. The parity choice makes one
+Where inheritance does apply, it is bounded by **grant-window validity**:
+each pipe carries a write-epoch with seqlock parity (bumped at write-grant
+acquire and release; +2 on a graph write handoff, which elides both pipe
+operations), and every context entry declared under a pipe grant captures
+the epoch at declaration. A snapshot that outlives its window — a detached
+coroutine created under a node's grant, resuming after the node released its
+objects — fails the comparison at the next instrumented access and faults
+with a stale-grant diagnostic rather than silently racing the next
+acquirer. The parity choice makes one
 rule serve both modes: a write entry is valid while its holder's window is
 open; a read entry is valid until a *writer* acquires (other readers coming
 and going don't bump), which is the actual safety condition, not the

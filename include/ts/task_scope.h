@@ -37,12 +37,16 @@ public:
     }
 
     // Launch a child into this scope (eager, grant-inheriting). Returns the task handle for
-    // optional individual awaiting; the child stays recorded for `join()` either way.
+    // optional individual awaiting; the child stays recorded for `join()` either way. Unlike
+    // the detached `ts::launch` (which inherits nothing), a scope child inherits the caller's
+    // grant: the child is structurally gated by `co_await scope.join()`, so the grant provably
+    // outlives it -- the same soundness condition as `ts::nested` (docs/coroutine-first.md §2).
     template<typename Fn>
         requires detail::Task_body<Fn>
     auto launch(Fn&& fn, Launch_options opts = {})
     {
-        auto t = ts::launch(std::forward<Fn>(fn), std::move(opts));
+        auto t = detail::build_bare_task<true>(std::forward<Fn>(fn), std::move(opts),
+            std::source_location::current());
         children_.push_back(detail::core_of(t));
         return t;
     }

@@ -255,18 +255,22 @@ Two limits you should understand:
   is exactly what the harness exists to catch at runtime. Treat a harness
   abort as a real bug, never as noise.
 
-Sub-work inherits grants: a task launched from inside a task body (or a
-`parallel_for` chunk, or a nested task) carries the parent's grants, so
-fan-out over data the parent owns just works.
+Structurally-gated sub-work inherits grants: a `ts::nested` task, a
+`Task_scope` child, a `parallel_for` chunk, or a coroutine segment after
+suspension carries the parent's grants, so fan-out over data the parent
+owns just works. The gating is what makes it sound — the parent's
+completion (and so its grant release) waits for the child, so the grant
+provably outlives it.
 
-An inherited grant is only valid while the access scope it came from is
-still open. Nested sub-work (`ts::nested`) is always safe — the parent's
-completion (and so its grant release) waits for it. A plain `ts::launch`
-that is *not* gated as nested can outlive the parent's access scope; if it
-then touches the parent's guarded data, the harness aborts with a
-stale-grant diagnostic instead of letting the access race whoever holds
-the object next. The fix is always the same: gate the sub-work with
-`ts::nested`.
+A detached `ts::launch` inherits nothing. Its handle may be dropped, so
+it can outlive the parent's access scope; an inherited grant would then
+race whoever holds the object next, and the harness would catch that only
+on a late touch — or not at all in a shipping build. Running the child
+under an empty context instead makes any touch of the parent's guarded
+data fault deterministically, on the first access, in every checked run.
+To fan out over the parent's data, gate the sub-work: `ts::nested` (its
+completion joins the parent's), or acquire fresh with `obj.async(...)` /
+`co_await obj.access(...)`.
 
 ---
 
@@ -1172,9 +1176,11 @@ ts::set_default_relaxed_rules(ts::Rule::in_task_sync);   // process-wide, for "r
 ```
 
 A relaxation follows the ambient task state rather than the thread: it survives a
-coroutine's suspensions and is inherited by sub-work launched under it, exactly as a grant
-is. It is therefore a little wider than the lexical scope suggests — deliberately, since a
-child inherits the grant and so inherits the hazard.
+coroutine's suspensions and is inherited by structurally-gated sub-work (`ts::nested`,
+`Task_scope` children), exactly as a grant is. It is therefore a little wider than the
+lexical scope suggests — deliberately, since a gated child inherits the grant and so
+inherits the hazard. A detached `ts::launch` inherits neither the grant nor the relaxation
+(§ on grant inheritance): it is a fresh context, so an opt-out does not follow it.
 
 Not every rule can be relaxed. `Rule::await_under_guard` (§8.2) protects an invariant the
 implementation relies on, not just a hazard you might know is absent, so it has no runtime

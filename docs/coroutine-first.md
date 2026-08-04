@@ -67,6 +67,17 @@ Grant lifetime rule (replaces §8's nested phrasing): **a node's grants are held
 completion, and a coroutine node completes when its frame completes** — suspension does
 not release grants; body-return is not completion.
 
+Inheritance is **gated-only**. Rule (a)'s "own spawned children" are the structurally-gated
+launches — `ts::nested`, `Task_scope` children, `parallel_for` chunks, coroutine segments —
+whose completion is joined to the holder, so the holder's grant provably outlives them and
+they inherit it soundly. A detached `ts::launch`/`ts::task` is **not** gated: its handle may
+be dropped and its grant window can close while it still runs, so it inherits nothing and runs
+under an empty context. A body that touches the launcher's guarded data then faults
+deterministically as undeclared access on the *first* access, in every checked run — rather
+than passing on an inherited-but-not-yet-stale grant and faulting only on a late touch (or, in
+a shipping build, never). The sanctioned fan-out over a holder's data is therefore `ts::nested`
+(or a fresh acquire via `obj.async` / `co_await obj.access`), never a bare `ts::launch`.
+
 ## 3. What is deleted (and what replaces it)
 
 | deleted | replaced by |

@@ -943,13 +943,18 @@ concept Task_body = std::invocable<std::decay_t<Fn>&>
     || std::invocable<std::decay_t<Fn>&, const Cancellation_token&>;
 
 // Wrap `fn` so the task runs under the access grant active where it was BUILT (see
-// access.h): sub-work launched from a task body inherits the launcher's permissions and
-// may touch the launcher's guarded data. The snapshot is by value, so it is valid after
-// the launcher unwinds and on whatever worker runs the body; a top-level
-// build (no active grant) captures nothing, so the scope is a no-op. Shared by
-// `ts::launch` and `ts::task` so both the eager and the builder path inherit alike. If
-// `fn` takes a trailing `Cancellation_token`, the wrapper does too (forwarded by
-// `Executable::run` from the block's token), so the body can poll for cancellation.
+// access.h): structurally-gated sub-work inherits the launcher's permissions and may touch
+// the launcher's guarded data. The snapshot is by value, so it is valid after the launcher
+// unwinds and on whatever worker runs the body; a top-level build (no active grant) captures
+// nothing, so the scope is a no-op. Used ONLY by the GATED launches -- `ts::nested` and
+// `Task_scope::launch` -- whose completion is joined to the launcher, so the launcher's grant
+// provably outlives the child (docs/coroutine-first.md §2). A detached `ts::launch`/`ts::task`
+// does NOT wrap: its handle may be dropped, the grant window can close while the child still
+// runs, and an inherited-but-stale grant makes an undeclared touch fault only on TIMING (late
+// touch) or not at all in shipping -- so it inherits nothing and faults deterministically on
+// the first touch instead. If `fn` takes a trailing `Cancellation_token`, the wrapper does too
+// (forwarded by `Executable::run` from the block's token), so the body can poll for
+// cancellation.
 template<typename R, typename Fn>
 auto with_inherited_access(Fn&& fn)
 {
@@ -1189,12 +1194,44 @@ Task<R> task_from_core(Task_ptr core) noexcept { return Task<R>(std::move(core))
 
 } // namespace detail
 
+namespace detail
+{
+
+// Shared builder for the bare-task entry points. `Inherit` selects grant inheritance:
+// the structurally-gated launches (`ts::nested`, `Task_scope::launch`) wrap the body in
+// `with_inherited_access` so it runs under the launcher's grant + rule relaxation and may
+// touch the launcher's guarded data; a detached `ts::launch`/`ts::task` passes the body raw,
+// so it runs under an empty context (the same no-current-task case a blue-boundary launch
+// installs) and an undeclared touch faults deterministically on the first access rather than
+// racing the launcher's closing grant window (docs/coroutine-first.md §2). The raw body keeps
+// its shape (a trailing-`Cancellation_token` overload is preserved), so `Executable::run`
+// forwards the token either way.
+template<bool Inherit, typename Fn>
+auto build_bare_task(Fn&& fn, Launch_options opts, std::source_location site)
+{
+    using R = detail::Task_result_t<Fn>;
+    Task_ptr core;
+    if constexpr (Inherit)
+        core = make_executable<R>(with_inherited_access<R>(std::forward<Fn>(fn)), std::move(opts.token));
+    else
+        core = make_executable<R>(std::forward<Fn>(fn), std::move(opts.token));
+    core->flags.priority = opts.priority;
+    set_task_name(core, named_from(opts, site));
+    submit_ready(core, core->generation());   // fresh block, pre-dispatch: gen 0, race-free read
+    return Task<R>(core);
+}
+
+} // namespace detail
+
 // Launch a standalone task on the scheduler — a bare functor with no access target (the
 // primitive `async` for work that touches no guarded object). Returns a `Task<R>`; a
 // `Launch_options{token, priority}` makes it skippable before it runs and sets its queue
 // position. Dispatches through the `submit_ready` bridge (so this stays scheduler-
-// independent) and inherits the launcher's access grant, so sub-work launched from a task
-// body may touch the launcher's data.
+// independent). The launched task inherits NOTHING from the launcher — its handle may be
+// dropped (the detached case), so the launcher's grant cannot be guaranteed to outlive the
+// child; a body that touches the launcher's guarded data faults as undeclared access. To
+// touch the launcher's data, gate the child: `ts::nested` (joins the launcher's completion)
+// or acquire fresh via `obj.async(...)` / `co_await obj.access(...)`.
 // (Deduced return -- `Task<Task_result_t<Fn>>` -- rather than a trailing return type:
 // the trailing form substitutes during overload resolution, BEFORE the constraint is
 // checked, so a wrong body shape would hard-error inside `Task_result` instead of
@@ -1207,12 +1244,7 @@ template<typename Fn>
 auto launch(Fn&& fn, Launch_options opts = {},
             std::source_location site = std::source_location::current())
 {
-    using R = detail::Task_result_t<Fn>;
-    auto core = detail::make_executable<R>(detail::with_inherited_access<R>(std::forward<Fn>(fn)), std::move(opts.token));
-    core->flags.priority = opts.priority;
-    detail::set_task_name(core, detail::named_from(opts, site));
-    detail::submit_ready(core, core->generation());   // fresh block, pre-dispatch: gen 0, race-free read
-    return Task<R>(core);
+    return detail::build_bare_task<false>(std::forward<Fn>(fn), std::move(opts), site);
 }
 
 namespace detail
@@ -1259,13 +1291,16 @@ inline void add_nested(Task_ptr child_core)
 
 // Launch a task and attach it as a nested task of the currently-executing task (its
 // completion gates the parent's): the parent will not complete until the child settles.
-// Call from within a task body; fatal outside one.
+// Call from within a task body; fatal outside one. Unlike the detached `ts::launch`, a
+// nested child INHERITS the launcher's grant (+ rule relaxation): the gating makes the
+// launcher's grant provably outlive the child, so touching the launcher's guarded data is
+// sound (docs/coroutine-first.md §2). `site` forwarded, not re-defaulted.
 template<typename Fn>
     requires detail::Task_body<Fn>
 auto nested(Fn&& fn, Launch_options opts = {},
             std::source_location site = std::source_location::current())
 {
-    auto t = launch(std::forward<Fn>(fn), std::move(opts), site);   // site forwarded, not re-defaulted
+    auto t = detail::build_bare_task<true>(std::forward<Fn>(fn), std::move(opts), site);
     detail::add_nested(detail::core_of(t));
     return t;
 }

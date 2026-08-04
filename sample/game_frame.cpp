@@ -213,14 +213,14 @@ struct World
     ts::Guarded<Skeletons> skeletons{ ts::Named{"skeletons"}, entity_count };
     ts::Guarded<Nav_mesh> nav_mesh{ ts::Named{"nav_mesh"}, entity_count };
     ts::Guarded<Renderables> renderables{ ts::Named{"renderables"}, entity_count };
-    ts::Guarded<Asset_source> asset_source{ ts::Named{"asset_source"}, ts::Rank{ 20 }, entity_count };
+    ts::Guarded<Asset_source> asset_source{ ts::Named{"asset_source"}, entity_count };
 
     // single-writer outputs (writer named by the type)
-    ts::Guarded<Input> input{ ts::Named{"input"}, ts::Rank{ 10 }, entity_count };
+    ts::Guarded<Input> input{ ts::Named{"input"}, entity_count };
     ts::Guarded<Camera> camera{ ts::Named{"camera"}, entity_count };
     ts::Guarded<Net> net{ ts::Named{"net"}, entity_count };
     ts::Guarded<Script_events> script_events{ ts::Named{"script_events"}, entity_count };
-    ts::Guarded<Assets> assets{ ts::Named{"assets"}, ts::Rank{ 10 }, entity_count };
+    ts::Guarded<Assets> assets{ ts::Named{"assets"}, entity_count };
     ts::Guarded<Nav_tiles> nav_tiles{ ts::Named{"nav_tiles"}, entity_count };
     ts::Guarded<Combat> combat{ ts::Named{"combat"}, entity_count };
     ts::Guarded<Economy> economy{ ts::Named{"economy"}, entity_count };
@@ -723,24 +723,30 @@ void tick_streaming(ts::Guarded<Asset_source>& asset_source, const Input& input,
     read_all(input);
     fill(assets, 1.0f);
 
-    // Four loads fire eagerly and run concurrently; the coroutine awaits each in turn and
-    // counts the batch after the last. Fire-and-forget -- the handle is dropped and the
-    // frame owns itself until it completes, which may be after this node returns. It
-    // accesses only `asset_source` (through its own async loads) and process-wide atomics,
-    // never this node's `input` or `assets`.
-    [](ts::Guarded<Asset_source>& src) -> ts::Task<void>
+    // The loads run as detached, fire-and-forget work that touches only `asset_source`
+    // (through its own async reads) and process-wide atomics -- never this node's `input` or
+    // `assets`. Kick them off through a detached `ts::launch`, which inherits none of this
+    // node's grants (docs/coroutine-first.md §2): the load coroutine created inside it snapshots
+    // an empty context, so it holds nothing while it awaits `asset_source` and needs no rank to
+    // await a foreign object. Four loads fire eagerly and run concurrently; the coroutine awaits
+    // each in turn and counts the batch after the last. The frame owns itself until it
+    // completes, which may be after this node returns.
+    ts::launch([&asset_source]
     {
-        auto load = [](const Asset_source& s) { spin(0.2); return s.size() > 0 ? s.get(0) : 1.0f; };
-        ts::Task<float> a = src.async(load);
-        ts::Task<float> b = src.async(load);
-        ts::Task<float> c = src.async(load);
-        ts::Task<float> d = src.async(load);
-        co_await a; streamed.fetch_add(1, std::memory_order_relaxed);
-        co_await b; streamed.fetch_add(1, std::memory_order_relaxed);
-        co_await c; streamed.fetch_add(1, std::memory_order_relaxed);
-        co_await d; streamed.fetch_add(1, std::memory_order_relaxed);
-        batches.fetch_add(1, std::memory_order_relaxed);
-    }(asset_source);
+        [](ts::Guarded<Asset_source>& src) -> ts::Task<void>
+        {
+            auto load = [](const Asset_source& s) { spin(0.2); return s.size() > 0 ? s.get(0) : 1.0f; };
+            ts::Task<float> a = src.async(load);
+            ts::Task<float> b = src.async(load);
+            ts::Task<float> c = src.async(load);
+            ts::Task<float> d = src.async(load);
+            co_await a; streamed.fetch_add(1, std::memory_order_relaxed);
+            co_await b; streamed.fetch_add(1, std::memory_order_relaxed);
+            co_await c; streamed.fetch_add(1, std::memory_order_relaxed);
+            co_await d; streamed.fetch_add(1, std::memory_order_relaxed);
+            batches.fetch_add(1, std::memory_order_relaxed);
+        }(asset_source);
+    });
 
     spin(budget::streaming);
 }

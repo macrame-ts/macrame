@@ -1,6 +1,8 @@
 #include "access_tests.h"
 #include "ts/access.h"
 #include "ts/fatal.h"
+#include "ts/guarded.h"
+#include "ts/static_task_graph.h"
 #include "harness.h"
 #include "test_util.h"
 
@@ -158,6 +160,26 @@ void test_death_context_overflow(){ TS_CHECK(ts::test::expect_death("access_cont
 // A non-nested task launched from a graph node inherits the node's grant but outlives
 // it; its guarded access after the node released must fault (the stale-grant fatal).
 void test_death_stale_grant()   { TS_CHECK(ts::test::expect_death("stale_inherited_grant")); }
+// A detached `ts::launch` inherits no grant, so a body touching the launcher's guarded data
+// faults deterministically as undeclared access (docs/coroutine-first.md §2).
+void test_death_detached_launch(){ TS_CHECK(ts::test::expect_death("detached_launch_undeclared")); }
+
+// Companion to the detached-launch death test: the sanctioned form. A `ts::nested` child IS
+// gated -- its completion joins the launcher, so the launcher's grant provably outlives it --
+// so it inherits the grant and may touch the launcher's guarded data legally.
+void test_nested_child_touches_guarded()
+{
+    ts::Guarded<tests::Counter> c{ ts::Named{ "c" } };
+    ts::Static_task_graph g;
+    g.add_node("writer", [](tests::Counter& k)
+    {
+        ts::nested([&k] { k.add(5); });   // gated child: legal guarded write under the inherited grant
+    }, c);
+    g.compile();
+    g.execute().sync();
+    int seen = c.access([](const tests::Counter& k) { return k.value(); }).sync();
+    TS_CHECK(seen == 5);
+}
 
 } // namespace
 
@@ -178,4 +200,6 @@ void run_access_tests()
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: wrong instance", test_death_wrong_instance);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: context overflow", test_death_context_overflow);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: stale inherited grant", test_death_stale_grant);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: detached launch undeclared access", test_death_detached_launch);
+    run("nested child touches guarded (sanctioned)", test_nested_child_touches_guarded);
 }

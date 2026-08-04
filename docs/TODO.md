@@ -20,9 +20,11 @@ death tests), documented, and CI-gated.
 
 - **Task core (coroutine-first, 2026-08)** — `Task<R>` is the one completion primitive:
   awaitable from any task, `sync()`/`take()` legal ONLY outside tasks (in-task blocking is
-  fatal under `TS_SAFETY_CHECKS`). Composition is `co_await`; `ts::launch` (free-running) and
-  `ts::nested` (joins the caller's implicit scope) are the launch verbs, `Task_scope` the
-  explicit nursery. Cooperative cancellation (+ `Cancel_callback` + trailing-
+  fatal under `TS_SAFETY_CHECKS`). Composition is `co_await`; `ts::launch` (free-running,
+  inherits NO grant — detached, so a touch of the launcher's guarded data faults
+  deterministically) and `ts::nested` (joins the caller's implicit scope, inherits the grant)
+  are the launch verbs, `Task_scope` the explicit nursery (gated, inherits like `nested`).
+  Inheritance is gated-only (docs/coroutine-first.md §2). Cooperative cancellation (+ `Cancel_callback` + trailing-
   `Cancellation_token` body early-out), `Signal` (+ `reset()`) as the awaitable event.
   Deleted with the transformation: `then`, `when_all`, the `ts::task` builder + `after`,
   retraction/deep-retraction, executable task reuse, the inline-dispatch trampoline

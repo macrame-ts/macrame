@@ -73,23 +73,36 @@ void test_relaxed_scope_refuses_structural()
 #endif
 }
 
-// 4. Reach, part 1: sub-work launched under a relaxation inherits it, exactly as it inherits
-// the launcher's grant (docs/waiting-rule-policy.md §4).
+// 4. Reach, part 1: a relaxation opened in a task body reaches its STRUCTURALLY-GATED
+// sub-work (`ts::nested`), which inherits the launcher's grant AND the opt-out that speaks
+// for it (docs/waiting-rule-policy.md §4). A DETACHED `ts::launch` inherits neither: its
+// handle may outlive the launcher's scope, so it runs as a fresh context and sees no
+// relaxation (docs/coroutine-first.md §2).
 void test_relaxed_scope_inherited_by_child()
 {
 #if TS_RULES_ANY
-    std::atomic<bool> seen_in_child{ false };
-    ts::Task<void> child;
+    std::atomic<bool> seen_in_nested{ false };
+    std::atomic<bool> seen_in_detached{ true };   // detached must NOT inherit -> ends false
+    ts::Signal detached_done;
+    ts::launch([&]
     {
         ts::Relaxed_scope relax{ Rule::in_task_sync };
-        child = ts::launch([&seen_in_child]
+        // Gated child: its completion joins this task, so the relaxation reaches it.
+        ts::nested([&seen_in_nested]
         {
-            seen_in_child.store(ts::rule_relaxed(Rule::in_task_sync), std::memory_order_relaxed);
+            seen_in_nested.store(ts::rule_relaxed(Rule::in_task_sync), std::memory_order_relaxed);
         });
-    }
-    child.sync();
-    TS_CHECK(seen_in_child.load(std::memory_order_relaxed));
-    TS_CHECK(!ts::rule_relaxed(Rule::in_task_sync));   // the launcher's thread is unaffected
+        // Detached child: a fresh context, so the relaxation does not.
+        ts::launch([&seen_in_detached, &detached_done]
+        {
+            seen_in_detached.store(ts::rule_relaxed(Rule::in_task_sync), std::memory_order_relaxed);
+            detached_done.trigger();
+        });
+    }).sync();                        // waits for the body + the gated nested child
+    detached_done.sync();             // the detached child is not gated -- wait for it explicitly
+    TS_CHECK(seen_in_nested.load(std::memory_order_relaxed));      // gated -> inherited
+    TS_CHECK(!seen_in_detached.load(std::memory_order_relaxed));   // detached -> fresh context
+    TS_CHECK(!ts::rule_relaxed(Rule::in_task_sync));               // the test thread is unaffected
 #endif
 }
 
