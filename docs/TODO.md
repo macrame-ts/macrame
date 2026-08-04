@@ -820,8 +820,32 @@ IDs — when an item is done, mark it, don't renumber.
        `ACQUIRED_AFTER` is silently source-order-dependent. Do 6.14 first; revisit this as an
        opt-in extra for users who want a compile-time signal on their own named state.
 
-   19. `[ ]` **(P2, author 2026-08) Debug name on every task — `source_location` by default,
-       overridable.** Graph nodes are named (`Node_name`, implicit from a string literal, `{}`
+   19. `[x]` **(P2, author 2026-08) Debug name on every task — DONE (2026-08), as
+       author-specified.** One `ts::Named` (`include/ts/named.h`) for nodes, objects and tasks;
+       `Node_name` deleted. It stores `{literal, file, line}` — not a whole `source_location`,
+       since `function_name()` is never used — displayed as the literal else
+       `basename(file):line`. Required for nodes and objects (their unnamed constructors and
+       the `node<N>`/`objN` fallbacks are gone; `ts::Named{}` is the "identify me by my call
+       site" spelling); optional for tasks, where the verb captures the site by default.
+       The three design points settled:
+       (a) **cost** — node and object names stay in shipping (they feed the DOT dump and the
+       trace, both shipping-capable, over a handful of entities); the task's `Named` is
+       `TS_SAFETY_CHECKS`-gated, field included, so the 264 B block is unchanged in shipping.
+       (b) **the coroutine case** — a promise sees the coroutine's arguments, not its call site,
+       so a frame cannot capture one; it INHERITS the identity of the task it was created
+       inside, which for a coroutine node body is the node — exactly the participant a
+       diagnostic should name.
+       (c) **plumbing** — a defaulted `source_location` captures the CALLER of the function
+       declaring it, so it is declared only on the outermost verb the user calls
+       (`launch`/`nested`/`Guarded::access`/`async`/`Deferred::commit`) and the resulting
+       `Named` is passed down every internal layer explicitly; `tests/named_tests.cpp` asserts
+       captured sites land in the test file rather than a library header. The pack-ending
+       multi-object `ts::access`/`ts::async` cannot take a trailing default, so they carry only
+       an explicit `{.name = "..."}` — documented, not worked around.
+       Payoff landed with it: the waits-for cycle fatal now reads `task 'nodeA' holding 'objA'
+       awaits 'objB', while task 'nodeB' holding 'objB' awaits 'objA'`. Also resolves
+       Inconsistency 7. Original text follows.
+       Graph nodes are named (`Node_name`, implicit from a string literal, `{}`
        captures the `add_node` call site via `std::source_location`) and objects are named
        (`ts::Named`), but **dynamic tasks are anonymous**. Since coroutine-first made
        coroutines the whole dynamic vocabulary, and since their ergonomics are a stated goal,
@@ -1019,14 +1043,17 @@ change after public. Feed the going-public "API-stability pass".
    mixed-config link fail with a diagnostic. The same convention governs the shelved
    interval-grant entry layout ([escaped-refs-hardening.md](escaped-refs-hardening.md) §6.1)
    if revived.
-7. **Entity-naming approach — review before it hardens (author 2026-07, T18).** We name nodes
-   (`Node_name` / `std::source_location`) and objects (`ts::Named` leading ctor arg), which is
-   what makes edge provenance and the DOT dump cheap — but the author is "not totally sold on
-   `ts::Named`" (the distinct-wrapper-to-avoid-`T`-ctor-ambiguity design, design.md §2.3). Since
-   provenance-driven optimization (2.4/2.5, the orientation lever) leans on these names, ratify
-   or revise the naming surface in the API-stability pass *before* more tooling depends on it.
-   Question: is a leading `ts::Named{"..."}` wrapper the right spelling, or a `.name("...")`
-   setter / a `Named<Guarded<T>>` alias / something else? Cheap to change now, costly post-public.
+7. **Entity-naming approach — RESOLVED (author-designed, 2026-08).** Ratified as the leading
+   `ts::Named` wrapper, unified across all three entity kinds: `Node_name` is deleted and
+   `add_node` takes `ts::Named` in the same leading position; `Guarded`/`Versioned` keep theirs;
+   tasks carry one too. `Named` is a literal **or** a captured call site
+   (`{literal, file, line}`, implicit from a string literal, `ts::Named{}` for the site alone),
+   displayed as the literal else `basename(file):line`. Required for nodes and objects — their
+   unnamed constructors and the `node<N>`/`objN` ordinal fallbacks are gone — and optional for
+   tasks, where the verb captures the creation site by default. The load-bearing implementation
+   rule (the defaulted `source_location` must sit on the OUTERMOST function the user calls, with
+   the resulting `Named` passed down explicitly) is stated in `ts/named.h` and pinned by
+   `tests/named_tests.cpp`. Specifies 6.19.
 
 ---
 

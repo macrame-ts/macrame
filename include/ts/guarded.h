@@ -416,29 +416,22 @@ class Guarded
     friend struct detail::Guarded_access;
 
 public:
-    // Non-explicit default ctor (value-initializes `T`) so arrays of `Guarded`
-    // work; the forwarding ctor below handles explicit argument construction.
-    Guarded() requires std::default_initializable<T>
-        : instance_()
-    {}
-
-    // Constrained so it never shadows the (deleted) copy/move constructors:
-    // 1+ args, and only when T is actually constructible from them.
-    template<typename... Args>
-        requires (sizeof...(Args) >= 1) && std::constructible_from<T, Args...>
-    explicit Guarded(Args&&... args)
-        : instance_(std::forward<Args>(args)...)
-    {}
-
-    // Named form: leading `ts::Named` -- a literal or `ts::Named{}` for the construction
-    // site -- then `T`'s constructor arguments as usual. The first parameter must BE a
-    // `Named`, not something convertible to one: `Named(const char*)` is implicit (so
-    // `add_node("physics", ...)` reads well), and without this constraint
-    // `Guarded<std::string> g{ "hello" }` would silently mean "named hello,
-    // default-constructed string" rather than failing to compile.
+    // The ONLY constructor: a leading `ts::Named` -- a literal or `ts::Named{}` for the
+    // construction site -- then `T`'s constructor arguments as usual. Naming is required
+    // because the name is what every diagnostic, DOT tooltip and trace row about this
+    // object prints; `ts::Named{}` is the deliberate "identify me by where I am written"
+    // spelling and costs one token.
+    //
+    // The first parameter must BE a `Named`, not something convertible to one:
+    // `Named(const char*)` is implicit (so `add_node("physics", ...)` reads well), and
+    // without this constraint `Guarded<std::string> g{ "hello" }` would silently mean
+    // "named hello, default-constructed string" rather than failing to compile.
+    // Not `explicit`: an array of `Guarded` copy-initializes each element from one
+    // `ts::Named`, and the type is neither copyable nor movable, so that is the only way
+    // to build one in place.
     template<typename N, typename... Args>
         requires std::same_as<std::remove_cvref_t<N>, Named> && std::constructible_from<T, Args...>
-    explicit Guarded(N&& name, Args&&... args)
+    Guarded(N&& name, Args&&... args)
         : instance_(std::forward<Args>(args)...)
     {
         pipe_.debug_name = name;

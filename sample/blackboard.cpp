@@ -219,12 +219,12 @@ Blackboard_stats run_blackboard_frames(int frames)
     // Destruction order: graph last (it holds the recorder), then systems, then
     // the board -- callbacks capture squad/audio by reference, so those outlive
     // the Subscriptions holding the callbacks.
-    ts::Guarded<World> world;
-    ts::Versioned<Blackboard> bb;   // the shared board
-    ts::Guarded<Squad> squad;
-    ts::Guarded<Audio> audio;
-    ts::Guarded<Agents> agents;
-    ts::Guarded<Subscriptions> subs;
+    ts::Guarded<World> world{ ts::Named{} };
+    ts::Versioned<Blackboard> bb{ ts::Named{} };   // the shared board
+    ts::Guarded<Squad> squad{ ts::Named{} };
+    ts::Guarded<Audio> audio{ ts::Named{} };
+    ts::Guarded<Agents> agents{ ts::Named{} };
+    ts::Guarded<Subscriptions> subs{ ts::Named{} };
 
     // Register subscriptions. The callbacks fire inside the dispatch node; both
     // route their side effects through `async` -- no grant needed to submit.
@@ -250,7 +250,7 @@ Blackboard_stats run_blackboard_frames(int frames)
 
     ts::Static_task_graph g;
 
-    g.add_node([](World& w) { w.tick(); }, world);
+    g.add_node(ts::Named{}, [](World& w) { w.tick(); }, world);
 
     // Senses: reads the world, stages facts -- no grant on the board, so it
     // never contends with the thinkers. The alert decay is a read-modify-write
@@ -258,7 +258,7 @@ Blackboard_stats run_blackboard_frames(int frames)
     // pre-states), and it owns its keys -- the key-ownership convention that
     // the cross-recorder ordering contract enforces by making the alternative
     // meaningless.
-    auto sense = g.add_node([rec = bb.recorder()](const World& w) mutable
+    auto sense = g.add_node(ts::Named{}, [rec = bb.recorder()](const World& w) mutable
     {
         Vec2 p = w.player();
         bool vis = w.player_in_zone();
@@ -274,16 +274,16 @@ Blackboard_stats run_blackboard_frames(int frames)
     // Thinkers: read the stable previous version all frame (declared before the
     // flip -> derived read->write edge). Every agent sees the same facts --
     // frame-coherent decisions, one frame of stimulus latency by design.
-    g.add_node([](const Blackboard& b, Agents& ag)
+    g.add_node(ts::Named{}, [](const Blackboard& b, Agents& ag)
     {
         ag.observe(b.get<bool>(Key::player_visible, false));
     }, bb.state(), agents);
 
-    auto flip = g.add_node(ts::publish_body(bb), bb.state());
+    auto flip = g.add_node(ts::Named{}, ts::publish_body(bb), bb.state());
     flip.after(sense);
 
     // Notification: after the flip, diff-and-fire off the fresh version.
-    auto notify = g.add_node([](const Blackboard& b, Subscriptions& s)
+    auto notify = g.add_node(ts::Named{}, [](const Blackboard& b, Subscriptions& s)
     {
         s.dispatch(b);
     }, bb.state(), subs);

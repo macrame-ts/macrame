@@ -30,7 +30,7 @@ static_assert(std::is_same_v<
 
 void test_stage_commit_applies_all()
 {
-    ts::Guarded<Counter> target;
+    ts::Guarded<Counter> target{ ts::Named{} };
     ts::Deferred<Counter> d{ target };
 
     auto rec = d.recorder();
@@ -46,7 +46,7 @@ void test_stage_takes_no_grant()
 {
     // Staging happens on a thread with NO task context at all -- if it touched the
     // target, the harness would fatal. It must not.
-    ts::Guarded<Counter> target;
+    ts::Guarded<Counter> target{ ts::Named{} };
     ts::Deferred<Counter> d{ target };
     auto rec = d.recorder();
     rec.stage([](Counter& c) { c.increment(); });
@@ -56,7 +56,7 @@ void test_stage_takes_no_grant()
 
 void test_empty_commit()
 {
-    ts::Guarded<int> target{ 9 };
+    ts::Guarded<int> target{ ts::Named{}, 9 };
     ts::Deferred<int> d{ target };
     d.commit().sync();
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 9);
@@ -64,7 +64,7 @@ void test_empty_commit()
 
 void test_intra_recorder_fifo()
 {
-    ts::Guarded<std::vector<int>> target;
+    ts::Guarded<std::vector<int>> target{ ts::Named{} };
     ts::Deferred<std::vector<int>> d{ target };
 
     auto rec = d.recorder();
@@ -82,7 +82,7 @@ void test_recorder_creation_order_not_stage_order()
 {
     // rec2's commands are staged chronologically FIRST, but rec1 was created first
     // -- the apply order is keyed by recorder creation, not by stage time.
-    ts::Guarded<std::vector<int>> target;
+    ts::Guarded<std::vector<int>> target{ ts::Named{} };
     ts::Deferred<std::vector<int>> d{ target };
 
     auto rec1 = d.recorder();
@@ -102,7 +102,7 @@ void test_concurrent_staging()
     constexpr int threads = 8;
     constexpr int per_thread = 500;
 
-    ts::Guarded<Counter> target;
+    ts::Guarded<Counter> target{ ts::Named{} };
     ts::Deferred<Counter> d{ target };
 
     std::vector<std::jthread> staging;
@@ -125,7 +125,7 @@ void test_concurrent_staging()
 
 void test_readers_see_none_then_all()
 {
-    ts::Guarded<int> target{ 0 };
+    ts::Guarded<int> target{ ts::Named{}, 0 };
     ts::Deferred<int> d{ target };
 
     auto rec = d.recorder();
@@ -145,7 +145,7 @@ void test_readers_see_none_then_all()
 
 void test_commit_under_async_write_grant()
 {
-    ts::Guarded<Counter> target;
+    ts::Guarded<Counter> target{ ts::Named{} };
     ts::Deferred<Counter> d{ target };
 
     auto rec = d.recorder();
@@ -165,17 +165,17 @@ void test_commit_under_async_write_grant()
 
 void test_commit_in_graph_node()
 {
-    ts::Guarded<Counter> target;
-    ts::Guarded<int> producer_state{ 0 };
+    ts::Guarded<Counter> target{ ts::Named{} };
+    ts::Guarded<int> producer_state{ ts::Named{}, 0 };
     ts::Deferred<Counter> d{ target };
 
     ts::Static_task_graph g;
-    auto producer = g.add_node([rec = d.recorder()](int& s) mutable
+    auto producer = g.add_node(ts::Named{}, [rec = d.recorder()](int& s) mutable
     {
         ++s;
         rec.stage([](Counter& c) { c.add(10); });
     }, producer_state);
-    auto commit = g.add_node([&d](Counter&) { d.commit(); }, target);
+    auto commit = g.add_node(ts::Named{}, [&d](Counter&) { d.commit(); }, target);
     commit.after(producer);
     g.compile();
 
@@ -190,7 +190,7 @@ void test_commit_in_graph_node()
 
 void test_straggler_rides_next_commit()
 {
-    ts::Guarded<int> target{ 0 };
+    ts::Guarded<int> target{ ts::Named{}, 0 };
     ts::Deferred<int> d{ target };
 
     auto rec = d.recorder();
@@ -208,7 +208,7 @@ void test_cancelled_commit_retains_commands()
     ts::Cancellation_source src;
     src.request_cancel();
 
-    ts::Guarded<int> target{ 0 };
+    ts::Guarded<int> target{ ts::Named{}, 0 };
     ts::Deferred<int> d{ target };
 
     auto rec = d.recorder();
@@ -226,7 +226,7 @@ void test_cancelled_commit_retains_commands()
 
 void test_discard()
 {
-    ts::Guarded<int> target{ 0 };
+    ts::Guarded<int> target{ ts::Named{}, 0 };
     ts::Deferred<int> d{ target };
 
     auto rec = d.recorder();
@@ -238,7 +238,7 @@ void test_discard()
 
 void test_move_only_command()
 {
-    ts::Guarded<int> target{ 0 };
+    ts::Guarded<int> target{ ts::Named{}, 0 };
     ts::Deferred<int> d{ target };
 
     auto rec = d.recorder();
@@ -253,7 +253,7 @@ void test_parallel_recorder_from_parallel_for()
     // (per-worker slots, guided chunking, caller participates via the overflow
     // lane), applied exactly once.
     constexpr int n = 20000;
-    ts::Guarded<Counter> target;
+    ts::Guarded<Counter> target{ ts::Named{} };
     ts::Deferred<Counter> d{ target };
 
     auto rec = d.parallel_recorder();
@@ -267,7 +267,7 @@ void test_parallel_recorder_overflow_lane()
 {
     // Non-worker threads (this test thread + an external jthread) route to the
     // shared overflow slot -- contended but correct.
-    ts::Guarded<Counter> target;
+    ts::Guarded<Counter> target{ ts::Named{} };
     ts::Deferred<Counter> d{ target };
 
     auto rec = d.parallel_recorder();
@@ -285,7 +285,7 @@ void test_parallel_recorder_on_versioned()
     // batch order is fixed at the cut, so replay resync applies the identical
     // sequence twice -- the divergence check must stay quiet.
     constexpr int n = 5000;
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     v.set_divergence_check([](const int& x) { return static_cast<std::size_t>(x); });
 
     auto rec = v.parallel_recorder();
@@ -300,7 +300,7 @@ void test_released_slot_commands_survive()
 {
     // A recorder destroyed with staged-but-uncommitted commands: the slot is
     // recycled, the commands drain on the next cut -- nothing is lost.
-    ts::Guarded<int> target{ 0 };
+    ts::Guarded<int> target{ ts::Named{}, 0 };
     ts::Deferred<int> d{ target };
     {
         auto rec = d.recorder();
@@ -315,7 +315,7 @@ void test_slot_reuse_inherits_position()
     // r1 released -> r3 reuses r1's slot -> r3's commands apply at slot 0,
     // BEFORE r2's (slot 1), even though r3 was minted last. The documented
     // reuse-inherits-position semantics, pinned.
-    ts::Guarded<std::vector<int>> target;
+    ts::Guarded<std::vector<int>> target{ ts::Named{} };
     ts::Deferred<std::vector<int>> d{ target };
 
     auto r1 = d.recorder();
@@ -336,7 +336,7 @@ void test_recorder_churn_does_not_grow_journal()
     // Mint/stage/destroy far past max_slots (4096): the free-list recycles one
     // slot the whole way -- no threshold fatal, every command applied.
     constexpr int churn = static_cast<int>(ts::detail::Journal<int>::max_slots) + 1000;
-    ts::Guarded<int> target{ 0 };
+    ts::Guarded<int> target{ ts::Named{}, 0 };
     ts::Deferred<int> d{ target };
 
     for (int i = 0; i < churn; ++i)
@@ -352,7 +352,7 @@ void test_parallel_recorder_churn()
 {
     // Same for the per-worker handle: each mint takes worker_count+1 slots, each
     // destroy returns them.
-    ts::Guarded<int> target{ 0 };
+    ts::Guarded<int> target{ ts::Named{}, 0 };
     ts::Deferred<int> d{ target };
 
     for (int i = 0; i < 2000; ++i)
@@ -373,7 +373,7 @@ void test_late_bound_recorder()
 {
     // The empty state's purpose: a member declared before the Deferred exists,
     // bound in init. Move nulls the source; the moved-to handle stages normally.
-    ts::Guarded<int> target{ 0 };
+    ts::Guarded<int> target{ ts::Named{}, 0 };
     ts::Deferred<int> d{ target };
 
     ts::Recorder<int> rec;             // empty
@@ -387,7 +387,7 @@ void test_late_bound_recorder()
 // last commit, so the destructor neither fatals nor waits on the pipe.
 void test_synced_commit_then_destroy()
 {
-    ts::Guarded<int> target{ 0 };
+    ts::Guarded<int> target{ ts::Named{}, 0 };
     {
         ts::Deferred<int> d{ target };
         auto rec = d.recorder();

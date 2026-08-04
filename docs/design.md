@@ -133,20 +133,40 @@ distinction is actionable: a `W->R` edge is dataflow, while `R->W`/`W->W`
 edges are ordering artifacts that versioning or deferral can delete — the
 same lever that moved the sample's audio off the post-flip tail.
 
-Node names follow the UE convention (a debug name at creation, kept in all
-builds), with one modernization: `std::source_location` in the `Node_name`
-descriptor's defaulted constructor argument makes a placeholder `{}` label
-the node with the user's `add_node` call site — no macro. A trailing
-defaulted parameter after the object pack is not expressible in C++, hence
-the leading-parameter position (also UE's argument order).
+Naming follows the UE convention (a debug name at creation, kept in all builds)
+with one modernization and one unification. The modernization: a defaulted
+`std::source_location` argument means an entity can identify itself by *where
+it is written* — `ts::Named{}` — with no macro. The unification: one type,
+`ts::Named`, for all three kinds of entity. Nodes and objects must carry one
+(there are no unnamed constructors, and the old `node<N>`/`objN` ordinal
+fallbacks are gone with them); tasks carry one optionally, because their verb
+captures the call site by default. `Named` keeps `{literal, file, line}` rather
+than a whole `source_location` — `function_name()` is never used here.
 
-Objects are named the same way — `ts::Named` as an optional leading
-constructor argument on `Guarded`/`Versioned`. It is a distinct wrapper type
-rather than a bare `const char*` because the constructor forwards to `T`
-in place: a bare leading string would be indistinguishable from `T`'s own
-first constructor argument. The name is stored on the pipe — the shared
-per-object structure every layer already reaches — so the dump (and future
-tooling) resolves it without new plumbing.
+It is a distinct wrapper type rather than a bare `const char*` because the
+`Guarded` constructor forwards to `T` in place: a bare leading string would be
+indistinguishable from `T`'s own first constructor argument. For the same
+reason the constructor is constrained to an actual `Named`, so
+`Guarded<std::string> g{"hello"}` is a compile error rather than a silently
+default-constructed string named "hello". A trailing defaulted parameter after
+an object pack is not expressible in C++, hence the leading position (also UE's
+argument order) — and hence the one gap: the multi-object `ts::access`/`async`
+have no site to capture and take only an explicit literal.
+
+The load-bearing implementation rule is that a defaulted `source_location`
+captures the *caller* of the function that declares it. So it is declared only
+on the outermost verb the user calls, and the resulting `Named` is threaded down
+every internal layer explicitly; an inner helper with its own default would
+capture a library header and the whole feature would quietly become useless.
+A test asserts that captured sites land in the test file, which is the only
+thing that actually guarantees it.
+
+An object's name lives on the pipe — the shared per-object structure every layer
+already reaches — and a task's lives on its control block, `TS_SAFETY_CHECKS`-
+gated so shipping pays nothing for it. A graph node's block carries the node's
+name, and a coroutine frame inherits the identity of the task it was created
+inside, so a diagnostic about a suspended frame names the node the user
+declared rather than a block pointer.
 
 Everything downstream of the name (the structure dump and the runtime trace)
 is gated by `TS_PROFILING` (default on; define it to 0 for shipping); the

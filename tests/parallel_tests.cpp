@@ -113,7 +113,7 @@ void test_parallel_for_inherits_grant()
     };
 
     constexpr int n = 20000;
-    ts::Guarded<Store> store{ n };
+    ts::Guarded<Store> store{ ts::Named{}, n };
     long long total = store.access([](Store& s)
     {
         ts::parallel_for(s.size(), [&s](int i) { s.set(i, 1); });

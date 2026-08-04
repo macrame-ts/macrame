@@ -80,13 +80,13 @@ void test_type_constraints()
 
 void test_construct()
 {
-    ts::Guarded<int> d{ 5 };
+    ts::Guarded<int> d{ ts::Named{}, 5 };
     TS_CHECK(read_value(d) == 5);
 }
 
 void test_write_then_read()
 {
-    ts::Guarded<Counter> c;
+    ts::Guarded<Counter> c{ ts::Named{} };
     c.async([](Counter& x) { x.add(7); });
     int v = c.async([](const Counter& x) { return x.value(); }).sync();
     TS_CHECK(v == 7);
@@ -94,7 +94,7 @@ void test_write_then_read()
 
 void test_async_returns_value()
 {
-    ts::Guarded<int> d{ 41 };
+    ts::Guarded<int> d{ ts::Named{}, 41 };
     ts::Task<int> t = d.async([](const int& v) { return v + 1; });
     TS_CHECK(t.sync() == 42);
 }
@@ -104,7 +104,7 @@ void test_destructor_waits()
     constexpr int count = 1000;
     std::atomic<int> done{ 0 };
     {
-        ts::Guarded<int> d{ 0 };
+        ts::Guarded<int> d{ ts::Named{}, 0 };
         for (int i = 0; i < count; ++i)
             d.async([&done](int& v) { ++v; done.fetch_add(1); });
     }   // destructor waits for the pipe to drain
@@ -134,7 +134,7 @@ void test_sync_then_destroy()
             {
                 for (int i = 0; i < iterations; ++i)
                 {
-                    auto* data = new ts::Guarded<int>{ 0 };
+                    auto* data = new ts::Guarded<int>{ ts::Named{}, 0 };
                     data->async([](int& v) { ++v; });   // fire-and-forget, queued ahead of the target
                     // Alternate the mode of the LAST access: a writer release clears
                     // `writer_active`, a reader release decrements `active_readers`, and both
@@ -162,8 +162,8 @@ void test_multi_sync_then_destroy()
     int mismatches = 0;
     for (int i = 0; i < iterations; ++i)
     {
-        auto* first = new ts::Guarded<int>{ 1 };
-        auto* second = new ts::Guarded<int>{ 2 };
+        auto* first = new ts::Guarded<int>{ ts::Named{}, 1 };
+        auto* second = new ts::Guarded<int>{ ts::Named{}, 2 };
         if (ts::async([](int& x, const int& y) { x += y; return x; }, *first, *second).sync() != 3)
             ++mismatches;
         // Both deletion orders, so whichever pipe the cascade released first is covered.
@@ -185,7 +185,7 @@ void test_multi_sync_then_destroy()
 
 void test_serial_correctness()
 {
-    ts::Guarded<Counter> counter;
+    ts::Guarded<Counter> counter{ ts::Named{} };
     for (int i = 0; i < 1000; ++i)
         counter.async([](Counter& c) { c.increment(); });
     int v = counter.async([](const Counter& c) { return c.value(); }).sync();
@@ -198,7 +198,7 @@ void test_concurrent_readers()
     // the gate is met iff the pipe genuinely ran readers concurrently -- rather than the
     // old "peak > 1" that merely hoped the timing overlapped.
     tests::Parallel_gate gate{ 2 };
-    ts::Guarded<int> data{ 7 };
+    ts::Guarded<int> data{ ts::Named{}, 7 };
     std::vector<ts::Task<int>> tasks;
 
     for (int i = 0; i < 16; ++i)
@@ -219,7 +219,7 @@ void test_writer_exclusion()
 {
     std::atomic<int> active{ 0 };
     std::atomic<bool> writing{ false }, violated{ false };
-    ts::Guarded<int> data{ 0 };
+    ts::Guarded<int> data{ ts::Named{}, 0 };
     std::vector<ts::Task<void>> tasks;
     int writes = 0;
 
@@ -258,7 +258,7 @@ void test_writer_exclusion()
 
 void test_reader_after_writer()
 {
-    ts::Guarded<int> data{ 0 };
+    ts::Guarded<int> data{ ts::Named{}, 0 };
     data.async([](int& v) { v = 99; });
     TS_CHECK(read_value(data) == 99);   // FIFO: the read sees the prior write
 }
@@ -266,7 +266,7 @@ void test_reader_after_writer()
 void test_independent_objects_parallel()
 {
     tests::Parallel_gate gate{ 2 };
-    ts::Guarded<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 };
 
     auto job = [&gate](int&) { gate.arrive(); };
     ts::Task<void> ta = a.async(job);
@@ -283,7 +283,7 @@ void test_independent_objects_parallel()
 void test_generic_readers_overlap()
 {
     tests::Parallel_gate gate{ 2 };
-    ts::Guarded<int> data{ 7 };
+    ts::Guarded<int> data{ ts::Named{}, 7 };
     std::vector<ts::Task<int>> tasks;
 
     for (int i = 0; i < 8; ++i)
@@ -302,7 +302,7 @@ void test_generic_readers_overlap()
 
 void test_generic_writer_serializes()
 {
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     for (int i = 0; i < 200; ++i)
         d.async([](auto& v) { ++v; });   // probed read_write: exclusive, all land
     TS_CHECK(read_value(d) == 200);
@@ -310,7 +310,7 @@ void test_generic_writer_serializes()
 
 void test_reentrant_same_object()
 {
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     std::atomic<int> done{ 0 };
 
     d.async([&d, &done](int& v)
@@ -326,7 +326,7 @@ void test_reentrant_same_object()
 
 void test_reentrant_other_object()
 {
-    ts::Guarded<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 };
     std::atomic<int> done{ 0 };
 
     a.async([&b, &done](int& v)
@@ -342,7 +342,7 @@ void test_reentrant_other_object()
 
 void test_pipe_stress()
 {
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     for (int i = 0; i < 5000; ++i)
         d.async([](int& v) { ++v; });
     TS_CHECK(read_value(d) == 5000);
@@ -354,7 +354,7 @@ void test_pipe_stress()
 // is already settled when the call returns.
 void test_access_runs_synchronously()
 {
-    ts::Guarded<int> d{ 5 };
+    ts::Guarded<int> d{ ts::Named{}, 5 };
     std::thread::id body_thread{};
     ts::Task<int> t = d.access([&body_thread](int& v)
     {
@@ -371,7 +371,7 @@ void test_access_runs_synchronously()
 // A read `access` on a free pipe joins as a reader and runs on the caller.
 void test_access_read_on_caller()
 {
-    ts::Guarded<int> d{ 9 };
+    ts::Guarded<int> d{ ts::Named{}, 9 };
     std::thread::id body_thread{};
     int r = d.access([&body_thread](const int& v)
     {
@@ -386,7 +386,7 @@ void test_access_read_on_caller()
 // queue and runs correctly on a worker once the pipe drains.
 void test_access_falls_back_when_busy()
 {
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     std::atomic<bool> gate{ false };
     std::thread::id caller = std::this_thread::get_id();
     std::atomic<std::thread::id> body_thread{};
@@ -420,7 +420,7 @@ void test_access_falls_back_when_busy()
 // the body before the check runs (it cost a CI flake on a slow runner).
 void test_async_always_schedules()
 {
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     std::thread::id caller = std::this_thread::get_id();
     std::atomic<std::thread::id> body_thread{ caller };
     ts::Task<int> t = d.async([&body_thread](int& v)
@@ -436,7 +436,7 @@ void test_async_always_schedules()
 // A read `async` also always enqueues and still deduces read (concurrent) access.
 void test_async_read_schedules()
 {
-    ts::Guarded<int> d{ 7 };
+    ts::Guarded<int> d{ ts::Named{}, 7 };
     TS_CHECK(d.async([](const int& v) { return v; }).sync() == 7);
 }
 
@@ -447,7 +447,7 @@ void test_async_read_schedules()
 // run after W (never join R1's group) and observe the write.
 void test_rwr_group_separation()
 {
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     std::atomic<int> seq{ 0 };
     std::atomic<int> r1_at{ -1 }, w_at{ -1 }, r2_at{ -1 };
 
@@ -467,7 +467,7 @@ void test_rwr_group_separation()
 // B4: writers run in launch order -- an order-sensitive fold composes to one exact value.
 void test_writer_fifo()
 {
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     for (int i = 1; i <= 6; ++i)
         d.async([i](int& v) { v = v * 10 + i; });
     TS_CHECK(read_value(d) == 123456);   // FIFO: (((((1)*10+2)*10+3)...)

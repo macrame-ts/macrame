@@ -43,9 +43,9 @@ int read_value(ts::Guarded<int>& d)
 // of the old `then`-off-`execute()` chain.
 void test_await_graph_completion()
 {
-    ts::Guarded<int> a{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 };
     ts::Static_task_graph g;
-    g.add_node([](int& v) { v = 5; }, a);
+    g.add_node(ts::Named{}, [](int& v) { v = 5; }, a);
     g.compile();
 
     std::atomic<bool> after{ false };
@@ -64,7 +64,7 @@ void test_await_graph_completion()
 // complete when the last does.
 void test_await_join_into_graph()
 {
-    ts::Guarded<int> a{ 2 }, b{ 3 };
+    ts::Guarded<int> a{ ts::Named{}, 2 }, b{ ts::Named{}, 3 };
     int sum = [](ts::Guarded<int>& ga, ts::Guarded<int>& gb) -> ts::Task<int>
     {
         ts::Task<int> ra = ga.async([](const int& v) { return v; });
@@ -72,9 +72,9 @@ void test_await_join_into_graph()
         co_return co_await ra + co_await rb;
     }(a, b).sync();
 
-    ts::Guarded<int> c{ 0 };
+    ts::Guarded<int> c{ ts::Named{}, 0 };
     ts::Static_task_graph g;
-    g.add_node([sum](int& v) { v = sum; }, c);
+    g.add_node(ts::Named{}, [sum](int& v) { v = sum; }, c);
     g.compile();
     g.execute().sync();
 
@@ -84,9 +84,9 @@ void test_await_join_into_graph()
 // graph run, then a dynamic async on the same object (sequential, no race).
 void test_graph_then_dynamic()
 {
-    ts::Guarded<int> a{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 };
     ts::Static_task_graph g;
-    g.add_node([](int& v) { v = 7; }, a);
+    g.add_node(ts::Named{}, [](int& v) { v = 7; }, a);
     g.compile();
     g.execute().sync();
 
@@ -121,9 +121,9 @@ int total_of(ts::Guarded<Guarded>& x) { return x.async([](const Guarded& g) { re
 // held reservation.)
 void test_graph_async_no_overlap_during()
 {
-    ts::Guarded<Guarded> x;
+    ts::Guarded<Guarded> x{ ts::Named{} };
     ts::Static_task_graph g;
-    g.add_node([](Guarded& gg) { gg.touch(); }, x);
+    g.add_node(ts::Named{}, [](Guarded& gg) { gg.touch(); }, x);
     g.compile();
 
     auto run = g.execute();
@@ -142,11 +142,11 @@ void test_graph_async_no_overlap_during()
 // (pipe not idle) and waits behind the async; the node runs after it.
 void test_async_before_graph_no_overlap()
 {
-    ts::Guarded<Guarded> x;
+    ts::Guarded<Guarded> x{ ts::Named{} };
     auto pending = x.async([](Guarded& gg) { gg.touch(); });
 
     ts::Static_task_graph g;
-    g.add_node([](Guarded& gg) { gg.touch(); }, x);
+    g.add_node(ts::Named{}, [](Guarded& gg) { gg.touch(); }, x);
     g.compile();
     g.execute().sync();
     pending.sync();
@@ -159,9 +159,9 @@ void test_async_before_graph_no_overlap()
 // reservation would let a node and an async overlap -> peak == 2.
 void test_graph_async_stress()
 {
-    ts::Guarded<Guarded> x;
+    ts::Guarded<Guarded> x{ ts::Named{} };
     ts::Static_task_graph g;
-    g.add_node([](Guarded& gg) { gg.touch(); }, x);
+    g.add_node(ts::Named{}, [](Guarded& gg) { gg.touch(); }, x);
     g.compile();
 
     std::atomic<bool> stop{ false };
@@ -192,13 +192,13 @@ void test_graph_async_stress()
 // run" behavior would block the async until run end, so the flag would be unset.
 void test_early_release_frees_object_mid_run()
 {
-    ts::Guarded<int> x{ 0 }, y{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 }, y{ ts::Named{}, 0 };
     std::atomic<bool> async_ran{ false };
     std::atomic<bool> ran_during_run{ false };
 
     ts::Static_task_graph g;
-    g.add_node([](int& v) { v = 1; }, x);   // fast: sole accessor of x
-    g.add_node([&async_ran, &ran_during_run](int& v)
+    g.add_node(ts::Named{}, [](int& v) { v = 1; }, x);   // fast: sole accessor of x
+    g.add_node(ts::Named{}, [&async_ran, &ran_during_run](int& v)
     {
         std::this_thread::sleep_for(60ms);
         ran_during_run.store(async_ran.load());   // did x's async run while this node was still going?
@@ -221,18 +221,18 @@ void test_early_release_frees_object_mid_run()
 // slow predecessor (which does NOT touch x) records whether x's async already ran.
 void test_lazy_acquire_late_object_free_early()
 {
-    ts::Guarded<int> y{ 0 }, x{ 0 };
+    ts::Guarded<int> y{ ts::Named{}, 0 }, x{ ts::Named{}, 0 };
     std::atomic<bool> async_ran{ false };
     std::atomic<bool> ran_during_a{ false };
 
     ts::Static_task_graph g;
-    ts::Graph_node a = g.add_node([&async_ran, &ran_during_a](int& v)
+    ts::Graph_node a = g.add_node(ts::Named{}, [&async_ran, &ran_during_a](int& v)
     {
         std::this_thread::sleep_for(60ms);
         ran_during_a.store(async_ran.load());   // x's async ran while a (no x access) was active?
         v = 1;
     }, y);
-    ts::Graph_node b = g.add_node([](int& v) { v = 1; }, x);   // x touched only after a
+    ts::Graph_node b = g.add_node(ts::Named{}, [](int& v) { v = 1; }, x);   // x touched only after a
     b.after(a);
     g.compile();
 
@@ -253,19 +253,19 @@ void test_lazy_acquire_late_object_free_early()
 // sleeps and records whether x's async already ran.
 void test_gap_frees_object_between_accessors()
 {
-    ts::Guarded<int> x{ 0 }, y{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 }, y{ ts::Named{}, 0 };
     std::atomic<bool> async_ran{ false };
     std::atomic<bool> ran_during_gap{ false };
 
     ts::Static_task_graph g;
-    ts::Graph_node n1 = g.add_node([](int& v) { v = 1; }, x);   // early accessor of x
-    ts::Graph_node n2 = g.add_node([&async_ran, &ran_during_gap](int& v)
+    ts::Graph_node n1 = g.add_node(ts::Named{}, [](int& v) { v = 1; }, x);   // early accessor of x
+    ts::Graph_node n2 = g.add_node(ts::Named{}, [&async_ran, &ran_during_gap](int& v)
     {
         std::this_thread::sleep_for(60ms);
         ran_during_gap.store(async_ran.load());   // x's async ran while the gap node was active?
         v = 1;
     }, y);                                                      // gap: touches only y
-    ts::Graph_node n3 = g.add_node([](int& v) { v = 2; }, x);   // late accessor of x
+    ts::Graph_node n3 = g.add_node(ts::Named{}, [](int& v) { v = 2; }, x);   // late accessor of x
     n2.after(n1);
     n3.after(n2);   // order n1 -> n2 -> n3 (n1 -> n3 is also an auto x-conflict edge)
     g.compile();
@@ -285,12 +285,12 @@ void test_gap_frees_object_between_accessors()
 // records whether the async read ran.
 void test_reader_node_overlaps_async_read()
 {
-    ts::Guarded<int> x{ 7 };
+    ts::Guarded<int> x{ ts::Named{}, 7 };
     std::atomic<bool> async_ran{ false };
     std::atomic<bool> ran_during_node{ false };
 
     ts::Static_task_graph g;
-    g.add_node([&async_ran, &ran_during_node](const int& v)
+    g.add_node(ts::Named{}, [&async_ran, &ran_during_node](const int& v)
     {
         std::this_thread::sleep_for(60ms);
         ran_during_node.store(async_ran.load());
@@ -311,7 +311,7 @@ void test_reader_node_overlaps_async_read()
 // holding all their pipes for the body. Basic correctness (write one, read another).
 void test_multi_async_basic()
 {
-    ts::Guarded<int> a{ 10 }, b{ 20 };
+    ts::Guarded<int> a{ ts::Named{}, 10 }, b{ ts::Named{}, 20 };
     int result = ts::async([](int& x, const int& y) { x += y; return x; }, a, b).sync();   // a += b
     TS_CHECK(result == 30);
     TS_CHECK(read_value(a) == 30);
@@ -322,7 +322,7 @@ void test_multi_async_basic()
 // queue behind it -- never concurrent on either object.
 void test_multi_async_exclusion()
 {
-    ts::Guarded<Guarded> x, y;
+    ts::Guarded<Guarded> x{ ts::Named{ "x" } }, y{ ts::Named{ "y" } };
     std::vector<ts::Task<void>> tasks;
     for (int i = 0; i < 4; ++i)
     {
@@ -340,7 +340,7 @@ void test_multi_async_exclusion()
 // acquire in canonical (pipe-address) order, so no hold-and-wait cycle forms. All complete.
 void test_multi_async_no_deadlock()
 {
-    ts::Guarded<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 };
     std::vector<ts::Task<void>> tasks;
     for (int i = 0; i < 50; ++i)
     {
@@ -356,7 +356,7 @@ void test_multi_async_no_deadlock()
 // Options (first arg): priority + token skip.
 void test_multi_async_options()
 {
-    ts::Guarded<int> a{ 1 }, b{ 2 };
+    ts::Guarded<int> a{ ts::Named{}, 1 }, b{ ts::Named{}, 2 };
     int r = ts::async({ .priority = ts::Priority::high }, [](const int& x, const int& y) { return x + y; }, a, b).sync();
     TS_CHECK(r == 3);
 
@@ -372,7 +372,7 @@ void test_multi_async_options()
 // `test_multi_async_basic` (write one, read the other).
 void test_multi_async_generic_lambda()
 {
-    ts::Guarded<int> a{ 10 }, b{ 20 };
+    ts::Guarded<int> a{ ts::Named{}, 10 }, b{ ts::Named{}, 20 };
     int result = ts::async([](auto& x, const auto& y) { x += y; return x; },
                            ts::as_read_write(a), ts::as_read_only(b)).sync();   // a += b
     TS_CHECK(result == 30);
@@ -389,7 +389,7 @@ void test_multi_async_generic_lambda()
 // `const auto&` = read, `auto&` = write. Same effect as the tagged and non-generic forms.
 void test_multi_async_probed_generic()
 {
-    ts::Guarded<int> a{ 3 }, b{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 3 }, b{ ts::Named{}, 0 };
     ts::async([](const auto& x, auto& y) { y = x * 2; }, a, b).sync();
     TS_CHECK(read_value(a) == 3);
     TS_CHECK(read_value(b) == 6);
@@ -405,7 +405,7 @@ void test_multi_async_probed_generic()
 // over-declaration: the object is held exclusively, and `T&` binds the `const T&` parameter.
 void test_multi_async_overdeclared_write()
 {
-    ts::Guarded<int> a{ 5 }, b{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 5 }, b{ ts::Named{}, 0 };
     ts::async([](const int& x, int& y) { y = x; },
               ts::as_read_write(a), ts::as_read_write(b)).sync();
     TS_CHECK(read_value(b) == 5);
@@ -415,7 +415,7 @@ void test_multi_async_overdeclared_write()
 // `test_multi_async_exclusion`): a concurrent single-object async never overlaps.
 void test_multi_async_generic_exclusion()
 {
-    ts::Guarded<Guarded> x, y;
+    ts::Guarded<Guarded> x{ ts::Named{ "x" } }, y{ ts::Named{ "y" } };
     std::vector<ts::Task<void>> tasks;
     for (int i = 0; i < 4; ++i)
     {
@@ -435,11 +435,11 @@ void test_multi_async_generic_exclusion()
 // through the chain -- and re-runnability confirm the hold is preserved across the handoffs.
 void test_handoff_write_chain()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
     ts::Static_task_graph g;
-    ts::Graph_node a = g.add_node([](int& v) { v += 1; }, x);
-    ts::Graph_node b = g.add_node([](int& v) { v *= 10; }, x);
-    ts::Graph_node c = g.add_node([](int& v) { v += 5; }, x);
+    ts::Graph_node a = g.add_node(ts::Named{}, [](int& v) { v += 1; }, x);
+    ts::Graph_node b = g.add_node(ts::Named{}, [](int& v) { v *= 10; }, x);
+    ts::Graph_node c = g.add_node(ts::Named{}, [](int& v) { v += 5; }, x);
     b.after(a);
     c.after(b);
     g.compile();
@@ -456,11 +456,11 @@ void test_handoff_write_chain()
 // Correctness (the read sees the write) confirms the release/re-acquire path still works.
 void test_handoff_skips_mode_change()
 {
-    ts::Guarded<int> x{ 3 };
+    ts::Guarded<int> x{ ts::Named{}, 3 };
     std::atomic<int> seen{ -1 };
     ts::Static_task_graph g;
-    ts::Graph_node w = g.add_node([](int& v) { v = 42; }, x);            // write
-    ts::Graph_node r = g.add_node([&seen](const int& v) { seen.store(v); }, x);   // read (mode change -> no handoff)
+    ts::Graph_node w = g.add_node(ts::Named{}, [](int& v) { v = 42; }, x);            // write
+    ts::Graph_node r = g.add_node(ts::Named{}, [&seen](const int& v) { seen.store(v); }, x);   // read (mode change -> no handoff)
     r.after(w);
     g.compile();
     g.execute().sync();
@@ -475,7 +475,7 @@ void test_repeat_stress()
     for (int iter = 0; iter < 20; ++iter)
     {
         tests::Parallel_gate gate{ 2 };
-        ts::Guarded<int> data{ 0 };
+        ts::Guarded<int> data{ ts::Named{}, 0 };
         std::vector<ts::Task<int>> tasks;
 
         for (int i = 0; i < 8; ++i)
@@ -647,7 +647,7 @@ void test_single_threaded_end_to_end()
     TS_CHECK(t2.sync() == 42);
 
     // Guarded async: pipe job runs inline at admission.
-    ts::Guarded<tests::Counter> c;
+    ts::Guarded<tests::Counter> c{ ts::Named{} };
     c.async([](tests::Counter& k) { k.add(5); });
     TS_CHECK(c.async([](const tests::Counter& k) { return k.value(); }).sync() == 5);
 
@@ -664,11 +664,11 @@ void test_single_threaded_end_to_end()
 
     // Graph: conflict edge (writer -> reader on the same object) + a nested task in the
     // writer; the reader must observe both writes, and every body runs on the main thread.
-    ts::Guarded<tests::Counter> g_obj;
+    ts::Guarded<tests::Counter> g_obj{ ts::Named{} };
     std::atomic<int> reader_saw{ -1 };
     std::atomic<bool> off_thread{ false };
     ts::Static_task_graph g;
-    g.add_node([main_id, &off_thread](tests::Counter& k)
+    g.add_node(ts::Named{}, [main_id, &off_thread](tests::Counter& k)
     {
         if (std::this_thread::get_id() != main_id) off_thread.store(true);
         k.add(1);
@@ -678,7 +678,7 @@ void test_single_threaded_end_to_end()
             k.add(2);
         });
     }, g_obj);
-    g.add_node([&reader_saw, main_id, &off_thread](const tests::Counter& k)
+    g.add_node(ts::Named{}, [&reader_saw, main_id, &off_thread](const tests::Counter& k)
     {
         if (std::this_thread::get_id() != main_id) off_thread.store(true);
         reader_saw.store(k.value());
@@ -698,7 +698,7 @@ void test_single_threaded_sync_inside_body()
 {
     ts::Scheduler_scope scope{ { .single_threaded = true } };
 
-    ts::Guarded<tests::Counter> c;
+    ts::Guarded<tests::Counter> c{ ts::Named{} };
     int seen = ts::launch([&c]
     {
         ts::Task<int> inner = c.async([](tests::Counter& k) { k.add(9); return k.value(); });
@@ -713,13 +713,13 @@ void test_single_threaded_deterministic_order()
 {
     ts::Scheduler_scope scope{ { .single_threaded = true } };
 
-    ts::Guarded<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 };
     std::vector<int> order;
     ts::Static_task_graph g;
-    g.add_node([&order](int& x) { order.push_back(0); x = 1; }, a);
-    g.add_node([&order](const int&) { order.push_back(1); }, a);
-    g.add_node([&order](int& y) { order.push_back(2); y = 1; }, b);
-    g.add_node([&order](const int&, const int&) { order.push_back(3); }, a, b);
+    g.add_node(ts::Named{}, [&order](int& x) { order.push_back(0); x = 1; }, a);
+    g.add_node(ts::Named{}, [&order](const int&) { order.push_back(1); }, a);
+    g.add_node(ts::Named{}, [&order](int& y) { order.push_back(2); y = 1; }, b);
+    g.add_node(ts::Named{}, [&order](const int&, const int&) { order.push_back(3); }, a, b);
     g.compile();
 
     g.execute().sync();
@@ -745,9 +745,9 @@ void test_blocking_sync_in_task_is_fatal()
 void test_parallel_for_in_node_no_reports()
 {
     long long base = ts::ensure_failure_count();
-    ts::Guarded<std::array<int, 256>> data{};
+    ts::Guarded<std::array<int, 256>> data{ ts::Named{} };
     ts::Static_task_graph g;
-    g.add_node([](std::array<int, 256>& d)
+    g.add_node(ts::Named{}, [](std::array<int, 256>& d)
     {
         ts::parallel_for(256, [&d](int i) { d[static_cast<std::size_t>(i)] = i; });
     }, data);

@@ -93,8 +93,14 @@ class Versioned
     static_assert(std::swappable<T>, "Versioned<T>: publish swaps the replicas' contents");
 
 public:
-    explicit Versioned(Resync policy = Resync::replay)
-        : policy_(policy)
+    // Leading `ts::Named` (a literal, or `ts::Named{}` for the construction site) names the
+    // front instance for the DOT dump, the trace and the diagnostics. Required, like
+    // `Guarded`'s: the name is what every diagnostic about this object prints.
+    template<typename N>
+        requires std::same_as<std::remove_cvref_t<N>, Named>
+    explicit Versioned(N&& name, Resync policy = Resync::replay)
+        : front_(name)
+        , policy_(policy)
         , front_ptr_(detail::Guarded_access::instance(front_))
     {
         Signal ready;
@@ -103,16 +109,6 @@ public:
 #if TS_SAFETY_CHECKS
         last_publish_ = ready;   // the "last" publish's returned gate -- done for a fresh instance
 #endif
-    }
-
-    // Named form: leading `ts::Named` (a literal, or `ts::Named{}` for the construction
-    // site) names the front instance for the DOT dump, the trace and the diagnostics.
-    template<typename N>
-        requires std::same_as<std::remove_cvref_t<N>, Named>
-    explicit Versioned(N&& name, Resync policy = Resync::replay)
-        : Versioned(policy)
-    {
-        detail::Guarded_access::pipe(front_).debug_name = name;
     }
 
     // Two destruction contracts, both fatal under TS_SAFETY_CHECKS (same severity as

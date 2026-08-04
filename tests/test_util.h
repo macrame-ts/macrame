@@ -1,15 +1,31 @@
 #pragma once
 
 #include "ts/access.h"
+#include "ts/guarded.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <new>
 #include <thread>
+#include <utility>
 
 namespace tests
 {
+
+// An array of `Guarded` needs one `ts::Named` per element -- the type has no unnamed
+// constructor and is neither copyable nor movable, so every element is built in place from
+// its own tag. Elements are identified by this helper's site rather than the caller's,
+// which is all an anonymous fixture array needs.
+template<typename T, std::size_t N>
+auto make_guarded_array()
+{
+    return []<std::size_t... I>(std::index_sequence<I...>)
+    {
+        return std::array<ts::Guarded<T>, N>{ (void(I), ts::Named{})... };
+    }(std::make_index_sequence<N>{});
+}
 
 // A guarded thread-unsafe "system" used across the suite.
 class Counter

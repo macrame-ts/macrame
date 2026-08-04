@@ -41,7 +41,7 @@ Hook points, all places where instrumentation already exists:
 |---|---|---|
 | worker start | `Worker_thread::main` (`worker_thread.cpp`) | thread name ("ts worker N") |
 | task run | `Scheduler::run_task` (`scheduler.h`) | per-task zone; generic name, or the owning node's via `current_trace_owner` |
-| node body | `Trace_busy_scope` site in `run_graph_node` (`static_task_graph.cpp`) | named zone (`Node_name`), priority → zone colour |
+| node body | `Trace_busy_scope` site in `run_graph_node` (`static_task_graph.cpp`) | named zone (`ts::Named`), priority → zone colour |
 | graph run | `execute()` begin / `Trace_stamps::fold` settle (`static_task_graph.cpp`) | frame mark (named per graph) |
 | `parallel_for` slice | helper body (`parallel_for.h`) | zone named from the inherited owner |
 | pipe / queue locks | `pipe_acquire` (`guarded.cpp`) | lock instrumentation (Tracy only; requires wrapping the mutex type, so this hook is optional and intrusive) |
@@ -61,7 +61,7 @@ Integration: vendor `public/` and compile one translation unit
 against the current client sources — contains no `throw`/`try`/`catch`, so it
 builds under our `/EHs-c-` + `_HAS_EXCEPTIONS=0` configuration. The C API
 (`TracyC.h`) takes runtime `const char*` zone names, which fits our stable
-per-node `Node_name` pointers without macro gymnastics; `TracyCZoneN` /
+per-node `ts::Named` names without macro gymnastics; `TracyCZoneN` /
 `___tracy_emit_zone_begin` carry source-loc + name + colour. Thread naming,
 `FrameMarkNamed` (one mark per graph), `TracyPlot`, and `TracyLockable` cover
 every seam row. `TRACY_ON_DEMAND` buffers nothing until a viewer connects —

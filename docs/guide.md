@@ -628,38 +628,47 @@ accessors — concurrent `async` work on the same objects interleaves safely
 into the gaps (it queues behind the node that currently holds the object
 rather than racing it).
 
-### 6.1 Node names and the structure dump
+### 6.1 Names and the structure dump
 
-`add_node` takes an optional leading name — a static string literal, referenced
-rather than copied — and `compile` takes an optional file path that writes the
-compiled structure as a Graphviz DOT file:
+Every node and every guarded object carries a `ts::Named` — a leading argument,
+required, because the name is what the DOT dump, the trace and every diagnostic
+print. It is either a string literal (referenced, not copied) or the call site
+that created the entity, spelled `ts::Named{}`:
 
 ```cpp
 auto sim = frame.add_node("physics", [](const Input& in, Physics& p) { p.step(in); },
                           input, physics);
-frame.add_node({}, [](Anim& a) { a.advance(); }, anim);   // unnamed: labels as file:line
+frame.add_node({}, [](Anim& a) { a.advance(); }, anim);   // identified as file:line
+
+ts::Guarded<Physics> physics{ ts::Named{"physics"}, world_size };
+ts::Versioned<Poses> poses{ ts::Named{"poses"} };
+ts::Guarded<Anim> anim{ ts::Named{} };                    // identified as file:line
 
 frame.compile("frame.dot");
 ```
 
-An unnamed node with a `{}` placeholder labels as the `add_node` call site
-(`file:line`); a fully bare `add_node` labels as `node<N>`. Objects are named
-too — an optional leading `ts::Named` on the `Guarded` (or `Versioned`)
-constructor, a distinct wrapper so it can never be mistaken for `T`'s own
-first constructor argument:
+`ts::Named` is a distinct wrapper rather than a bare leading `const char*` so
+it can never be mistaken for `T`'s own first constructor argument.
+
+Tasks carry one too, but there it is *optional*: `ts::launch`, `ts::nested` and
+the access verbs capture their own call site by default, so an unnamed task is
+still identified in a diagnostic. Pass a literal when the site is not the useful
+name:
 
 ```cpp
-ts::Guarded<Physics> physics{ ts::Named{"physics"}, world_size };
-ts::Versioned<Poses>  poses{ ts::Named{"poses"} };
+ts::launch(stream_textures, { .name = "stream_textures" });
 ```
+
+(The one exception is the multi-object `ts::access` / `ts::async`: they end in an
+object pack, so there is no call site to capture and they carry only an explicit
+`{.name = "..."}`.)
 
 Render the dump with Graphviz (`dot -Tsvg frame.dot -o frame.svg`, or the
 repo's `show_graph.bat`) or paste it into an online viewer (e.g. edotor.net).
 The output is dark-themed; edges are green with the line style carrying their
 origin: solid edges are your explicit `after`/`before` orderings, dashed edges
 were derived from declared access — hovering
-one (in SVG) shows which object and modes produced it (`physics: W->R`;
-unnamed objects fall back to an `objN` ordinal). The picture answers
+one (in SVG) shows which object and modes produced it (`physics: W->R`). The picture answers
 "why does this edge exist", which is exactly what you need when re-shaping a
 graph: a `W->R` edge is real dataflow, while a `R->W` or `W->W` edge is an
 ordering artifact you may be able to remove by double-buffering (`Versioned`)

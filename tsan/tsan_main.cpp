@@ -71,7 +71,7 @@ void stress_scheduler()
 void stress_thread_safe()
 {
     constexpr int threads = 8, per = 2000;
-    ts::Guarded<int> obj{ 0 };
+    ts::Guarded<int> obj{ ts::Named{}, 0 };
     std::atomic<int> reads{ 0 };
     {
         std::vector<std::jthread> producers;
@@ -100,7 +100,7 @@ void stress_thread_safe()
 void stress_inline_async()
 {
     constexpr int threads = 8, per = 2000;
-    ts::Guarded<int> obj{ 0 };
+    ts::Guarded<int> obj{ ts::Named{}, 0 };
     std::atomic<int> reads{ 0 };
     {
         std::vector<std::jthread> producers;
@@ -161,7 +161,7 @@ void pipe_rw_producers(ts::Guarded<tests::Rw_probe>& probe, int threads, int per
 
 void stress_pipe_rw()
 {
-    ts::Guarded<tests::Rw_probe> probe;
+    ts::Guarded<tests::Rw_probe> probe{ ts::Named{} };
     pipe_rw_producers(probe, 8, 3000);
     bool bad = probe.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
     assert(!bad);
@@ -172,7 +172,7 @@ void stress_pipe_rw()
 void stress_pipe_rw_worker_less()
 {
     ts::Scheduler_scope scope{ ts::Scheduler_config{ .single_threaded = true } };
-    ts::Guarded<tests::Rw_probe> probe;
+    ts::Guarded<tests::Rw_probe> probe{ ts::Named{} };
     pipe_rw_producers(probe, 4, 1500);
     bool bad = probe.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
     assert(!bad);
@@ -196,7 +196,7 @@ void stress_pipe_lifetime()
         {
             for (int i = 0; i < iters; ++i)
             {
-                ts::Guarded<int> obj{ 0 };
+                ts::Guarded<int> obj{ ts::Named{}, 0 };
                 for (int k = 0; k < jobs; ++k)
                 {
                     if (k & 1)
@@ -227,7 +227,7 @@ void stress_pipe_sync_then_destroy()
         {
             for (int i = 0; i < iters; ++i)
             {
-                auto* obj = new ts::Guarded<int>{ 0 };
+                auto* obj = new ts::Guarded<int>{ ts::Named{}, 0 };
                 obj->async([](int& v) { ++v; });   // queued ahead of the sync target
                 if (i & 1)
                     obj->async([](int& v) { v *= 10; return v; }).sync();
@@ -235,8 +235,8 @@ void stress_pipe_sync_then_destroy()
                     obj->async([](const int& v) { return v; }).sync();
                 delete obj;
 
-                auto* first = new ts::Guarded<int>{ 1 };
-                auto* second = new ts::Guarded<int>{ 2 };
+                auto* first = new ts::Guarded<int>{ ts::Named{}, 1 };
+                auto* second = new ts::Guarded<int>{ ts::Named{}, 2 };
                 ts::async([](int& x, const int& y) { x += y; return x; }, *first, *second).sync();
                 delete first;
                 delete second;
@@ -251,11 +251,11 @@ void stress_pipe_sync_then_destroy()
 // the payload; the oracle also asserts the invariant.
 void stress_pipe_reservation()
 {
-    ts::Guarded<tests::Rw_probe> a, b;
+    ts::Guarded<tests::Rw_probe> a{ ts::Named{ "a" } }, b{ ts::Named{ "b" } };
     ts::Static_task_graph g;
-    g.add_node([](tests::Rw_probe& p) { p.observe_write(1); }, a);        // writer on a
-    g.add_node([](const tests::Rw_probe& p) { p.observe_read(2); }, a);   // reader on a (ordered after)
-    g.add_node([](tests::Rw_probe& p) { p.observe_write(3); }, b);        // writer on b
+    g.add_node(ts::Named{}, [](tests::Rw_probe& p) { p.observe_write(1); }, a);        // writer on a
+    g.add_node(ts::Named{}, [](const tests::Rw_probe& p) { p.observe_read(2); }, a);   // reader on a (ordered after)
+    g.add_node(ts::Named{}, [](tests::Rw_probe& p) { p.observe_write(3); }, b);        // writer on b
     g.compile();
 
     std::atomic<bool> stop{ false };
@@ -348,11 +348,11 @@ void stress_signal()
 // several workers, fold on the settling one, stats read on the main thread after sync).
 void stress_graph()
 {
-    ts::Guarded<int> a{ 0 }, b{ 0 }, c{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 }, c{ ts::Named{}, 0 };
     ts::Static_task_graph g;
-    g.add_node([](int& x) { x = 1; }, a);
-    g.add_node([](const int& x, int& y) { y = x * 10; }, a, b);
-    g.add_node([](const int& x, const int& y, int& z) { z = x + y; }, a, b, c);
+    g.add_node(ts::Named{}, [](int& x) { x = 1; }, a);
+    g.add_node(ts::Named{}, [](const int& x, int& y) { y = x * 10; }, a, b);
+    g.add_node(ts::Named{}, [](const int& x, const int& y, int& z) { z = x + y; }, a, b, c);
     g.compile();
     ts::tools::Graph_trace trace;
     g.set_trace(&trace);
@@ -371,16 +371,16 @@ void stress_graph()
 void stress_graph_nested()
 {
     constexpr int n = 32;
-    ts::Guarded<std::array<int, n>> arr{};
+    ts::Guarded<std::array<int, n>> arr{ ts::Named{} };
     std::atomic<int> sum{ 0 };
 
     ts::Static_task_graph g;
-    g.add_node([](std::array<int, n>& a)
+    g.add_node(ts::Named{}, [](std::array<int, n>& a)
     {
         for (int k = 0; k < n; ++k)
             ts::nested([&a, k] { a[k] = k; });
     }, arr);
-    g.add_node([&sum](const std::array<int, n>& a)
+    g.add_node(ts::Named{}, [&sum](const std::array<int, n>& a)
     {
         int s = 0;
         for (int v : a) s += v;
@@ -404,15 +404,15 @@ void stress_graph_nested()
 // slab rebinding both ways (lent subset, then the full set for the standalone inner run).
 void stress_graph_nested_runs()
 {
-    ts::Guarded<tests::Rw_probe> a, b;
+    ts::Guarded<tests::Rw_probe> a{ ts::Named{ "a" } }, b{ ts::Named{ "b" } };
 
     ts::Static_task_graph inner;
-    inner.add_node([](tests::Rw_probe& p) { p.observe_write(1); }, a);
-    inner.add_node([](const tests::Rw_probe& p) { p.observe_read(2); }, b);
+    inner.add_node(ts::Named{}, [](tests::Rw_probe& p) { p.observe_write(1); }, a);
+    inner.add_node(ts::Named{}, [](const tests::Rw_probe& p) { p.observe_read(2); }, b);
     inner.compile();
 
     ts::Static_task_graph outer;
-    outer.add_node([&inner](tests::Rw_probe& pa, tests::Rw_probe& pb) -> ts::Task<void>
+    outer.add_node(ts::Named{}, [&inner](tests::Rw_probe& pa, tests::Rw_probe& pb) -> ts::Task<void>
     {
         pa.observe_write(3);
         co_await inner.execute();          // both objects lent (write covers read)
@@ -468,16 +468,16 @@ void stress_graph_nested_runs()
 void stress_concurrent_graphs()
 {
     constexpr int rounds = 400;
-    ts::Guarded<tests::Rw_probe> a, b, c;
+    ts::Guarded<tests::Rw_probe> a{ ts::Named{ "a" } }, b{ ts::Named{ "b" } }, c{ ts::Named{ "c" } };
 
     ts::Static_task_graph g1;
-    g1.add_node([](tests::Rw_probe& p) { p.observe_write(1); }, a);
-    g1.add_node([](const tests::Rw_probe& p, tests::Rw_probe& q) { p.observe_read(2); q.observe_write(3); }, b, c);
+    g1.add_node(ts::Named{}, [](tests::Rw_probe& p) { p.observe_write(1); }, a);
+    g1.add_node(ts::Named{}, [](const tests::Rw_probe& p, tests::Rw_probe& q) { p.observe_read(2); q.observe_write(3); }, b, c);
     g1.compile();
 
     ts::Static_task_graph g2;                    // opposite declaration order on the same objects
-    g2.add_node([](tests::Rw_probe& p) { p.observe_write(4); }, b);
-    g2.add_node([](tests::Rw_probe& p, const tests::Rw_probe& q) { p.observe_write(5); q.observe_read(6); }, a, b);
+    g2.add_node(ts::Named{}, [](tests::Rw_probe& p) { p.observe_write(4); }, b);
+    g2.add_node(ts::Named{}, [](tests::Rw_probe& p, const tests::Rw_probe& q) { p.observe_write(5); q.observe_read(6); }, a, b);
     g2.compile();
 
     std::atomic<bool> stop{ false };
@@ -600,7 +600,7 @@ void stress_nested()
 // token check (a load); the block must settle exactly once, completed or cancelled.
 void stress_cancel()
 {
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
 
     for (int i = 0; i < 2000; ++i)
     {
@@ -616,10 +616,10 @@ void stress_cancel()
     }
 
     // Graph cancellation racing the run.
-    ts::Guarded<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 };
     ts::Static_task_graph g;
-    g.add_node([](int& v) { ++v; }, a);
-    g.add_node([](const int& x, int& y) { y = x; }, a, b);
+    g.add_node(ts::Named{}, [](int& v) { ++v; }, a);
+    g.add_node(ts::Named{}, [](const int& x, int& y) { y = x; }, a, b);
     g.compile();
     for (int i = 0; i < 500; ++i)
     {
@@ -660,7 +660,7 @@ void stress_token_body()
 
     // Same, through an async accessor (body runs on the pipe): request_cancel races the
     // accessor's polling read.
-    ts::Guarded<int> d{ 5 };
+    ts::Guarded<int> d{ ts::Named{}, 5 };
     for (int i = 0; i < 2000; ++i)
     {
         ts::Cancellation_source src;
@@ -716,11 +716,11 @@ void stress_cancel_callback()
 // concurrent reads may overlap (allowed).
 void stress_graph_async()
 {
-    ts::Guarded<int> x{ 0 }, y{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 }, y{ ts::Named{}, 0 };
     ts::Static_task_graph g;
-    ts::Graph_node n1 = g.add_node([](int& a) { ++a; }, x);                       // write x
-    ts::Graph_node n2 = g.add_node([](int& a, int& b) { ++a; ++b; }, x, y);       // write x (handoff from n1) + write y
-    ts::Graph_node n3 = g.add_node([](int& a) { ++a; }, x);                       // write x (handoff from n2)
+    ts::Graph_node n1 = g.add_node(ts::Named{}, [](int& a) { ++a; }, x);                       // write x
+    ts::Graph_node n2 = g.add_node(ts::Named{}, [](int& a, int& b) { ++a; ++b; }, x, y);       // write x (handoff from n1) + write y
+    ts::Graph_node n3 = g.add_node(ts::Named{}, [](int& a) { ++a; }, x);                       // write x (handoff from n2)
     n2.after(n1);
     n3.after(n2);
     g.compile();
@@ -756,11 +756,11 @@ void stress_graph_async()
 // same object exercises the trampoline + the release/re-acquire hand-off.
 void stress_graph_inline()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
     ts::Static_task_graph g;
-    ts::Graph_node a = g.add_node([](int& v) { ++v; }, x).set_inline();
-    ts::Graph_node b = g.add_node([](int& v) { ++v; }, x).set_inline();
-    ts::Graph_node c = g.add_node([](int& v) { ++v; }, x).set_inline();
+    ts::Graph_node a = g.add_node(ts::Named{}, [](int& v) { ++v; }, x).set_inline();
+    ts::Graph_node b = g.add_node(ts::Named{}, [](int& v) { ++v; }, x).set_inline();
+    ts::Graph_node c = g.add_node(ts::Named{}, [](int& v) { ++v; }, x).set_inline();
     b.after(a);
     c.after(b);
     g.compile();
@@ -790,7 +790,7 @@ void stress_graph_inline()
 // release-on-completion continuation, and cross-object hold-and-wait (no cycle).
 void stress_multi_async()
 {
-    ts::Guarded<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 };
     {
         std::vector<std::jthread> firers;
         for (int t = 0; t < 4; ++t)
@@ -927,7 +927,7 @@ ts::Task<void> co_guard_bump(ts::Guarded<int>& w, int times)
 void stress_coroutine_guard()
 {
     constexpr int threads = 8, each = 300;
-    ts::Guarded<int> w{ 0 };
+    ts::Guarded<int> w{ ts::Named{}, 0 };
     {
         std::vector<std::jthread> drivers;
         for (int t = 0; t < threads; ++t)
@@ -971,7 +971,7 @@ void stress_deferred()
     constexpr int threads = 6, per = 500, rounds = 20;
     for (int r = 0; r < rounds; ++r)
     {
-        ts::Guarded<int> target{ 0 };
+        ts::Guarded<int> target{ ts::Named{}, 0 };
         ts::Deferred<int> d{ target };
         {
             std::vector<std::jthread> ps;
@@ -999,7 +999,7 @@ void stress_deferred()
     // own slots, the participating caller hits the overflow lane), racing
     // fire-and-forget commits.
     {
-        ts::Guarded<int> target{ 0 };
+        ts::Guarded<int> target{ ts::Named{}, 0 };
         ts::Deferred<int> d{ target };
         auto rec = d.parallel_recorder();
         constexpr int rounds_pr = 10, per_pr = 20000;
@@ -1020,7 +1020,7 @@ void stress_deferred()
 void stress_versioned()
 {
     constexpr int stagers = 4, readers = 3, per = 400, publishes = 200;
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     v.set_divergence_check([](const int& x) { return static_cast<std::size_t>(x); });
 
     std::atomic<bool> stop{ false };

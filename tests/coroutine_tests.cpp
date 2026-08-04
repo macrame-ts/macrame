@@ -61,7 +61,7 @@ Task<void> co_thread_safe(ts::Guarded<int>& obj, int* seen_out)
 
 void test_thread_safe()
 {
-    ts::Guarded<int> obj{ 5 };
+    ts::Guarded<int> obj{ ts::Named{}, 5 };
     int seen = -1;
     co_thread_safe(obj, &seen).sync();
     TS_CHECK(seen == 5);
@@ -160,7 +160,7 @@ Task<int> co_write_guard(ts::Guarded<tests::Counter>& w)
 
 void test_write_guard()
 {
-    ts::Guarded<tests::Counter> w;
+    ts::Guarded<tests::Counter> w{ ts::Named{} };
     TS_CHECK(co_write_guard(w).sync() == 6);   // 1 + 5
 }
 
@@ -173,7 +173,7 @@ Task<int> co_read_guard(ts::Guarded<tests::Counter>& w)
 
 void test_read_guard()
 {
-    ts::Guarded<tests::Counter> w;
+    ts::Guarded<tests::Counter> w{ ts::Named{} };
     w.async([](tests::Counter& c) { c.add(9); }).sync();
     TS_CHECK(co_read_guard(w).sync() == 9);
 }
@@ -190,7 +190,7 @@ Task<int> co_guard_loop(ts::Guarded<tests::Counter>& w, int n)
 
 void test_guard_loop()
 {
-    ts::Guarded<tests::Counter> w;
+    ts::Guarded<tests::Counter> w{ ts::Named{} };
     TS_CHECK(co_guard_loop(w, 10).sync() == 10);
 }
 
@@ -208,7 +208,7 @@ Task<void> co_bump(ts::Guarded<tests::Counter>& w, int times)
 
 void test_guard_contention()
 {
-    ts::Guarded<tests::Counter> w;
+    ts::Guarded<tests::Counter> w{ ts::Named{} };
     constexpr int threads = 8, each = 200;
     {
         std::vector<std::jthread> drivers;
@@ -273,7 +273,7 @@ void test_showcase()
 {
     // Full path: everything runs, phase released, not cancelled.
     {
-        ts::Guarded<tests::Counter> world;
+        ts::Guarded<tests::Counter> world{ ts::Named{} };
         ts::Signal phase;
         ts::Cancellation_source src;
         Task<int> t = co_showcase(world, phase, src.token());
@@ -282,7 +282,7 @@ void test_showcase()
     }
     // Cancelled path: same pipeline, early-out after the phase gate.
     {
-        ts::Guarded<tests::Counter> world;
+        ts::Guarded<tests::Counter> world{ ts::Named{} };
         ts::Signal phase;
         ts::Cancellation_source src;
         src.request_cancel();
@@ -312,7 +312,7 @@ Task<int> await_instead_of_sync(ts::Guarded<int>& b, std::atomic<bool>& release)
 
 void test_coro_await_instead_of_sync()
 {
-    ts::Guarded<int> b{ 0 };
+    ts::Guarded<int> b{ ts::Named{}, 0 };
     std::atomic<bool> release{ false };
     TS_CHECK(await_instead_of_sync(b, release).sync() == 7);
 }
@@ -332,7 +332,7 @@ void test_await_cancelled_checked()
 {
     ts::Cancellation_source src;
     src.request_cancel();
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });
     TS_CHECK(await_cancelled_checked(std::move(t)).sync() == -1);
 }
@@ -349,10 +349,10 @@ void test_death_await_cancelled_value()
 // itself (which used to be the sharp same-object deadlock).
 void test_access_reentrant_under_own_grant()
 {
-    ts::Guarded<int> a{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 };
     ts::Static_task_graph g;
     std::atomic<int> seen{ -1 };
-    g.add_node([&a, &seen](int& v)
+    g.add_node(ts::Named{}, [&a, &seen](int& v)
     {
         v = 5;
         ts::Task<int> r = a.access([](const int& x) { return x; });   // reentrant: inline, done
@@ -371,14 +371,14 @@ void test_access_reentrant_under_own_grant()
 // the node completes (releasing grants, unlocking successors) only at frame completion.
 void test_coroutine_graph_node()
 {
-    ts::Guarded<std::vector<int>> phys{ std::vector<int>{ 1, 2, 3 } };
-    ts::Guarded<int> audio{ 40 };
-    ts::Guarded<int> result{ 0 };
+    ts::Guarded<std::vector<int>> phys{ ts::Named{}, std::vector<int>{ 1, 2, 3 } };
+    ts::Guarded<int> audio{ ts::Named{}, 40 };
+    ts::Guarded<int> result{ ts::Named{}, 0 };
     std::atomic<int> total{ 0 };
     std::atomic<int> successor_runs{ 0 };
 
     ts::Static_task_graph g;
-    g.add_node([&audio, &total](const std::vector<int>& islands, int& out) -> ts::Task<void>
+    g.add_node(ts::Named{}, [&audio, &total](const std::vector<int>& islands, int& out) -> ts::Task<void>
     {
         total.store(0);                                             // re-run-safe
         for (int island : islands)                                  // data-dependent fan-out
@@ -391,7 +391,7 @@ void test_coroutine_graph_node()
         out = total.load() + mix;
         co_return;
     }, phys, result);
-    g.add_node([&successor_runs](const int& out)
+    g.add_node(ts::Named{}, [&successor_runs](const int& out)
     {
         TS_CHECK(out == 46);   // the successor sees the frame's full effect (post-join, post-await)
         successor_runs.fetch_add(1);
@@ -461,11 +461,11 @@ Task<void> declared_pair_body(tests::Counter& own, tests::Counter& other)
 
 void test_cross_object_declared()
 {
-    ts::Guarded<tests::Counter> a;
-    ts::Guarded<tests::Counter> b;
+    ts::Guarded<tests::Counter> a{ ts::Named{} };
+    ts::Guarded<tests::Counter> b{ ts::Named{} };
     ts::Static_task_graph graph;
-    graph.add_node([](tests::Counter& own, tests::Counter& other) { return declared_pair_body(own, other); }, a, b);
-    graph.add_node([](tests::Counter& own, tests::Counter& other) { return declared_pair_body(own, other); }, b, a);
+    graph.add_node(ts::Named{}, [](tests::Counter& own, tests::Counter& other) { return declared_pair_body(own, other); }, a, b);
+    graph.add_node(ts::Named{}, [](tests::Counter& own, tests::Counter& other) { return declared_pair_body(own, other); }, b, a);
     graph.compile();
     graph.execute().sync();
     TS_CHECK(a.access([](const tests::Counter& c) { return c.value(); }).sync() == 2);

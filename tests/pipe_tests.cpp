@@ -45,7 +45,7 @@ void test_readers_overlap_in_group()
 {
     constexpr int k = 4;
     Parallel_gate gate{ k };
-    ts::Guarded<int> data{ 0 };
+    ts::Guarded<int> data{ ts::Named{}, 0 };
 
     data.async([](int& v) { v = 1; });   // a writer opens the sequence
     std::vector<ts::Task<int>> reads;
@@ -68,7 +68,7 @@ void test_readers_overlap_in_group()
 // unsynchronized payload (the latter is what TSan flags on a true overlap).
 void test_writer_exclusion_probe()
 {
-    ts::Guarded<Rw_probe> probe;
+    ts::Guarded<Rw_probe> probe{ ts::Named{} };
     std::vector<ts::Task<void>> tasks;
 
     int writes = 0;
@@ -95,7 +95,7 @@ void test_writer_exclusion_probe()
 // the payload. The cross-thread interleaving is the point -- maximises overlap.
 void test_mixed_interleave()
 {
-    ts::Guarded<Rw_probe> probe;
+    ts::Guarded<Rw_probe> probe{ ts::Named{} };
     constexpr int producers = 6;
     constexpr int ops = 400;
 
@@ -146,7 +146,7 @@ void test_reader_concurrency_degrees()
     for (int k : { 2, 4, 8 })
     {
         Parallel_gate gate{ k };
-        ts::Guarded<int> data{ 0 };
+        ts::Guarded<int> data{ ts::Named{}, 0 };
         std::vector<ts::Task<int>> reads;
         for (int i = 0; i < k; ++i)
             reads.push_back(data.async([&gate](const int& v) { gate.arrive(); return v; }));
@@ -165,7 +165,7 @@ void test_group_between_writers()
 {
     constexpr int k = 4;
     Parallel_gate gate{ k };
-    ts::Guarded<Rw_probe> probe;
+    ts::Guarded<Rw_probe> probe{ ts::Named{} };
 
     probe.async([](Rw_probe& p) { p.observe_write(0); });
     std::vector<ts::Task<void>> reads;
@@ -188,7 +188,7 @@ void test_group_between_writers()
 // stress; this asserts the ordering guarantee black-box.
 void test_reader_after_writer_ordering()
 {
-    ts::Guarded<int> data{ 0 };
+    ts::Guarded<int> data{ ts::Named{}, 0 };
     data.async([](int& v) { v = 5; });
     ts::Task<int> after = data.async([](const int& v) { return v; });
     TS_CHECK(after.sync() == 5);
@@ -202,7 +202,7 @@ void test_reader_after_writer_ordering()
 void test_promotion_two_readers()
 {
     Parallel_gate gate{ 2 };
-    ts::Guarded<Rw_probe> probe;
+    ts::Guarded<Rw_probe> probe{ ts::Named{} };
 
     ts::Task<void> r1 = probe.async([&gate](const Rw_probe& p) { gate.arrive(); p.observe_read(1); });
     ts::Task<void> r2 = probe.async([&gate](const Rw_probe& p) { gate.arrive(); p.observe_read(2); });
@@ -221,7 +221,7 @@ void test_destructor_drains()
 {
     for (int iter = 0; iter < 200; ++iter)
     {
-        ts::Guarded<int> d{ 0 };
+        ts::Guarded<int> d{ ts::Named{}, 0 };
         for (int i = 0; i < 8; ++i)
             d.async([](int& v) { ++v; });
         // ~Guarded here must wait for the 8 writes.
@@ -235,7 +235,7 @@ void test_last_decrement_lifetime()
 {
     for (int iter = 0; iter < 300; ++iter)
     {
-        auto d = std::make_unique<ts::Guarded<int>>(0);
+        auto d = std::make_unique<ts::Guarded<int>>(ts::Named{}, 0);
         std::vector<ts::Task<void>> tasks;
         for (int i = 0; i < 16; ++i)
             tasks.push_back(d->async([](int& v) { ++v; }));
@@ -250,7 +250,7 @@ void test_last_decrement_lifetime()
 // returns -- rapid enqueue+immediate-complete churn exercises the push-UAF bracket.
 void test_push_uaf_churn()
 {
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     constexpr int n = 20000;
     for (int i = 0; i < n; ++i)
         d.async([](int& v) { ++v; });   // handle dropped immediately; each may free mid-push
@@ -261,7 +261,7 @@ void test_push_uaf_churn()
 // (unmodified) value; no hang.
 void test_cancelled_writer_advances()
 {
-    ts::Guarded<int> d{ 7 };
+    ts::Guarded<int> d{ ts::Named{}, 7 };
     ts::Cancellation_source src;
     src.request_cancel();
     ts::Task<void> cancelled = d.async([](int& v) { v = 999; }, { .token = src.token() });
@@ -276,7 +276,7 @@ void test_cancelled_writer_advances()
 void test_worker_less_deterministic()
 {
     ts::Scheduler_scope scope{ ts::Scheduler_config{ .single_threaded = true } };
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     for (int i = 0; i < 100; ++i)
         d.async([](int& v) { ++v; });
     for (int i = 0; i < 50; ++i)
@@ -289,7 +289,7 @@ void test_worker_less_deterministic()
 void test_worker_less_deep_chain()
 {
     ts::Scheduler_scope scope{ ts::Scheduler_config{ .single_threaded = true } };
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     constexpr int n = 200000;
     for (int i = 0; i < n; ++i)
         d.async([](int& v) { ++v; });
@@ -302,11 +302,11 @@ void test_worker_less_deep_chain()
 // completion of every run and async (no hang, no invariant break) is the assertion.
 void test_graph_async_hammer()
 {
-    ts::Guarded<Rw_probe> a, b;
+    ts::Guarded<Rw_probe> a{ ts::Named{ "a" } }, b{ ts::Named{ "b" } };
     ts::Static_task_graph g;
-    g.add_node([](Rw_probe& p) { p.observe_write(1); }, a);
-    g.add_node([](const Rw_probe& p) { p.observe_read(2); }, a);
-    g.add_node([](Rw_probe& p) { p.observe_write(3); }, b);
+    g.add_node(ts::Named{}, [](Rw_probe& p) { p.observe_write(1); }, a);
+    g.add_node(ts::Named{}, [](const Rw_probe& p) { p.observe_read(2); }, a);
+    g.add_node(ts::Named{}, [](Rw_probe& p) { p.observe_write(3); }, b);
     g.compile();
 
     std::atomic<bool> stop{ false };
@@ -368,7 +368,7 @@ void test_graph_async_hammer()
 // high-priority read still sees the write (the pipe edge dominates the queue priority).
 void test_priority_does_not_reorder()
 {
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     d.async([](int& v) { v = 3; }, { .priority = ts::Priority::low });
     ts::Task<int> hi = d.async([](const int& v) { return v; }, { .priority = ts::Priority::high });
     TS_CHECK(hi.sync() == 3);
@@ -408,7 +408,7 @@ bool owner_cleared(ts::Guarded<T>& obj)
 // owner, or `commit()` would take its inline arm under a read grant.
 void test_writer_owner_set_and_cleared()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
     TS_CHECK(owner_of(x) == nullptr);
 
     std::atomic<bool> matched{ false };
@@ -431,7 +431,7 @@ void test_writer_owner_set_and_cleared()
 // each name their OWN block, never the predecessor's and never null.
 void test_writer_owner_transfers_between_writes()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
     std::atomic<void*> first{ nullptr }, second{ nullptr };
     std::atomic<bool> self1{ false }, self2{ false };
 
@@ -464,7 +464,7 @@ void test_writer_owner_transfers_between_writes()
 // would mis-dispatch for the rest of the outer body.
 void test_writer_owner_inline_and_reentrant()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
 
     std::atomic<void*> inline_owner{ nullptr };
     x.access([&](int& v) { v = 1; inline_owner.store(owner_of(x)); }).sync();
@@ -493,7 +493,7 @@ void test_writer_owner_inline_and_reentrant()
 // is independent (a third object the task never touched stays unowned).
 void test_writer_owner_multi_object()
 {
-    ts::Guarded<int> a{ 0 }, b{ 0 }, c{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 }, c{ ts::Named{}, 0 };
     std::atomic<bool> both_self{ false };
     std::atomic<void*> untouched{ reinterpret_cast<void*>(1) };
 

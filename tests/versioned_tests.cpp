@@ -25,13 +25,13 @@ static_assert(std::is_same_v<
 
 void test_initial_read()
 {
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     TS_CHECK(v.read([](const int& x) { return x; }).sync() == 0);
 }
 
 void test_stage_publish_read()
 {
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     auto rec = v.recorder();
     rec.stage([](int& x) { x = 42; });
     v.publish().sync();
@@ -41,7 +41,7 @@ void test_stage_publish_read()
 void test_stability_before_publish()
 {
     // The whole point: staged writes are invisible until the publish.
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     auto rec = v.recorder();
     rec.stage([](int& x) { x = 42; });
     TS_CHECK(v.read([](const int& x) { return x; }).sync() == 0);
@@ -51,7 +51,7 @@ void test_stability_before_publish()
 
 void test_empty_publish_noop()
 {
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     auto rec = v.recorder();
     rec.stage([](int& x) { x = 5; });
     v.publish().sync();
@@ -66,7 +66,7 @@ void test_replay_resync_invariant()
     // Deltas accumulate across publishes. If the shadow were NOT resynced after
     // each swap, publish N+1 would apply its delta to a version N-1 shadow and
     // readers would observe dropped history.
-    ts::Versioned<int> v;   // Resync::replay
+    ts::Versioned<int> v{ ts::Named{} };   // Resync::replay
     auto rec = v.recorder();
 
     rec.stage([](int& x) { x += 1; });
@@ -84,7 +84,7 @@ void test_replay_resync_invariant()
 
 void test_copy_resync_invariant()
 {
-    ts::Versioned<int> v{ ts::Resync::copy };
+    ts::Versioned<int> v{ ts::Named{}, ts::Resync::copy };
     auto rec = v.recorder();
     rec.stage([](int& x) { x += 1; });
     v.publish().sync();
@@ -95,7 +95,7 @@ void test_copy_resync_invariant()
 
 void test_copy_custom_fn()
 {
-    ts::Versioned<int> v{ ts::Resync::copy };
+    ts::Versioned<int> v{ ts::Named{}, ts::Resync::copy };
     std::atomic<int> copies{ 0 };
     v.set_copy([&copies](int& dst, const int& src) { dst = src; copies.fetch_add(1); });
 
@@ -116,7 +116,7 @@ void test_overwrite_policy()
 {
     // Contract: every version's staged writes fully overwrite the state, so the
     // (stale) shadow contents never matter.
-    ts::Versioned<std::vector<int>> v{ ts::Resync::overwrite };
+    ts::Versioned<std::vector<int>> v{ ts::Named{}, ts::Resync::overwrite };
     auto rec = v.recorder();
 
     rec.stage([](std::vector<int>& x) { x = { 1, 2 }; });
@@ -130,7 +130,7 @@ void test_overwrite_policy()
 
 void test_divergence_check_passes_for_deterministic()
 {
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     v.set_divergence_check([](const int& x) { return static_cast<std::size_t>(x); });
     auto rec = v.recorder();
     for (int i = 0; i < 5; ++i)
@@ -145,7 +145,7 @@ void test_divergence_check_passes_for_deterministic()
 
 void test_multi_recorder_order()
 {
-    ts::Versioned<std::vector<int>> v;
+    ts::Versioned<std::vector<int>> v{ ts::Named{} };
     auto rec1 = v.recorder();
     auto rec2 = v.recorder();
     rec2.stage([](std::vector<int>& x) { x.push_back(2); });
@@ -160,7 +160,7 @@ void test_chained_publishes_apply_exactly_once()
     // Publishes fired back-to-back without syncing chain internally (phase 1 of
     // each gates on the previous resync); every staged command lands in exactly
     // one cut.
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     auto rec = v.recorder();
     std::vector<ts::Task<void>> pubs;
     for (int i = 0; i < 20; ++i)
@@ -178,7 +178,7 @@ void test_cancelled_publish_retains_commands()
     ts::Cancellation_source src;
     src.request_cancel();
 
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     auto rec = v.recorder();
     rec.stage([](int& x) { x = 7; });
 
@@ -204,7 +204,7 @@ void test_reader_overlaps_resync()
     tests::Parallel_gate gate{ 2 };
     std::atomic<int> hash_calls{ 0 };
 
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     v.set_divergence_check([&gate, &hash_calls](const int& x)
     {
         if (hash_calls.fetch_add(1) == 0)
@@ -233,7 +233,7 @@ void test_concurrent_readers_and_publishes()
     constexpr int publishes = 50;
     constexpr int reader_threads = 4;
 
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     std::atomic<bool> stop{ false };
     std::atomic<int> bad{ 0 };
 
@@ -271,19 +271,19 @@ void test_graph_stale_then_fresh()
 {
     // One frame: `before` (declared before the flip) reads version N-1, `after`
     // (ordered after the flip) reads version N. Run twice to prove re-arming.
-    ts::Versioned<int> v;
-    ts::Guarded<std::vector<int>> seen_before, seen_after;
+    ts::Versioned<int> v{ ts::Named{} };
+    ts::Guarded<std::vector<int>> seen_before{ ts::Named{ "seen_before" } }, seen_after{ ts::Named{ "seen_after" } };
 
     ts::Static_task_graph g;
-    g.add_node([](const int& x, std::vector<int>& log) { log.push_back(x); },
+    g.add_node(ts::Named{}, [](const int& x, std::vector<int>& log) { log.push_back(x); },
                v.state(), seen_before);   // "before": declared before the flip -> derived read->write edge
-    auto producer = g.add_node([rec = v.recorder()](std::vector<int>&) mutable
+    auto producer = g.add_node(ts::Named{}, [rec = v.recorder()](std::vector<int>&) mutable
     {
         rec.stage([](int& x) { x += 1; });
     }, seen_after);   // touches seen_after only to have SOME declared access
-    auto flip = g.add_node(ts::publish_body(v), v.state());
+    auto flip = g.add_node(ts::Named{}, ts::publish_body(v), v.state());
     flip.after(producer);
-    auto after = g.add_node([](const int& x, std::vector<int>& log) { log.push_back(x); },
+    auto after = g.add_node(ts::Named{}, [](const int& x, std::vector<int>& log) { log.push_back(x); },
                             v.state(), seen_after);
     after.after(flip);
     g.compile();
@@ -306,11 +306,11 @@ void test_publish_sync_then_graph_flip()
     // (enqueued before the phase gate triggers), so the flip's acquire orders
     // behind it and the flip-entry enforcement check passes deterministically.
     // 200 iterations amplify the timing window.
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     auto rec = v.recorder();
 
     ts::Static_task_graph g;
-    g.add_node(ts::publish_body(v), v.state());
+    g.add_node(ts::Named{}, ts::publish_body(v), v.state());
     g.compile();
 
     constexpr int rounds = 200;
@@ -333,7 +333,7 @@ void test_dynamic_publish_chains_behind_flip()
     long long ensure_base = ts::ensure_failure_count();
 #endif
 
-    ts::Versioned<int> v;
+    ts::Versioned<int> v{ ts::Named{} };
     std::atomic<int> apply_count{ 0 };
     std::atomic<bool> release{ false };
 
@@ -354,7 +354,7 @@ void test_dynamic_publish_chains_behind_flip()
     }
 
     ts::Static_task_graph g;
-    g.add_node(ts::publish_body(v), v.state());
+    g.add_node(ts::Named{}, ts::publish_body(v), v.state());
     g.compile();
     g.execute().sync();   // flip runs phases 1-2 and installs its shadow_ready; its resync
                           // is now blocked -> chain_ stays not-done
@@ -412,7 +412,7 @@ void test_synced_publish_then_destroy()
 {
     int seen = -1;
     {
-        ts::Versioned<int> v;
+        ts::Versioned<int> v{ ts::Named{} };
         auto rec = v.recorder();
         rec.stage([](int& x) { x = 7; });
         v.publish().sync();

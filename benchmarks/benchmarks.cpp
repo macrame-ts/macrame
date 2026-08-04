@@ -207,7 +207,7 @@ std::vector<double> bench_fork_join(ts::Idle_policy policy)
 // Guarded write: serialized async writes through one object's pipe.
 std::vector<double> bench_ts_write()
 {
-    ts::Guarded<uint64_t> obj{ 0 };
+    ts::Guarded<uint64_t> obj{ ts::Named{}, 0 };
     constexpr uint64_t batch = 20000;
     return measure([&]() -> uint64_t
     {
@@ -221,7 +221,7 @@ std::vector<double> bench_ts_write()
 // Guarded read: concurrent async reads through the reader/writer pipe.
 std::vector<double> bench_ts_read()
 {
-    ts::Guarded<uint64_t> obj{ 7 };
+    ts::Guarded<uint64_t> obj{ ts::Named{}, 7 };
     std::atomic<uint64_t> done{ 0 };
     constexpr uint64_t batch = 20000;
     return measure([&]() -> uint64_t
@@ -243,7 +243,7 @@ std::vector<double> bench_ts_read()
 // (readers never serialize); mixing writes adds serialization + the writer/reader handoff.
 std::vector<double> bench_pipe_contention(unsigned producers, int read_pct)
 {
-    ts::Guarded<uint64_t> obj{ 0 };
+    ts::Guarded<uint64_t> obj{ ts::Named{}, 0 };
     std::atomic<uint64_t> completed{ 0 };
 
     auto run_once = [&]() -> uint64_t
@@ -387,7 +387,7 @@ std::vector<double> bench_coro_chain_on(ts::Scheduler_config config)
 // Awaited join over 4 async reads (the coroutine-first form of the old typed join).
 std::vector<double> bench_coro_join()
 {
-    ts::Guarded<int> a{ 1 }, b{ 2 }, c{ 3 }, d{ 4 };
+    ts::Guarded<int> a{ ts::Named{}, 1 }, b{ ts::Named{}, 2 }, c{ ts::Named{}, 3 }, d{ ts::Named{}, 4 };
     auto read = [](const int& v) { return v; };
     return measure([&]() -> uint64_t
     {
@@ -404,10 +404,14 @@ std::vector<double> bench_coro_join()
 std::vector<double> bench_graph_execute()
 {
     constexpr int nodes = 8;
-    std::array<ts::Guarded<int>, nodes> stores{};
+    // An array of `Guarded` names each element: the type has no unnamed constructor, and
+    // `Guarded` is neither copyable nor movable, so the elements are built in place from
+    // one `ts::Named` each.
+    std::array<ts::Guarded<int>, nodes> stores{ ts::Named{}, ts::Named{}, ts::Named{}, ts::Named{},
+                                                ts::Named{}, ts::Named{}, ts::Named{}, ts::Named{} };
     ts::Static_task_graph g;
     for (auto& s : stores)
-        g.add_node([](int& v) { ++v; }, s);
+        g.add_node(ts::Named{}, [](int& v) { ++v; }, s);
     g.compile();
     return measure([&]() -> uint64_t
     {

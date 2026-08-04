@@ -326,15 +326,15 @@ Physics_stats run_physics_frames(int frames)
     // world. All journals are empty at frame end by construction: gameplay's
     // stages are committed by `sim` the same frame, sim's extract is published by
     // `flip` the same frame.
-    ts::Guarded<Physics_world> world;
+    ts::Guarded<Physics_world> world{ ts::Named{} };
     ts::Deferred<Physics_world> world_in{ world };      // the machine's staged inputs
-    ts::Versioned<Pose_snapshot> poses;                 // the machine's published outputs
+    ts::Versioned<Pose_snapshot> poses{ ts::Named{} };                 // the machine's published outputs
     Body_id_allocator ids;
 
-    ts::Guarded<Player> player;
-    ts::Guarded<Spawn_queue> spawns;
-    ts::Guarded<AI_system> AI;
-    ts::Guarded<Camera_state> camera;
+    ts::Guarded<Player> player{ ts::Named{} };
+    ts::Guarded<Spawn_queue> spawns{ ts::Named{} };
+    ts::Guarded<AI_system> AI{ ts::Named{} };
+    ts::Guarded<Camera_state> camera{ ts::Named{} };
 
     poses.set_divergence_check([](const Pose_snapshot& s) { return s.hash(); });
 
@@ -371,7 +371,7 @@ Physics_stats run_physics_frames(int frames)
     // distinct bodies commute at the world level -- and the player's thrust
     // (recorder created before the parallel slots) always applies before its
     // drag -- so the frame stays bit-deterministic across runs.
-    auto gameplay = g.add_node(
+    auto gameplay = g.add_node(ts::Named{},
         [rec = world_in.recorder(), drag = world_in.parallel_recorder()](const Pose_snapshot& p, const Player& pl) mutable
         {
             Vec3 f = pl.thrust_from(p.of(pl.body()));
@@ -390,7 +390,7 @@ Physics_stats run_physics_frames(int frames)
         poses.state(), player);
 
     // Spawner: reserve ids now (forward reference), stage the creations.
-    auto spawner = g.add_node(
+    auto spawner = g.add_node(ts::Named{},
         [rec = world_in.recorder(), &ids](Spawn_queue& q) mutable
         {
             for (Vec3 pos : q.take(2))
@@ -412,7 +412,7 @@ Physics_stats run_physics_frames(int frames)
     // Jolt query interfaces, UE Chaos's game-thread mirror), reserving direct
     // machine reads for what the extract can't carry -- that serialization a
     // visible graph edge you accept knowingly.
-    g.add_node(
+    g.add_node(ts::Named{},
         [](const Pose_snapshot& p, AI_system& a)
         {
             if (p.raycast_down({ 0.0f, 100.0f, 1.0f }, 2.5f))
@@ -423,7 +423,7 @@ Physics_stats run_physics_frames(int frames)
     // The sim: exclusive write on the machine, heaviest node in the frame.
     // Boundary commit (under the grant this node already holds) -> step ->
     // batch-extract into one staged command (cheap to replay twice).
-    auto sim = g.add_node(
+    auto sim = g.add_node(ts::Named{},
         [&world_in, out = poses.recorder()](Physics_world& w) mutable
         {
             world_in.commit();
@@ -435,10 +435,10 @@ Physics_stats run_physics_frames(int frames)
 
     // The flip: the only write conflict on `poses`. `gameplay` (declared before
     // it) derives an edge in front of it; `camera` opts into freshness after it.
-    auto flip = g.add_node(ts::publish_body(poses), poses.state());
+    auto flip = g.add_node(ts::Named{}, ts::publish_body(poses), poses.state());
     flip.after(sim);
 
-    auto cam = g.add_node(
+    auto cam = g.add_node(ts::Named{},
         [](const Pose_snapshot& p, const Player& pl, Camera_state& c)
         {
             c.follow(p.of(pl.body()).pos);

@@ -131,17 +131,22 @@ public:
     Static_task_graph(Static_task_graph&&) noexcept;
     Static_task_graph& operator=(Static_task_graph&&) noexcept;
 
-    // Add a node: functor + the `Guarded<>` instances it accesses. Per-object access mode, one
-    // rule (same as `Guarded::access`): parameter const-ness for a non-generic functor
-    //   add_node([](Physics& p, const Nav& n){ ... }, physics, nav);   // p:write, n:read
+    // Add a node: a leading `ts::Named`, the functor, and the `Guarded<>` instances it
+    // accesses. The name is required -- a literal, or `{}` to identify the node by this
+    // call site -- because it labels the node in the DOT dump, the trace, and every
+    // diagnostic that names a task (the node's block carries it).
+    //
+    // Per-object access mode, one rule (same as `Guarded::access`): parameter const-ness
+    // for a non-generic functor
+    //   add_node("pose", [](Physics& p, const Nav& n){ ... }, physics, nav);  // p:write, n:read
     // (by-value / `T&&` resource parameters are rejected); the rvalue probe for a GENERIC one
-    //   add_node([](const auto& p, auto& a){ a.pose(p); }, physics, anim);   // p:read, a:write
+    //   add_node({}, [](const auto& p, auto& a){ a.pose(p); }, physics, anim);  // p:read, a:write
     // or explicit `ts::as_read_only`/`as_read_write` tags on every object (don't mix tagged and
     // bare in one node). Read positions receive `const T&`, so a mutating body under a read
     // classification does not compile. Returns a `Graph_node` ordering handle.
     template<typename Fn, typename... Objs>
         requires (detail::Object_arg<Objs> && ...)
-    Graph_node add_node(Fn&& fn, Objs&&... objs)
+    Graph_node add_node(Named name, Fn&& fn, Objs&&... objs)
     {
         Node node;
         constexpr bool any_tagged = (detail::is_access_arg_v<Objs> || ...);
@@ -167,23 +172,12 @@ public:
                 std::forward<Fn>(fn), objs...);
         }
 
+        node.name = name;
         int index = static_cast<int>(nodes_.size());
         nodes_.push_back(std::move(node));
         compiled_ = false;
 
         return Graph_node(this, index);
-    }
-
-    // Named form: the leading `ts::Named` (implicit from a string literal, or `{}` for the
-    // call site alone) labels the node in the DOT dump, the trace and every diagnostic that
-    // names a task -- the node's task block carries it.
-    template<typename Fn, typename... Objs>
-        requires (detail::Object_arg<Objs> && ...)
-    Graph_node add_node(Named name, Fn&& fn, Objs&&... objs)
-    {
-        Graph_node handle = add_node(std::forward<Fn>(fn), std::forward<Objs>(objs)...);
-        nodes_[static_cast<std::size_t>(handle.index())].name = name;
-        return handle;
     }
 
     // Resolve access conflicts + explicit edges into a DAG; detect cycles. A non-null

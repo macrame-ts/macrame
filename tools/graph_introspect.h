@@ -45,17 +45,17 @@ inline std::string named_string(const Named& name)
     return std::string(detail::path_basename(name.file)) + ":" + std::to_string(name.line);
 }
 
-// A node's display label: its `ts::Named`, else `node<N>`.
+// A node's display label. Every node has a `ts::Named` (`add_node` requires one), so there
+// is no ordinal fallback -- the old `node<N>` and `objN` placeholders are gone with the
+// unnamed constructors that produced them.
 template<typename Node>
-std::string node_label(const Node& node, int index)
+std::string node_label(const Node& node, int)
 {
-    std::string label = named_string(node.name);
-    return label.empty() ? "node" + std::to_string(index) : label;
+    return named_string(node.name);
 }
 
-// Object labels: the owning pipe's `ts::Named` when set, else an `objN` ordinal in
-// first-declaration order. `access` and `pipes` are parallel arrays (same argument order),
-// so an instance's pipe is at the same position.
+// Object labels, from each owning pipe's `ts::Named`. `access` and `pipes` are parallel
+// arrays (same argument order), so an instance's pipe is at the same position.
 template<typename Nodes>
 std::map<const void*, std::string> object_labels(const Nodes& nodes)
 {
@@ -63,11 +63,7 @@ std::map<const void*, std::string> object_labels(const Nodes& nodes)
     for (const auto& node : nodes)
     {
         for (size_t k = 0; k < node.access.size(); ++k)
-        {
-            std::string name = named_string(node.pipes[k]->debug_name);
-            label.try_emplace(node.access[k].first,
-                name.empty() ? "obj" + std::to_string(label.size()) : name);
-        }
+            label.try_emplace(node.access[k].first, named_string(node.pipes[k]->debug_name));
     }
     return label;
 }

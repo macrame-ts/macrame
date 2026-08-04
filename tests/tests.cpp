@@ -127,9 +127,9 @@ void run_death_scenario(const char* name)
 #if TS_SAFETY_CHECKS
     else if (std::strcmp(name, "sync_own_object_deadlock") == 0)
     {
-        ts::Guarded<int> a{ 0 };
+        ts::Guarded<int> a{ ts::Named{}, 0 };
         ts::Static_task_graph g;
-        g.add_node([&a](int&)
+        g.add_node(ts::Named{}, [&a](int&)
         {
             // Queues behind this node's own write hold -> never admitted; the sync
             // diagnostic fires the sharp same-object message, then the worker parks
@@ -151,29 +151,29 @@ void run_death_scenario(const char* name)
     {
         ts::Static_task_graph g;
         {
-            ts::Guarded<int> a{ 0 };
-            g.add_node([](int&) {}, a);
+            ts::Guarded<int> a{ ts::Named{}, 0 };
+            g.add_node(ts::Named{}, [](int&) {}, a);
             g.compile();
         }   // ~Guarded: a compiled graph still references it -> fatal
     }
     else if (std::strcmp(name, "graph_destroyed_mid_run") == 0)
     {
-        ts::Guarded<int> a{ 0 };
+        ts::Guarded<int> a{ ts::Named{}, 0 };
         ts::Signal go;   // never triggered: the run stays in flight
         {
             ts::Static_task_graph g;
-            g.add_node([&go](int&) { go.sync(); }, a);
+            g.add_node(ts::Named{}, [&go](int&) { go.sync(); }, a);
             g.compile();
             ts::Task<void> run = g.execute();   // remaining_nodes set at execute entry
         }   // ~Static_task_graph with the run in flight -> fatal
     }
     else if (std::strcmp(name, "stale_inherited_grant") == 0)
     {
-        ts::Guarded<Counter> c;
+        ts::Guarded<Counter> c{ ts::Named{} };
         ts::Signal go;
         ts::Task<void> stray;
         ts::Static_task_graph g;
-        g.add_node([&stray, &go](Counter& k)
+        g.add_node(ts::Named{}, [&stray, &go](Counter& k)
         {
             // Deliberately NOT `ts::nested`: the coroutine inherits the node's grant (its
             // promise snapshots it at creation, here inside the body) but does not gate the
@@ -191,13 +191,13 @@ void run_death_scenario(const char* name)
         // The outer node declares READ on `x`; the inner graph writes it. A read grant
         // cannot be lent to a writer, and upgrading would re-acquire behind the caller's
         // own hold -- fatal at the nested `execute()`, not a deadlock later.
-        ts::Guarded<int> x{ 0 };
+        ts::Guarded<int> x{ ts::Named{}, 0 };
         ts::Static_task_graph inner;
-        inner.add_node([](int& v) { v += 1; }, x);
+        inner.add_node(ts::Named{}, [](int& v) { v += 1; }, x);
         inner.compile();
 
         ts::Static_task_graph outer;
-        outer.add_node([&inner](const int& v) -> ts::Task<void>
+        outer.add_node(ts::Named{}, [&inner](const int& v) -> ts::Task<void>
         {
             (void)v;
             co_await inner.execute();   // -> fatal
@@ -209,14 +209,14 @@ void run_death_scenario(const char* name)
     {
         // Lending while the caller still has unjoined scope children: the children run under
         // the same grant, so they could race the lent-to graph on the lent object.
-        ts::Guarded<int> x{ 0 };
+        ts::Guarded<int> x{ ts::Named{}, 0 };
         std::atomic<bool> release{ false };   // never set: the scope child stays live
         ts::Static_task_graph inner;
-        inner.add_node([](int& v) { v += 1; }, x);
+        inner.add_node(ts::Named{}, [](int& v) { v += 1; }, x);
         inner.compile();
 
         ts::Static_task_graph outer;
-        outer.add_node([&inner, &release](int& v) -> ts::Task<void>
+        outer.add_node(ts::Named{}, [&inner, &release](int& v) -> ts::Task<void>
         {
             (void)v;
             // Spin-waits rather than blocking on a `Signal`: an in-task `sync()` is itself
@@ -231,9 +231,9 @@ void run_death_scenario(const char* name)
     {
         // One run at a time: a node calling `execute()` on its OWN graph re-enters while the
         // first run is still in flight (the shared `Run_state` would be overwritten).
-        ts::Guarded<int> x{ 0 };
+        ts::Guarded<int> x{ ts::Named{}, 0 };
         ts::Static_task_graph g;
-        g.add_node([&g](int& v)
+        g.add_node(ts::Named{}, [&g](int& v)
         {
             (void)v;
             g.execute();   // -> fatal
@@ -243,10 +243,10 @@ void run_death_scenario(const char* name)
     }
     else if (std::strcmp(name, "graph_cycle") == 0)
     {
-        ts::Guarded<int> a{ 0 }, b{ 0 };
+        ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 };
         ts::Static_task_graph g;
-        ts::Graph_node na = g.add_node([](int&) {}, a);
-        ts::Graph_node nb = g.add_node([](int&) {}, b);
+        ts::Graph_node na = g.add_node(ts::Named{}, [](int&) {}, a);
+        ts::Graph_node nb = g.add_node(ts::Named{}, [](int&) {}, b);
         na.after(nb);
         nb.after(na);
         g.compile();     // cycle -> fatal
@@ -259,9 +259,9 @@ void run_death_scenario(const char* name)
     else if (std::strcmp(name, "graph_undeclared") == 0)
     {
         Counter outside;
-        ts::Guarded<int> a{ 0 };
+        ts::Guarded<int> a{ ts::Named{}, 0 };
         ts::Static_task_graph g;
-        g.add_node([&outside](int&) { outside.increment(); }, a);   // touches undeclared `outside`
+        g.add_node(ts::Named{}, [&outside](int&) { outside.increment(); }, a);   // touches undeclared `outside`
         g.compile();
         g.execute().sync();   // node runs -> violation
     }
@@ -269,7 +269,7 @@ void run_death_scenario(const char* name)
     {
         ts::Cancellation_source src;
         src.request_cancel();
-        ts::Guarded<int> d{ 0 };
+        ts::Guarded<int> d{ ts::Named{}, 0 };
         ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });
         while (!t.is_done()) std::this_thread::yield();
         t.sync();   // cancelled value task has no result -> fatal
@@ -289,11 +289,11 @@ void run_death_scenario(const char* name)
         // A node body parking on a pipe job for an object the task does not hold: fatal
         // (coroutine-first §4.1). The blocker keeps `b`'s pipe busy so the sync genuinely
         // parks (no timing dependence: the fatal fires before the wait).
-        ts::Guarded<tests::Counter> a;
-        ts::Guarded<int> b{ 0 };
+        ts::Guarded<tests::Counter> a{ ts::Named{} };
+        ts::Guarded<int> b{ ts::Named{}, 0 };
         std::atomic<bool> release{ false };
         ts::Static_task_graph g;
-        g.add_node([&b, &release](tests::Counter&)
+        g.add_node(ts::Named{}, [&b, &release](tests::Counter&)
         {
             ts::Task<void> blocker = b.async([&release](int&)
             {
@@ -325,7 +325,7 @@ void run_death_scenario(const char* name)
         // `test_await_cancelled_checked` (coroutine_tests).
         ts::Cancellation_source src;
         src.request_cancel();
-        ts::Guarded<int> d{ 0 };
+        ts::Guarded<int> d{ ts::Named{}, 0 };
         ts::Task<int> t = d.async([](const int& v) { return v; }, { .token = src.token() });
         while (!t.is_done())
             std::this_thread::yield();
@@ -336,7 +336,7 @@ void run_death_scenario(const char* name)
     }
     else if (std::strcmp(name, "deferred_drop_staged") == 0)
     {
-        ts::Guarded<int> target{ 0 };
+        ts::Guarded<int> target{ ts::Named{}, 0 };
         ts::Deferred<int> d{ target };
         auto rec = d.recorder();
         rec.stage([](int& v) { ++v; });
@@ -353,7 +353,7 @@ void run_death_scenario(const char* name)
             std::_Exit(0);
         }).detach();
 
-        ts::Guarded<int> target{ 0 };
+        ts::Guarded<int> target{ ts::Named{}, 0 };
         std::atomic<bool> release{ false };
         // Holds the pipe's write slot so the commit job cannot run or settle.
         ts::Task<void> blocker = target.async([&release](int&)
@@ -373,12 +373,12 @@ void run_death_scenario(const char* name)
 #if TS_SAFETY_CHECKS
     else if (std::strcmp(name, "deferred_commit_nested_grant") == 0)
     {
-        ts::Guarded<int> target{ 0 };
+        ts::Guarded<int> target{ ts::Named{}, 0 };
         ts::Deferred<int> d{ target };
         auto rec = d.recorder();
         rec.stage([](int& v) { ++v; });
         ts::Static_task_graph g;
-        g.add_node([&d](int&)
+        g.add_node(ts::Named{}, [&d](int&)
         {
             // The nested body inherits the node's write grant but is NOT the grant
             // holder (`writer_owner` is the node); its commit() would enqueue behind
@@ -391,7 +391,7 @@ void run_death_scenario(const char* name)
 #endif
     else if (std::strcmp(name, "recorder_empty_stage") == 0)
     {
-        ts::Guarded<int> target{ 0 };
+        ts::Guarded<int> target{ ts::Named{}, 0 };
         ts::Deferred<int> d{ target };
         ts::Recorder<int> rec = d.recorder();
         ts::Recorder<int> moved = std::move(rec);
@@ -400,7 +400,7 @@ void run_death_scenario(const char* name)
     }
     else if (std::strcmp(name, "journal_slot_overflow") == 0)
     {
-        ts::Guarded<int> target{ 0 };
+        ts::Guarded<int> target{ ts::Named{}, 0 };
         ts::Deferred<int> d{ target };
         std::vector<ts::Recorder<int>> alive;   // all kept alive: nothing recycles
         for (std::size_t i = 0; i <= ts::detail::Journal<int>::max_slots; ++i)
@@ -413,7 +413,7 @@ void run_death_scenario(const char* name)
     }
     else if (std::strcmp(name, "versioned_drop_staged") == 0)
     {
-        ts::Versioned<int> v;
+        ts::Versioned<int> v{ ts::Named{} };
         auto rec = v.recorder();
         rec.stage([](int& x) { ++x; });
         // destroyed with a staged unpublished command -> fatal (lost write)
@@ -431,7 +431,7 @@ void run_death_scenario(const char* name)
 
         std::atomic<bool> release{ false };
         {
-            ts::Versioned<int> v;
+            ts::Versioned<int> v{ ts::Named{} };
             // A spinning reader holds the front, so the publish's swap (a write) cannot
             // run and the returned task stays unsettled.
             ts::Task<void> blocker = v.read([&release](const int&)
@@ -448,7 +448,7 @@ void run_death_scenario(const char* name)
     }
     else if (std::strcmp(name, "versioned_divergence") == 0)
     {
-        ts::Versioned<int> v;
+        ts::Versioned<int> v{ ts::Named{} };
         v.set_divergence_check([](const int& x) { return static_cast<std::size_t>(x); });
         auto rec = v.recorder();
         // Nondeterministic command: the two replay applications see different
@@ -465,7 +465,7 @@ void run_death_scenario(const char* name)
         static std::atomic<bool> phase1_running{ false };
         static std::atomic<bool> release{ false };
         {
-            ts::Versioned<int> v;
+            ts::Versioned<int> v{ ts::Named{} };
             auto rec = v.recorder();
             rec.stage([](int& x)
             {
@@ -481,7 +481,7 @@ void run_death_scenario(const char* name)
             auto rec2 = v.recorder();
             rec2.stage([](int& x) { x += 10; });
             ts::Static_task_graph g;
-            g.add_node(ts::publish_body(v), v.state());
+            g.add_node(ts::Named{}, ts::publish_body(v), v.state());
             g.compile();
             g.execute().sync();                     // flip catches the unresolved publish -> fatal
 
@@ -492,7 +492,7 @@ void run_death_scenario(const char* name)
     }
     else if (std::strcmp(name, "versioned_wrong_front") == 0)
     {
-        ts::Versioned<int> v;
+        ts::Versioned<int> v{ ts::Named{} };
         int other = 0;
         ts::Access_context ctx;
         ctx.add(&other, Access::read_write);
@@ -501,7 +501,7 @@ void run_death_scenario(const char* name)
     }
     else if (std::strcmp(name, "coro_await_under_guard") == 0)
     {
-        ts::Guarded<Counter> w;
+        ts::Guarded<Counter> w{ ts::Named{} };
         ts::Signal never;
         coro_await_under_guard(w, never).sync();   // fatals during the coroutine's eager run
     }

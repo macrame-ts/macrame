@@ -27,7 +27,7 @@ ts::Task<int> read_async(ts::Guarded<int>& d)
 
 void test_get_void()
 {
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     ts::Task<void> t = d.async([](int& v) { v = 1; });
     t.sync();
     TS_CHECK(read_async(d).sync() == 1);
@@ -36,7 +36,7 @@ void test_get_void()
 void test_is_done()
 {
     std::atomic<bool> go{ false };
-    ts::Guarded<int> d{ 5 };
+    ts::Guarded<int> d{ ts::Named{}, 5 };
     ts::Task<int> t = d.async([&go](const int& v)
     {
         wait_until([&] { return go.load(); });
@@ -60,7 +60,7 @@ ts::Task<int> transform_chain(ts::Guarded<int>& d)
 
 void test_await_transform_chain()
 {
-    ts::Guarded<int> d{ 21 };
+    ts::Guarded<int> d{ ts::Named{}, 21 };
     TS_CHECK(transform_chain(d).sync() == 43);
 }
 
@@ -75,13 +75,13 @@ ts::Task<int> join_two(ts::Task<int> a, ts::Task<int> b)
 
 void test_await_join_two()
 {
-    ts::Guarded<int> a{ 10 }, b{ 32 };
+    ts::Guarded<int> a{ ts::Named{}, 10 }, b{ ts::Named{}, 32 };
     TS_CHECK(join_two(read_async(a), read_async(b)).sync() == 42);
 }
 
 void test_await_join_out_of_order()
 {
-    ts::Guarded<int> a{ 1 }, b{ 2 };
+    ts::Guarded<int> a{ ts::Named{}, 1 }, b{ ts::Named{}, 2 };
     ts::Task<int> ta = a.async([](const int& v) { std::this_thread::sleep_for(20ms); return v; });
     ts::Task<int> tb = b.async([](const int& v) { return v; });   // completes first
     TS_CHECK(join_two(std::move(ta), std::move(tb)).sync() == 3);
@@ -96,7 +96,7 @@ ts::Task<int> join_mixed(ts::Task<void> v, ts::Task<int> r)
 
 void test_await_join_void_prereq()
 {
-    ts::Guarded<int> a{ 10 }, b{ 32 };
+    ts::Guarded<int> a{ ts::Named{}, 10 }, b{ ts::Named{}, 32 };
     std::atomic<int> side{ 0 };
     ts::Task<void> v = a.async([&side](int& x) { side.store(x); });
     ts::Task<int> r = b.async([](const int& x) { return x; });
@@ -122,7 +122,7 @@ void test_await_join_cancelled_prereq()
     ts::Cancellation_source src;
     src.request_cancel();
 
-    ts::Guarded<int> a{ 1 }, b{ 2 };
+    ts::Guarded<int> a{ ts::Named{}, 1 }, b{ ts::Named{}, 2 };
     ts::Task<int> ta = a.async([](const int& x) { return x; });                              // completes
     ts::Task<int> tb = b.async([](const int& x) { return x; }, { .token = src.token() });    // cancelled
 
@@ -233,7 +233,7 @@ void test_cancel_before_run()
     ts::Cancellation_source src;
     src.request_cancel();               // cancelled before the task is dispatched
 
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     std::atomic<bool> ran{ false };
     ts::Task<int> t = d.async([&ran](int& v) { ran.store(true); return v; }, { .token = src.token() });
 
@@ -247,7 +247,7 @@ void test_cancel_void_get_unblocks()
     ts::Cancellation_source src;
     src.request_cancel();
 
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     ts::Task<void> t = d.async([](int& v) { v = 1; }, { .token = src.token() });
     t.sync();                            // void: unblocks, no fatal
     TS_CHECK(t.is_cancelled());
@@ -255,7 +255,7 @@ void test_cancel_void_get_unblocks()
 
 void test_not_cancelled_normally()
 {
-    ts::Guarded<int> d{ 7 };
+    ts::Guarded<int> d{ ts::Named{}, 7 };
     ts::Task<int> t = d.async([](const int& v) { return v; });
     TS_CHECK(t.sync() == 7);
     TS_CHECK(!t.is_cancelled());
@@ -370,7 +370,7 @@ void test_launch_priority()
     // the scheduler + graph tests; here just confirm the API threads through and runs).
     TS_CHECK(ts::launch([] { return 1; }, { .priority = ts::Priority::high }).sync() == 1);
 
-    ts::Guarded<int> d{ 40 };
+    ts::Guarded<int> d{ ts::Named{}, 40 };
     TS_CHECK(d.async([](const int& v) { return v + 2; }, { .priority = ts::Priority::high }).sync() == 42);
 }
 
@@ -406,7 +406,7 @@ void test_async_body_token_earlyout()
     std::atomic<bool> started{ false };
     std::atomic<int> stage{ 0 };
 
-    ts::Guarded<int> d{ 5 };
+    ts::Guarded<int> d{ ts::Named{}, 5 };
     ts::Task<int> t = d.async([&started, &stage](const int& v, ts::Cancellation_token tok) -> int
     {
         started.store(true);
@@ -425,7 +425,7 @@ void test_async_body_token_earlyout()
 // A write accessor (T&) with a trailing token is still deduced read_write.
 void test_async_write_token()
 {
-    ts::Guarded<int> d{ 0 };
+    ts::Guarded<int> d{ ts::Named{}, 0 };
     d.async([](int& v, ts::Cancellation_token) { v = 9; }).sync();   // mutates -> write path
     TS_CHECK(d.async([](const int& v) { return v; }).sync() == 9);
 }

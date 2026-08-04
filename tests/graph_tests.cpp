@@ -30,12 +30,12 @@ int read_value(ts::Guarded<int>& d)
 
 void test_access_ordering()
 {
-    ts::Guarded<int> a{ 0 }, b{ 0 }, c{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 }, c{ ts::Named{}, 0 };
 
     ts::Static_task_graph g;
-    g.add_node([](int& x) { x = 1; }, a);
-    g.add_node([](const int& x, int& y) { y = x * 10; }, a, b);
-    g.add_node([](const int& x, const int& y, int& z) { z = x + y; }, a, b, c);
+    g.add_node(ts::Named{}, [](int& x) { x = 1; }, a);
+    g.add_node(ts::Named{}, [](const int& x, int& y) { y = x * 10; }, a, b);
+    g.add_node(ts::Named{}, [](const int& x, const int& y, int& z) { z = x + y; }, a, b, c);
     g.compile();
 
     g.execute().sync();
@@ -53,12 +53,12 @@ void test_access_ordering()
 // values.
 void test_generic_lambda_node()
 {
-    ts::Guarded<int> a{ 0 }, b{ 0 }, c{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 }, c{ ts::Named{}, 0 };
 
     ts::Static_task_graph g;
-    g.add_node([](auto& x) { x = 1; }, ts::as_read_write(a));
-    g.add_node([](auto& x, auto& y) { y = x * 10; }, ts::as_read_only(a), ts::as_read_write(b));
-    g.add_node([](auto& x, auto& y, auto& z) { z = x + y; },
+    g.add_node(ts::Named{}, [](auto& x) { x = 1; }, ts::as_read_write(a));
+    g.add_node(ts::Named{}, [](auto& x, auto& y) { y = x * 10; }, ts::as_read_only(a), ts::as_read_write(b));
+    g.add_node(ts::Named{}, [](auto& x, auto& y, auto& z) { z = x + y; },
                ts::as_read_only(a), ts::as_read_only(b), ts::as_read_write(c));
     g.compile();
 
@@ -73,13 +73,13 @@ void test_generic_lambda_node()
 // behavior.
 void test_generic_lambda_readers_overlap()
 {
-    ts::Guarded<int> x{ 0 }, y{ 0 }, z{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 }, y{ ts::Named{}, 0 }, z{ ts::Named{}, 0 };
     tests::Parallel_gate gate{ 2 };
 
     ts::Static_task_graph g;
-    g.add_node([](auto& v) { v = 1; }, ts::as_read_write(x));
-    g.add_node([&gate](auto& xv, auto& yv) { gate.arrive(); yv = xv; }, ts::as_read_only(x), ts::as_read_write(y));
-    g.add_node([&gate](auto& xv, auto& zv) { gate.arrive(); zv = xv; }, ts::as_read_only(x), ts::as_read_write(z));
+    g.add_node(ts::Named{}, [](auto& v) { v = 1; }, ts::as_read_write(x));
+    g.add_node(ts::Named{}, [&gate](auto& xv, auto& yv) { gate.arrive(); yv = xv; }, ts::as_read_only(x), ts::as_read_write(y));
+    g.add_node(ts::Named{}, [&gate](auto& xv, auto& zv) { gate.arrive(); zv = xv; }, ts::as_read_only(x), ts::as_read_write(z));
     g.compile();
 
     g.execute().sync();
@@ -92,12 +92,12 @@ void test_generic_lambda_readers_overlap()
 // the same write-then-read edges, proven by the propagated values.
 void test_probed_generic_node()
 {
-    ts::Guarded<int> a{ 0 }, b{ 0 }, c{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 }, c{ ts::Named{}, 0 };
 
     ts::Static_task_graph g;
-    g.add_node([](auto& x) { x = 1; }, a);
-    g.add_node([](const auto& x, auto& y) { y = x * 10; }, a, b);
-    g.add_node([](const auto& x, const auto& y, auto& z) { z = x + y; }, a, b, c);
+    g.add_node(ts::Named{}, [](auto& x) { x = 1; }, a);
+    g.add_node(ts::Named{}, [](const auto& x, auto& y) { y = x * 10; }, a, b);
+    g.add_node(ts::Named{}, [](const auto& x, const auto& y, auto& z) { z = x + y; }, a, b, c);
     g.compile();
 
     g.execute().sync();
@@ -110,13 +110,13 @@ void test_probed_generic_node()
 // run concurrently, matching the tagged and non-generic reader-overlap behavior.
 void test_probed_generic_readers_overlap()
 {
-    ts::Guarded<int> x{ 0 }, y{ 0 }, z{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 }, y{ ts::Named{}, 0 }, z{ ts::Named{}, 0 };
     tests::Parallel_gate gate{ 2 };
 
     ts::Static_task_graph g;
-    g.add_node([](auto& v) { v = 1; }, x);
-    g.add_node([&gate](const auto& xv, auto& yv) { gate.arrive(); yv = xv; }, x, y);
-    g.add_node([&gate](const auto& xv, auto& zv) { gate.arrive(); zv = xv; }, x, z);
+    g.add_node(ts::Named{}, [](auto& v) { v = 1; }, x);
+    g.add_node(ts::Named{}, [&gate](const auto& xv, auto& yv) { gate.arrive(); yv = xv; }, x, y);
+    g.add_node(ts::Named{}, [&gate](const auto& xv, auto& zv) { gate.arrive(); zv = xv; }, x, z);
     g.compile();
 
     g.execute().sync();
@@ -126,13 +126,13 @@ void test_probed_generic_readers_overlap()
 
 void test_explicit_ordering()
 {
-    ts::Guarded<int> p{ 0 }, q{ 0 };
+    ts::Guarded<int> p{ ts::Named{}, 0 }, q{ ts::Named{}, 0 };
     std::atomic<int> seq{ 0 };
     std::atomic<int> p_order{ 0 }, q_order{ 0 };
 
     ts::Static_task_graph g;
-    ts::Graph_node np = g.add_node([&seq, &p_order](int&) { p_order.store(++seq); }, p);
-    ts::Graph_node nq = g.add_node([&seq, &q_order](int&) { q_order.store(++seq); }, q);
+    ts::Graph_node np = g.add_node(ts::Named{}, [&seq, &p_order](int&) { p_order.store(++seq); }, p);
+    ts::Graph_node nq = g.add_node(ts::Named{}, [&seq, &q_order](int&) { q_order.store(++seq); }, q);
     nq.after(np);
     g.compile();
 
@@ -144,12 +144,12 @@ void test_explicit_ordering()
 void test_independent_parallel()
 {
     tests::Parallel_gate gate{ 2 };
-    ts::Guarded<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 }, b{ ts::Named{}, 0 };
 
     ts::Static_task_graph g;
     auto job = [&gate](int&) { gate.arrive(); };
-    g.add_node(job, a);
-    g.add_node(job, b);
+    g.add_node(ts::Named{}, job, a);
+    g.add_node(ts::Named{}, job, b);
     g.compile();
 
     g.execute().sync();
@@ -158,9 +158,9 @@ void test_independent_parallel()
 
 void test_re_run_counts()
 {
-    ts::Guarded<int> a{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 };
     ts::Static_task_graph g;
-    g.add_node([](int& v) { ++v; }, a);
+    g.add_node(ts::Named{}, [](int& v) { ++v; }, a);
     g.compile();
 
     for (int i = 0; i < 5; ++i)
@@ -178,9 +178,9 @@ void test_empty_graph()
 
 void test_single_node()
 {
-    ts::Guarded<int> a{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 };
     ts::Static_task_graph g;
-    g.add_node([](int& v) { v = 1; }, a);
+    g.add_node(ts::Named{}, [](int& v) { v = 1; }, a);
     g.compile();
     g.execute().sync();
     TS_CHECK(read_value(a) == 1);
@@ -189,13 +189,13 @@ void test_single_node()
 void test_diamond()
 {
     tests::Parallel_gate gate{ 2 };
-    ts::Guarded<int> x{ 0 }, y{ 0 }, z{ 0 }, w{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 }, y{ ts::Named{}, 0 }, z{ ts::Named{}, 0 }, w{ ts::Named{}, 0 };
 
     ts::Static_task_graph g;
-    g.add_node([](int& v) { v = 1; }, x);
-    g.add_node([&gate](const int& xv, int& yv) { gate.arrive(); yv = xv + 1; }, x, y);
-    g.add_node([&gate](const int& xv, int& zv) { gate.arrive(); zv = xv + 2; }, x, z);
-    g.add_node([](const int& yv, const int& zv, int& wv) { wv = yv + zv; }, y, z, w);
+    g.add_node(ts::Named{}, [](int& v) { v = 1; }, x);
+    g.add_node(ts::Named{}, [&gate](const int& xv, int& yv) { gate.arrive(); yv = xv + 1; }, x, y);
+    g.add_node(ts::Named{}, [&gate](const int& xv, int& zv) { gate.arrive(); zv = xv + 2; }, x, z);
+    g.add_node(ts::Named{}, [](const int& yv, const int& zv, int& wv) { wv = yv + zv; }, y, z, w);
     g.compile();
 
     g.execute().sync();
@@ -207,12 +207,12 @@ constexpr int wide = 32;
 
 void test_completion_after_all()
 {
-    std::array<ts::Guarded<int>, wide> data{};
+    auto data = tests::make_guarded_array<int, wide>();
     std::atomic<int> ran{ 0 };
 
     ts::Static_task_graph g;
     for (auto& d : data)
-        g.add_node([&ran](int&) { std::this_thread::sleep_for(1ms); ran.fetch_add(1); }, d);
+        g.add_node(ts::Named{}, [&ran](int&) { std::this_thread::sleep_for(1ms); ran.fetch_add(1); }, d);
     g.compile();
 
     g.execute().sync();
@@ -221,10 +221,10 @@ void test_completion_after_all()
 
 void test_graph_stress()
 {
-    std::array<ts::Guarded<int>, wide> data{};
+    auto data = tests::make_guarded_array<int, wide>();
     ts::Static_task_graph g;
     for (auto& d : data)
-        g.add_node([](int& v) { ++v; }, d);
+        g.add_node(ts::Named{}, [](int& v) { ++v; }, d);
     g.compile();
 
     for (int run_i = 0; run_i < 10; ++run_i)
@@ -238,12 +238,12 @@ void test_graph_stress()
 
 void test_cancel_skips_nodes()
 {
-    std::array<ts::Guarded<int>, wide> data{};
+    auto data = tests::make_guarded_array<int, wide>();
     std::atomic<int> ran{ 0 };
 
     ts::Static_task_graph g;
     for (auto& d : data)
-        g.add_node([&ran](int& v) { ran.fetch_add(1); v = 1; }, d);
+        g.add_node(ts::Named{}, [&ran](int& v) { ran.fetch_add(1); v = 1; }, d);
     g.compile();
 
     ts::Cancellation_source src;
@@ -259,11 +259,11 @@ void test_cancel_skips_nodes()
 void test_nested_gates_completion()
 {
     constexpr int n = 8;
-    ts::Guarded<int> owned{ 0 };
+    ts::Guarded<int> owned{ ts::Named{}, 0 };
     std::atomic<int> done_count{ 0 };
 
     ts::Static_task_graph g;
-    g.add_node([&done_count](int&)
+    g.add_node(ts::Named{}, [&done_count](int&)
     {
         for (int k = 0; k < n; ++k)
             ts::nested([&done_count] { done_count.fetch_add(1, std::memory_order_relaxed); });
@@ -278,10 +278,10 @@ void test_nested_gates_completion()
 // inherited access grant, so the harness must accept it.
 void test_nested_inherits_access()
 {
-    ts::Guarded<tests::Counter> c;
+    ts::Guarded<tests::Counter> c{ ts::Named{} };
 
     ts::Static_task_graph g;
-    g.add_node([](tests::Counter& counter)
+    g.add_node(ts::Named{}, [](tests::Counter& counter)
     {
         ts::nested([&counter] { counter.add(5); });   // guarded write, on a worker
     }, c);
@@ -297,16 +297,16 @@ void test_nested_inherits_access()
 void test_nested_before_successor()
 {
     constexpr int n = 16;
-    ts::Guarded<std::array<int, n>> arr{};
+    ts::Guarded<std::array<int, n>> arr{ ts::Named{} };
     std::atomic<int> sum_seen{ -1 };
 
     ts::Static_task_graph g;
-    g.add_node([](std::array<int, n>& a)
+    g.add_node(ts::Named{}, [](std::array<int, n>& a)
     {
         for (int k = 0; k < n; ++k)
             ts::nested([&a, k] { a[k] = k + 1; });   // disjoint elements: no race
     }, arr);
-    g.add_node([&sum_seen](const std::array<int, n>& a)
+    g.add_node(ts::Named{}, [&sum_seen](const std::array<int, n>& a)
     {
         int s = 0;
         for (int v : a) s += v;
@@ -324,15 +324,15 @@ void test_nested_before_successor()
 void test_node_priority_order()
 {
     ts::Scheduler_scope s{ { .num_threads = 1 } };
-    ts::Guarded<int> a{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 };
     std::atomic<int> seq{ 0 };
     std::atomic<int> high_ord{ 0 }, normal_ord{ 0 }, low_ord{ 0 };
 
     ts::Static_task_graph g;
-    g.add_node([](int& v) { v = 1; }, a);   // writer root -> the three readers run after it
-    g.add_node([&seq, &low_ord](const int&) { low_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::low);
-    g.add_node([&seq, &normal_ord](const int&) { normal_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::normal);
-    g.add_node([&seq, &high_ord](const int&) { high_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::high);
+    g.add_node(ts::Named{}, [](int& v) { v = 1; }, a);   // writer root -> the three readers run after it
+    g.add_node(ts::Named{}, [&seq, &low_ord](const int&) { low_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::low);
+    g.add_node(ts::Named{}, [&seq, &normal_ord](const int&) { normal_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::normal);
+    g.add_node(ts::Named{}, [&seq, &high_ord](const int&) { high_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::high);
     g.compile();
 
     g.execute().sync();
@@ -345,11 +345,11 @@ void test_node_priority_order()
 // succeeds synchronously and the node dispatches inline on this thread.
 void test_graph_node_inline_on_caller()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
     std::atomic<std::thread::id> node_thread{};
 
     ts::Static_task_graph g;
-    g.add_node([&node_thread](int& v) { node_thread.store(std::this_thread::get_id()); v = 1; }, x).set_inline();
+    g.add_node(ts::Named{}, [&node_thread](int& v) { node_thread.store(std::this_thread::get_id()); v = 1; }, x).set_inline();
     g.compile();
     g.execute().sync();
 
@@ -362,14 +362,14 @@ void test_graph_node_inline_on_caller()
 // inline too (trampolined). Order preserved by the edge.
 void test_graph_inline_chain_on_caller()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
     std::atomic<int> seq{ 0 };
     std::atomic<int> a_ord{ 0 }, b_ord{ 0 };
     std::atomic<std::thread::id> a_thr{}, b_thr{};
 
     ts::Static_task_graph g;
-    ts::Graph_node a = g.add_node([&](int& v) { a_ord.store(++seq); a_thr.store(std::this_thread::get_id()); v = 1; }, x).set_inline();
-    ts::Graph_node b = g.add_node([&](int& v) { b_ord.store(++seq); b_thr.store(std::this_thread::get_id()); v = 2; }, x).set_inline();
+    ts::Graph_node a = g.add_node(ts::Named{}, [&](int& v) { a_ord.store(++seq); a_thr.store(std::this_thread::get_id()); v = 1; }, x).set_inline();
+    ts::Graph_node b = g.add_node(ts::Named{}, [&](int& v) { b_ord.store(++seq); b_thr.store(std::this_thread::get_id()); v = 2; }, x).set_inline();
     b.after(a);
     g.compile();
     g.execute().sync();
@@ -383,9 +383,9 @@ void test_graph_inline_chain_on_caller()
 // Inline nodes are re-runnable like any node (the block re-arms; run_inline sticks).
 void test_graph_inline_rerun()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
     ts::Static_task_graph g;
-    g.add_node([](int& v) { ++v; }, x).set_inline();
+    g.add_node(ts::Named{}, [](int& v) { ++v; }, x).set_inline();
     g.compile();
     for (int i = 0; i < 5; ++i)
         g.execute().sync();
@@ -397,13 +397,13 @@ void test_graph_inline_rerun()
 // guarded-object list, and the per-node access numbers in label + tooltip.
 void test_dot_dump()
 {
-    ts::Guarded<int> x{ ts::Named{"counter"}, 0 };   // named -> tooltip uses the name
-    ts::Guarded<int> y{ 0 };                         // unnamed -> ordinal fallback
+    ts::Guarded<int> x{ ts::Named{"counter"}, 0 };   // literal -> tooltip uses the name
+    ts::Guarded<int> y{ ts::Named{}, 0 };            // call site -> `file:line`
 
     ts::Static_task_graph g;
     g.add_node("writer_a", [](int& v) { v = 1; }, x);
     ts::Graph_node b = g.add_node("reader_b", [](const int& v, int& w) { w = v; }, x, y);
-    ts::Graph_node c = g.add_node([](const int& w) { (void)w; }, y);   // unnamed -> "node2"
+    ts::Graph_node c = g.add_node(ts::Named{}, [](const int& w) { (void)w; }, y);   // site-labelled
     c.after(b);   // explicit, on top of the derived y-conflict (dedups to one solid edge)
 
     const char* path = "graph_dump_test.dot";
@@ -421,11 +421,14 @@ void test_dot_dump()
     TS_CHECK(dot.find("guarded objects") != std::string::npos);   // the object-list table
     TS_CHECK(dot.find("writer_a") != std::string::npos);
     TS_CHECK(dot.find("reader_b") != std::string::npos);
-    TS_CHECK(dot.find("node2") != std::string::npos);
+    // The `ts::Named{}` node and object are labelled by their call site, not an ordinal.
+    TS_CHECK(dot.find("graph_tests.cpp:") != std::string::npos);
     // a->b: derived from the x conflict (writer -> reader), cyan + tooltip with x's `ts::Named` name
     TS_CHECK(dot.find("n0 -> n1 [color=\"#66d9ef\", penwidth=1.8, tooltip=\"counter: RW->RO\"") != std::string::npos);
-    // b->c: explicit (green), tooltip still carries the y conflict
-    TS_CHECK(dot.find("n1 -> n2 [color=\"#a6e22e\", penwidth=2.0, tooltip=\"explicit ordering; obj1: RW->RO\"") != std::string::npos);
+    // b->c: explicit (green), tooltip still carries the y conflict -- y is site-named
+    TS_CHECK(dot.find("n1 -> n2 [color=\"#a6e22e\", penwidth=2.0, tooltip=\"explicit ordering; graph_tests.cpp:")
+             != std::string::npos);
+    TS_CHECK(dot.find(": RW->RO\"") != std::string::npos);
     // node tooltips decode the access numbers: writer_a writes `counter` (object 1)
     TS_CHECK(dot.find("tooltip=\"writer_a\\n1: counter - read/write\"") != std::string::npos);
 
@@ -441,7 +444,7 @@ void test_dot_dump()
 void test_graph_trace()
 {
     ts::Guarded<int> x{ ts::Named{"counter"}, 0 };
-    ts::Guarded<int> y{ 0 };
+    ts::Guarded<int> y{ ts::Named{}, 0 };
 
     ts::Static_task_graph g;
     g.add_node("writer_a", [](int& v) { ++v; }, x);
@@ -490,9 +493,9 @@ void test_graph_trace()
 // A cancelled run is not folded (its stamps are partial).
 void test_graph_trace_cancelled()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
     ts::Static_task_graph g;
-    g.add_node([](int& v) { ++v; }, x);
+    g.add_node(ts::Named{}, [](int& v) { ++v; }, x);
     g.compile();
 
     ts::tools::Graph_trace trace;
@@ -513,7 +516,7 @@ void test_graph_trace_cancelled()
 // the criticality tooltip line and the legend row.
 void test_graph_trace_critical()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
 
     ts::Static_task_graph g;
     g.add_node("chain_a", [](int& v) { ++v; }, x);
@@ -556,7 +559,7 @@ void test_graph_trace_critical()
 // the name-colour scheme.
 void test_graph_trace_priority()
 {
-    ts::Guarded<int> x{ 0 }, y{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 }, y{ ts::Named{}, 0 };
 
     ts::Static_task_graph g;
     g.add_node("hi", [](int& v) { ++v; }, x).priority(ts::Priority::high);
@@ -694,7 +697,7 @@ void test_graph_trace_row_packing()
 // window's work at all.
 void test_graph_trace_end_to_end_utilization()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
     auto busy = [](int us)
     {
         auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
@@ -722,7 +725,7 @@ void test_graph_trace_end_to_end_utilization()
 // total task count exceeds the run count (which would equal it if each run were one task).
 void test_graph_trace_task_count()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
     auto busy = [](int us)
     {
         auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
@@ -795,7 +798,7 @@ void test_graph_trace_overhead()
 // sane overhead share (bodies dominate at this granularity, so it stays well below 1).
 void test_graph_trace_overhead_end_to_end()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
     auto busy = [](int us)
     {
         auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
@@ -841,11 +844,11 @@ void test_death_sync_own_object()  { TS_CHECK(ts::test::expect_death("sync_own_o
 // every configuration still runs correctly.
 void test_lifetime_registration_balance()
 {
-    ts::Guarded<int> a{ 0 };
-    ts::Guarded<int> b{ 0 };
+    ts::Guarded<int> a{ ts::Named{}, 0 };
+    ts::Guarded<int> b{ ts::Named{}, 0 };
     {
         ts::Static_task_graph g;
-        g.add_node([](int& x) { x += 1; }, a);
+        g.add_node(ts::Named{}, [](int& x) { x += 1; }, a);
         g.compile();
         g.compile();   // recompile releases + re-registers (balanced)
         g.execute().sync();
@@ -854,7 +857,7 @@ void test_lifetime_registration_balance()
         g2.execute().sync();
 
         ts::Static_task_graph g3;
-        g3.add_node([](int& y) { y += 10; }, b);
+        g3.add_node(ts::Named{}, [](int& y) { y += 10; }, b);
         g3.compile();
         g3.execute().sync();
         g3 = std::move(g2);   // overwrite releases g3's registration of `b`
@@ -883,11 +886,11 @@ int probe_writes(ts::Guarded<tests::Rw_probe>& p)
 // oracle must see no reader/writer overlap and every write applied, across re-runs.
 void test_writer_handoff_chain()
 {
-    ts::Guarded<tests::Rw_probe> probe;
+    ts::Guarded<tests::Rw_probe> probe{ ts::Named{} };
     ts::Static_task_graph g;
-    g.add_node([](tests::Rw_probe& p) { p.observe_write(1); }, probe);
-    g.add_node([](tests::Rw_probe& p) { p.observe_write(2); }, probe);
-    g.add_node([](tests::Rw_probe& p) { p.observe_write(3); }, probe);
+    g.add_node(ts::Named{}, [](tests::Rw_probe& p) { p.observe_write(1); }, probe);
+    g.add_node(ts::Named{}, [](tests::Rw_probe& p) { p.observe_write(2); }, probe);
+    g.add_node(ts::Named{}, [](tests::Rw_probe& p) { p.observe_write(3); }, probe);
     g.compile();
 
     g.execute().sync();
@@ -906,12 +909,12 @@ void test_writer_handoff_chain()
 void test_reader_node_overlaps_async()
 {
     tests::Parallel_gate gate{ 2 };
-    ts::Guarded<int> x{ 5 };
+    ts::Guarded<int> x{ ts::Named{}, 5 };
 
     ts::Task<int> a = x.async([&gate](const int& v) { gate.arrive(); return v; });
 
     ts::Static_task_graph g;
-    g.add_node([&gate](const int& v) { gate.arrive(); (void)v; }, x);
+    g.add_node(ts::Named{}, [&gate](const int& v) { gate.arrive(); (void)v; }, x);
     g.compile();
     ts::Task<void> run = g.execute();
 
@@ -929,14 +932,14 @@ void test_reader_node_overlaps_async()
 // node skips the turn and runs under the outer's grant.
 void test_nested_run_lends_write_grant()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
 
     ts::Static_task_graph inner;
-    inner.add_node([](int& v) { v += 10; }, x);
+    inner.add_node(ts::Named{}, [](int& v) { v += 10; }, x);
     inner.compile();
 
     ts::Static_task_graph outer;
-    outer.add_node([&inner](int& v) -> ts::Task<void>
+    outer.add_node(ts::Named{}, [&inner](int& v) -> ts::Task<void>
     {
         v += 1;                          // under the outer node's write grant
         co_await inner.execute();        // lent: the inner writer skips its turn on `x`
@@ -956,16 +959,16 @@ void test_nested_run_lends_write_grant()
 // on the lent object must apply in declaration order.
 void test_nested_run_inner_edges_survive_lend()
 {
-    ts::Guarded<std::string> log;
+    ts::Guarded<std::string> log{ ts::Named{} };
 
     ts::Static_task_graph inner;
-    inner.add_node([](std::string& s) { s += "a"; }, log);
-    inner.add_node([](std::string& s) { s += "b"; }, log);
-    inner.add_node([](std::string& s) { s += "c"; }, log);
+    inner.add_node(ts::Named{}, [](std::string& s) { s += "a"; }, log);
+    inner.add_node(ts::Named{}, [](std::string& s) { s += "b"; }, log);
+    inner.add_node(ts::Named{}, [](std::string& s) { s += "c"; }, log);
     inner.compile();
 
     ts::Static_task_graph outer;
-    outer.add_node([&inner](std::string& s) -> ts::Task<void>
+    outer.add_node(ts::Named{}, [&inner](std::string& s) -> ts::Task<void>
     {
         s += "[";
         co_await inner.execute();
@@ -982,15 +985,15 @@ void test_nested_run_inner_edges_survive_lend()
 // concurrent async on the same object (the oracle would flag an overlap).
 void test_nested_run_without_overlap_takes_turns()
 {
-    ts::Guarded<int> held{ 0 };
-    ts::Guarded<tests::Rw_probe> other;
+    ts::Guarded<int> held{ ts::Named{}, 0 };
+    ts::Guarded<tests::Rw_probe> other{ ts::Named{} };
 
     ts::Static_task_graph inner;
-    inner.add_node([](tests::Rw_probe& p) { p.observe_write(1); }, other);
+    inner.add_node(ts::Named{}, [](tests::Rw_probe& p) { p.observe_write(1); }, other);
     inner.compile();
 
     ts::Static_task_graph outer;
-    outer.add_node([&inner](int& v) -> ts::Task<void>
+    outer.add_node(ts::Named{}, [&inner](int& v) -> ts::Task<void>
     {
         v = 7;
         co_await inner.execute();
@@ -1011,15 +1014,15 @@ void test_nested_run_without_overlap_takes_turns()
 // the auto-join the inner run would float and the read below would race it.)
 void test_nested_run_auto_joins_scope()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
     std::atomic<int> inner_done{ 0 };
 
     ts::Static_task_graph inner;
-    inner.add_node([&inner_done](int& v) { std::this_thread::sleep_for(20ms); v += 5; inner_done.fetch_add(1); }, x);
+    inner.add_node(ts::Named{}, [&inner_done](int& v) { std::this_thread::sleep_for(20ms); v += 5; inner_done.fetch_add(1); }, x);
     inner.compile();
 
     ts::Static_task_graph outer;
-    outer.add_node([&inner](int& v)
+    outer.add_node(ts::Named{}, [&inner](int& v)
     {
         v += 1;
         inner.execute();   // handle dropped: the scope join is what keeps it honest
@@ -1036,15 +1039,15 @@ void test_nested_run_auto_joins_scope()
 // the outer node releases. Awaited from the blue boundary afterwards.
 void test_nested_run_detached()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
 
     ts::Static_task_graph inner;
-    inner.add_node([](int& v) { v += 5; }, x);
+    inner.add_node(ts::Named{}, [](int& v) { v += 5; }, x);
     inner.compile();
 
     ts::Task<void> detached;
     ts::Static_task_graph outer;
-    outer.add_node([&inner, &detached](int& v)
+    outer.add_node(ts::Named{}, [&inner, &detached](int& v)
     {
         v += 1;
         detached = inner.execute({ .detach = true });   // queues behind this node's own hold
@@ -1060,14 +1063,14 @@ void test_nested_run_detached()
 // carries the lent entries, so the lend composes without extra machinery.
 void test_nested_run_recursive()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
 
     ts::Static_task_graph deepest;
-    deepest.add_node([](int& v) { v += 100; }, x);
+    deepest.add_node(ts::Named{}, [](int& v) { v += 100; }, x);
     deepest.compile();
 
     ts::Static_task_graph middle;
-    middle.add_node([&deepest](int& v) -> ts::Task<void>
+    middle.add_node(ts::Named{}, [&deepest](int& v) -> ts::Task<void>
     {
         v += 10;
         co_await deepest.execute();
@@ -1075,7 +1078,7 @@ void test_nested_run_recursive()
     middle.compile();
 
     ts::Static_task_graph outer;
-    outer.add_node([&middle](int& v) -> ts::Task<void>
+    outer.add_node(ts::Named{}, [&middle](int& v) -> ts::Task<void>
     {
         v += 1;
         co_await middle.execute();
@@ -1090,14 +1093,14 @@ void test_nested_run_recursive()
 // declare the WRITE, which then covers the inner graph's writer.
 void test_nested_run_write_covers_inner_write()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
 
     ts::Static_task_graph inner;
-    inner.add_node([](int& v) { v += 2; }, x);
+    inner.add_node(ts::Named{}, [](int& v) { v += 2; }, x);
     inner.compile();
 
     ts::Static_task_graph outer;
-    outer.add_node([&inner](int& v) -> ts::Task<void>   // write, not const& -- covers the inner write
+    outer.add_node(ts::Named{}, [&inner](int& v) -> ts::Task<void>   // write, not const& -- covers the inner write
     {
         co_await inner.execute();
         v += 1;
@@ -1111,14 +1114,14 @@ void test_nested_run_write_covers_inner_write()
 // Companion to the non-quiet-scope fatal: join the scope children first, then lend.
 void test_nested_run_join_scope_then_lend()
 {
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
 
     ts::Static_task_graph inner;
-    inner.add_node([](int& v) { v += 100; }, x);
+    inner.add_node(ts::Named{}, [](int& v) { v += 100; }, x);
     inner.compile();
 
     ts::Static_task_graph outer;
-    outer.add_node([&inner](int& v) -> ts::Task<void>
+    outer.add_node(ts::Named{}, [&inner](int& v) -> ts::Task<void>
     {
         ts::nested([&v] { v += 1; });      // a scope child, running under the node's grant
         co_await ts::join_nested();        // quiesce before lending
@@ -1140,18 +1143,18 @@ void test_nested_run_join_scope_then_lend()
 void test_concurrent_graphs_shared_objects()
 {
     constexpr int rounds = 60;
-    ts::Guarded<tests::Rw_probe> shared_a, shared_b;
+    ts::Guarded<tests::Rw_probe> shared_a{ ts::Named{ "shared_a" } }, shared_b{ ts::Named{ "shared_b" } };
 
     ts::Static_task_graph g1;
-    g1.add_node([](tests::Rw_probe& p) { p.observe_write(1); }, shared_a);
-    g1.add_node([](const tests::Rw_probe& p) { p.observe_read(2); }, shared_b);
+    g1.add_node(ts::Named{}, [](tests::Rw_probe& p) { p.observe_write(1); }, shared_a);
+    g1.add_node(ts::Named{}, [](const tests::Rw_probe& p) { p.observe_read(2); }, shared_b);
     g1.compile();
 
     // Opposite declaration order on the same two objects: the canonical order is the pipes'
     // addresses, not the declaration order, so this cannot invert anyone's acquisition.
     ts::Static_task_graph g2;
-    g2.add_node([](tests::Rw_probe& p) { p.observe_write(3); }, shared_b);
-    g2.add_node([](tests::Rw_probe& p, const tests::Rw_probe& q) { p.observe_write(4); (void)q; },
+    g2.add_node(ts::Named{}, [](tests::Rw_probe& p) { p.observe_write(3); }, shared_b);
+    g2.add_node(ts::Named{}, [](tests::Rw_probe& p, const tests::Rw_probe& q) { p.observe_write(4); (void)q; },
                 shared_a, shared_b);
     g2.compile();
 
@@ -1177,14 +1180,14 @@ void test_concurrent_graphs_shared_objects()
 void test_nested_run_worker_less()
 {
     ts::Scheduler_scope scope{ ts::Scheduler_config{ .single_threaded = true } };
-    ts::Guarded<int> x{ 0 };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
 
     ts::Static_task_graph inner;
-    inner.add_node([](int& v) { v += 10; }, x);
+    inner.add_node(ts::Named{}, [](int& v) { v += 10; }, x);
     inner.compile();
 
     ts::Static_task_graph outer;
-    outer.add_node([&inner](int& v) -> ts::Task<void>
+    outer.add_node(ts::Named{}, [&inner](int& v) -> ts::Task<void>
     {
         v += 1;
         co_await inner.execute();
