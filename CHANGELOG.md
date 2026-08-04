@@ -3,7 +3,11 @@
 Notable changes per version. Dates are the version's completion, not a release date —
 nothing has been tagged or published yet.
 
-## 0.2.0 — unreleased (2026-08)
+## 0.1.0 — unreleased (2026-08)
+
+The library goes public as 0.1.0 (author, 2026-08): nothing was ever tagged, so the
+pre-transformation API shape has no released version to be distinguished from. What
+follows is the state 0.1.0 ships as, not a delta against a published predecessor.
 
 Two large transformations, developed together on the `pipe-rebase` branch and merged as a
 unit. Both change public API. Designs of record: [docs/coroutine-first.md](docs/coroutine-first.md)

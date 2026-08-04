@@ -57,8 +57,8 @@ death tests), documented, and CI-gated.
   offenders are gone with the verbs themselves; re-baseline `mem_profile` on the coroutine
   shapes (10.14 territory).
 - **Build / public-prep** — MIT license, whole lib in `ts::`, CMake + presets, CI
-  (MSVC / clang-cl / Linux-TSan), Shipping config (`TS_SAFETY_CHECKS=0`), v0.2.0
-  (+ [CHANGELOG.md](../CHANGELOG.md); 0.1.0 was never tagged),
+  (MSVC / clang-cl / Linux-TSan), Shipping config (`TS_SAFETY_CHECKS=0`), v0.1.0
+  (+ [CHANGELOG.md](../CHANGELOG.md); the library goes public as 0.1.0),
   `ts.h` umbrella, `.clang-format`, `CONTRIBUTING` + issue/PR templates.
 
 ---
@@ -452,7 +452,20 @@ IDs — when an item is done, mark it, don't renumber.
       trigger would run every parked frame on the frame loop's own thread before `open()`
       returned, stalling frame start by an unbounded amount — the low-priority-resumption
       default this item asked for, made structural. 3 tests.
-   8. `[ ]` **(P3, research — borrow from UE) Symmetric task switching for coroutine resumption.** UE's runnable signature is `FTask*(bool)` — a body/segment can RETURN the next task, which the worker loop runs immediately on the same thread with zero queue/eventcount interaction ("Continuations were not themselves dequeued from any queue"); `CallAndMove` relocates the delegate storage in one step, so no second alloc for the returned continuation. This is the natural shape for a coroutine `co_await` handing back "resume me here next" — cleaner than routing the resume through our thread-local inline trampoline (`dispatch_ready`/`inline_pending`, task.h), which already gives same-thread + stack-safe execution but via a push+drain rather than a direct return-and-run. Scope the borrow to the coroutine path (pairs with 6.2's frame/control-block fusion — a fused frame that returns its own next segment); NOT a rework of general dispatch, which stays framework-driven so a queued resumption still gets a priority and the scheduler can interleave. Verified against UE source (`FTask::ExecuteTask`, `FScheduler::ExecuteTask` loop). Prior art: [task-systems-comparison.md](task-systems-comparison.md) §UE.
+   8. `[ ]` **(P1, author 2026-08 — promoted from P3 by two independent measurements)
+      Symmetric task switching for coroutine resumption.**
+      *Why P1:* the resume round trip is now the largest measured cost in the coroutine core,
+      established twice without looking for it. (a) The `coro chn` decomposition (N3): 88 ns/stage
+      of actual coroutine machinery against 1809–2139 ns/stage for a chained wait — ~95% is the
+      wake + dispatch + resume-on-another-thread round trip, not the frame. (b) The graph-free
+      frame measurement (`sample/game_frame.cpp`, 2026-08): graph-free costs +56–131 µs/frame,
+      matching ~50 suspend/resume round trips at ~1.8 µs; the +95 allocations/frame are under
+      2 µs of it. So the graph's performance advantage over hand-composed coroutines is **resume
+      locality, not allocation amortization** — and this item is the lever, not the allocator.
+      Not yet decomposed: how the ~1.8 µs splits between the wake syscall, the queue/eventcount
+      hop, and the cache-cold resume. Measure that first (an `Idle_policy::spin` vs
+      `spin_then_block` comparison isolates the wake syscall) — it decides how much of the gap
+      symmetric transfer can actually claim. UE's runnable signature is `FTask*(bool)` — a body/segment can RETURN the next task, which the worker loop runs immediately on the same thread with zero queue/eventcount interaction ("Continuations were not themselves dequeued from any queue"); `CallAndMove` relocates the delegate storage in one step, so no second alloc for the returned continuation. This is the natural shape for a coroutine `co_await` handing back "resume me here next" — cleaner than routing the resume through our thread-local inline trampoline (`dispatch_ready`/`inline_pending`, task.h), which already gives same-thread + stack-safe execution but via a push+drain rather than a direct return-and-run. Scope the borrow to the coroutine path (pairs with 6.2's frame/control-block fusion — a fused frame that returns its own next segment); NOT a rework of general dispatch, which stays framework-driven so a queued resumption still gets a priority and the scheduler can interleave. Verified against UE source (`FTask::ExecuteTask`, `FScheduler::ExecuteTask` loop). Prior art: [task-systems-comparison.md](task-systems-comparison.md) §UE.
       **Rescoped (2026-08, post-6.4):** the coroutine path now has its own equivalent — a
       bounded thread-local *resume trampoline* (`resume_pending`/`schedule_resume`,
       coroutine_support.h) that resumes a released frame on the settling/granting thread with
