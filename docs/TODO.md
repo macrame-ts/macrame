@@ -798,6 +798,35 @@ IDs — when an item is done, mark it, don't renumber.
        `ACQUIRED_AFTER` is silently source-order-dependent. Do 6.14 first; revisit this as an
        opt-in extra for users who want a compile-time signal on their own named state.
 
+   19. `[ ]` **(P2, author 2026-08) Debug name on every task — `source_location` by default,
+       overridable.** Graph nodes are named (`Node_name`, implicit from a string literal, `{}`
+       captures the `add_node` call site via `std::source_location`) and objects are named
+       (`ts::Named`), but **dynamic tasks are anonymous**. Since coroutine-first made
+       coroutines the whole dynamic vocabulary, and since their ergonomics are a stated goal,
+       every task should carry a name the same way: **default = the `std::source_location` of
+       the creation site, with an optional user-supplied literal overriding it** — the exact
+       `Node_name` pattern, reused rather than reinvented.
+       *Why it pays off now:* the diagnostics landing in 6.10–6.14 all print tasks. The
+       waits-for fatal currently reads `task (block 0000018EB62717B0) holding 'objB' awaits
+       'objA'` — the objects are named because `ts::Named` exists, the tasks are raw pointers
+       because nothing equivalent does. 6.13's quiescence net is meant to **dump every
+       suspended frame** when it fires, which is only useful if the frames identify
+       themselves. Trace attribution (`trace_owner`) has the same gap for non-node work.
+       Design points to settle: (a) **cost** — a `const char*` plus a `source_location` is
+       ~3 pointers + 2 ints per block, against a control block deliberately shrunk to 264 B
+       (4.7 is still trying to shrink it further), so decide between always-on (like
+       `Node_name`, kept in shipping) and `TS_SAFETY_CHECKS`-gated, and consider storing the
+       `source_location` alone and formatting lazily; (b) **the coroutine case is the
+       interesting one** — a coroutine's useful name is its function, which `source_location`
+       at the *creation* site gives only indirectly; check what `source_location::current()` as
+       a defaulted parameter actually captures for `co_await`ed frames versus `launch`/`async`
+       call sites, and whether the promise can capture it at `get_return_object` instead;
+       (c) plumbing through `launch`/`async`/`nested`/access verbs without adding a parameter
+       to every signature (a leading name arg is not expressible after an object pack — the
+       same constraint that forced `Node_name` to lead). Ratify alongside Inconsistency 7
+       (the naming surface review, which explicitly wants this settled *before* more tooling
+       depends on it) — this item is exactly that dependency arriving.
+
 7. **Deferred / Versioned**
    1. `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.
    2. `[ ]` **(P2) Lock-free `stage()`** — kill the per-slot mutex (it exists ONLY for the dynamic stage-vs-cut race; single producer per slot otherwise — handoff doc §5). Falls out of 7.1's arena step: single-producer chunked bump allocation makes `stage` a lock-free bump, and the cut becomes a chain-head exchange. `Parallel_recorder` already gives thread-keyed slots (per-worker + overflow lane); this removes the last lock on the staging path. Split out of 7.1 for referenceability — implement together with the arena.
