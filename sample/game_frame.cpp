@@ -723,11 +723,11 @@ void tick_streaming(ts::Guarded<Asset_source>& asset_source, const Input& input,
     read_all(input);
     fill(assets, 1.0f);
 
-    // Coroutine-first: the four loads fire eagerly and run concurrently; the coroutine
-    // processes each as it is awaited and counts the batch after the last -- the linear
-    // spelling of the old then/when_all chain. Created fire-and-forget (the returned handle
-    // is dropped): the frame owns itself until it completes, possibly after this node -- it
-    // touches only the pipe API and atomics, so no inherited grant can go stale.
+    // Four loads fire eagerly and run concurrently; the coroutine awaits each in turn and
+    // counts the batch after the last. Fire-and-forget -- the handle is dropped and the
+    // frame owns itself until it completes, which may be after this node returns. It
+    // accesses only `asset_source` (through its own async loads) and process-wide atomics,
+    // never this node's `input` or `assets`.
     [](ts::Guarded<Asset_source>& src) -> ts::Task<void>
     {
         auto load = [](const Asset_source& s) { spin(0.2); return s.size() > 0 ? s.get(0) : 1.0f; };
