@@ -634,6 +634,13 @@ IDs — when an item is done, mark it, don't renumber.
        an awaiter for an object already in the grant set skips the check, everything else does
        not — which makes the rule legible rather than implicit. Land with 6.10; same principle,
        same test-matrix rows.
+       **Confirmed load-bearing (2026-08), not cosmetic:** the ww_mutex evaluation found that
+       because the fatal sits in `await_suspend`, a hold-then-await runs *fine* whenever the
+       target pipe happens to be free at that moment — so the illegal pattern executes
+       undiagnosed on exactly the runs where timing is friendly, which is the A.1 inversion in
+       its purest form. It also found that both *guard-form* ABBA shapes are already closed by
+       these fatals; what survives is node/pipe-job declared grants plus a `co_await`, which is
+       6.14's territory. That narrows the residual hole and raises this item's value.
 
    12. `[ ]` **(P1, author 2026-08) Non-blocking result accessors — `try_take()` /
        `as_optional()`.** Fatal-on-cancelled is the wrong default for a value `sync()`: the
@@ -700,11 +707,26 @@ IDs — when an item is done, mark it, don't renumber.
        programs; the escape is to restructure (split the node — the §10.4 preferred form) or
        opt out per scope. Prior art: Go `runtime/lockrank.go`, Williams' `hierarchical_mutex`,
        Linux `CONFIG_PROVE_RAW_LOCK_NESTING`, Boyapati et al. OOPSLA'02 (the type-level version).
-       **Free static complement worth evaluating:** Clang's `ACQUIRED_BEFORE`/`ACQUIRED_AFTER`
-       graduated from beta 2025-08 and are default-on from LLVM 22 — zero runtime cost, cycle-
-       checks the declarations themselves. Limits (strictly intra-procedural, no alias tracking,
-       relates only *named* capability declarations) mean it can cover named global `Guarded`
-       state and not much else, but clang-cl is already a supported toolchain here.
+       **Free static complement — EVALUATED (2026-08), adopt narrowly.** Full report with
+       compiler output: [static-order-checking-and-ww-mutex.md](static-order-checking-and-ww-mutex.md).
+       clang-cl **22.1.3 ships in VS 18 Community**, so `ACQUIRED_BEFORE` is default-on under
+       plain `-Wthread-safety`, and the flag is silent over the current headers — enabling it
+       costs nothing today. Two claims in the earlier draft of this item were **wrong** and are
+       corrected here: (1) it does NOT cycle-check the declarations themselves — there is no
+       declaration-level check at all (verified under `-Weverything`); the analysis is entirely
+       use-driven, so an unused inverted rank pair is never diagnosed. (2) "named globals only"
+       is false — the attribute fires on *struct members* through a `World&` parameter and
+       through lambda captures, so all 38 of `game_frame`'s objects are coverable.
+       Real limits, measured: **function locals cannot carry the attribute at all** (hard
+       `-Wignored-attributes` rejection) — 268 of the repo's ~410 `Guarded` objects, giving ~9%
+       repo coverage against ~75% of the samples. And the *held* side is unautomatable: a node
+       body must hand-write `REQUIRES(world.phys, world.nav)` duplicating what `compile()`
+       already derives (42 sites in `game_frame`), with silent drift when it diverges. One
+       defect worth knowing: `ACQUIRED_AFTER` is silently order-dependent — identical code
+       warns or not depending on source position relative to an unrelated acquisition.
+       Verdict: ship `TS_CAPABILITY`/`TS_ACQUIRED_BEFORE` macros (no-ops on MSVC, verified
+       zero-noise) plus a guide recipe, as a free static mirror of the ranks this item makes
+       users write anyway. Strictly a subset of 6.14 at higher annotation cost — **6.14 first.**
 
    15. `[ ]` **(P1, author 2026-08 — big, design first) Escape hatches for the waiting rules,
        with a declared shipping policy.** Raised by the observation that a user may uphold a
