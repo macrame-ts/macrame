@@ -452,8 +452,22 @@ IDs — when an item is done, mark it, don't renumber.
       trigger would run every parked frame on the frame loop's own thread before `open()`
       returned, stalling frame start by an unbounded amount — the low-priority-resumption
       default this item asked for, made structural. 3 tests.
-   8. `[ ]` **(P1, author 2026-08 — promoted from P3 by two independent measurements)
-      Symmetric task switching for coroutine resumption.**
+   8. `[ ]` **(P2, author 2026-08 — promoted to P1 on an aggregate, then DEMOTED by the
+      decomposition that aggregate asked for) Symmetric task switching for coroutine
+      resumption.**
+      *Correction (2026-08):* the P1 promotion below reasoned from "~95% of a chained stage
+      is the wake/dispatch round trip, and symmetric transfer is the lever for it". The first
+      half is true; the second does not follow. The measured split of the ~1930 ns default
+      stage is frame 91 ns (5%) · same-thread queue hop 248 ns (13%) · first cross-thread hop
+      331 ns (17%) · idle-pool scale 770 ns (40%) · wake+park 490 ns (25%). Symmetric transfer
+      can claim at most the same-thread queue hop — ~13%, and less in practice since the
+      resume trampoline already skips the queue. Everything else is paid dispatching the stage
+      *outward*, before any resume exists to transfer to. The real lever for the remaining
+      ~1600 ns is **locality**, and the obvious shape (awaiting a not-yet-started task runs it
+      inline on the awaiting thread) is exactly the retraction coroutine-first deleted on
+      purpose — so it needs a design answer, not an optimization. Caveat on the measurement:
+      the benchmark is a strictly serial chain, which maximally rewards locality and is
+      therefore the most favourable possible case for that lever, not a representative one.
       *Why P1:* the resume round trip is now the largest measured cost in the coroutine core,
       established twice without looking for it. (a) The `coro chn` decomposition (N3): 88 ns/stage
       of actual coroutine machinery against 1809–2139 ns/stage for a chained wait — ~95% is the
@@ -623,8 +637,46 @@ IDs — when an item is done, mark it, don't renumber.
        quiescence with a zero count is a genuine deadlock and not a legitimate wait; (b) idle
        must be an explicit idle-worker count + empty queues + zero in-flight, since `spin`
        workers never park. Relationship: quiescence is the safety net (always-on candidate),
-       6.5's graph stays the precise dev-mode diagnostic. Ranks first of 6.10–6.13 — it also
+       6.5's graph stays the precise dev-mode diagnostic. Ranks first of 6.10–6.14 — it also
        retires the blind spot above.
+       **Field evidence (survey, 2026-08):** Go's equivalent check has a documented blind spot
+       — it fires only when *every* goroutine is asleep, so any live background thread masks a
+       partial deadlock ([golang/go#13759](https://github.com/golang/go/issues/13759)). Our
+       version is better positioned only *because* of the outstanding-external-wakeup counter,
+       which supplies the "nothing can wake us" predicate Go lacks. The counter is load-bearing,
+       not an optimization — and its failure mode (a forgotten registration ⇒ a FALSE deadlock
+       report) means the fatal message must name its own escape hatch.
+
+   14. `[ ]` **(P1, author 2026-08 — the one gap the field survey identified) Declared rank
+       for dynamically-awaited objects.** The canonical pipe-address order covers BATCH
+       acquisition (`multi_acquire`, node declared sets) and makes it deadlock-free. Nothing
+       relates a grant a task already HOLDS to an object it awaits LATER — that single missing
+       ordering constraint is the entire suspended-ABBA hole. The field's cheap answer is a
+       lock rank: `Guarded` takes an optional `ts::Rank{n}` (alongside `ts::Named`), and every
+       dynamic await asserts `rank(target) > max(rank of everything currently held)`. Havender's
+       argument then makes the cycle unrepresentable.
+       Why this shape over the alternatives: **O(1)** (one TLS max against one field;
+       `Access_context` already tracks held entries — Go's `lockrank` is a load and a branch,
+       and is off by default only for a struct-size reason, not a speed one), and it fires
+       **deterministically on the first offending await**, where a waits-for cycle detector
+       needs both halves to actually interleave — a scheduling coin-flip. Driver Verifier makes
+       the same choice explicitly: it bugchecks on *"the hierarchy violation… not when an actual
+       deadlock situation is occurring"*.
+       Composes with what exists: batch acquisition keeps address order; only the sequential
+       held-then-await edge needs ranks, so only objects that are actually awaited need one.
+       **Design detail that is load-bearing:** do NOT default the rank to address order —
+       rejection would become ABI-dependent and non-reproducible across builds. Require an
+       explicit rank for any object that may be dynamically awaited; default = "no dynamic
+       await permitted while held", the strictest and most common case.
+       Honest cost, the standard one for this family: a strict order rejects some correct
+       programs; the escape is to restructure (split the node — the §10.4 preferred form) or
+       opt out per scope. Prior art: Go `runtime/lockrank.go`, Williams' `hierarchical_mutex`,
+       Linux `CONFIG_PROVE_RAW_LOCK_NESTING`, Boyapati et al. OOPSLA'02 (the type-level version).
+       **Free static complement worth evaluating:** Clang's `ACQUIRED_BEFORE`/`ACQUIRED_AFTER`
+       graduated from beta 2025-08 and are default-on from LLVM 22 — zero runtime cost, cycle-
+       checks the declarations themselves. Limits (strictly intra-procedural, no alias tracking,
+       relates only *named* capability declarations) mean it can cover named global `Guarded`
+       state and not much else, but clang-cl is already a supported toolchain here.
 
 7. **Deferred / Versioned**
    1. `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.
