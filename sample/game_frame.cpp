@@ -221,6 +221,12 @@ struct World
     ts::Guarded<Net> net{ ts::Named{"net"}, entity_count };
     ts::Guarded<Script_events> script_events{ ts::Named{"script_events"}, entity_count };
     ts::Guarded<Assets> assets{ ts::Named{"assets"}, entity_count };
+    // Streaming stages loaded assets here as each load completes; the asset_commit node applies
+    // the batch (declared after `assets`, so it destructs before it -- ~Deferred touches the
+    // target's pipe).
+    ts::Deferred<Assets> assets_stream{ assets };
+    // Detached load coroutines in flight; the teardown flush waits on it (see ~World).
+    std::atomic<int> streaming_inflight{ 0 };
     ts::Guarded<Nav_tiles> nav_tiles{ ts::Named{"nav_tiles"}, entity_count };
     ts::Guarded<Combat> combat{ ts::Named{"combat"}, entity_count };
     ts::Guarded<Economy> economy{ ts::Named{"economy"}, entity_count };
@@ -260,6 +266,18 @@ struct World
     // stage into `draw_staged` and submit applies the batch
     ts::Guarded<Draw_lists> draw_lists{ ts::Named{"draw_lists"} };
     ts::Deferred<Draw_lists> draw_staged{ draw_lists };   // references an earlier member -- fine
+
+    // Streaming loads run detached and can finish after the frame that launched them, so at
+    // teardown some may still be staging into `assets_stream`. Flush on shutdown: wait for the
+    // in-flight loaders to drain, then apply the final batch as one write -- leaving no staged
+    // commands for `~Deferred` to reject as lost writes. (A user-declared destructor keeps this
+    // an aggregate -- only user-declared constructors would forfeit `World world{ entities }`.)
+    ~World()
+    {
+        while (streaming_inflight.load(std::memory_order_acquire) != 0)
+            std::this_thread::yield();
+        assets_stream.commit().sync();
+    }
 };
 
 // --- system budgets (ms at scale 1.0) ---------------------------------------------
@@ -299,7 +317,7 @@ void tick_input(Input&);
 void tick_camera(const Input&, Camera&);
 void tick_networking(const Input&, Net&);
 void tick_scripting(const Input&, const Net&, Script_events&);
-void tick_streaming(ts::Guarded<Asset_source>&, const Input&, Assets&);
+void tick_streaming(ts::Guarded<Asset_source>&, ts::Deferred<Assets>&, std::atomic<int>&, const Input&);
 void tick_navmesh_rebuild(const Input&, Nav_tiles&);
 // gameplay trio (combat splits per-entity when `parallel`)
 void tick_combat(const Transforms& prev_xf, const Input&, const Net&, const Script_events&, Combat&, bool parallel);
@@ -378,8 +396,12 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     graph.add_node("camera", &tick_camera, world.input, world.camera);
     graph.add_node("networking", &tick_networking, world.input, world.net);
     graph.add_node("scripting", &tick_scripting, world.input, world.net, world.script_events);
+    // Streaming declares only `input`: it stages loaded assets into `assets_stream` (grant-free)
+    // and reads `asset_source` through its own async loads -- neither is a declared node access.
     graph.add_node("streaming",
-        [&world](const Input& in, Assets& a) { tick_streaming(world.asset_source, in, a); }, world.input, world.assets);
+        [&world](const Input& in)
+        { tick_streaming(world.asset_source, world.assets_stream, world.streaming_inflight, in); },
+        world.input);
     graph.add_node("navmesh_rebuild", &tick_navmesh_rebuild, world.input, world.nav_tiles);
 
     // Gameplay trio: shared inputs, disjoint outputs -> runs in parallel. Combat is
@@ -453,6 +475,12 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     auto vfx = graph.add_node("vfx", &tick_vfx, world.transforms.state(), world.particles, world.vfx);
     graph.add_node("replication", &tick_replication, world.combat, world.economy, world.quests, world.intents, world.replication);
     graph.add_node("stats", &tick_stats, world.combat, world.economy, world.bodies, world.visibility, world.stats);
+    // The streaming commit slot: applies the assets staged so far as one write. It writes
+    // `assets`, so the conflict edge to gc (which reads `assets`) orders it before gc; it has no
+    // edge to streaming (staging is grant-free), so it commits whatever has arrived -- last
+    // frame's loads are fine.
+    graph.add_node("asset_commit", [&world](Assets& a) { (void)a; world.assets_stream.commit(); },
+        world.assets).priority(ts::Priority::low);
     graph.add_node("gc", &tick_gc, world.assets, world.renderables, world.particles, world.gc);
     auto debug_overlay = graph.add_node("debug_overlay",   // bare generic lambda: modes probed
         [](const auto& economy, const auto& xf) { tick_debug_overlay(economy, xf); },
@@ -717,35 +745,41 @@ void tick_scripting(const Input& input, const Net& net, Script_events& events)
 }
 
 // Streaming: async loads from the read-only source, overlapping the node's own
-// decompression cost. Fire-and-forget; handles dropped, chain stays alive.
-void tick_streaming(ts::Guarded<Asset_source>& asset_source, const Input& input, Assets& assets)
+// decompression cost. A real streaming system writes each loaded asset into the table WHEN
+// its load completes, not at frame start -- so the loader stages each result into
+// `assets_stream` (a `Deferred<Assets>`, grant-free) as it arrives, and the asset_commit node
+// applies the batch at its slot. Next frame is fine: streaming latency is not frame-critical.
+// This is the recommended shape (stage outward writes, apply at a commit slot) -- the loader
+// holds no grant across its multi-frame wait, so there is nothing to climb a rank away from.
+void tick_streaming(ts::Guarded<Asset_source>& asset_source, ts::Deferred<Assets>& assets_stream,
+    std::atomic<int>& inflight, const Input& input)
 {
     read_all(input);
-    fill(assets, 1.0f);
 
-    // The loads run as detached, fire-and-forget work that touches only `asset_source`
-    // (through its own async reads) and process-wide atomics -- never this node's `input` or
-    // `assets`. Kick them off through a detached `ts::launch`, which inherits none of this
-    // node's grants (docs/coroutine-first.md §2): the load coroutine created inside it snapshots
-    // an empty context, so it holds nothing while it awaits `asset_source` and needs no rank to
-    // await a foreign object. Four loads fire eagerly and run concurrently; the coroutine awaits
-    // each in turn and counts the batch after the last. The frame owns itself until it
-    // completes, which may be after this node returns.
-    ts::launch([&asset_source]
+    // The loads run detached, fire-and-forget. Kicked off through a detached `ts::launch`, which
+    // inherits none of this node's grants (docs/coroutine-first.md §2): the loader created inside
+    // it snapshots an empty context, so it holds nothing while it awaits `asset_source`. Four
+    // loads fire eagerly and run concurrently; the coroutine stages each result as it arrives and
+    // counts the batch after the last. `inflight` gates the teardown flush (see ~World): bumped
+    // here, dropped at the loader's end after the last stage.
+    inflight.fetch_add(1, std::memory_order_relaxed);
+    ts::launch([&asset_source, &assets_stream, &inflight]
     {
-        [](ts::Guarded<Asset_source>& src) -> ts::Task<void>
+        [](ts::Guarded<Asset_source>& src, ts::Deferred<Assets>& stage, std::atomic<int>& live) -> ts::Task<void>
         {
+            auto rec = stage.recorder();
             auto load = [](const Asset_source& s) { spin(0.2); return s.size() > 0 ? s.get(0) : 1.0f; };
             ts::Task<float> a = src.async(load);
             ts::Task<float> b = src.async(load);
             ts::Task<float> c = src.async(load);
             ts::Task<float> d = src.async(load);
-            co_await a; streamed.fetch_add(1, std::memory_order_relaxed);
-            co_await b; streamed.fetch_add(1, std::memory_order_relaxed);
-            co_await c; streamed.fetch_add(1, std::memory_order_relaxed);
-            co_await d; streamed.fetch_add(1, std::memory_order_relaxed);
+            float va = co_await a; rec.stage([va](Assets& t) { if (t.size() > 0) t.set(0, va); }); streamed.fetch_add(1, std::memory_order_relaxed);
+            float vb = co_await b; rec.stage([vb](Assets& t) { if (t.size() > 1) t.set(1, vb); }); streamed.fetch_add(1, std::memory_order_relaxed);
+            float vc = co_await c; rec.stage([vc](Assets& t) { if (t.size() > 2) t.set(2, vc); }); streamed.fetch_add(1, std::memory_order_relaxed);
+            float vd = co_await d; rec.stage([vd](Assets& t) { if (t.size() > 3) t.set(3, vd); }); streamed.fetch_add(1, std::memory_order_relaxed);
             batches.fetch_add(1, std::memory_order_relaxed);
-        }(asset_source);
+            live.fetch_sub(1, std::memory_order_release);   // last: all four staged
+        }(asset_source, assets_stream, inflight);
     });
 
     spin(budget::streaming);
@@ -1268,6 +1302,10 @@ ts::Task<void> gf_gc(World& world, ts::Task<void> streaming, ts::Task<void> part
 {
     co_await streaming;
     co_await particles;
+    // The commit slot: apply the assets staged so far (one write on `assets`), then account
+    // live memory. Sequencing the commit before the read is the hand-written analogue of the
+    // graph's asset_commit->gc conflict edge.
+    co_await ts::async([&world](Assets& a) { (void)a; world.assets_stream.commit(); }, world.assets);
     co_await ts::async(&tick_gc, world.assets, world.renderables, world.particles, world.gc);
 }
 
@@ -1315,8 +1353,9 @@ ts::Task<void> run_frame_graph_free(World& world)
     ts::Task<void> camera = ts::async(&tick_camera, world.input, world.camera);
     ts::Task<void> networking = ts::async(&tick_networking, world.input, world.net);
     ts::Task<void> streaming = ts::async(
-        [&world](const Input& in, Assets& assets) { tick_streaming(world.asset_source, in, assets); },
-        world.input, world.assets);
+        [&world](const Input& in)
+        { tick_streaming(world.asset_source, world.assets_stream, world.streaming_inflight, in); },
+        world.input);
     ts::Task<void> navmesh_rebuild = ts::async(&tick_navmesh_rebuild, world.input, world.nav_tiles);
 
     ts::Task<void> frustum_cull = gf_frustum_cull(world, camera);
