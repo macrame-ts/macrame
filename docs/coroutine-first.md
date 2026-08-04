@@ -77,7 +77,7 @@ not release grants; body-return is not completion.
 | `Task_builder`, `after()`, `add_prerequisite`, frozen-at-launch enforcement | `co_await x; co_await y;` at the top of the coroutine (dynamic edges become code) |
 | retraction: deep `retract`, `retractable`, hints, `retract_or_wait`, the claim/generation reuse machinery (`run_state` fusion, monotonic-max `dispatch_arg`, release-time gen capture, reuse forensics) | waits are suspensions — pool exhaustion is structurally gone; the inline-execution optimization survives as eager start + symmetric transfer (§5.2) |
 | reusable executable tasks (`Task_builder::reset`) | call the coroutine again (frames are one-shot); `Signal::reset` stays |
-| inline dispatch: `set_inline`, `run_inline`, the `inline_pending` trampoline | symmetric transfer — the settling thread resumes the awaiting frame directly, tail-call bounded |
+| inline dispatch: `set_inline`, `run_inline`, the `inline_pending` trampoline — **partially: removed from the DYNAMIC surface only** (as landed, 2026-08; `Graph_node::set_inline` and the `dispatch_ready`/`inline_pending` machinery survive graph-internal, see TODO 6.4) | symmetric transfer — the settling thread resumes the awaiting frame directly, tail-call bounded |
 | `access()` vs `async()` as behavioral split | one awaitable access verb + one eager fire verb (§4.2) |
 | blocking-sync diagnostics (`blocking_sync_diagnose`, the sharp/general ensures) | in-task `sync()` is a hard fatal (§4.1); nothing to diagnose-and-park |
 | `Task_control_block`'s three vectors + two counting regimes | slim shared-completion state: refcount, settled/cancelled, result, token, waiter list (usually one frame handle). TODO 4.7 resolves by annihilation |
@@ -272,8 +272,10 @@ them.
    blackboard) and the test suite off `then`/`when_all`/nested/builder onto coroutine
    forms. Largest mechanical stage; determinism checks must hold.
 4. **The deletions** (§3, in dependency order): then/when_all → builder/after → nested +
-   `execution_flag` mode → retraction + claim/generation → reuse → inline trampoline →
-   block slimming (vectors → waiter list). Suite green after each sub-step.
+   `execution_flag` mode → retraction + claim/generation → reuse → inline trampoline
+   (dynamic surface only, as landed) → block slimming (vectors → waiter list; landed as
+   `successors` → bare `Task_ptr`, 280 → 264 B — the `continuations` half is TODO 4.7
+   step 2). Suite green after each sub-step.
 5. **The detector** (TODO 6.5) + the remaining matrix rows; doctrine section into
    task-internals (rewritten §4/§6/§7/§8).
 6. **Validation + docs** — benches vs §5.5 targets, full TSan campaigns, ASan/stress,
