@@ -767,11 +767,49 @@ IDs — when an item is done, mark it, don't renumber.
        call site to attribute a relaxation to); shipping default **compiled out**. Death
        scenario `deadlock_net` plus two companions (`External_wait` suppresses it; the window
        switch disables it).
-       **Scoped out, deliberately:** the item wanted the fatal to dump every suspended frame.
-       That needs a registry of live suspended frames, i.e. per-suspension bookkeeping --
-       exactly what (b) was designed to avoid -- so the report names the blocked waiter (by
-       `ts::Named`, from 6.19) and the state that justified the verdict, and the frame dump is
-       deferred until a debugging session actually demands it. Original text follows.
+       **The report has three tiers** (author follow-up, landed 2026-08). Rule: say everything
+       cheap to collect, then name the flag that gets the rest.
+       *Tier 1, always* -- the blocked waiter's identity, the quiescent window, the escapes.
+       *Tier 2, free wherever `waits_for_cycle` exists* -- the live `waits_edges` registry is
+       printed verbatim; its entries ARE the tasks suspended while holding a grant. Sound
+       because it is a POST-MORTEM: an independent mechanism already concluded the system is
+       wedged, so these edges explain a verdict rather than predicting one. (The Linux
+       cross-release / DEPT precedent argues against learned edges used to PREDICT; it does not
+       apply to printing them afterwards.)
+       *Tier 3, `TS_SUSPENSION_REGISTRY`* -- every live suspension: the task, what it awaits
+       (task / object / its own scope children) and what it holds. Covers the shape tier 2
+       cannot: a task suspended on a plain task await while holding nothing, i.e. the two-hop
+       cycle. Records are embedded in the awaiter (which lives in the coroutine frame), so
+       nothing is allocated; the fatal names the rebuild flag when the tier is absent.
+       **Default justified by measurement, not assumption** (the assumption was wrong).
+       Release x64, 22 hw threads, three runs each, registry ON vs OFF:
+       | fixture | OFF | ON | delta |
+       |---|---|---|---|
+       | `1 w spin` (1 worker, serial) | ~357 ns | ~385 ns | +28 ns (+8%) |
+       | `coro chn` (serial chain, 100% suspension) | ~1866 ns | ~2025 ns | +160 ns (+8.5%) |
+       | `2 w spin` | ~816 ns | ~975 ns | +160 ns (+19%) |
+       | `N w spin` (22 workers) | ~1553 ns | ~1647 ns | +94 ns (+6%) |
+       | `graph 1.0` / `graph .05` (real frame) | 4112 / 455 µs | 4107 / 444 µs | none (noise) |
+       | `free .05` (graph-free, ~50 suspensions / 0.5 ms frame) | ~545 µs | ~542 µs | none (noise) |
+       So: ~30 ns/suspension uncontended (matching the estimate), **no scaling cliff** -- the
+       per-suspension cost FALLS from 2 workers to 22, because records shard by address and
+       concurrent suspensions land on different shards -- and **zero measurable cost on real
+       workloads**. The ~8% appears only where one frame ping-pongs a single suspension between
+       two threads and does nothing else, which is the structural worst case for any registry.
+       Default is therefore **on wherever `TS_SAFETY_CHECKS` is on** (this project's Release IS
+       a checked build; Shipping is the performance-committed one and has it off), rather than
+       the debug-only default the item first proposed; `-DTS_SUSPENSION_REGISTRY=0` opts out.
+       **Sharding key is load-bearing**: a coroutine resumes wherever its awaited work settled,
+       so a record is linked by one thread and unlinked by another. Keying shards on the
+       SUSPENDING THREAD put both halves of every suspension on one mutex and one cache line --
+       measured at +183 ns on `2 w spin` and +157 ns on `N w spin`; keying on the record's
+       ADDRESS removed the multi-worker component entirely.
+       `TS_DEBUG_NAMES` landed with it (the task `Named` moved off `TS_SAFETY_CHECKS` onto its
+       own switch), and `TS_SUSPENSION_REGISTRY=1` forces it on -- an explicit
+       `TS_DEBUG_NAMES=0` alongside is a hard `#error`. Both defines join `TS_ENABLED_RULES` in
+       the layout-mismatch tripwire; verified firing (`lld-link: /failifmismatch: mismatch
+       detected for 'TS_SUSPENSION_REGISTRY'`) with a deliberately mis-configured TU.
+       Original text follows.
        The waits-for
        detector (6.5) fires *before* a deadlock and names the participants, but only for the
        shapes it models: an edge is recorded solely when a task suspends on a pipe job while

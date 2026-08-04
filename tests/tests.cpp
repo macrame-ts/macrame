@@ -538,6 +538,26 @@ void run_death_scenario(const char* name)
         graph.compile();
         graph.execute().sync();
     }
+    else if (std::strcmp(name, "deadlock_net_suspended") == 0)
+    {
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+        // The shape tier 2 structurally cannot see: a node suspends on a plain task await
+        // (a Signal nobody triggers) while holding its declared grant. No pipe suspension,
+        // so no waits-for edge -- only the suspension registry has it. The report should
+        // name the node, what it holds, and what it awaits.
+        ts::Guarded<int> held{ ts::Named{ "held_object" }, 0 };
+        ts::Signal never{ "never_triggered" };
+        ts::Static_task_graph g;
+        g.add_node("stuck", [&never](int& v) -> ts::Task<void>
+        {
+            v = 1;
+            co_await never;   // suspends holding `held_object`; nothing will ever trigger it
+        }, held);
+        g.compile();
+        ts::set_deadlock_net_window(std::chrono::milliseconds(200));
+        g.execute().sync();   // -> the net fires from this boundary wait
+#endif
+    }
     else if (std::strcmp(name, "access_rank_descends") == 0)
     {
 #if TS_RULE_ON(TS_RULE_ACCESS_RANK)

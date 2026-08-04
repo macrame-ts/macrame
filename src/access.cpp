@@ -18,6 +18,18 @@ const char config_safety_checks_on = 1;
 const char config_safety_checks_off = 1;
 #endif
 
+#if TS_SUSPENSION_REGISTRY
+const char config_suspension_registry_on = 1;
+#else
+const char config_suspension_registry_off = 1;
+#endif
+
+#if TS_DEBUG_NAMES
+const char config_debug_names_on = 1;
+#else
+const char config_debug_names_off = 1;
+#endif
+
 } // namespace detail
 
 void Access_context::add(const void* instance, Access mode,

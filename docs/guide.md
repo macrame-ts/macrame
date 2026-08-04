@@ -620,6 +620,25 @@ legitimate handoff between two of your own threads. Tune or disable it with
 `TS_ENABLED_RULES` drops it from the build. It is compiled out of shipping
 builds by default.
 
+**The report.** It tells you as much as it cheaply can, then how to get more:
+
+```
+deadlock: waiting on task 'frame.cpp:212', but every worker has been idle …
+  suspended while holding a grant:
+    task 'physics' holds 'bodies', awaits 'nav'
+    task 'ai' awaits 'bodies', holds 'nav'
+    task 'stuck' awaits 'never_triggered', holding 'held_object'
+  (3 suspended task(s) listed above)
+```
+
+The middle block comes free from the waits-for machinery and covers tasks
+suspended while holding something. The full list — including tasks suspended on
+a plain `co_await` while holding nothing, which the first block cannot see — is
+the **suspension registry**, `TS_SUSPENSION_REGISTRY`. It is on in checked builds
+and off in shipping; it costs about 30 ns per suspension and nothing measurable
+on real frames. If you are looking at a report from a build without it, the
+message says so and names the rebuild flag.
+
 ### 5.1 Multi-object access
 
 To touch several guarded objects in one body, use the free function:

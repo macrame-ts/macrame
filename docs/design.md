@@ -539,6 +539,35 @@ own message, and the window is measured *continuously* over seconds rather than
 sampled once, so a slow-but-legitimate handoff between two of the program's own
 threads does not trip it.
 
+**What the report says is the feature.** A net that only announces "deadlock"
+leaves the user where they started, so the report is layered by collection cost:
+the blocked waiter always; the live waits-for edges wherever that registry
+exists, which is free and covers everyone suspended while holding a grant; and,
+behind `TS_SUSPENSION_REGISTRY`, every live suspension including those holding
+nothing — the two-hop shape the waits-for graph is blind to by construction.
+When the last tier is compiled out the message names the rebuild flag, so the
+escalation path is in the diagnostic rather than in a document.
+
+The second tier is worth a note on why it is sound. Learned-order deadlock
+*predictors* have a poor record — Linux reverted cross-release and never merged
+DEPT, both on false positives — and this reads the same edges. The difference is
+direction of inference: these edges are printed only after an independent
+mechanism has established that nothing can progress, so they explain a
+conclusion rather than reaching one, and a post-mortem cannot false-positive.
+
+The third tier's default was measured rather than assumed, and the assumption
+was wrong. Per-suspension bookkeeping was expected to be too expensive for
+non-debug builds; it costs ~30 ns per suspension, is inside noise on every real
+frame workload, and — because records shard by their own address — gets
+*cheaper* per suspension as worker count rises rather than collapsing on a
+shared lock. The one place it shows (~8%) is a microbenchmark where a single
+suspension ping-pongs between two threads and nothing else happens. So it is on
+wherever the harness is on. The sharding key is the load-bearing detail: a
+coroutine resumes wherever its awaited work settled, so a record is linked by one
+thread and unlinked by another, and keying shards on the *suspending thread*
+would have put both halves of every suspension on one mutex — which is precisely
+what the first measurement showed.
+
 Hoisting the guard check had a second effect worth recording: it forced the
 reentrancy exemption to be *stated*. A reentrant same-object access never
 suspends, so it never reached the old check — the exemption existed only as an

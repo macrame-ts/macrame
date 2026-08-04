@@ -2,6 +2,7 @@
 #include "harness.h"
 
 #include "ts/coroutine_support.h"
+#include "ts/detail/suspension_registry.h"
 #include "ts/rules.h"
 #include "ts/static_task_graph.h"
 #include "ts/task.h"
@@ -258,6 +259,35 @@ void test_death_deadlock_net()
 {
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
     TS_CHECK(ts::test::expect_death("deadlock_net"));
+    // The shape only tier 3 can see: a task suspended on a plain task await while holding a
+    // grant, so no waits-for edge exists. The child's report names it (verified by eye; the
+    // harness has no fatal-output capture) -- what this asserts is that the net still fires.
+    TS_CHECK(ts::test::expect_death("deadlock_net_suspended"));
+#endif
+}
+
+// 8. The suspension registry itself (tier 3): a live suspension is registered, and the entry
+// is retired when the frame resumes -- the property the whole report depends on.
+#if TS_SUSPENSION_REGISTRY
+ts::Task<void> park_on(ts::Signal gate)
+{
+    co_await gate;
+}
+#endif
+
+void test_suspension_registry_tracks_live_suspensions()
+{
+#if TS_SUSPENSION_REGISTRY
+    const int before = ts::detail::suspension_count();
+    ts::Signal gate{ "registry_gate" };
+    ts::Task<void> parked = park_on(gate);
+    // The coroutine is eager, so it has already reached the await and suspended.
+    TS_CHECK(ts::detail::suspension_count() == before + 1);
+    gate.trigger();
+    parked.sync();
+    TS_CHECK(ts::detail::suspension_count() == before);
+#else
+    TS_CHECK(ts::detail::suspension_count() == -1);   // compiled out: "not tracked"
 #endif
 }
 
@@ -277,4 +307,5 @@ void run_rules_tests()
     run("rules external wait suppresses the net", test_external_wait_suppresses_net);
     run("rules deadlock net window disable", test_deadlock_net_window_disable);
     run("death: deadlock net", test_death_deadlock_net);
+    run("suspension registry tracks live suspensions", test_suspension_registry_tracks_live_suspensions);
 }

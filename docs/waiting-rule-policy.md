@@ -157,10 +157,55 @@ Shape, in three parts kept apart on purpose:
    one from the first `next()` of a frame until the matching `open()`, so a frame whose
    workers run dry while a task waits for the boundary is not reported.
 
-Known limitation, recorded rather than hidden: the report names the blocked waiter but does
-not dump every suspended frame. That needs a registry of live suspended frames — per-suspension
-bookkeeping, which is exactly what part 2 above was designed to avoid — so it is deferred
-until something demands it.
+### 7.1 The report has three tiers
+
+A deadlock report should say everything that was cheap to collect, and tell you how to get
+the rest. So it is layered by what each level costs:
+
+**Tier 1 — always.** The fact of the deadlock, the blocked waiter's identity, how long the
+scheduler was quiescent, and the escapes (`ts::External_wait`,
+`ts::set_deadlock_net_window`, `TS_ENABLED_RULES`).
+
+**Tier 2 — free wherever `Rule::waits_for_cycle` is compiled in.** The waits-for registry
+already records `{held grant → awaited pipe}` at every pipe suspension and clears at resume,
+so at fatal time its live entries *are* the set of tasks suspended while holding a grant. It
+is printed, not consulted: an independent mechanism has already concluded the system is
+wedged, so this is a post-mortem of those edges rather than a prediction from them. (That
+distinction matters. Learned-order detectors that *predict* deadlocks from wait edges have a
+bad history — Linux's cross-release was reverted and DEPT never merged, both on false
+positives. Printing edges after the fact cannot false-positive.)
+
+**Tier 3 — the suspension registry, `TS_SUSPENSION_REGISTRY`.** Every live suspension:
+the suspended task, what it awaits (a task, an object, or its own scope children), and what
+it holds. This is what tier 2 structurally cannot see — a task suspended on a plain task
+await while holding nothing, which is exactly the two-hop cycle the waits-for graph is blind
+to (N holds G1 and awaits foreign task T; T awaits G1).
+
+When tier 3 is compiled out the report says so and names the rebuild flag, so a user hitting
+this in a build without it learns the next step from the message rather than from this
+document.
+
+### 7.2 What the registry costs, measured
+
+The registry was going to be debug-only on the assumption that per-suspension bookkeeping is
+expensive. It was measured instead (numbers and method in [TODO](TODO.md) 6.13):
+
+- **~30 ns per suspension**, uncontended.
+- **Zero measurable cost on real frame workloads** — the `game_frame` benchmarks, graph and
+  graph-free, at both scales, are inside run-to-run noise.
+- **~8% on `coro chn`**, a fixture where one frame ping-pongs a single suspension between
+  two threads and does nothing else. That is the structural worst case for any registry, and
+  it is a microbenchmark, not a workload.
+- **No scaling cliff**: the per-suspension cost *falls* as workers rise, because records
+  shard by address and concurrent suspensions land on different shards.
+
+So it is on wherever the safety harness is on, and off in shipping. Two implementation notes
+that carry that result. Records live inside the awaiter, which lives inside the coroutine
+frame, so nothing is allocated. And the shard key is the **record's address, not the
+suspending thread** — a coroutine resumes wherever its awaited work settled, so a record is
+linked by one thread and unlinked by another; keying on the thread would put both halves of
+every suspension on one mutex and one cache line, which is what the first measurement showed
+before the key changed.
 
 ## 8. Obligations on a new rule check
 

@@ -65,14 +65,51 @@
 #define TS_RULE_ON(bit) (((TS_RULES_EFFECTIVE) & (bit)) != 0)
 #define TS_RULES_ANY ((TS_RULES_EFFECTIVE) != 0)
 
+// The deadlock report's third tier (docs/waiting-rule-policy.md §7): a registry of every
+// live suspension -- who is suspended, what they await, what they hold. Tiers 1 and 2 come
+// free; this one costs a linked-list insert/remove per suspension, so it is a switch.
+//
+// Default ON everywhere except shipping. It was measured, not assumed: sharded per thread,
+// it costs ~1% of a suspend/resume round trip with no scaling cliff (numbers in TODO 6.13),
+// which is far too little to trade a complete deadlock report for. Shipping is the build
+// where someone has explicitly asked for no diagnostics, so it stays off there; define
+// `TS_SUSPENSION_REGISTRY=0` to opt out of any other configuration.
+#ifndef TS_SUSPENSION_REGISTRY
+#if TS_SAFETY_CHECKS
+#define TS_SUSPENSION_REGISTRY 1
+#else
+#define TS_SUSPENSION_REGISTRY 0
+#endif
+#endif
+
+// Debug identity on every task (`ts::Named` on the control block). Follows the harness by
+// default; forced on by the suspension registry, which is worthless without names -- a list
+// of block pointers is not a diagnostic.
+#ifndef TS_DEBUG_NAMES
+#if TS_SAFETY_CHECKS || TS_SUSPENSION_REGISTRY
+#define TS_DEBUG_NAMES 1
+#else
+#define TS_DEBUG_NAMES 0
+#endif
+#endif
+
+#if TS_SUSPENSION_REGISTRY && !TS_DEBUG_NAMES
+#error "TS_SUSPENSION_REGISTRY=1 requires TS_DEBUG_NAMES=1: the registry reports task names."
+#endif
+
 // Same ODR hazard as `TS_SAFETY_CHECKS` (the macro changes inline bodies and the coroutine
 // promise's layout), and the same best-effort tripwire. Note it compares the TOKEN TEXT, so
 // two spellings of one value (`TS_RULE_ALL` vs `0x1F`) trip it: define the macro in exactly
 // one place, as a build system does.
+// `TS_SUSPENSION_REGISTRY` and `TS_DEBUG_NAMES` carry the same hazard and get the same
+// treatment: both change class layout (`Task_control_block`'s name field, and the awaiters'
+// embedded registry record), so a mixed-configuration link is an ODR violation.
 #if defined(_MSC_VER)
 #define TS_DETAIL_RULES_STRINGIZE2(x) #x
 #define TS_DETAIL_RULES_STRINGIZE(x) TS_DETAIL_RULES_STRINGIZE2(x)
 #pragma detect_mismatch("TS_ENABLED_RULES", TS_DETAIL_RULES_STRINGIZE(TS_ENABLED_RULES))
+#pragma detect_mismatch("TS_SUSPENSION_REGISTRY", TS_DETAIL_RULES_STRINGIZE(TS_SUSPENSION_REGISTRY))
+#pragma detect_mismatch("TS_DEBUG_NAMES", TS_DETAIL_RULES_STRINGIZE(TS_DEBUG_NAMES))
 #endif
 
 namespace ts

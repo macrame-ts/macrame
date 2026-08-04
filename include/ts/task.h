@@ -413,7 +413,7 @@ struct Task_control_block
     Task_ptr nested_parent;
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
-#if TS_SAFETY_CHECKS
+#if TS_DEBUG_NAMES
     // Debug identity (`ts::Named`): the literal from the launching verb's options, else the
     // creation call site, else empty (a coroutine frame, whose promise sees no call site).
     // Diagnostics only -- the waits-for fatal, the quiescence dump -- so it is fully gated
@@ -421,6 +421,17 @@ struct Task_control_block
     // Cold tail placement: the hot clusters above keep their layout.
     Named name{ nullptr };
 #endif
+
+    // The block's identity, or the empty `Named` when names are compiled out -- so callers
+    // need no `#if` of their own.
+    Named name_or_empty() const noexcept
+    {
+#if TS_DEBUG_NAMES
+        return name;
+#else
+        return Named{ nullptr };
+#endif
+    }
 
     // This block's current re-arm generation — the high bits of `run_state`, above the
     // claim bit (`run_state >> 1`). Bumped by `reset()` on each re-arm. A dispatch
@@ -743,7 +754,7 @@ auto make_block()
 // name field). Call at the public verb, with the `Named` that verb captured.
 inline void set_task_name(const Task_ptr& core, const Named& name) noexcept
 {
-#if TS_SAFETY_CHECKS
+#if TS_DEBUG_NAMES
     core->name = name;
 #else
     (void)core;
@@ -762,7 +773,7 @@ inline Named named_from(const Options& opts, const std::source_location& site) n
 // Display identity of a block for a diagnostic; never null. `buf` must outlive the use.
 inline const char* task_name(const Task_control_block* blk, char* buf, std::size_t size) noexcept
 {
-#if TS_SAFETY_CHECKS
+#if TS_DEBUG_NAMES
     if (blk != nullptr)
         return named_display(blk->name, buf, size, "<unnamed task>");
 #else
@@ -791,7 +802,7 @@ inline thread_local std::vector<Task_ptr>* current_scope_children = nullptr;
 // anyway: the participant the user declared. Frames created outside any task stay unnamed.
 inline void inherit_task_name(Task_control_block& core) noexcept
 {
-#if TS_SAFETY_CHECKS
+#if TS_DEBUG_NAMES
     if (current_task)
         core.name = current_task->name;
 #else

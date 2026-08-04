@@ -39,6 +39,7 @@
 
 #include "ts/task.h"
 #include "ts/guarded.h"   // Pipe, pipe_acquire/release, Guarded(_access), global_scheduler
+#include "ts/detail/suspension_registry.h"   // tier 3 of the deadlock report
 
 #include <atomic>
 #include <coroutine>
@@ -293,6 +294,12 @@ struct Task_awaiter
         }
 #endif
 
+#if TS_SUSPENSION_REGISTRY
+        suspension_.awaited_task = core_->name_or_empty();
+        suspension_link(suspension_);
+        registered_ = true;
+#endif
+
         exit_segment_if_ours(h.promise());
 
         core_->attach([this, h](void*, bool)
@@ -332,12 +339,23 @@ struct Task_awaiter
         if (recorded_)
             waits_for_clear(this);
 #endif
+#if TS_SUSPENSION_REGISTRY
+        if (registered_)
+        {
+            suspension_unlink(suspension_);
+            registered_ = false;
+        }
+#endif
     }
 
     Task_ptr core_;
     std::atomic<int> state_{ 0 };
 #if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
     bool recorded_ = false;   // waits-for edges recorded at suspend, cleared at resume
+#endif
+#if TS_SUSPENSION_REGISTRY
+    Suspension_record suspension_;   // in the coroutine frame; never allocated
+    bool registered_ = false;
 #endif
 };
 
@@ -610,6 +628,11 @@ struct Pipe_guard_awaiter
 
         // Deferred: we are about to suspend. The guard rule was already checked at
         // `co_await` entry (`await_ready`).
+#if TS_SUSPENSION_REGISTRY
+        suspension_.awaited_pipe = &pipe_;
+        suspension_link(suspension_);
+        registered_ = true;
+#endif
 #if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
         // Waits-for edge (docs/coroutine-first.md §2): a deferred acquire is a genuine
         // suspension on this pipe; record {each held grant -> pipe_} and cycle-check.
@@ -634,6 +657,13 @@ struct Pipe_guard_awaiter
         if (recorded_)
             waits_for_clear(this);
 #endif
+#if TS_SUSPENSION_REGISTRY
+        if (registered_)
+        {
+            suspension_unlink(suspension_);
+            registered_ = false;
+        }
+#endif
         return Pipe_guard<T, Mode>(scheduler_, pipe_, obj_);   // prvalue -> elided into the local
     }
 
@@ -654,6 +684,10 @@ public:
     std::atomic<int> state_{ 0 };
 #if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
     bool recorded_ = false;   // waits-for edge recorded at suspend, cleared at resume
+#endif
+#if TS_SUSPENSION_REGISTRY
+    Suspension_record suspension_;
+    bool registered_ = false;
 #endif
 };
 
@@ -691,6 +725,12 @@ struct Join_awaiter
     template<typename P>
     bool await_suspend(std::coroutine_handle<P> h)
     {
+#if TS_SUSPENSION_REGISTRY
+        suspension_.joining_scope = true;
+        suspension_link(suspension_);
+        registered_ = true;
+#endif
+
         exit_segment_if_ours(h.promise());
 
         for (Task_ptr& c : children_)
@@ -711,11 +751,24 @@ struct Join_awaiter
         return true;
     }
 
-    void await_resume() const noexcept {}
+    void await_resume() noexcept
+    {
+#if TS_SUSPENSION_REGISTRY
+        if (registered_)
+        {
+            suspension_unlink(suspension_);
+            registered_ = false;
+        }
+#endif
+    }
 
     std::vector<Task_ptr> children_;
     std::atomic<int> remaining_{ 0 };
     std::atomic<int> state_{ 0 };
+#if TS_SUSPENSION_REGISTRY
+    Suspension_record suspension_;
+    bool registered_ = false;
+#endif
 };
 
 } // namespace detail

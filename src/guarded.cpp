@@ -1,7 +1,9 @@
 #include "ts/guarded.h"
+#include "ts/detail/suspension_registry.h"
 
 #include <atomic>
 #include <cstddef>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -419,40 +421,6 @@ const char* pipe_name(const Pipe* pipe, char* buf, std::size_t size) noexcept
 }
 #endif
 
-#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
-// The scheduler-side half of the deadlock net (declared in task.h). Defined here rather
-// than in scheduler.cpp because this is where the global scheduler holder lives, and the
-// null check is load-bearing: a blue thread may wait on a hand-triggered `Signal` before
-// any scheduler exists, and asking `global_scheduler()` would CREATE a worker pool as a
-// side effect of a safety check.
-bool scheduler_quiescent() noexcept
-{
-    const Scheduler* scheduler = g_fast.load(std::memory_order_acquire);
-    return scheduler != nullptr && scheduler->quiescent();
-}
-
-// The net fired: the scheduler has been continuously idle with empty queues, nothing is
-// registered as completable from off-pool, and this waiter is still blocked. Names its own
-// escape, because the failure mode of the counter is a FORGOTTEN registration, which
-// presents as exactly this message on a correct program.
-[[noreturn]] void report_deadlock(const Task_control_block* waited_on) noexcept
-{
-    char target[96];
-    char message[768];
-    std::snprintf(message, sizeof message,
-        "deadlock: waiting on task '%s', but every worker has been idle with empty queues for "
-        "%lld ms and nothing is registered as completable from outside the pool -- no thread and "
-        "no queue can ever settle it. If this wait IS completed by a non-worker thread (I/O, a "
-        "GPU fence, a Signal triggered off-pool, a frame gate), hold a ts::External_wait for its "
-        "duration -- a missing registration reports a correct program as deadlocked. "
-        "ts::set_deadlock_net_window(0ms) disables the net for this process; TS_ENABLED_RULES "
-        "drops it from the build",
-        task_name(waited_on, target, sizeof target),
-        deadlock_net_window_ms.load(std::memory_order_relaxed));
-    ts::fatal(message);
-}
-#endif
-
 #if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
 // ===== waits-for cycle detector (docs/coroutine-first.md §2) ================================
 //
@@ -580,6 +548,132 @@ void waits_for_clear(const void* ticket) noexcept
     std::erase_if(waits_edges, [&](const Waits_edge& e) { return e.ticket == ticket; });
 }
 #endif   // TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
+
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+// The scheduler-side half of the deadlock net (declared in task.h). Defined here rather
+// than in scheduler.cpp because this is where the global scheduler holder lives, and the
+// null check is load-bearing: a blue thread may wait on a hand-triggered `Signal` before
+// any scheduler exists, and asking `global_scheduler()` would CREATE a worker pool as a
+// side effect of a safety check.
+bool scheduler_quiescent() noexcept
+{
+    const Scheduler* scheduler = g_fast.load(std::memory_order_acquire);
+    return scheduler != nullptr && scheduler->quiescent();
+}
+
+// The net fired: the scheduler has been continuously idle with empty queues, nothing is
+// registered as completable from off-pool, and this waiter is still blocked. Names its own
+// escape, because the failure mode of the counter is a FORGOTTEN registration, which
+// presents as exactly this message on a correct program.
+// Append to a bounded report buffer, tracking the write position. Truncation is fine: this
+// is a dying process's last words, not a protocol.
+void report_append(char* buffer, std::size_t size, std::size_t& used, const char* format, ...) noexcept
+{
+    if (used + 1 >= size)
+        return;
+    va_list args;
+    va_start(args, format);
+    int written = std::vsnprintf(buffer + used, size - used, format, args);
+    va_end(args);
+    if (written > 0)
+        used = used + static_cast<std::size_t>(written) < size ? used + static_cast<std::size_t>(written) : size - 1;
+}
+
+// TIER 2 -- free wherever the waits-for registry exists. Its live entries ARE the tasks
+// suspended while holding a grant, in a structure already maintained for the cycle check,
+// read at a moment when we are already dying. (This is a POST-MORTEM of edges an independent
+// mechanism has already concluded are wedged, not a prediction from them -- the distinction
+// that separates it from the learned-order detectors that failed to land in Linux.)
+void report_held_grant_suspensions([[maybe_unused]] char* buffer, [[maybe_unused]] std::size_t size,
+                                   [[maybe_unused]] std::size_t& used) noexcept
+{
+#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
+    std::scoped_lock lock(waits_mutex);
+    if (waits_edges.empty())
+    {
+        report_append(buffer, size, used, "\n  (no task is suspended while holding a grant)");
+        return;
+    }
+    report_append(buffer, size, used, "\n  suspended while holding a grant:");
+    for (const Waits_edge& edge : waits_edges)
+    {
+        char who[96], held[96], awaited[96];
+        report_append(buffer, size, used, "\n    task '%s' holds '%s', awaits '%s'",
+            task_name(edge.waiter, who, sizeof who),
+            pipe_name(edge.held, held, sizeof held),
+            pipe_name(edge.awaited, awaited, sizeof awaited));
+    }
+#endif
+}
+
+// TIER 3 -- the full picture, when the registry is compiled in: every live suspension,
+// including the ones holding nothing (a plain task await), which tier 2 structurally cannot
+// see. When it is not compiled in, this is where the user learns how to get it.
+void report_all_suspensions(char* buffer, std::size_t size, std::size_t& used) noexcept
+{
+#if TS_SUSPENSION_REGISTRY
+    int total = 0;
+    for (Suspension_shard& shard : suspension_shards)
+    {
+        std::scoped_lock lock(shard.mutex);
+        for (const Suspension_record* record = shard.head; record != nullptr; record = record->next)
+        {
+            ++total;
+            char who[96], awaited[96];
+            if (record->joining_scope)
+            {
+                report_append(buffer, size, used, "\n    task '%s' awaits its own scope children",
+                    named_display(record->task, who, sizeof who, "<unnamed task>"));
+            }
+            else
+            {
+                const char* what = record->awaited_pipe != nullptr
+                    ? pipe_name(record->awaited_pipe, awaited, sizeof awaited)
+                    : named_display(record->awaited_task, awaited, sizeof awaited, "<unnamed task>");
+                report_append(buffer, size, used, "\n    task '%s' awaits '%s'",
+                    named_display(record->task, who, sizeof who, "<unnamed task>"), what);
+            }
+            for (int i = 0; i < record->held_count; ++i)
+            {
+                char held[96];
+                report_append(buffer, size, used, "%s'%s'", i == 0 ? ", holding " : ", ",
+                    pipe_name(pipe_from_epoch(record->held[i]), held, sizeof held));
+            }
+        }
+    }
+    if (total == 0)
+        report_append(buffer, size, used, "\n  (no task is suspended at all -- the wait is on work that never started)");
+    else
+        report_append(buffer, size, used, "\n  (%d suspended task(s) listed above)", total);
+#else
+    report_append(buffer, size, used,
+        "\n  the suspension registry is compiled out, so tasks suspended without holding a "
+        "grant are invisible here. Rebuild with -DTS_SUSPENSION_REGISTRY=1 and reproduce for "
+        "the full list of suspended tasks, what each holds and what each awaits");
+#endif
+}
+
+[[noreturn]] void report_deadlock(const Task_control_block* waited_on) noexcept
+{
+    char target[96];
+    char message[4096];
+    std::size_t used = 0;
+    report_append(message, sizeof message, used,
+        "deadlock: waiting on task '%s', but every worker has been idle with empty queues for "
+        "%lld ms and nothing is registered as completable from outside the pool -- no thread and "
+        "no queue can ever settle it. If this wait IS completed by a non-worker thread (I/O, a "
+        "GPU fence, a Signal triggered off-pool, a frame gate), hold a ts::External_wait for its "
+        "duration -- a missing registration reports a correct program as deadlocked. "
+        "ts::set_deadlock_net_window(0ms) disables the net for this process; TS_ENABLED_RULES "
+        "drops it from the build.",
+        task_name(waited_on, target, sizeof target),
+        deadlock_net_window_ms.load(std::memory_order_relaxed));
+    report_held_grant_suspensions(message, sizeof message, used);
+    report_all_suspensions(message, sizeof message, used);
+    ts::fatal(message);
+}
+#endif
+
 
 #if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
 // The `sync_wait` diagnostic (declared in task.h, defined here for the `Pipe` layout): a

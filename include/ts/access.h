@@ -41,6 +41,25 @@ extern const char config_safety_checks_off;
 inline const char* const config_tripwire = &config_safety_checks_off;
 #endif
 
+// Same treatment for the two diagnostics switches that also change class layout (the
+// control block's `Named`, the awaiters' embedded registry record). MSVC catches these via
+// `detect_mismatch` in rules.h; elsewhere the anchor symbol is the mechanism.
+#if TS_SUSPENSION_REGISTRY
+extern const char config_suspension_registry_on;
+inline const char* const config_registry_tripwire = &config_suspension_registry_on;
+#else
+extern const char config_suspension_registry_off;
+inline const char* const config_registry_tripwire = &config_suspension_registry_off;
+#endif
+
+#if TS_DEBUG_NAMES
+extern const char config_debug_names_on;
+inline const char* const config_names_tripwire = &config_debug_names_on;
+#else
+extern const char config_debug_names_off;
+inline const char* const config_names_tripwire = &config_debug_names_off;
+#endif
+
 } // namespace detail
 
 enum class Access { read_only, read_write };
