@@ -69,13 +69,18 @@
 // live suspension -- who is suspended, what they await, what they hold. Tiers 1 and 2 come
 // free; this one costs a linked-list insert/remove per suspension, so it is a switch.
 //
-// Default ON everywhere except shipping. It was measured, not assumed: sharded per thread,
-// it costs ~1% of a suspend/resume round trip with no scaling cliff (numbers in TODO 6.13),
-// which is far too little to trade a complete deadlock report for. Shipping is the build
-// where someone has explicitly asked for no diagnostics, so it stays off there; define
-// `TS_SUSPENSION_REGISTRY=0` to opt out of any other configuration.
+// Default ON in DEBUG builds only (author, 2026-08). Measured cost is ~30 ns per suspension
+// with no scaling cliff and nothing measurable on any real frame fixture, but ~8% on the
+// suspend/resume microbenchmarks -- and a per-suspension linked-list insert/remove is not
+// something a release build should carry for a diagnostic that only pays off after a
+// deadlock has already happened. The escalation path is the design: tiers 1 and 2 are free
+// and always present, and the deadlock report tells the user to rebuild with
+// `TS_SUSPENSION_REGISTRY=1` and reproduce when it needs more.
+//
+// Define `TS_SUSPENSION_REGISTRY=1` to turn it on in any configuration (it forces
+// `TS_DEBUG_NAMES` on with it); `=0` turns it off in debug.
 #ifndef TS_SUSPENSION_REGISTRY
-#if TS_SAFETY_CHECKS
+#if TS_SAFETY_CHECKS && !defined(NDEBUG)
 #define TS_SUSPENSION_REGISTRY 1
 #else
 #define TS_SUSPENSION_REGISTRY 0

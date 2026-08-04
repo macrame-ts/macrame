@@ -796,9 +796,14 @@ IDs — when an item is done, mark it, don't renumber.
        concurrent suspensions land on different shards -- and **zero measurable cost on real
        workloads**. The ~8% appears only where one frame ping-pongs a single suspension between
        two threads and does nothing else, which is the structural worst case for any registry.
-       Default is therefore **on wherever `TS_SAFETY_CHECKS` is on** (this project's Release IS
-       a checked build; Shipping is the performance-committed one and has it off), rather than
-       the debug-only default the item first proposed; `-DTS_SUSPENSION_REGISTRY=0` opts out.
+       The implementation defaulted it **on wherever `TS_SAFETY_CHECKS` is on**, arguing that
+       this project's Release is itself a checked build. **Author ruling (2026-08): too
+       expensive for release — default is DEBUG ONLY** (`TS_SAFETY_CHECKS && !NDEBUG`). The ~8%
+       is on a microbenchmark, but a per-suspension linked-list insert/remove is not something a
+       release build should carry for a diagnostic that only pays off after a deadlock has
+       already happened, and the escalation path is the whole design: tiers 1 and 2 are free and
+       always present, and the report tells the user to rebuild with
+       `-DTS_SUSPENSION_REGISTRY=1` and reproduce when it needs more.
        **Sharding key is load-bearing**: a coroutine resumes wherever its awaited work settled,
        so a record is linked by one thread and unlinked by another. Keying shards on the
        SUSPENDING THREAD put both halves of every suspension on one mutex and one cache line --
