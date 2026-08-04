@@ -15,9 +15,10 @@ harness-free stress driver so the portable core (scheduler, `Guarded` pipe,
 
 ## Git hooks (per clone, recommended)
 
-`tsan/tsan_main.cpp` is the one TU the Windows build never compiles, so an API
-change can leave it stale with a green local build — CI catches it a push later.
-`tools/hooks/` closes the gap locally:
+`tsan/tsan_main.cpp` is now compiled by the Windows build too (see below), so an
+API change that misses it fails the ordinary local build. `tools/hooks/` still
+closes the remaining gap — the driver is the only TU whose *Linux* toolchain
+behaviour matters, and the hooks run it there:
 
 - **pre-commit**: compile-check `tsan_main.cpp` (`-fsyntax-only`, ~3 s) when the
   staged changes touch C++ sources/headers.
@@ -30,6 +31,18 @@ Enable once per clone:
 ```sh
 git config core.hooksPath tools/hooks
 ```
+
+## The driver in the Windows build
+
+`task_system.vcxproj` compiles `tsan/tsan_main.cpp` with
+`TS_TSAN_NO_MAIN` defined, purely as an API-drift tripwire: an API-tightening
+change now fails the developer's own build instead of at commit time or in a
+Linux CI job. Everything in the driver lives in an anonymous namespace, so
+`main` is the only symbol that would collide with `src/main.cpp` — and it is
+also the only thing that *references* those statics, so simply dropping it would
+trade a link error for a wall of unused-function warnings. Under the macro the
+entry point is renamed to `ts::tsan::run_all` instead: the whole TU compiles and
+stays referenced, and the Windows binary gains one function it never calls.
 
 ## Run (after every major change)
 

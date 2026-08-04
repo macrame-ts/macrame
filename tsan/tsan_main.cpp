@@ -89,7 +89,7 @@ void stress_thread_safe()
             });
         }
     }   // join producers
-    int final = obj.async([](const int& v) { return v; }).sync();   // FIFO drain
+    [[maybe_unused]] int final = obj.async([](const int& v) { return v; }).sync();   // FIFO drain
     assert(final == threads * per / 2);
 }
 
@@ -126,7 +126,7 @@ void stress_inline_async()
             });
         }
     }   // join producers
-    int final = obj.async([](const int& v) { return v; }).sync();   // FIFO drain
+    [[maybe_unused]] int final = obj.async([](const int& v) { return v; }).sync();   // FIFO drain
     assert(final == threads * per / 2);
 }
 
@@ -163,7 +163,7 @@ void stress_pipe_rw()
 {
     ts::Guarded<tests::Rw_probe> probe{ ts::Named{} };
     pipe_rw_producers(probe, 8, 3000);
-    bool bad = probe.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
+    [[maybe_unused]] bool bad = probe.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
     assert(!bad);
 }
 
@@ -174,7 +174,7 @@ void stress_pipe_rw_worker_less()
     ts::Scheduler_scope scope{ ts::Scheduler_config{ .single_threaded = true } };
     ts::Guarded<tests::Rw_probe> probe{ ts::Named{} };
     pipe_rw_producers(probe, 4, 1500);
-    bool bad = probe.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
+    [[maybe_unused]] bool bad = probe.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
     assert(!bad);
 }
 
@@ -292,7 +292,7 @@ void stress_pipe_reservation()
     stop.store(true, std::memory_order_relaxed);
     asyncs.clear();   // join
 
-    bool bad = a.async([](const tests::Rw_probe& p) { return p.violated(); }).sync()
+    [[maybe_unused]] bool bad = a.async([](const tests::Rw_probe& p) { return p.violated(); }).sync()
              || b.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
     assert(!bad);
 }
@@ -454,7 +454,7 @@ void stress_graph_nested_runs()
     stop.store(true, std::memory_order_relaxed);
     hammers.clear();   // join
 
-    bool bad = a.async([](const tests::Rw_probe& p) { return p.violated(); }).sync()
+    [[maybe_unused]] bool bad = a.async([](const tests::Rw_probe& p) { return p.violated(); }).sync()
              || b.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
     assert(!bad);
 }
@@ -518,7 +518,7 @@ void stress_concurrent_graphs()
     stop.store(true, std::memory_order_relaxed);
     hammers.clear();   // join
 
-    bool bad = a.async([](const tests::Rw_probe& p) { return p.violated(); }).sync()
+    [[maybe_unused]] bool bad = a.async([](const tests::Rw_probe& p) { return p.violated(); }).sync()
              || b.async([](const tests::Rw_probe& p) { return p.violated(); }).sync()
              || c.async([](const tests::Rw_probe& p) { return p.violated(); }).sync();
     assert(!bad);
@@ -933,7 +933,7 @@ void stress_coroutine_guard()
         for (int t = 0; t < threads; ++t)
             drivers.emplace_back([&] { co_guard_bump(w, each).sync(); });
     }   // join
-    int final = w.async([](const int& v) { return v; }).sync();
+    [[maybe_unused]] int final = w.async([](const int& v) { return v; }).sync();
     assert(final == threads * each);
 }
 
@@ -991,7 +991,7 @@ void stress_deferred()
             }
         }   // join stagers
         d.commit().sync();
-        int final = target.async([](const int& v) { return v; }).sync();
+        [[maybe_unused]] int final = target.async([](const int& v) { return v; }).sync();
         assert(final == threads * per);
     }
 
@@ -1038,7 +1038,7 @@ void stress_versioned()
         {
             threads.emplace_back([&v, &stop]
             {
-                int last = 0;
+                [[maybe_unused]] int last = 0;
                 while (!stop.load(std::memory_order_acquire))
                 {
                     int x = v.read([](const int& val) { return val; }).sync();
@@ -1070,7 +1070,21 @@ void stress_physics()
 
 } // namespace
 
+// The entry point, renamed when this TU is compiled into the Windows binary.
+//
+// Everything above lives in an anonymous namespace, so `main` is the only symbol that would
+// collide with `src/main.cpp` -- and it is also the only thing that REFERENCES those static
+// functions, so dropping it outright would trade a link error for a wall of
+// unused-function warnings. Renaming keeps the whole TU compiled and referenced while
+// contributing no second `main`. The Windows build never calls it; it is there so an
+// API-tightening change fails on the developer's own machine instead of at commit time or in
+// a Linux CI job (this file used to be invisible to MSBuild, and drifted).
+#ifdef TS_TSAN_NO_MAIN
+namespace ts::tsan { int run_all(); }
+int ts::tsan::run_all()
+#else
 int main()
+#endif
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered: last stage is visible if it hangs
     std::puts("tsan: scheduler stress");   stress_scheduler();
