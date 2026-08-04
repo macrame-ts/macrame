@@ -137,7 +137,7 @@ bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_
 // Release a hold taken by `pipe_acquire` in `mode`; admits queued entries.
 void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode);
 
-#if TS_SAFETY_CHECKS
+#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
 // Waits-for cycle detector (docs/coroutine-first.md §2). At a genuine suspension on a
 // pipe -- a deferred coroutine guard acquire, or awaiting a pipe-job task -- the awaiters
 // record one edge per held grant: {pipe the suspending context holds -> pipe it awaits}.

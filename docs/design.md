@@ -536,6 +536,35 @@ running parents collides. That was previously an unguarded corruption; it is
 now a fatal naming the fix (an instance per caller), and the general
 relaxation — queued or pipelined runs — is roadmap work, not new machinery.
 
+### 5.2 Rule policy: every check needs an escape and a shipping answer
+
+The waiting rules are enforced by checks that abort. A user can uphold a rule
+by means we cannot see, so a check can be a false positive; and a shipping
+build should be able to decide what it keeps paying for. Both are properties
+of a *check*, so they are declared per rule rather than left to whoever writes
+one: a bit in `TS_ENABLED_RULES` (compile-out, state included) and, for the
+rules that permit it, `ts::Relaxed_scope` (runtime opt-out, scoped).
+
+The interesting result is that the runtime opt-out cannot be uniform. Relaxing
+the guard-across-suspension rule does not merely accept a program we disapprove
+of: a `Pipe_guard` installs its own `Access_context` as the thread's current
+grant, so a frame that suspended under one would resume with the promise's
+snapshot installed over it and then restore a `current_access` pointer captured
+on a *different* thread. The rule protects an implementation invariant, and no
+claim a user could make would make relaxing it sound. That splits the rules
+into **advisory** (a hazard the caller may know is absent — scoped opt-out plus
+compile-out), **structural** (an implementation invariant — compile-out only,
+escape is the sanctioned form), and the **net** (the global quiescence check,
+which has no call site to scope and whose escape is registering the legitimate
+external wait instead).
+
+A relaxation propagates with the ambient task state, not the thread — carried
+across a coroutine's segments by its promise and captured into launched
+sub-work alongside the grant snapshot. Wider than lexical scope, and
+deliberately so: the child inherits the grant, hence the hazard the claim is
+about. Full taxonomy, defaults, and the obligations a new check inherits:
+[waiting-rule-policy.md](waiting-rule-policy.md).
+
 ---
 
 ## 6. Deferred and versioned state

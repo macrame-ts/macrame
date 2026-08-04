@@ -40,6 +40,7 @@
     <ClCompile Include="sample\game_frame.cpp" />
     <ClCompile Include="sample\physics.cpp" />
     <ClCompile Include="tests\access_tests.cpp" />
+    <ClCompile Include="tests\rules_tests.cpp" />
     <ClCompile Include="tests\graph_tests.cpp" />
     <ClCompile Include="tests\parallel_tests.cpp" />
     <ClCompile Include="tests\coroutine_tests.cpp" />
@@ -63,6 +64,7 @@
     <ClInclude Include="include\ts\parallel_for.h" />
     <ClInclude Include="include\ts\priority.h" />
     <ClInclude Include="include\ts\detail\ref_count.h" />
+    <ClInclude Include="include\ts\rules.h" />
     <ClInclude Include="include\ts\detail\trace_owner.h" />
     <ClInclude Include="include\ts\scheduler.h" />
     <ClInclude Include="include\ts\static_task_graph.h" />
@@ -84,6 +86,7 @@
     <ClInclude Include="include\ts\detail\worker_thread.h" />
     <ClInclude Include="benchmarks\benchmarks.h" />
     <ClInclude Include="tests\access_tests.h" />
+    <ClInclude Include="tests\rules_tests.h" />
     <ClInclude Include="tests\graph_tests.h" />
     <ClInclude Include="tests\parallel_tests.h" />
     <ClInclude Include="tests\coroutine_tests.h" />

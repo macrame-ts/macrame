@@ -56,7 +56,27 @@ namespace detail
 // right: any `co_await` that would actually suspend while a guard is held (`> 0`) is the
 // lock-across-suspension anti-pattern and faults -- the harness doubling as a suspension
 // detector. Incremented/decremented by `Pipe_guard`; checked in both `await_suspend`s.
+//
+// `Rule::await_under_guard` (ts/rules.h) is a STRUCTURAL rule: it has no scoped opt-out,
+// because a guard that did survive a suspension would leave the resumed segment installing
+// the promise's access snapshot over the guard's own context, and the guard's destructor
+// restoring a `current_access` pointer captured on another thread. The rule protects an
+// implementation invariant, not merely a user-level hazard. It can be compiled out
+// wholesale (`TS_ENABLED_RULES`), which also removes the counter.
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
 inline thread_local int pipe_guard_depth = 0;
+#endif
+
+// The guard-across-suspension check, at every site that can genuinely suspend.
+inline void check_await_under_guard(const char* message)
+{
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+    if (pipe_guard_depth > 0 && rule_enforced(Rule::await_under_guard))
+        ts::fatal(message);
+#else
+    (void)message;
+#endif
+}
 
 // Segment bracket, resolved per promise type: enter installs the coroutine's `current_task`
 // (and, in the promise, its access snapshot is applied by the resume path); exit restores.
@@ -172,16 +192,15 @@ struct Task_awaiter
         // Suspension detector: reaching here means `await_ready` was false, so `co_await`ing
         // this task suspends the coroutine. Doing so while holding a `Pipe_guard` would hold
         // that pipe across the suspension (serialize / deadlock) -- the anti-pattern.
-        if (pipe_guard_depth > 0)
-            ts::fatal("co_await while holding a Guarded guard (pipe held across suspension)");
+        check_await_under_guard("co_await while holding a Guarded guard (pipe held across suspension)");
 
-#if TS_SAFETY_CHECKS
+#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
         // Waits-for edges (docs/coroutine-first.md §2): suspending on a PIPE JOB while this
         // context holds grants -- the job's turn cannot arrive until its pipes drain, so a
         // held-grant cycle through them is the suspended-ABBA deadlock. Recorded before the
         // attach (the segment's `current_access` is still installed here); cleared at
         // `await_resume`. Non-pipe tasks record nothing.
-        if (core_->pipe_count > 0 && current_access != nullptr)
+        if (core_->pipe_count > 0 && current_access != nullptr && rule_enforced(Rule::waits_for_cycle))
         {
             Pipe* awaited[8];
             int n = 0;
@@ -209,7 +228,7 @@ struct Task_awaiter
 
     decltype(auto) await_resume()
     {
-#if TS_SAFETY_CHECKS
+#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
         if (recorded_)
             waits_for_clear(this);
 #endif
@@ -227,7 +246,7 @@ struct Task_awaiter
 
     Task_ptr core_;
     std::atomic<int> state_{ 0 };
-#if TS_SAFETY_CHECKS
+#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
     bool recorded_ = false;   // waits-for edges recorded at suspend, cleared at resume
 #endif
 };
@@ -257,6 +276,10 @@ struct Promise_base
     // single-thread-per-segment discipline as `prev_task_`.
     std::vector<Task_ptr> scope_children_;
     std::vector<Task_ptr>* prev_scope_ = nullptr;
+    // The frame's rule relaxation (`ts::Relaxed_scope`), carried across suspensions the same
+    // way: a `Relaxed_scope` entered in the body must still be in effect when the body resumes
+    // on another worker, and must not leak onto that worker (docs/waiting-rule-policy.md §4).
+    Relaxed_carrier relaxed_;
     // The coroutine's dispatch priority, carried onto the block for queued uses of its task.
     Priority priority_ = Priority::normal;
 
@@ -284,10 +307,12 @@ struct Promise_base
         current_task = Task_ptr(&core);
         prev_scope_ = current_scope_children;
         current_scope_children = &scope_children_;
+        relaxed_.enter();
     }
 
     void exit_segment()
     {
+        relaxed_.exit();
         current_task = std::move(prev_task_);
         current_scope_children = prev_scope_;
     }
@@ -370,13 +395,17 @@ public:
         ctx_.add(obj_, Mode, detail::pipe_epoch(pipe_));
         prev_ = current_access;
         current_access = &ctx_;
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
         ++pipe_guard_depth;
+#endif
     }
 
     ~Pipe_guard()
     {
         current_access = prev_;
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
         --pipe_guard_depth;
+#endif
         pipe_release(scheduler_, pipe_, Mode);   // admit queued entries / the next guard
     }
 
@@ -451,16 +480,17 @@ struct Pipe_guard_awaiter
 
         // Deferred: we are about to suspend. Suspending while holding another guard is the
         // lock-across-suspension anti-pattern.
-        if (pipe_guard_depth > 0)
-            ts::fatal("co_await a Guarded guard while holding another (pipe held across suspension)");
+        check_await_under_guard(
+            "co_await a Guarded guard while holding another (pipe held across suspension)");
 
-#if TS_SAFETY_CHECKS
+#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
         // Waits-for edge (docs/coroutine-first.md §2): a deferred acquire is a genuine
         // suspension on this pipe; record {each held grant -> pipe_} and cycle-check.
         // `current_access` is still the segment's context here (`exit_segment` restores
         // task identity, not the access scope). Cleared at `await_resume`.
         Pipe* awaited = &pipe_;
-        recorded_ = waits_for_record(current_access, this, owner_of(h), &awaited, 1);
+        if (rule_enforced(Rule::waits_for_cycle))
+            recorded_ = waits_for_record(current_access, this, owner_of(h), &awaited, 1);
 #endif
 
         if (state_.exchange(2, std::memory_order_acq_rel) == 1)
@@ -473,7 +503,7 @@ struct Pipe_guard_awaiter
 
     Pipe_guard<T, Mode> await_resume() noexcept
     {
-#if TS_SAFETY_CHECKS
+#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
         if (recorded_)
             waits_for_clear(this);
 #endif
@@ -495,7 +525,7 @@ public:
     Pipe& pipe_;
     T* obj_;
     std::atomic<int> state_{ 0 };
-#if TS_SAFETY_CHECKS
+#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
     bool recorded_ = false;   // waits-for edge recorded at suspend, cleared at resume
 #endif
 };
@@ -528,8 +558,7 @@ struct Join_awaiter
     template<typename P>
     bool await_suspend(std::coroutine_handle<P> h)
     {
-        if (pipe_guard_depth > 0)
-            ts::fatal("co_await while holding a Guarded guard (pipe held across suspension)");
+        check_await_under_guard("co_await while holding a Guarded guard (pipe held across suspension)");
 
         exit_segment_if_ours(h.promise());
 

@@ -728,8 +728,30 @@ IDs — when an item is done, mark it, don't renumber.
        zero-noise) plus a guide recipe, as a free static mirror of the ranks this item makes
        users write anyway. Strictly a subset of 6.14 at higher annotation cost — **6.14 first.**
 
-   15. `[ ]` **(P1, author 2026-08 — big, design first) Escape hatches for the waiting rules,
-       with a declared shipping policy.** Raised by the observation that a user may uphold a
+   15. `[x]` **(P1, author 2026-08 — big, design first) Escape hatches for the waiting rules,
+       with a declared shipping policy — DONE (2026-08).** Design of record:
+       [waiting-rule-policy.md](waiting-rule-policy.md); mechanism in `include/ts/rules.h`.
+       Landed: a flat `ts::Rule` enum mirroring `TS_RULE_*` preprocessor bits (so a disabled
+       rule's code AND state vanish), three classes over it, `ts::Relaxed_scope` +
+       `ts::set_default_relaxed_rules`, and `TS_ENABLED_RULES` with the same
+       `detect_mismatch` ODR tripwire as `TS_SAFETY_CHECKS`. Defaults reproduce today's
+       behavior exactly (everything checked; `await_under_guard` only in shipping). The two
+       existing checks were rewired onto it: `await_under_guard` and `waits_for_cycle`.
+       **The design question the item left open answered itself, against the assumption in
+       (a):** the runtime opt-out cannot be uniform. Relaxing `await_under_guard` is not
+       merely permissive but unsound — a `Pipe_guard` installs its own `Access_context` as
+       the thread's current grant, so a frame suspended under one resumes with the promise's
+       snapshot installed over it and then restores a `current_access` pointer captured on a
+       different thread. That splits the rules into **advisory** (scoped opt-out +
+       compile-out), **structural** (compile-out only; escape is the sanctioned form) and
+       **net** (6.13; no call site to scope, escape is `ts::External_wait`). Inheritance
+       resolved as "yes, but not via `Access_context`": the relaxation is its own
+       thread-local, carried across coroutine segments by the promise (`Relaxed_carrier`) and
+       captured into launched sub-work by `with_inherited_access` — `Access_context` is
+       snapshotted at frame CREATION, so a mask living in it would be silently dropped by any
+       `Relaxed_scope` opened mid-body. Obligations on a new check are the doc's §8 checklist.
+       Original text follows.
+       Raised by the observation that a user may uphold a
        rule by means we cannot see — an external lock discipline, a phase invariant, a
        platform guarantee — in which case our check is a false positive and there must be a
        way out. Two axes, both needed:

@@ -369,7 +369,7 @@ void pipe_release(Scheduler&, Pipe& pipe, Access mode)
     release_and_redispatch(pipe, mode);
 }
 
-#if TS_SAFETY_CHECKS
+#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
 // ===== waits-for cycle detector (docs/coroutine-first.md §2) ================================
 //
 // One process-wide registry of {held pipe -> awaited pipe} edges, recorded by the coroutine
@@ -490,7 +490,9 @@ void waits_for_clear(const void* ticket) noexcept
     std::scoped_lock lock(waits_mutex);
     std::erase_if(waits_edges, [&](const Waits_edge& e) { return e.ticket == ticket; });
 }
+#endif   // TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
 
+#if TS_SAFETY_CHECKS
 // The `sync_wait` diagnostic (declared in task.h, defined here for the `Pipe` layout):
 // the caller established that the wait is about to park inside a task. Sharp message
 // when the wait target is a pipe task queued on a pipe the current scope's grant covers

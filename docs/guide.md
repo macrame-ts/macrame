@@ -975,6 +975,37 @@ guard** — that would keep the object locked across a suspension of unknown
 duration. The library enforces it: such an await is fatal (the suspension
 detector), so the mistake cannot ship silently.
 
+### 8.3 Rule policy: turning a check off
+
+The waiting rules are enforced by runtime checks that abort. Sometimes you uphold a rule by
+means the library cannot see — an external lock discipline, a phase invariant, a platform
+guarantee — and the check is a false positive. Two levers, from narrow to blunt:
+
+```cpp
+{
+    ts::Relaxed_scope relax{ ts::Rule::in_task_sync };   // "I know this wait is bounded"
+    // ... only this scope is affected; the rest of the program stays checked
+}
+
+ts::set_default_relaxed_rules(ts::Rule::in_task_sync);   // process-wide, for "rules as advice"
+```
+
+A relaxation follows the ambient task state rather than the thread: it survives a
+coroutine's suspensions and is inherited by sub-work launched under it, exactly as a grant
+is. It is therefore a little wider than the lexical scope suggests — deliberately, since a
+child inherits the grant and so inherits the hazard.
+
+Not every rule can be relaxed. `Rule::await_under_guard` (§8.2) protects an invariant the
+implementation relies on, not just a hazard you might know is absent, so it has no runtime
+opt-out — its escape is the sanctioned form: use the functor verb
+`co_await obj.access(fn)`, or split the scope (release, await, re-acquire). The global
+deadlock net has no call site to scope at all.
+
+To drop a check from a build entirely — including its state — define `TS_ENABLED_RULES` to
+an OR of `TS_RULE_*` bits (one value per binary, like `TS_SAFETY_CHECKS`). The defaults are
+everything in checked builds and `TS_RULE_AWAIT_UNDER_GUARD` in shipping builds. Full table
+and rationale: [waiting-rule-policy.md](waiting-rule-policy.md).
+
 ---
 
 ## 9. `Deferred<T>` and `Versioned<T>` — staged writes

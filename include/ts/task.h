@@ -3,6 +3,7 @@
 #include "ts/access.h"   // grant inheritance for launched/nested sub-work (snapshot_access)
 #include "ts/fatal.h"
 #include "ts/priority.h"
+#include "ts/rules.h"   // rule policy: which waiting-rule checks run, and their scoped opt-out
 #include "ts/detail/ref_count.h"   // intrusive Ref_ptr / Ref_counted (preferred over shared_ptr)
 #include "ts/detail/trace_owner.h"   // scheduler-free trace seam: owner inheritance + busy attribution
 
@@ -822,24 +823,30 @@ auto with_inherited_access(Fn&& fn)
 {
     // Also snapshot the trace owner (graph-node index) so this sub-work's busy is attributed
     // to its owning node; `Trace_busy_scope` measures the body while the owner is live. Both
-    // no-op under TS_PROFILING=0 (owner is -1, the scopes empty).
+    // no-op under TS_PROFILING=0 (owner is -1, the scopes empty). The launcher's rule
+    // relaxation (`ts::Relaxed_scope`) rides along the same way: a child inherits the grant,
+    // so it inherits the hazard the opt-out speaks for (docs/waiting-rule-policy.md §4).
     if constexpr (takes_token_v<std::decay_t<Fn>>)
     {
-        return [fn = std::forward<Fn>(fn), ctx = snapshot_access(), owner = trace_owner()](const Cancellation_token& tok) mutable -> R
+        return [fn = std::forward<Fn>(fn), ctx = snapshot_access(), owner = trace_owner(),
+                relaxed = Relaxed_snapshot{}](const Cancellation_token& tok) mutable -> R
         {
             Trace_owner_scope trace_owner_scope(owner);
             Trace_busy_scope trace_busy_scope;
             Inherited_access_scope scope(ctx);
+            Inherited_relaxed_scope relaxed_scope(relaxed);
             return fn(tok);
         };
     }
     else
     {
-        return [fn = std::forward<Fn>(fn), ctx = snapshot_access(), owner = trace_owner()]() mutable -> R
+        return [fn = std::forward<Fn>(fn), ctx = snapshot_access(), owner = trace_owner(),
+                relaxed = Relaxed_snapshot{}]() mutable -> R
         {
             Trace_owner_scope trace_owner_scope(owner);
             Trace_busy_scope trace_busy_scope;
             Inherited_access_scope scope(ctx);
+            Inherited_relaxed_scope relaxed_scope(relaxed);
             return fn();
         };
     }
