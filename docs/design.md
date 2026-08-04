@@ -72,7 +72,7 @@ entity. This is a deliberate position in a real tension:
   object.
 
 The resolution: wrap coarsely, then get intra-system parallelism from
-`parallel_for` and nested tasks running *under the system's grant*, and split
+`parallel_for` running *under the system's grant*, and split
 state along the seams you need concurrent (the sample double-buffers its
 transform store so the writer and the frame's readers touch different
 objects). Once enough subsystems process concurrently to fill the cores,
@@ -104,16 +104,20 @@ and not airtight; the design position is that a cheap, always-on-in-dev
 scheme that would constrain the programming model (§7.9 on Rust/Pony).
 
 Grant *inheritance* makes the model compose, but only for **structurally
-gated** sub-work — `ts::nested` tasks, `Task_scope` children, `parallel_for`
-chunks, coroutine segments after suspension — which carries the parent's
-grant set by value. Gating is the soundness condition: the parent's
-completion waits for the child, so the grant provably outlives it. That one
-rule lets a graph node fan out dynamic work over its declared data without
-new declarations, and it is what coroutine support reuses wholesale (§5). A
-detached `ts::launch` is *not* gated (its handle may be dropped), so it
-inherits nothing and runs under an empty context — a touch of the parent's
-data faults deterministically as undeclared access, rather than racing the
-next acquirer on a timing window.
+gated** sub-work — `parallel_for` chunks and coroutine segments after
+suspension — which carries the parent's grant set by value. Gating is the
+soundness condition: the parent's completion waits for the child, so the
+grant provably outlives it. That one rule lets a graph node fan out dynamic
+work over its declared data without new declarations, and it is what
+coroutine support reuses wholesale (§5). A detached `ts::launch` is *not*
+gated (its handle may be dropped), so it inherits nothing and runs under an
+empty context — a touch of the parent's data faults deterministically as
+undeclared access, rather than racing the next acquirer on a timing window.
+(An earlier design also inherited into a *concurrent* child, `ts::nested` /
+`Task_scope`; that was removed — a concurrent grant-inheriting child can race
+its parent on shared mutable state and the harness cannot see it, since both
+sides declared the access. `parallel_for`'s synchronous join is the gated
+form that survives. See docs/coroutine-first.md §4.3.)
 
 Where inheritance does apply, it is bounded by **grant-window validity**:
 each pipe carries a write-epoch with seqlock parity (bumped at write-grant
@@ -625,8 +629,9 @@ design points that carry the weight:
 - **Fused frame and block.** The promise embeds the `Task_control_block`
   (first-member aliasing, the `Executable` pattern), so a coroutine task is
   one allocation and is an ordinary `Task<R>` to everyone else. The frame
-  holds a running self-reference; awaiters, handles, and nested children
-  hold refs, so a fire-and-forget frame lives exactly until settled.
+  holds a running self-reference; awaiters, handles, and any gated completion
+  it awaits (a nested graph run) hold refs, so a fire-and-forget frame lives
+  exactly until settled.
 - **Eager start, blue boundary.** A coroutine task runs to its first genuine
   suspension on the calling thread (no cold tasks — matching the launch
   model everywhere else), suspends without holding a worker, and is consumed
@@ -635,7 +640,7 @@ design points that carry the weight:
   thread-local, and a coroutine migrates threads at every suspension. The
   model: a coroutine is a chain of task-*segments*, and each resumed segment
   re-installs the coroutine's grant snapshot and task identity — the
-  nested-task inheritance mechanism reused verbatim, no new concept. A
+  grant-inheritance mechanism reused verbatim, no new concept. A
   coroutine *graph node* holds its declared grants until the frame
   completes — suspension does not release grants; body-return is not
   completion.
@@ -695,10 +700,11 @@ Three properties make this cheap rather than clever:
 The rest is refusing the cases where the containment argument fails. A caller
 holding *read* where the inner graph *writes* cannot lend (upgrading would
 re-acquire behind its own hold) — fatal, with the two restructurings named.
-Unjoined scope children run under the same grant and could race the lent-to
-graph, so lending requires a quiet scope — fatal, `co_await ts::join_nested()`
-first; already-settled children are filtered out, since only live ones are a
-hazard. And a detached run (`{.detach = true}`) is *not* contained in the
+An earlier un-awaited nested run of the caller runs under the same grant and
+could race the lent-to graph, so lending requires a quiet scope — fatal,
+`co_await` the previous nested run first; already-settled runs are filtered
+out, since only live ones are a hazard. And a detached run (`{.detach = true}`)
+is *not* contained in the
 caller's window, so it structurally receives no lend and queues like any
 external work. Un-awaited runs otherwise join the caller's scope, which makes
 "fire an inner run and forget it" safe by construction rather than by
@@ -987,8 +993,8 @@ it:
 Project documents:
 
 - [task-internals.md](task-internals.md) — the dynamic-task design of
-  record: control block, lifecycle, lock-counter, coroutine frames, nested
-  tasks.
+  record: control block, lifecycle, lock-counter, coroutine frames,
+  completion gating.
 - [task-systems-comparison.md](task-systems-comparison.md) — the survey: UE
   Tasks, TBB, Taskflow, HPX, folly, Marl, Rayon/Tokio, Go, GCD, and the
   scheduler literature.

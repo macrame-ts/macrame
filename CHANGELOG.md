@@ -19,7 +19,7 @@ and [docs/pipe-rebase.md](docs/pipe-rebase.md) §0.
 
 - `Task<R>::then(...)` — replace with `co_await t;` and the next statement.
 - `ts::when_all(...)` — replace with sequential `co_await`s (tasks already run eagerly, so
-  the last await gates), or `co_await ts::join_nested()` / `co_await scope.join()`.
+  the last await gates).
 - The `ts::task(...)` builder, `Task_builder`, `.after()`, `.set_inline()`, `.launch()`,
   and `Task_options` — dynamic ordering is now code: `co_await x; co_await y;`.
 - Reusable executable tasks (`Task_builder::reset()`). `Signal::reset()` stays.
@@ -28,6 +28,15 @@ and [docs/pipe-rebase.md](docs/pipe-rebase.md) §0.
   form.
 - The dynamic inline-dispatch surface (`run_inline` on task options). `Graph_node::set_inline`
   and the underlying trampoline remain as a graph-internal mechanism.
+- `ts::nested`, `ts::Task_scope`, and `co_await ts::join_nested()` — the scoped-launch verbs.
+  A nested/scope child runs concurrently with its parent while inheriting the parent's access
+  grant, so the two can race on shared mutable state and the declaration-based harness cannot
+  see it. Fan out over a holder's data with `ts::parallel_for` (grant-inheriting helpers,
+  synchronous join) or acquire fresh via `obj.async` / `co_await obj.access`; the field's safe
+  patterns (read-only inheritance, parent relinquishes, child re-acquires) are covered by
+  `Versioned`, node-splitting, and the access verbs. `detail::add_nested` survives internally
+  as the completion-gating for coroutine graph nodes and nested graph runs. See
+  [docs/coroutine-first.md](docs/coroutine-first.md) §4.3.
 
 **Changed:**
 
@@ -43,11 +52,9 @@ and [docs/pipe-rebase.md](docs/pipe-rebase.md) §0.
 
 - Frame/block fusion: a coroutine task's promise embeds its control block, so it is **one**
   allocation, not two.
-- Implicit per-frame/per-node scopes, with `ts::nested` as the scoped-launch verb and
-  `co_await ts::join_nested()` for a mid-body join. `ts::Task_scope` (`ts/task_scope.h`) is
-  the explicit nursery; destroying one with unjoined children is fatal.
 - Coroutine graph node bodies: a node body returning `ts::Task<void>` completes when the
-  frame completes, so grants are held across suspensions.
+  frame completes (gated through the internal `detail::add_nested`), so grants are held across
+  suspensions.
 - Awaitable held-grant guards: `auto g = co_await ts::read_write(obj)` / `ts::read_only(obj)`.
   `co_await`ing anything while a guard is live is fatal.
 - A waits-for cycle detector for the suspended-ABBA deadlock (two frames each holding a grant

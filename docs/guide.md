@@ -115,8 +115,8 @@ graph.execute().sync();   // the whole run happens on this thread, deterministic
 With `single_threaded = true` the scheduler has **no worker threads at all**:
 every task executes inline, at the point it is submitted, on the submitting
 thread (a chain of tasks drains iteratively — no stack growth). Everything
-works — graphs, `async`, nested tasks, `parallel_for`, the harness — and runs
-in a deterministic order. Use it for:
+works — graphs, `async`, coroutine tasks, `parallel_for`, the harness — and
+runs in a deterministic order. Use it for:
 
 - **Debugging and bisection**: breaks parallel but works single-threaded →
   suspect an ordering/declaration bug; breaks in both → plain logic bug.
@@ -255,12 +255,11 @@ Two limits you should understand:
   is exactly what the harness exists to catch at runtime. Treat a harness
   abort as a real bug, never as noise.
 
-Structurally-gated sub-work inherits grants: a `ts::nested` task, a
-`Task_scope` child, a `parallel_for` chunk, or a coroutine segment after
-suspension carries the parent's grants, so fan-out over data the parent
-owns just works. The gating is what makes it sound — the parent's
-completion (and so its grant release) waits for the child, so the grant
-provably outlives it.
+Structurally-gated sub-work inherits grants: a `parallel_for` chunk or a
+coroutine segment after suspension carries the parent's grants, so fan-out
+over data the parent owns just works. The gating is what makes it sound —
+the parent's completion (and so its grant release) waits for the child, so
+the grant provably outlives it.
 
 A detached `ts::launch` inherits nothing. Its handle may be dropped, so
 it can outlive the parent's access scope; an inherited grant would then
@@ -268,9 +267,9 @@ race whoever holds the object next, and the harness would catch that only
 on a late touch — or not at all in a shipping build. Running the child
 under an empty context instead makes any touch of the parent's guarded
 data fault deterministically, on the first access, in every checked run.
-To fan out over the parent's data, gate the sub-work: `ts::nested` (its
-completion joins the parent's), or acquire fresh with `obj.async(...)` /
-`co_await obj.access(...)`.
+To fan out over the parent's data, use `ts::parallel_for` (its chunks
+inherit the parent's grant and join synchronously, staying inside the grant
+window), or acquire fresh with `obj.async(...)` / `co_await obj.access(...)`.
 
 ---
 
@@ -357,9 +356,9 @@ std::unique_ptr<Level> level = t.take();
 `sync()`/`take()` are **blue-thread verbs**. Calling them inside a task parks
 a worker on work that may need that worker — the pool-exhaustion deadlock —
 so a `sync()` that would genuinely block inside a task is **fatal** under
-safety checks (§5.0.1). The sanctioned in-task waits are `co_await`, the
-`parallel_for` join (it runs chunks on the caller), and gating completion on
-children via `ts::nested` (§4.5).
+safety checks (§5.0.1). The sanctioned in-task waits are `co_await` and the
+`parallel_for` join (it runs chunks on the caller), which is also how you fan
+out over the parent's data (§4.5).
 
 Both verbs assert "this task cannot be cancelled" and abort if it was, which
 is right when no token is in play but wrong when one is: you cannot check and
@@ -413,43 +412,52 @@ ts::launch([](ts::Cancellation_token tok)
 ```
 
 A cooperative early return settles the task **completed** (it ran), not
-cancelled. This works in `launch`/`nested` bodies and `async` accessors
+cancelled. This works in `launch` bodies and `async` accessors
 (`[](T& v, ts::Cancellation_token t)`). For work that blocks rather than
 polls, register a push notification:
 `ts::Cancel_callback cb(token, [] { wake_the_socket(); });` —
 `request_cancel()` invokes it synchronously.
 
-### 4.5 Nested tasks and scopes
+### 4.5 Fanning out over the parent's data
 
-Work launched *inside* a task body can gate the parent's completion:
+To parallelise over data a task already holds a grant on, use
+`ts::parallel_for`. Its chunks inherit the parent's access grants (a by-value
+`Access_context` snapshot) and its join is synchronous — the caller
+participates and does not return until every chunk has run — so the sub-work
+stays strictly inside the parent's grant window and the harness accepts each
+chunk's touch of the parent's guarded data:
 
 ```cpp
-ts::launch([]
+ts::launch([&mesh]
 {
-    for (int i = 0; i < 4; ++i)
-        ts::nested([i] { process_chunk(i); });
-}).sync();   // returns only after all 4 nested tasks finished
+    ts::parallel_for(4, [&mesh](int i) { process_chunk(mesh, i); });
+}).sync();   // returns only after all 4 chunks finished
 ```
 
-`ts::nested(fn)` launches and attaches in one step; nested work inherits the
-parent's access grants. In a coroutine body the children also join the
-frame's implicit scope, so you can await them mid-body:
+Inside a coroutine body the same call gates a mid-body consume — the loop has
+finished when `parallel_for` returns, so its output is ready on the next line:
 
 ```cpp
 ts::Task<void> frame_section()
 {
-    ts::nested(build_shadow_list);
-    ts::nested(build_visible_list);
-    co_await ts::join_nested();     // both lists done here
-    merge_lists();                  // safe to consume their output
+    ts::parallel_for(2, [&](int i) { i == 0 ? build_shadow_list() : build_visible_list(); });
+    merge_lists();   // both lists done here — safe to consume their output
 }
 ```
 
-For several independent lifetimes — or a scope handed to helpers — use the
-explicit `ts::Task_scope`: `scope.launch(fn)` records a child,
-`co_await scope.join()` awaits all recorded children. A scope destroyed with
-unjoined children is fatal (lost children), the structured-concurrency
-analogue of the journal's lost-writes fatal.
+There is no verb for a *concurrent* child that inherits the parent's grant and
+outlives the fan-out point. An earlier design offered one (`ts::nested`, plus
+an explicit `ts::Task_scope` nursery); it was removed. A child that runs
+concurrently with its parent while sharing the parent's access grant can race
+the parent on the same mutable guarded state, and because both sides "declared"
+the access the harness cannot see it. `parallel_for`'s synchronous join closes
+that window: the child never outlives the parent's use of the object. When you
+need genuinely independent work, launch it detached (`ts::launch`, which
+inherits nothing) and have it take its own turn on the object via
+`obj.async(...)` / `co_await obj.access(...)`; when it needs last-frame data,
+read a `Versioned` snapshot; when it produces outward writes, stage them with
+`Deferred`. (See docs/coroutine-first.md §4.3 for the full rationale and the
+field survey behind the removal.)
 
 ---
 
@@ -521,8 +529,8 @@ and `async` alike (a cancellation token, a scheduling priority). There is no
 ### 5.0.1 The never-block rule is enforced
 
 Blocking inside a task or node body ties up a worker and risks
-pool-exhaustion deadlock; the rule is "await results with `co_await`, or
-gate sub-work with `ts::nested` — never `sync()` inside a body". In
+pool-exhaustion deadlock; the rule is "await results with `co_await`, or fan
+out with `ts::parallel_for` — never `sync()` inside a body". In
 `TS_SAFETY_CHECKS` builds a violation is **fatal** at the call, with two
 messages:
 
@@ -730,9 +738,9 @@ Node capabilities:
 - `node.priority(p)` — queue priority per node.
 - `node.set_inline()` — run the node on the thread that readied it when its
   objects are immediately available (low-latency chaining for small nodes).
-- Node bodies may spawn **nested tasks** (§4.5) — the node's completion, and
-  thus its successors, gate on them; nested work inherits the node's grants,
-  so dynamic fan-out over the node's data passes the harness.
+- Node bodies may fan out with **`ts::parallel_for`** (§4.5) — the chunks
+  inherit the node's grants and the synchronous join gates the node's
+  completion, so dynamic parallelism over the node's data passes the harness.
 - A node body may be a **coroutine**: return `ts::Task<void>` from the body
   and it may `co_await` mid-node — the node completes (releasing its grants
   and successors) when the *frame* completes, not at the first suspension,
@@ -769,9 +777,9 @@ frame.compile("frame.dot");
 `ts::Named` is a distinct wrapper rather than a bare leading `const char*` so
 it can never be mistaken for `T`'s own first constructor argument.
 
-Tasks carry one too, but there it is *optional*: `ts::launch`, `ts::nested` and
-the access verbs capture their own call site by default, so an unnamed task is
-still identified in a diagnostic. Pass a literal when the site is not the useful
+Tasks carry one too, but there it is *optional*: `ts::launch` and the access
+verbs capture their own call site by default, so an unnamed task is still
+identified in a diagnostic. Pass a literal when the site is not the useful
 name:
 
 ```cpp
@@ -947,10 +955,10 @@ Three mistakes are caught with a fatal in checked builds:
 - The calling node declares **read** on an object the inner graph **writes**. A
   read grant cannot be lent to a writer. Declare the write on the calling node,
   or move the writing node out of the sub-graph.
-- Lending while the calling task still has **unjoined scope children running**.
-  They hold the same grant, so they could touch the lent object concurrently
-  with the inner graph, each of them "validly". `co_await ts::join_nested()`
-  first.
+- Lending while an **earlier un-awaited nested run of the calling task is still
+  in flight**. It holds the same grant, so it could touch the lent object
+  concurrently with the inner graph, each of them "validly". `co_await` the
+  previous nested run first.
 - Calling `execute()` on a graph whose **previous run is still in flight**. One
   run at a time: give each concurrent caller its own instance, or order the
   callers with an edge. (This also catches the plain single-threaded mistake of
@@ -1176,11 +1184,12 @@ ts::set_default_relaxed_rules(ts::Rule::in_task_sync);   // process-wide, for "r
 ```
 
 A relaxation follows the ambient task state rather than the thread: it survives a
-coroutine's suspensions and is inherited by structurally-gated sub-work (`ts::nested`,
-`Task_scope` children), exactly as a grant is. It is therefore a little wider than the
-lexical scope suggests — deliberately, since a gated child inherits the grant and so
-inherits the hazard. A detached `ts::launch` inherits neither the grant nor the relaxation
-(§ on grant inheritance): it is a fresh context, so an opt-out does not follow it.
+coroutine's suspensions, so a `Relaxed_scope` opened in a coroutine body is still in effect
+when the body resumes on another worker. It is therefore a little wider than the lexical
+scope suggests — deliberately, since a resumed segment inherits the grant and so inherits the
+hazard. A detached `ts::launch` inherits neither the grant nor the relaxation (§ on grant
+inheritance): it is a fresh context, so an opt-out does not follow it. (`parallel_for` helpers
+inherit the grant but not the relaxation — a helper that needs an opt-out states it itself.)
 
 Not every rule can be relaxed. `Rule::await_under_guard` (§8.2) protects an invariant the
 implementation relies on, not just a hazard you might know is absent, so it has no runtime
@@ -1250,11 +1259,12 @@ Contracts, briefly (full statements live in
   inline (you held the grant), the returned task settled *before* the apply —
   it answers `is_done()` truthfully but provides no happens-before edge.
   Observers of the data order through the object's pipe, which orders.
-- **Commit from the grant holder, not nested sub-work**: inside a node/body
-  that holds the write grant, call `commit()` there. Calling it from a nested
-  task running under the *inherited* grant is a misuse (the nested task is not
-  the holder; the enqueued write would queue behind the very grant it waits
-  out) — fatal under `TS_SAFETY_CHECKS`.
+- **Commit from the grant holder, not grant-inheriting sub-work**: inside a
+  node/body that holds the write grant, call `commit()` there. Calling it from
+  sub-work running under the *inherited* grant (a `parallel_for` helper, a
+  coroutine frame launched from the node) is a misuse (the sub-work is not the
+  holder; the enqueued write would queue behind the very grant it waits out) —
+  fatal under `TS_SAFETY_CHECKS`.
 
 For one logical producer parallelized internally (staging from inside a
 `parallel_for`), mint a `Parallel_recorder` instead: per-worker storage, no
@@ -1326,7 +1336,7 @@ in `sample/blackboard.cpp`. Both are deterministic and verify themselves.
 ### 10.1 Priorities
 
 `ts::Priority { high, normal, low }`, defaulting to `normal`, accepted by
-every route: `launch`/`nested` options, `async` options,
+every route: `launch` options, `async` options,
 `Graph_node::priority(p)`. `high` is strict (always served first); `low`
 still makes progress under sustained load (an aging valve prevents
 starvation).
@@ -1432,7 +1442,7 @@ serializes all readers of that object — so split state along the lines you
 want to parallelize (the sample double-buffers its transforms so early
 readers and the writer never touch the same object). Tens to low hundreds of
 guarded objects and graph nodes is the intended scale; parallelism *inside* a
-system comes from `parallel_for` and nested tasks under the system's grant.
+system comes from `parallel_for` running under the system's grant.
 
 ### 11.2 Never block inside a task or node
 
@@ -1478,8 +1488,8 @@ error, not a behavior change. The replacements:
 | `Task_builder::priority/token` | `ts::launch(fn, { .priority, .token })` at the launch site |
 | `Task_builder::set_inline` / `Task_options::run_inline` | deleted for dynamic tasks (graph nodes keep `Graph_node::set_inline`) |
 | `Task_builder::reset()` (reusable tasks) | call the coroutine again — one frame per run is the model; `Signal::reset()` remains the re-armable phase gate |
-| `ts::add_nested(task)` | `ts::nested(fn)` (launch-and-attach), or record into a `ts::Task_scope` |
-| `Task_options` | `Launch_options` (`launch`/`nested`) or `Access_options` (`access`/`async`) |
+| `ts::add_nested(task)` / `ts::nested(fn)` / `ts::Task_scope` | `ts::parallel_for` for grant-inheriting fan-out over the parent's data; `co_await` to compose; `ts::launch` for detached work (removed — see §4.5) |
+| `Task_options` | `Launch_options` (`launch`) or `Access_options` (`access`/`async`) |
 | retraction (blocking `sync()` running work inline) | deleted — a blue thread parks (that is fine); an in-task `sync()` is fatal, `co_await` instead |
 
 ---
@@ -1517,7 +1527,7 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
 - [design.md](design.md) — the design rationale: why these primitives, what
   was tried and rejected, and how it compares to other systems.
 - [task-internals.md](task-internals.md) — dynamic-task internals (control
-  block, lifecycle, coroutine frames, nested tasks).
+  block, lifecycle, coroutine frames, completion gating).
 - [command-buffer-design.md](command-buffer-design.md) — the design study
   behind `Deferred`/`Versioned`, including the UE research.
 - [deferred-versioned-state.md](deferred-versioned-state.md) — the staged-

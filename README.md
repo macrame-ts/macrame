@@ -56,7 +56,7 @@ Inspired by Rust, adapted to C++.
 ## How it differs from existing task systems
 
 - **Access orchestration is a first-class, novel feature.** `Guarded<T>` + the runtime harness give you a thread-safe API for a shared object with the safety *checked*, not merely conventional. To our knowledge no other C++ task system derives scheduling from declared data access and polices it at runtime.
-- **It is also a comprehensive, state-of-the-art task system**, not a thin wrapper: efficient work-stealing scheduler, typed continuations and joins, cooperative cancellation, reusable, nested and inline tasks, priorities, coroutine integration, and data-parallel loops.
+- **It is also a comprehensive, state-of-the-art task system**, not a thin wrapper: efficient work-stealing scheduler, coroutine-based composition, cooperative cancellation, priorities, graph-internal inline dispatch, and data-parallel loops.
 - **High-level patterns, built in** — command buffers (`Deferred`) and double buffering (`Versioned`): the state-sharing idioms every game engine reinvents, provided as primitives.
 - **Some functionality is uncommon or unique**: **retraction** (a blocking wait runs not-yet-started work inline, so fork-join can't deadlock the pool); scheduler's configurable idle policies; object hand-off between graph nodes; and a `co_await`-a-guard model where holding an access guard across a suspension is *detected and fails fast*.
 

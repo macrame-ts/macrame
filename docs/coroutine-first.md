@@ -68,15 +68,17 @@ completion, and a coroutine node completes when its frame completes** — suspen
 not release grants; body-return is not completion.
 
 Inheritance is **gated-only**. Rule (a)'s "own spawned children" are the structurally-gated
-launches — `ts::nested`, `Task_scope` children, `parallel_for` chunks, coroutine segments —
-whose completion is joined to the holder, so the holder's grant provably outlives them and
-they inherit it soundly. A detached `ts::launch`/`ts::task` is **not** gated: its handle may
-be dropped and its grant window can close while it still runs, so it inherits nothing and runs
-under an empty context. A body that touches the launcher's guarded data then faults
-deterministically as undeclared access on the *first* access, in every checked run — rather
-than passing on an inherited-but-not-yet-stale grant and faulting only on a late touch (or, in
-a shipping build, never). The sanctioned fan-out over a holder's data is therefore `ts::nested`
-(or a fresh acquire via `obj.async` / `co_await obj.access`), never a bare `ts::launch`.
+launches — `parallel_for` chunks and coroutine segments (and, graph-internal, a coroutine
+node's frame and a nested graph run) — whose completion is joined to the holder, so the
+holder's grant provably outlives them and they inherit it soundly. A detached `ts::launch` is
+**not** gated: its handle may be dropped and its grant window can close while it still runs, so
+it inherits nothing and runs under an empty context. A body that touches the launcher's guarded
+data then faults deterministically as undeclared access on the *first* access, in every checked
+run — rather than passing on an inherited-but-not-yet-stale grant and faulting only on a late
+touch (or, in a shipping build, never). The sanctioned fan-out over a holder's data is
+therefore `ts::parallel_for` (or a fresh acquire via `obj.async` / `co_await obj.access`), never
+a bare `ts::launch`. (The `ts::nested` / `Task_scope` verbs that once offered a concurrent
+grant-inheriting child were **removed 2026-08** — see §4.3.)
 
 ## 3. What is deleted (and what replaces it)
 
@@ -84,7 +86,7 @@ a shipping build, never). The sanctioned fan-out over a holder's data is therefo
 |---|---|
 | `then(fn, opts)` + apply-style traits | `co_await t;` then the next line |
 | `when_all(...)` + `Join_state` + tuple traits | sequential `co_await`s (tasks already run eagerly; last one gates) |
-| the `execution_flag` counting mode + `add_nested`-on-`num_locks` plumbing | the implicit per-node/per-frame scope (§4.3); **`ts::nested` survives as the scoped-launch verb**, joining it; a coroutine's `co_return` gates on the scope draining |
+| the `execution_flag` counting mode as USER fan-out; `ts::nested`, `Task_scope`, `ts::join_nested`, `with_inherited_access` (**removed 2026-08 — see §4.3**) | fan out with `ts::parallel_for` (its helpers inherit the caller's grant, join synchronously) or acquire fresh via `obj.async` / `co_await obj.access`. `detail::add_nested`-on-`num_locks` SURVIVES as graph-internal plumbing (a coroutine node's frame and a nested graph run gate their completion through it) |
 | `Task_builder`, `after()`, `add_prerequisite`, frozen-at-launch enforcement | `co_await x; co_await y;` at the top of the coroutine (dynamic edges become code) |
 | retraction: deep `retract`, `retractable`, hints, `retract_or_wait`, the claim/generation reuse machinery (`run_state` fusion, monotonic-max `dispatch_arg`, release-time gen capture, reuse forensics) | waits are suspensions — pool exhaustion is structurally gone; the inline-execution optimization survives as eager start + symmetric transfer (§5.2) |
 | reusable executable tasks (`Task_builder::reset`) | call the coroutine again (frames are one-shot); `Signal::reset` stays |
@@ -116,22 +118,38 @@ the explicit exemption (waits on running work only).
 - Multi-object: `co_await ts::access(fn, objs...)` rides the same cascade; the guard
   forms keep the held-across-suspension fatal.
 
-### 4.3 Scoped launches: implicit per-node scope + `ts::nested` (author revision)
-Dynamic fan-out launched deep in call stacks must not require threading a scope object
-through every call. Instead every node/coroutine frame owns an **implicit scope**, carried
-in TLS and reinstalled at resumption exactly like the grant, and **`ts::nested(fn)`
-survives as the scoped-launch verb** — it launches eagerly and joins the caller's implicit
-scope. The join is implicit at the end: a functor node completes when body + scope have
-drained (completion-gated, non-blocking — the old nested semantics); a coroutine frame
-completes at `co_return` only after its scope drains (`final_suspend` gates on it). A
-mid-body join is `co_await ts::join_nested()`. Honest note: for functor nodes this is the
-old nested *capability* with cleaner plumbing — what §3 deletes is the `execution_flag`
-counting *regime* inside `num_locks`, replaced by a scope object that exists only when
-used. Rules: plain `ts::launch` never auto-joins (cross-frame tasks stay free); a nested
-child's own `ts::nested` joins the child's scope (transitive gating, as today). The
-**explicit** `Task_scope` remains for advanced shapes (several scopes, handing a scope to
-helpers): `scope.launch(fn)` / `co_await scope.join()`; only the explicit form can leak,
-so only it carries the unjoined-children **fatal**.
+### 4.3 Scoped launches (`ts::nested` / `Task_scope`) — REMOVED (author revision, 2026-08)
+An earlier revision of this plan kept `ts::nested` (and an explicit `Task_scope`) as the
+scoped-launch verbs: an eager, grant-inheriting child joined to the caller's completion,
+carried on an implicit per-frame scope in TLS. **They are removed.** The defect is
+structural, not incidental: a nested/scope child runs **concurrently** with its parent while
+**inheriting the parent's access grant**, so parent and child can race on the same mutable
+guarded state, and the declaration-based harness is structurally blind to it (both accesses
+are "declared"). A field survey (Trio, asyncio TaskGroup, Kotlin, Swift SE-0304, Cilk, TBB,
+OpenMP, .NET TPL, Legion, OmpSs-2, actors) found structured completion-gating universal but
+always motivated by **lifetime/cancellation**, never resource-sharing; inheriting a live
+**writable** grant into a concurrent child is something essentially no mainstream system does
+silently (Legion requires the parent to unmap the region first; OmpSs-2 requires the parent
+to be a non-accessor; Swift considered and refused concurrent mutable capture; .NET makes
+attached children opt-in).
+
+Replacement, by shape:
+- **Fan out over the holder's data** → `ts::parallel_for` (its helpers inherit the caller's
+  grant via an `Access_context` snapshot, and the synchronous join keeps them strictly inside
+  the grant window — the one sanctioned in-task wait).
+- **Fire independent work** → plain `ts::launch` (detached, inherits nothing).
+- **Awaited composition** → `co_await` a `Task` / `Signal` / `parallel_for` / a nested graph run.
+
+**Reintroduce a safe form only against a concrete need.** The field's three safe patterns are
+already covered: **read-only inheritance** → `Versioned` snapshots; **parent relinquishes** →
+node-splitting (declare the narrower set on a second node ordered after the first, §10.4);
+**child re-acquires** → `obj.async` / `co_await obj.access`.
+
+What SURVIVES is graph-internal only: `detail::add_nested` gates a coroutine node's frame and
+a nested graph run through the block's `num_locks` (§4.4, §4.8), and a coroutine frame's own
+`final_suspend` gates on that counter. The implicit-scope TLS (`current_scope_children`) is
+kept solely so the non-quiet-scope lending check (§4.8 fatal 2) can see a still-running nested
+run; it is no longer reachable from user code.
 
 ### 4.4 Coroutine graph nodes
 `add_node` accepts a body returning `Task<void>` (a coroutine): access modes deduce from
@@ -144,18 +162,16 @@ graph.add_node([&audio](Physics& phys, const Nav& nav) -> ts::Task<void>
 {
     auto islands = phys.discover_islands();              // under the node's write grant
 
-    for (auto& island : islands)                         // data-dependent fan-out
-        ts::nested([&phys, island] { phys.solve(island); });   // joins the node's implicit scope
-
-    co_await ts::join_nested();                          // solves needed mid-body?
-                                                         // (otherwise: implicit at co_return)
+    ts::parallel_for(islands.size(), [&](std::size_t i)  // data-dependent fan-out; the helpers
+    {                                                    // inherit the node's grant, join here
+        phys.solve(islands[i]);
+    });
 
     float mix = co_await audio.access([](const Audio& a) { return a.mix_level(); });
     // foreign read under held grants -- waiting rule (c): short, read-mode, acyclic
 
     phys.apply(mix);
-    co_return;   // frame completes (scope already drained) -> node completes ->
-                 // grants release -> successors unlock
+    co_return;   // frame completes -> node completes -> grants release -> successors unlock
 });
 ```
 
@@ -212,11 +228,12 @@ Fatals (each with a companion test):
 1. **Mode-incompatible overlap** — outer holds read, inner contains a writer: a read
    grant cannot cover a write and upgrading would re-acquire (the deadlock). Restructure:
    outer declares write, or hoist the writer out of the sub-graph.
-2. **Lending with a non-quiet scope** — unjoined `ts::nested` children (or a second
-   scope-joined run) could race the lent-to inner graph on the same object, both
-   "validly". Rule: a lending `execute()` requires `co_await ts::join_nested()` first
-   (runtime check: implicit-scope count is zero). Conservative; relaxations live on the
-   §10 queue.
+2. **Lending with a non-quiet scope** — an earlier **un-awaited nested run** of the caller
+   still in flight could race the lent-to inner graph on the same object, both "validly".
+   Rule: a lending `execute()` requires that no earlier un-awaited nested run of the caller
+   is still running (runtime check: no live child on the implicit scope). `co_await` the
+   previous nested run first. (Before the `ts::nested` removal this also caught unjoined
+   scope children.) Conservative; relaxations live on the §10 queue.
 3. **`execute()` while a run is in flight** (same graph) — explicit fatal (the in-flight
    state already exists for the destructor check).
 
@@ -263,7 +280,7 @@ Every row = one death test + one adjacent test demonstrating the sanctioned form
 | `sync()`/`take()` inside a task | `co_await` it |
 | guard held across suspension (exists) | functor-form `co_await obj.access(fn)`, or split: release, await, re-acquire |
 | `commit()` from a grant-inheriting child (exists) | `commit()` from the grant-holding task |
-| `Task_scope` destroyed with unjoined children | `co_await scope.join()` before scope exit |
+| lending an object to a nested run with an earlier un-awaited nested run in flight | `co_await` the previous nested run first |
 | awaiting a cancelled value task | `is_cancelled()` check, then branch |
 | circular wait (foreign await under grant; needs TODO 6.5) | the §2 hierarchy: declare / snapshot / stage |
 | `Signal` re-armed while awaited (reset misuse; verify existing guard) | settle, then `reset()` |
@@ -295,11 +312,14 @@ them.
 
 ## 8. Flagged changes (behavior/API breaks, per the shakeup mandate)
 
-1. `then`/`when_all`/`ts::nested`/`add_nested`/`ts::task` builder/`after`/`set_inline`/
-   executable `reset()` — **removed** (compile errors).
+1. `then`/`when_all`/`ts::task` builder/`after`/`set_inline`/executable `reset()` —
+   **removed** (compile errors). `ts::nested`, `ts::Task_scope`, `ts::join_nested`, and
+   `detail::with_inherited_access` were reinstated by the §4.3 revision and then **removed
+   for good (2026-08)** — see §4.3 for the rationale. `detail::add_nested` is **kept** as
+   graph-internal completion-gating (coroutine node frames, nested graph runs).
 2. In-task `sync()` — was retraction-or-park, becomes **fatal** (checked builds).
 3. Retraction removed — bare-tree fork-join via `sync()` inside tasks no longer exists;
-   the pattern is `co_await`/`Task_scope`/`parallel_for`.
+   the pattern is `co_await`/`parallel_for`.
 4. `Task<R>` handles: `sync()` demoted to boundary-only; awaiting is the primary verb.
 5. Coroutines become **mandatory** (drop `__cpp_impl_coroutine` guards; C++23 baseline
    already assumes a conforming compiler).

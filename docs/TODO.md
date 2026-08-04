@@ -22,8 +22,11 @@ death tests), documented, and CI-gated.
   awaitable from any task, `sync()`/`take()` legal ONLY outside tasks (in-task blocking is
   fatal under `TS_SAFETY_CHECKS`). Composition is `co_await`; `ts::launch` (free-running,
   inherits NO grant — detached, so a touch of the launcher's guarded data faults
-  deterministically) and `ts::nested` (joins the caller's implicit scope, inherits the grant)
-  are the launch verbs, `Task_scope` the explicit nursery (gated, inherits like `nested`).
+  deterministically) is the one bare-task verb;
+  grant-inheriting fan-out is `ts::parallel_for` (helpers snapshot the grant, join
+  synchronously). The `ts::nested` / `Task_scope` / `join_nested` scoped-launch verbs were
+  REMOVED (2026-08, an unsafe concurrent grant-inheriting child — coroutine-first.md §4.3);
+  `detail::add_nested` survives as graph-internal completion-gating.
   Inheritance is gated-only (docs/coroutine-first.md §2). Cooperative cancellation (+ `Cancel_callback` + trailing-
   `Cancellation_token` body early-out), `Signal` (+ `reset()`) as the awaitable event.
   Deleted with the transformation: `then`, `when_all`, the `ts::task` builder + `after`,
@@ -47,7 +50,7 @@ death tests), documented, and CI-gated.
   (`spin` / `spin_then_block` default / `handoff`).
 - **Coroutines** — mandatory, not optional: awaitable `Task`, `co_await ts::read_only/
   read_write` guards, promise-carried access context reinstalled at every resumption,
-  implicit per-frame scope + `join_nested`, `Task_scope`, coroutine graph nodes, frame/block
+  coroutine graph nodes, frame/block
   fusion (one allocation — the promise embeds the block), the bounded resume trampoline, the
   circular-wait detector for suspended-ABBA.
 - **Deferred / Versioned** — staged-write layer (`Journal`/`Recorder`/`Parallel_recorder`),
@@ -100,7 +103,8 @@ IDs — when an item is done, mark it, don't renumber.
        declared under a pipe grant captures the epoch (all declaration sites threaded: single-
        object access/async, multi-object, graph nodes, coroutine pipe guards, `Versioned` front
        scopes); `Access_context::check` returns granted/stale/none and `access_check` fatals on
-       stale with a dedicated diagnostic naming the fix (`ts::nested`/`add_nested`). One rule
+       stale with a dedicated diagnostic naming the fix (acquire fresh via `obj.async` /
+       `co_await obj.access`, or fan out with `ts::parallel_for`). One rule
        serves both modes: a write entry is valid while its window is open, a read entry until a
        writer acquires. Compiled out under `TS_SAFETY_CHECKS=0` (bumps, capture, compare all
        gated; the 8-byte pipe field stays for layout stability). Chosen over per-owner
@@ -408,9 +412,9 @@ IDs — when an item is done, mark it, don't renumber.
       (block 320 → 280 B).
       **Step 1 DONE (2026-08): `successors` → a single `nested_parent` slot, 280 → 264 B**
       (clang-cl x64, measured). The audit that motivated the note found `successors` had
-      exactly one producer left — `add_nested` — and it runs once per child (`ts::nested`
-      launches its own task; a coroutine node's frame and a nested graph run are each attached
-      once), so the fan-out was structurally 0 or 1. A `std::vector<Task_ptr>` was costing 24
+      exactly one producer left — `add_nested` — and it runs once per child (a coroutine
+      node's frame and a nested graph run are each attached once), so the fan-out was
+      structurally 0 or 1. A `std::vector<Task_ptr>` was costing 24
       bytes plus a heap allocation on first push to hold one pointer. Now a bare `Task_ptr`,
       with a `TS_SAFETY_CHECKS` fatal on a second attachment (which would previously have
       silently queued a second parent, and would now silently drop one).
@@ -465,7 +469,7 @@ IDs — when an item is done, mark it, don't renumber.
       under the held grant), and suspends only when it would actually have to wait.
    2. `[x]` **DONE (2026-08, 6.4 stage 1).** Coroutine-frame / control-block fusion — one alloc for frame + block, not two. `Task_promise<R>` carries `Task_control_block core` as its FIRST member (so the block pointer doubles as the promise pointer) plus the result storage, and the block's `destroy` thunk destroys the coroutine frame. A coroutine task therefore allocates exactly the frame; coroutines reduce allocations rather than adding them, as the item required. Remaining allocation work is 4.1 (routing `operator new` on the promise to a size-class pool).
    3. `[ ]` **(P3)** Priority setter on the promise (it stores one; no config channel yet).
-   4. `[x]` **DONE (2026-08, branch `pipe-rebase`) — coroutine-first transformation.** The shakeup: static graph + coroutines for everything dynamic; `then`/`when_all`/builder-`after`/retraction/reuse/inline-trampoline removed; `Task_scope` nursery + implicit per-frame scopes + coroutine graph nodes + awaitable access verb added; every illegal case a fatal with a companion how-to test. Design of record + staged plan: [coroutine-first.md](coroutine-first.md). Landed §7 stages 1–6; the remaining §11 action list is tracked as 6.9 below. Subsumed 6.1 (the awaitable access verb IS inline-when-free) and delivered 6.2 (frame/block fusion — the promise embeds the block, so a coroutine task is one allocation). Note the inline-dispatch trampoline was removed only from the DYNAMIC surface: `Graph_node::set_inline` and the `dispatch_ready`/`inline_pending` machinery survive as graph-internal.
+   4. `[x]` **DONE (2026-08, branch `pipe-rebase`) — coroutine-first transformation.** The shakeup: static graph + coroutines for everything dynamic; `then`/`when_all`/builder-`after`/retraction/reuse/inline-trampoline removed; `Task_scope` nursery + implicit per-frame scopes + coroutine graph nodes + awaitable access verb added; every illegal case a fatal with a companion how-to test. (`ts::nested` / `Task_scope` / `join_nested` were subsequently REMOVED, 2026-08 — an unsafe concurrent grant-inheriting child; see coroutine-first.md §4.3.) Design of record + staged plan: [coroutine-first.md](coroutine-first.md). Landed §7 stages 1–6; the remaining §11 action list is tracked as 6.9 below. Subsumed 6.1 (the awaitable access verb IS inline-when-free) and delivered 6.2 (frame/block fusion — the promise embeds the block, so a coroutine task is one allocation). Note the inline-dispatch trampoline was removed only from the DYNAMIC surface: `Graph_node::set_inline` and the `dispatch_ready`/`inline_pending` machinery survive as graph-internal.
    5. `[x]` **DONE (2026-08) — circular-wait detector** (`TS_SAFETY_CHECKS`). The suspended-ABBA deadlock (a task holding G1 suspends awaiting G2's turn while a G2-holder awaits G1) parks no thread — both frames suspended, all workers free, the run silently never completes; graph-invisible by definition (the accesses are undeclared). At suspension-on-a-pipe record edge {holder's grants -> awaited pipe} (the harness knows both), clear at resume, cycle-check on insert, fatal naming both tasks + both objects. Gates blessing waiting-rule case (c) (coroutine-first.md §2) in the guide.
       **Scope ruling (2026-08, field survey): keep it on GRANT edges; do not generalize it to
       arbitrary `Task`/`Signal` await edges.** That generalization is what Linux has failed to
@@ -932,10 +936,11 @@ IDs — when an item is done, mark it, don't renumber.
        compile-out), **structural** (compile-out only; escape is the sanctioned form) and
        **net** (6.13; no call site to scope, escape is `ts::External_wait`). Inheritance
        resolved as "yes, but not via `Access_context`": the relaxation is its own
-       thread-local, carried across coroutine segments by the promise (`Relaxed_carrier`) and
-       captured into launched sub-work by `with_inherited_access` — `Access_context` is
-       snapshotted at frame CREATION, so a mask living in it would be silently dropped by any
-       `Relaxed_scope` opened mid-body. Obligations on a new check are the doc's §8 checklist.
+       thread-local, carried across coroutine segments by the promise (`Relaxed_carrier`) —
+       `Access_context` is snapshotted at frame CREATION, so a mask living in it would be
+       silently dropped by any `Relaxed_scope` opened mid-body. (The `with_inherited_access`
+       path that once carried it into gated bare-task children went away with `ts::nested`;
+       `parallel_for` helpers inherit the grant but not the relaxation.) Obligations on a new check are the doc's §8 checklist.
        Original text follows.
        Raised by the observation that a user may uphold a
        rule by means we cannot see — an external lock discipline, a phase invariant, a
