@@ -357,6 +357,23 @@ safety checks (§5.0.1). The sanctioned in-task waits are `co_await`, the
 `parallel_for` join (it runs chunks on the caller), and gating completion on
 children via `ts::nested` (§4.5).
 
+Both verbs assert "this task cannot be cancelled" and abort if it was, which
+is right when no token is in play but wrong when one is: you cannot check and
+then read without a race. Two accessors branch instead:
+
+```cpp
+if (std::optional<Mesh> m = t.try_take())   // never blocks: empty if unsettled
+    use(*m);                                // OR if cancelled
+
+std::optional<Mesh> m = co_await t.as_optional();   // waits; empty if cancelled
+```
+
+`try_take()` never blocks, so it is legal inside a task too — it is the
+non-blocking spelling of "consume it if it is ready". Both *move* the result
+out like `take()`, so either must be the last consume. Neither exists for
+`ts::Task<void>`: there is no result to be missing, `is_done()` answers the
+first question and awaiting a cancelled void task already resumes normally.
+
 ### 4.4 Cancellation
 
 Cooperative, value-based (no exceptions):

@@ -920,6 +920,16 @@ Task_ptr core_of(const Task<R>& t) noexcept;
 template<typename R>
 Task<R> task_from_core(Task_ptr core) noexcept;
 
+// What `Task<R>::as_optional()` returns: a marker carrying the block, made awaitable by an
+// `operator co_await` in coroutine_support.h that resolves to `std::optional<R>` -- empty
+// when the task settled cancelled. Declared here so `Task` can name it without dragging the
+// coroutine layer into this header.
+template<typename R>
+struct Optional_awaitable
+{
+    Task_ptr core;
+};
+
 } // namespace detail
 
 // Options for a `Guarded` access (`access` / `async`, single- and multi-object). Deliberately
@@ -1007,6 +1017,35 @@ public:
         if (core_->cancelled)
             ts::fatal("Task::take() on a cancelled task; check is_cancelled() first");
         return std::move(*static_cast<R*>(core_->result_ptr));
+    }
+
+    // The two cancellation-tolerant consumes. `sync()`/`take()` assert "this cannot be
+    // cancelled" and fatal when it was, which is right for the common case (no token in
+    // play) but punishes a caller for a state the callee chose -- and there is no
+    // check-then-take that is not a race. These two branch instead:
+    //
+    //   try_take()   -- NEVER blocks. Empty when the task is unsettled OR cancelled, so it
+    //                   is also legal inside a task (the non-blocking spelling of
+    //                   `if (t.is_done()) v = t.sync();`).
+    //   as_optional()-- `co_await t.as_optional()` waits, then yields empty on cancellation
+    //                   instead of the fatal that `co_await t` raises.
+    //
+    // Both MOVE the result out, like `take()`: the stored result is left moved-from, so
+    // either must be the last consume. Neither exists for `void` -- a void task has no
+    // result to be missing, `is_done()` answers the first and awaiting a cancelled void task
+    // already resumes normally, so `is_cancelled()` answers the second.
+    std::optional<R> try_take() requires (!std::is_void_v<R>)
+    {
+        if (!core_ || !core_->ready.load(std::memory_order_acquire) || core_->cancelled)
+            return std::nullopt;
+        return std::move(*static_cast<R*>(core_->result_ptr));
+    }
+
+    // Awaitable-only (there is nothing to wait on outside a coroutine that `sync()` does not
+    // already do). See `operator co_await` in coroutine_support.h.
+    detail::Optional_awaitable<R> as_optional() const noexcept requires (!std::is_void_v<R>)
+    {
+        return detail::Optional_awaitable<R>{ core_ };
     }
 
 protected:

@@ -228,10 +228,7 @@ struct Task_awaiter
 
     decltype(auto) await_resume()
     {
-#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
-        if (recorded_)
-            waits_for_clear(this);
-#endif
+        end_wait();
         if constexpr (std::is_void_v<R>)
         {
             return;   // a cancelled void task simply resumes (mirrors sync())
@@ -244,12 +241,47 @@ struct Task_awaiter
         }
     }
 
+    // Retire any waits-for edges this suspension recorded. Shared with the `as_optional`
+    // awaiter below, which resumes differently but ends the same wait.
+    void end_wait() noexcept
+    {
+#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
+        if (recorded_)
+            waits_for_clear(this);
+#endif
+    }
+
     Task_ptr core_;
     std::atomic<int> state_{ 0 };
 #if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
     bool recorded_ = false;   // waits-for edges recorded at suspend, cleared at resume
 #endif
 };
+
+// `co_await t.as_optional()` -- the same wait, resolving to `std::optional<R>` instead of
+// fatalling when the task settled cancelled. Moves the result out (like `take()`), so it
+// must be the last consume.
+template<typename R>
+struct Optional_awaiter : Task_awaiter<R>
+{
+    using Task_awaiter<R>::Task_awaiter;
+
+    std::optional<R> await_resume()
+    {
+        this->end_wait();
+        if (this->core_->cancelled)
+            return std::nullopt;
+        return std::move(*static_cast<R*>(this->core_->result_ptr));
+    }
+};
+
+// In `ts::detail`, not `ts`: the argument is `detail::Optional_awaitable`, so that is where
+// ADL looks for the operator.
+template<typename R>
+Optional_awaiter<R> operator co_await(Optional_awaitable<R> awaitable)
+{
+    return Optional_awaiter<R>(std::move(awaitable.core));
+}
 
 // The shared (result-agnostic) half of the fused promise. The block is the FIRST member,
 // so `Task_control_block* == promise*` (the `Executable` pattern) and the block's `destroy`
@@ -618,6 +650,7 @@ detail::Task_awaiter<R> operator co_await(Task<R>&& t)
 {
     return detail::Task_awaiter<R>(detail::core_of(t));
 }
+
 
 // Async-lock a `Guarded<T>` in a coroutine: `auto g = co_await ts::read_write(w);` suspends
 // until the pipe grants exclusive write access, then resumes with an RAII guard giving direct

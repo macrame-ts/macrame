@@ -344,6 +344,58 @@ void test_death_await_cancelled_value()
 }
 #endif
 
+// The other companion to that fatal, and the one that needs no polling: `as_optional()`
+// waits like a plain `co_await` and yields an empty optional on cancellation.
+Task<int> await_optional(ts::Task<int> maybe_cancelled)
+{
+    std::optional<int> value = co_await maybe_cancelled.as_optional();
+    co_return value.value_or(-1);
+}
+
+void test_await_as_optional()
+{
+    ts::Guarded<int> d{ ts::Named{ "d" }, 5 };
+
+    ts::Cancellation_source src;
+    src.request_cancel();
+    ts::Task<int> cancelled = d.async([](const int& v) { return v; }, { .token = src.token() });
+    TS_CHECK(await_optional(std::move(cancelled)).sync() == -1);
+
+    ts::Task<int> completed = d.async([](const int& v) { return v; });
+    TS_CHECK(await_optional(std::move(completed)).sync() == 5);
+}
+
+// `try_take()` never blocks, so it is legal inside a task -- the non-blocking spelling of
+// "consume it if it happens to be ready".
+void test_try_take()
+{
+    ts::Guarded<int> d{ ts::Named{ "d" }, 11 };
+
+    ts::Signal gate;
+    ts::Task<int> pending = ts::launch([gate]() mutable { gate.sync(); return 3; });
+    TS_CHECK(!pending.try_take().has_value());   // unsettled -> empty, no park
+    gate.trigger();
+    pending.sync();
+    TS_CHECK(pending.try_take() == 3);
+
+    ts::Cancellation_source src;
+    src.request_cancel();
+    ts::Task<int> cancelled = d.async([](const int& v) { return v; }, { .token = src.token() });
+    while (!cancelled.is_done())
+        std::this_thread::yield();
+    TS_CHECK(!cancelled.try_take().has_value());   // cancelled -> empty, not fatal
+
+    // Inside a task: never parks, so the in-task rule does not apply to it.
+    ts::Task<int> settled = d.async([](const int& v) { return v; });
+    settled.sync();
+    std::atomic<int> seen{ -1 };
+    ts::launch([&seen, settled]() mutable
+    {
+        seen.store(settled.try_take().value_or(-2), std::memory_order_relaxed);
+    }).sync();
+    TS_CHECK(seen.load(std::memory_order_relaxed) == 11);
+}
+
 // The reentrant access arm (coroutine-first §4.2, waiting rule (b)): `access` from a task that
 // already holds the object's write grant runs inline under it instead of queueing behind
 // itself (which used to be the sharp same-object deadlock).
@@ -575,6 +627,8 @@ void run_coroutine_tests()
     run("co await-under-guard fatal", test_death_await_under_guard);
     run("co await instead of sync", test_coro_await_instead_of_sync);
     run("co await cancelled checked", test_await_cancelled_checked);
+    run("co await as_optional", test_await_as_optional);
+    run("try_take non-blocking", test_try_take);
 #if TS_SAFETY_CHECKS
     run("death: await cancelled value", test_death_await_cancelled_value);
 #endif

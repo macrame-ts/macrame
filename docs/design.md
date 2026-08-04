@@ -381,6 +381,23 @@ readers; at most one mover, and it must be last" — the multi-consumer
 ergonomics of `shared_future` without a second type, and move-only results
 still work.
 
+Cancellation makes that pair insufficient rather than wrong. `sync()`/`take()`
+abort on a cancelled task, which is the correct assertion for the common case
+(no token in play) but punishes the caller for a state the callee chose — and
+there is no check-then-read that is not a race, since the check and the read
+are separate observations of a state another thread is setting. Changing the
+return type to an optional was rejected outright: every call site that cannot
+be cancelled would pay an unwrap forever, for a case it does not have. So the
+answer is two more verbs rather than a different one — `try_take()`
+(non-blocking, empty when unsettled *or* cancelled, therefore also legal
+inside a task) and `co_await t.as_optional()` (the same wait, branching
+instead of fatalling). Both consume, so they compose with the "at most one
+mover" rule rather than adding a third kind of read. Neither exists for
+`void`: a void task has no result to be missing, so `is_done()` and
+`is_cancelled()` already answer both questions, and defining a
+`Maybe<void>`-shaped type to make generic code uniform was judged not to earn
+its name.
+
 ### 4.3 One composition mechanism (historical: builders, `then`, `when_all`)
 
 Earlier revisions carried a full callback-composition surface: `then`

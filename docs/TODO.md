@@ -642,8 +642,20 @@ IDs — when an item is done, mark it, don't renumber.
        these fatals; what survives is node/pipe-job declared grants plus a `co_await`, which is
        6.14's territory. That narrows the residual hole and raises this item's value.
 
-   12. `[ ]` **(P1, author 2026-08) Non-blocking result accessors — `try_take()` /
-       `as_optional()`.** Fatal-on-cancelled is the wrong default for a value `sync()`: the
+   12. `[x]` **(P1, author 2026-08) Non-blocking result accessors — DONE (2026-08).**
+       `Task<R>::try_take()` returns `std::optional<R>`, never blocks (empty when unsettled
+       OR cancelled) and is therefore legal inside a task -- the escape valve 6.10 needs;
+       `co_await t.as_optional()` performs the same wait as `co_await t` but yields an empty
+       optional instead of fatalling on a cancelled task (a `detail::Optional_awaitable`
+       marker from task.h, made awaitable by an `operator co_await` in `ts::detail` -- ADL
+       looks where the argument type lives -- resolving to an `Optional_awaiter` that reuses
+       `Task_awaiter`'s handshake and only differs in `await_resume`). `sync()`/`take()` are
+       unchanged. **`ts::Maybe<R>` dropped by the author**: both verbs simply do not exist for
+       `void`, since a void task has no result to be missing (`is_done()` answers the first
+       question, and awaiting a cancelled void task already resumes normally). Both MOVE the
+       result, so they join `take()` under the existing "at most one mover, and it must be
+       last" rule rather than adding a third kind of read. Original text follows.
+       Fatal-on-cancelled is the wrong default for a value `sync()`: the
        caller cannot check-then-take without a race, and the fatal punishes them for a state
        the callee chose. Do NOT change `sync()`'s return type — every call site that cannot be
        cancelled (no token in play, the common case) would pay an unwrap forever. Three
