@@ -15,7 +15,7 @@ Every rule check answers two independent questions:
 
 1. **Is it compiled into this build?** — `TS_ENABLED_RULES`, a preprocessor bitmask. When a
    rule's bit is clear, its code *and its state* vanish (the `Pipe_guard` depth counter, the
-   awaiters' `recorded_` flags, the waits-for registry).
+   awaiters' `recorded_` flags, the circular-wait registry).
 2. **Is it enforced at this point?** — `ts::Relaxed_scope`, a scoped RAII opt-out, plus a
    process-wide default for teams that want the rules as advice.
 
@@ -30,14 +30,14 @@ a false positive". They are genuinely different needs and neither substitutes fo
 | `in_task_sync` | `sync()` / `take()` inside a task | advisory | compiled out | yes |
 | `await_under_guard` | `co_await` while a `Pipe_guard` is live | structural | **kept** | no |
 | `access_rank` | awaiting an object out of declared rank order (6.14) | advisory | compiled out | yes |
-| `waits_for_cycle` | a held-grant → awaited-pipe wait cycle (6.5) | advisory | compiled out | yes |
+| `circular_wait` | a held-grant → awaited-pipe wait cycle (6.5) | advisory | compiled out | yes |
 | `deadlock_net` | quiescence with no possible external wakeup (6.13) | net | compiled out | no (global) |
 
 `TS_ENABLED_RULES` defaults to `TS_RULE_ALL` under `TS_SAFETY_CHECKS=1` and to
 `TS_RULE_AWAIT_UNDER_GUARD` under `TS_SAFETY_CHECKS=0` — which is exactly what each
 configuration did before the policy existed, so adopting it changes no shipped behavior.
 
-Not every rule can be honoured in every configuration. `waits_for_cycle` reads grant
+Not every rule can be honoured in every configuration. `circular_wait` reads grant
 bookkeeping (`Access_context` entry epochs, `Pipe::write_epoch`) that exists only under
 `TS_SAFETY_CHECKS`; asking for it in a shipping build cannot work, so the *effective* mask
 (`TS_RULES_EFFECTIVE`) is the requested policy intersected with what the build supports, and
@@ -166,7 +166,7 @@ the rest. So it is layered by what each level costs:
 scheduler was quiescent, and the escapes (`ts::External_wait`,
 `ts::set_deadlock_net_window`, `TS_ENABLED_RULES`).
 
-**Tier 2 — free wherever `Rule::waits_for_cycle` is compiled in.** The waits-for registry
+**Tier 2 — free wherever `Rule::circular_wait` is compiled in.** The circular-wait registry
 already records `{held grant → awaited pipe}` at every pipe suspension and clears at resume,
 so at fatal time its live entries *are* the set of tasks suspended while holding a grant. It
 is printed, not consulted: an independent mechanism has already concluded the system is

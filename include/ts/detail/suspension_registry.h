@@ -5,8 +5,8 @@
 // quiescence net (`Rule::deadlock_net`) can say "nothing can make progress"; this says who
 // was stuck on what, which is the difference between a report and a debugging session.
 //
-// It exists because tier 2 (the waits-for edge registry) only records suspensions that hold
-// a grant. The shape it misses is the two-hop cycle: task N holds G1 and awaits foreign
+// It exists because tier 2 (the circular-wait edge registry) only records suspensions
+// that hold a grant. The shape it misses is the two-hop cycle: task N holds G1 and awaits foreign
 // task T, while T awaits G1 -- T holds nothing, so tier 2 never sees it, and neither
 // suspension is on a pipe from N's side.
 //

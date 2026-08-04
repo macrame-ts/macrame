@@ -10,8 +10,8 @@ all-or-nothing); the hole is a grant held *then* a later dynamic await
 
 Three candidate answers exist. One is **already shipped** and must frame both evaluations:
 
-- **The waits-for cycle detector** (TODO 6.5) is implemented — `waits_for_record` /
-  `waits_for_clear` in `src/guarded.cpp` (lines 372–492), called from
+- **The circular-wait detector** (TODO 6.5) is implemented — `circular_wait_record` /
+  `circular_wait_clear` in `src/guarded.cpp` (lines 372–492), called from
   `Task_awaiter::await_suspend` and `Pipe_guard_awaiter::await_suspend` in
   `include/ts/coroutine_support.h`. It records {held pipe → awaited pipe} edges at a genuine
   suspension, DFS-checks for a cycle on insert, and fatals naming both tasks and both
@@ -417,13 +417,13 @@ sketch assumes.** `Pipe_guard_awaiter::await_suspend` fatals on `pipe_guard_dept
 (`coroutine_support.h:454`), and so does `Task_awaiter::await_suspend` (line 175). A body
 holding an RAII guard cannot await anything. The surviving hole is exactly: a **graph node's or
 pipe job's** declared grants (no `Pipe_guard` involved, depth 0) plus a `co_await` on a pipe
-job — which is what the shipped waits-for detector watches. Worth recording: because that
+job — which is what the shipped circular-wait detector watches. Worth recording: because that
 fatal lives in `await_suspend`, `hold_then_await` above compiles and *runs fine whenever the
 second pipe happens to be free* — the timing-luck coverage TODO 6.11 is about.
 
 ### 2.4 Rank vs `ww_mutex` vs the shipped detector
 
-| | declared rank (6.14) | `ww_mutex` | waits-for detector (shipped) |
+| | declared rank (6.14) | `ww_mutex` | circular-wait detector (shipped) |
 |---|---|---|---|
 | mode | prevents (rejects the program) | recovers (retries) | detects, then fatals |
 | fires | deterministically, first offending await | only under actual contention | only when both halves are concurrently suspended |

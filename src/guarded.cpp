@@ -371,7 +371,7 @@ void pipe_release(Scheduler&, Pipe& pipe, Access mode)
     release_and_redispatch(pipe, mode);
 }
 
-#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE) || TS_RULE_ON(TS_RULE_IN_TASK_SYNC) || TS_RULE_ON(TS_RULE_ACCESS_RANK)
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT) || TS_RULE_ON(TS_RULE_IN_TASK_SYNC) || TS_RULE_ON(TS_RULE_ACCESS_RANK)
 namespace
 {
 // Display identity of a pipe's object, for a diagnostic. `buf` must outlive the use (each
@@ -421,8 +421,8 @@ const char* pipe_name(const Pipe* pipe, char* buf, std::size_t size) noexcept
 }
 #endif
 
-#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
-// ===== waits-for cycle detector (docs/coroutine-first.md §2) ================================
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
+// ===== circular-wait detector (docs/coroutine-first.md §2) ================================
 //
 // One process-wide registry of {held pipe -> awaited pipe} edges, recorded by the coroutine
 // awaiters at a genuine suspension on a pipe and cleared at resume. A cycle among the edges
@@ -432,7 +432,7 @@ const char* pipe_name(const Pipe* pipe, char* buf, std::size_t size) noexcept
 namespace
 {
 
-struct Waits_edge
+struct Wait_edge
 {
     const Pipe* held;
     const Pipe* awaited;
@@ -440,8 +440,8 @@ struct Waits_edge
     const Task_control_block* waiter;    // the suspending task, for the diagnostic
 };
 
-std::mutex waits_mutex;
-std::vector<Waits_edge> waits_edges;
+std::mutex wait_mutex;
+std::vector<Wait_edge> wait_edges;
 
 // Recover the owning `Pipe` from an `Access_context` entry's epoch source (the entry
 // stores `&pipe->write_epoch`). Diagnostic-only pointer arithmetic, confined to this TU
@@ -456,15 +456,15 @@ const Pipe* pipe_from_epoch(const std::atomic<std::uint64_t>* epoch) noexcept
 
 // Does a chain of edges lead from `from` back to `target`? (`held == from` edges step to
 // their awaited pipe.) Depth-bounded for safety; the registry is tiny (live suspensions).
-bool waits_reaches(const Pipe* from, const Pipe* target, int depth) noexcept
+bool wait_reaches(const Pipe* from, const Pipe* target, int depth) noexcept
 {
     if (from == target)
         return true;
     if (depth > 64)
         return false;
-    for (const Waits_edge& e : waits_edges)
+    for (const Wait_edge& e : wait_edges)
     {
-        if (e.held == from && waits_reaches(e.awaited, target, depth + 1))
+        if (e.held == from && wait_reaches(e.awaited, target, depth + 1))
             return true;
     }
     return false;
@@ -472,12 +472,12 @@ bool waits_reaches(const Pipe* from, const Pipe* target, int depth) noexcept
 
 } // namespace
 
-bool waits_for_record(const Access_context* held, const void* ticket, const Task_control_block* waiter,
+bool circular_wait_record(const Access_context* held, const void* ticket, const Task_control_block* waiter,
                       Pipe* const* awaited, int count)
 {
     if (held == nullptr || count == 0)
         return false;
-    std::scoped_lock lock(waits_mutex);
+    std::scoped_lock lock(wait_mutex);
     bool recorded = false;
     held->for_each_epoch([&](const std::atomic<std::uint64_t>* epoch)
     {
@@ -487,13 +487,13 @@ bool waits_for_record(const Access_context* held, const void* ticket, const Task
             const Pipe* awaited_pipe = awaited[i];
             if (awaited_pipe == nullptr)
                 continue;
-            if (waits_reaches(awaited_pipe, held_pipe, 0))
+            if (wait_reaches(awaited_pipe, held_pipe, 0))
             {
                 // The closing edge. Find the counterpart edge out of the awaited pipe to
                 // name the other task; for a self-cycle (awaiting an object this task
                 // holds) there is none.
-                const Waits_edge* other = nullptr;
-                for (const Waits_edge& e : waits_edges)
+                const Wait_edge* other = nullptr;
+                for (const Wait_edge& e : wait_edges)
                 {
                     if (e.held == awaited_pipe)
                     {
@@ -509,7 +509,7 @@ bool waits_for_record(const Access_context* held, const void* ticket, const Task
                 if (awaited_pipe == held_pipe)
                 {
                     std::snprintf(message, sizeof message,
-                        "waits-for cycle: task '%s' holding '%s' awaits the same object -- the "
+                        "circular wait: task '%s' holding '%s' awaits the same object -- the "
                         "access queues behind the very grant the awaiter holds and the frame never "
                         "resumes; access it under the held grant instead (reentrancy covers the "
                         "writer-owner case)",
@@ -519,7 +519,7 @@ bool waits_for_record(const Access_context* held, const void* ticket, const Task
                 else
                 {
                     std::snprintf(message, sizeof message,
-                        "waits-for cycle: task '%s' holding '%s' awaits '%s', while task "
+                        "circular wait: task '%s' holding '%s' awaits '%s', while task "
                         "'%s' holding '%s' awaits '%s' -- a suspended ABBA deadlock (no thread "
                         "parks; the frames simply never resume). Prefer the access hierarchy: declare "
                         "the object on the node, read a Versioned snapshot, or stage via Deferred "
@@ -535,19 +535,19 @@ bool waits_for_record(const Access_context* held, const void* ticket, const Task
                 }
                 ts::fatal(message);
             }
-            waits_edges.push_back({ held_pipe, awaited_pipe, ticket, waiter });
+            wait_edges.push_back({ held_pipe, awaited_pipe, ticket, waiter });
             recorded = true;
         }
     });
     return recorded;
 }
 
-void waits_for_clear(const void* ticket) noexcept
+void circular_wait_clear(const void* ticket) noexcept
 {
-    std::scoped_lock lock(waits_mutex);
-    std::erase_if(waits_edges, [&](const Waits_edge& e) { return e.ticket == ticket; });
+    std::scoped_lock lock(wait_mutex);
+    std::erase_if(wait_edges, [&](const Wait_edge& e) { return e.ticket == ticket; });
 }
-#endif   // TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
+#endif   // TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
 
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
 // The scheduler-side half of the deadlock net (declared in task.h). Defined here rather
@@ -579,7 +579,7 @@ void report_append(char* buffer, std::size_t size, std::size_t& used, const char
         used = used + static_cast<std::size_t>(written) < size ? used + static_cast<std::size_t>(written) : size - 1;
 }
 
-// TIER 2 -- free wherever the waits-for registry exists. Its live entries ARE the tasks
+// TIER 2 -- free wherever the circular-wait registry exists. Its live entries ARE the tasks
 // suspended while holding a grant, in a structure already maintained for the cycle check,
 // read at a moment when we are already dying. (This is a POST-MORTEM of edges an independent
 // mechanism has already concluded are wedged, not a prediction from them -- the distinction
@@ -587,15 +587,15 @@ void report_append(char* buffer, std::size_t size, std::size_t& used, const char
 void report_held_grant_suspensions([[maybe_unused]] char* buffer, [[maybe_unused]] std::size_t size,
                                    [[maybe_unused]] std::size_t& used) noexcept
 {
-#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
-    std::scoped_lock lock(waits_mutex);
-    if (waits_edges.empty())
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
+    std::scoped_lock lock(wait_mutex);
+    if (wait_edges.empty())
     {
         report_append(buffer, size, used, "\n  (no task is suspended while holding a grant)");
         return;
     }
     report_append(buffer, size, used, "\n  suspended while holding a grant:");
-    for (const Waits_edge& edge : waits_edges)
+    for (const Wait_edge& edge : wait_edges)
     {
         char who[96], held[96], awaited[96];
         report_append(buffer, size, used, "\n    task '%s' holds '%s', awaits '%s'",

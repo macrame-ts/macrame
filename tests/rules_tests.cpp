@@ -27,11 +27,11 @@ void test_compiled_in_set()
     // spellings of one policy.
     TS_CHECK(ts::rule_compiled_in(Rule::await_under_guard) == (TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)));
     TS_CHECK(ts::rule_compiled_in(Rule::in_task_sync) == (TS_RULE_ON(TS_RULE_IN_TASK_SYNC)));
-    TS_CHECK(ts::rule_compiled_in(Rule::waits_for_cycle) == (TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)));
+    TS_CHECK(ts::rule_compiled_in(Rule::circular_wait) == (TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)));
 #if !TS_SAFETY_CHECKS
-    // `waits_for_cycle` reads harness-only state, so the effective mask drops it regardless
+    // `circular_wait` reads harness-only state, so the effective mask drops it regardless
     // of what the policy asked for.
-    TS_CHECK(!ts::rule_compiled_in(Rule::waits_for_cycle));
+    TS_CHECK(!ts::rule_compiled_in(Rule::circular_wait));
 #endif
 }
 
@@ -43,14 +43,14 @@ void test_relaxed_scope_scoping()
     {
         ts::Relaxed_scope relax{ Rule::in_task_sync };
         TS_CHECK(ts::rule_relaxed(Rule::in_task_sync));
-        TS_CHECK(!ts::rule_relaxed(Rule::waits_for_cycle));   // not named -> still enforced
+        TS_CHECK(!ts::rule_relaxed(Rule::circular_wait));   // not named -> still enforced
         {
-            ts::Relaxed_scope inner{ Rule::waits_for_cycle };   // nests, does not replace
+            ts::Relaxed_scope inner{ Rule::circular_wait };   // nests, does not replace
             TS_CHECK(ts::rule_relaxed(Rule::in_task_sync));
-            TS_CHECK(ts::rule_relaxed(Rule::waits_for_cycle));
+            TS_CHECK(ts::rule_relaxed(Rule::circular_wait));
         }
         TS_CHECK(ts::rule_relaxed(Rule::in_task_sync));
-        TS_CHECK(!ts::rule_relaxed(Rule::waits_for_cycle));
+        TS_CHECK(!ts::rule_relaxed(Rule::circular_wait));
     }
     TS_CHECK(!ts::rule_relaxed(Rule::in_task_sync));
 #endif
@@ -260,7 +260,7 @@ void test_death_deadlock_net()
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
     TS_CHECK(ts::test::expect_death("deadlock_net"));
     // The shape only tier 3 can see: a task suspended on a plain task await while holding a
-    // grant, so no waits-for edge exists. The child's report names it (verified by eye; the
+    // grant, so no wait edge exists. The child's report names it (verified by eye; the
     // harness has no fatal-output capture) -- what this asserts is that the net still fires.
     TS_CHECK(ts::test::expect_death("deadlock_net_suspended"));
 #endif

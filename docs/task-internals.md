@@ -617,7 +617,7 @@ TSan): the block settles exactly once, either way.
   bodies (§7.1); graph↔async pipe coexistence via mode-aware acquire (§10);
   cooperative cancellation (§11); the fused coroutine frame (`Task_promise`
   embedding the block); the blue-boundary blocking rule with the in-task fatal
-  (§6); the waits-for cycle detector for suspended-ABBA deadlocks
+  (§6); the circular-wait detector for suspended-ABBA deadlocks
   (docs/coroutine-first.md §2); allocation-free graph re-runs (§7.1, ~19% faster
   on the 8-node `graph` benchmark than per-run blocks).
 - **Historical record (built, validated, deleted 2026-08 in coroutine-first):**

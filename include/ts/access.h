@@ -144,7 +144,7 @@ public:
     }
 
     // Invoke `fn(epoch)` for every entry that carries a grant-validity source -- i.e. every
-    // pipe-backed grant this context holds. Consumed by the waits-for cycle detector, which
+    // pipe-backed grant this context holds. Consumed by the circular-wait detector, which
     // records held-grant -> awaited-pipe edges at suspension (docs/coroutine-first.md §2).
     template<typename Fn>
     void for_each_epoch(Fn&& fn) const noexcept

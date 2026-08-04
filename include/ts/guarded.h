@@ -153,7 +153,7 @@ bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_
 // Release a hold taken by `pipe_acquire` in `mode`; admits queued entries.
 void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode);
 
-#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
 // Waits-for cycle detector (docs/coroutine-first.md §2). At a genuine suspension on a
 // pipe -- a deferred coroutine guard acquire, or awaiting a pipe-job task -- the awaiters
 // record one edge per held grant: {pipe the suspending context holds -> pipe it awaits}.
@@ -163,14 +163,14 @@ void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode);
 // closing edge is inserted, naming both tasks and both objects. `ticket` identifies this
 // suspension (the awaiter's address); `waiter` is the suspending task's block for the
 // diagnostic (may be null off-task). Returns whether any edge was recorded, so the resume
-// path knows to `waits_for_clear`. Insertion and the cycle check share one registry lock,
+// path knows to `circular_wait_clear`. Insertion and the cycle check share one registry lock,
 // so a true deadlock is always caught by whichever awaiter inserts last. A granted-but-
 // not-yet-cleared edge (the grant fires between record and resume) can in principle close
 // a spurious cycle in that window; the window is a few instructions on the resume path and
 // requires a reader-share interleaving to matter -- accepted for a safety harness.
-bool waits_for_record(const Access_context* held, const void* ticket, const Task_control_block* waiter,
+bool circular_wait_record(const Access_context* held, const void* ticket, const Task_control_block* waiter,
                       Pipe* const* awaited, int count);
-void waits_for_clear(const void* ticket) noexcept;
+void circular_wait_clear(const void* ticket) noexcept;
 #endif
 
 // Extracts the parameter type list of a callable's `operator()` (or a function pointer).

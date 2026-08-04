@@ -502,9 +502,9 @@ can appear in a cycle.
 
 The choice of rank over the alternatives was made on when it fires, not on what
 it costs. It is O(1) — one scan of an eight-entry access context against one
-field, on the cold await path — but so is a waits-for edge insertion. The
+field, on the cold await path — but so is a wait-edge insertion. The
 difference is that a rank violation is a property of *one* await, so it fires the
-first time the path executes, on any machine; a waits-for cycle needs both halves
+first time the path executes, on any machine; a circular wait needs both halves
 concurrently suspended, which is a scheduling coin-flip. Driver Verifier makes
 the same argument explicitly: it bugchecks on the hierarchy violation, not when
 an actual deadlock is occurring. One refinement fell out of implementing it: a
@@ -513,7 +513,7 @@ otherwise a detached coroutine, which carries its launcher's grant snapshot for
 its whole life, would be treated as a holder forever.
 
 **The net behind the detectors.** Both the in-task `sync()` fatal and the
-waits-for cycle detector are *models*: they catch the shapes they were written
+circular-wait detector are *models*: they catch the shapes they were written
 for. The waits-for graph in particular is blind to a cycle that passes through
 a plain task-await edge — N holds an object and awaits foreign task T, T awaits
 that object; neither suspension records an edge, and both frames sleep forever.
@@ -541,7 +541,7 @@ threads does not trip it.
 
 **What the report says is the feature.** A net that only announces "deadlock"
 leaves the user where they started, so the report is layered by collection cost:
-the blocked waiter always; the live waits-for edges wherever that registry
+the blocked waiter always; the live wait edges wherever that registry
 exists, which is free and covers everyone suspended while holding a grant; and,
 behind `TS_SUSPENSION_REGISTRY`, every live suspension including those holding
 nothing — the two-hop shape the waits-for graph is blind to by construction.
@@ -640,7 +640,7 @@ design points that carry the weight:
 - **The suspended deadlock is detected too.** Two frames that each hold a
   grant and await the other's object deadlock with *no thread parked* — the
   failure mode a blocked-thread diagnostic can never see. Under safety
-  checks every suspension-on-a-pipe records waits-for edges (held grants →
+  checks every suspension-on-a-pipe records wait edges (held grants →
   awaited pipe) in a global registry, cleared at resume, cycle-checked on
   insert; the closing edge faults, naming both tasks and both objects. This
   is what makes awaited dynamic cross-object access a *blessable* residual

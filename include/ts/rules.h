@@ -33,7 +33,7 @@
 #define TS_RULE_IN_TASK_SYNC      0x01
 #define TS_RULE_AWAIT_UNDER_GUARD 0x02
 #define TS_RULE_ACCESS_RANK       0x04
-#define TS_RULE_WAITS_FOR_CYCLE   0x08
+#define TS_RULE_CIRCULAR_WAIT     0x08
 #define TS_RULE_DEADLOCK_NET      0x10
 #define TS_RULE_ALL               0x1F
 
@@ -49,7 +49,7 @@
 #endif
 #endif
 
-// Not every rule can be honoured in every configuration: `waits_for_cycle` and `access_rank`
+// Not every rule can be honoured in every configuration: `circular_wait` and `access_rank`
 // both read grant bookkeeping (`Access_context` entry epochs and ranks, `Pipe::write_epoch`)
 // that exists only under `TS_SAFETY_CHECKS`, so neither can outlive it whatever the policy
 // asks for -- the *held* side of a rank comparison is the access context itself. The EFFECTIVE
@@ -58,7 +58,7 @@
 #if TS_SAFETY_CHECKS
 #define TS_RULES_AVAILABLE TS_RULE_ALL
 #else
-#define TS_RULES_AVAILABLE (TS_RULE_ALL & ~TS_RULE_WAITS_FOR_CYCLE & ~TS_RULE_ACCESS_RANK)
+#define TS_RULES_AVAILABLE (TS_RULE_ALL & ~TS_RULE_CIRCULAR_WAIT & ~TS_RULE_ACCESS_RANK)
 #endif
 
 #define TS_RULES_EFFECTIVE ((TS_ENABLED_RULES) & (TS_RULES_AVAILABLE))
@@ -123,7 +123,7 @@ namespace ts
 // | `in_task_sync`      | `sync()`/`take()` inside a task              | out  | yes           |
 // | `await_under_guard` | `co_await` while a `Pipe_guard` is live      | KEPT | no            |
 // | `access_rank`       | awaiting an object out of declared rank order| out  | yes           |
-// | `waits_for_cycle`   | a held-grant -> awaited-pipe wait cycle      | out  | yes           |
+// | `circular_wait`     | a held-grant -> awaited-pipe wait cycle      | out  | yes           |
 // | `deadlock_net`      | quiescence with no possible external wakeup  | out  | no (global)   |
 enum class Rule : unsigned
 {
@@ -132,14 +132,14 @@ enum class Rule : unsigned
     in_task_sync = TS_RULE_IN_TASK_SYNC,
     await_under_guard = TS_RULE_AWAIT_UNDER_GUARD,
     access_rank = TS_RULE_ACCESS_RANK,
-    waits_for_cycle = TS_RULE_WAITS_FOR_CYCLE,
+    circular_wait = TS_RULE_CIRCULAR_WAIT,
     deadlock_net = TS_RULE_DEADLOCK_NET,
 
     // Classes. `advisory` rules encode a hazard the caller may know is absent, so they take
     // a scoped opt-out; `structural` rules protect an implementation invariant and are
     // compile-out-only; `net` is the global quiescence check, which cannot be scoped at all
     // because it fires on the whole process rather than at a call site.
-    advisory = in_task_sync | access_rank | waits_for_cycle,
+    advisory = in_task_sync | access_rank | circular_wait,
     structural = await_under_guard,
     net = deadlock_net,
     all = TS_RULE_ALL,

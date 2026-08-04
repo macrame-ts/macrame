@@ -115,7 +115,7 @@ inline bool reentrant_under_held_grant(const Task_control_block* blk) noexcept
 // all-or-nothing. Nothing orders a grant a task already HOLDS against an object it awaits
 // LATER, and that one missing constraint is the whole suspended-ABBA hole. A declared rank
 // closes it: every dynamic await must strictly climb, so a cycle is unrepresentable
-// (Havender). Unlike the waits-for detector this fires DETERMINISTICALLY on the first
+// (Havender). Unlike the circular-wait detector this fires DETERMINISTICALLY on the first
 // offending await, rather than needing both halves of a cycle to be suspended at once.
 //
 // O(1): one scan of the (<= 8 entry) access context against one field, on the cold await
@@ -278,19 +278,19 @@ struct Task_awaiter
     {
         // The guard-across-suspension rule was already checked at `co_await` entry
         // (`await_ready`), so reaching here means it passed.
-#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
         // Waits-for edges (docs/coroutine-first.md §2): suspending on a PIPE JOB while this
         // context holds grants -- the job's turn cannot arrive until its pipes drain, so a
         // held-grant cycle through them is the suspended-ABBA deadlock. Recorded before the
         // attach (the segment's `current_access` is still installed here); cleared at
         // `await_resume`. Non-pipe tasks record nothing.
-        if (core_->pipe_count > 0 && current_access != nullptr && rule_enforced(Rule::waits_for_cycle))
+        if (core_->pipe_count > 0 && current_access != nullptr && rule_enforced(Rule::circular_wait))
         {
             Pipe* awaited[8];
             int n = 0;
             for (std::uint8_t i = 0; i < core_->pipe_count && n < 8; ++i)
                 awaited[n++] = core_->pipe_links[i].pipe;
-            recorded_ = waits_for_record(current_access, this, current_task.get(), awaited, n);
+            recorded_ = circular_wait_record(current_access, this, current_task.get(), awaited, n);
         }
 #endif
 
@@ -331,13 +331,13 @@ struct Task_awaiter
         }
     }
 
-    // Retire any waits-for edges this suspension recorded. Shared with the `as_optional`
+    // Retire any wait edges this suspension recorded. Shared with the `as_optional`
     // awaiter below, which resumes differently but ends the same wait.
     void end_wait() noexcept
     {
-#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
         if (recorded_)
-            waits_for_clear(this);
+            circular_wait_clear(this);
 #endif
 #if TS_SUSPENSION_REGISTRY
         if (registered_)
@@ -350,8 +350,8 @@ struct Task_awaiter
 
     Task_ptr core_;
     std::atomic<int> state_{ 0 };
-#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
-    bool recorded_ = false;   // waits-for edges recorded at suspend, cleared at resume
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
+    bool recorded_ = false;   // wait edges recorded at suspend, cleared at resume
 #endif
 #if TS_SUSPENSION_REGISTRY
     Suspension_record suspension_;   // in the coroutine frame; never allocated
@@ -633,14 +633,14 @@ struct Pipe_guard_awaiter
         suspension_link(suspension_);
         registered_ = true;
 #endif
-#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
         // Waits-for edge (docs/coroutine-first.md §2): a deferred acquire is a genuine
         // suspension on this pipe; record {each held grant -> pipe_} and cycle-check.
         // `current_access` is still the segment's context here (`exit_segment` restores
         // task identity, not the access scope). Cleared at `await_resume`.
         Pipe* awaited = &pipe_;
-        if (rule_enforced(Rule::waits_for_cycle))
-            recorded_ = waits_for_record(current_access, this, owner_of(h), &awaited, 1);
+        if (rule_enforced(Rule::circular_wait))
+            recorded_ = circular_wait_record(current_access, this, owner_of(h), &awaited, 1);
 #endif
 
         if (state_.exchange(2, std::memory_order_acq_rel) == 1)
@@ -653,9 +653,9 @@ struct Pipe_guard_awaiter
 
     Pipe_guard<T, Mode> await_resume() noexcept
     {
-#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
         if (recorded_)
-            waits_for_clear(this);
+            circular_wait_clear(this);
 #endif
 #if TS_SUSPENSION_REGISTRY
         if (registered_)
@@ -682,8 +682,8 @@ public:
     Pipe& pipe_;
     T* obj_;
     std::atomic<int> state_{ 0 };
-#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
-    bool recorded_ = false;   // waits-for edge recorded at suspend, cleared at resume
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
+    bool recorded_ = false;   // wait edge recorded at suspend, cleared at resume
 #endif
 #if TS_SUSPENSION_REGISTRY
     Suspension_record suspension_;

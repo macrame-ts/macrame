@@ -41,7 +41,7 @@ dynamic cross-object access:
 > unconditionally safe (they inherit the grant, never re-acquire it; no cycle can pass
 > through the holder's objects); (b) the same object — resolved by reentrancy
 > (`writer_owner == current task` runs inline under the grant, never queues behind
-> itself); (c) a foreign object — safe iff no waits-for cycle forms, which is a global
+> itself); (c) a foreign object — safe iff no circular wait forms, which is a global
 > property the caller cannot always see locally.**
 
 For (c), the preference hierarchy (highest first — this is "parallelism concentrates at
@@ -58,7 +58,7 @@ The (c) failure mode is a **suspended ABBA deadlock**: N holds G1 awaiting G2, M
 awaiting G1 — no thread parks (both frames suspended, all workers free), the frame's
 `execute()` silently never completes; harder to debug than a blocked thread. The graph
 cannot prevent it (the accesses are undeclared by definition). Mitigation: the
-**waits-for cycle detector** (TODO 6.5) — at suspension-on-a-pipe the harness knows the
+**circular-wait detector** (TODO 6.5) — at suspension-on-a-pipe the harness knows the
 awaiter's held grants (`Access_context`) and each pipe knows its holders; record the edge
 at suspend, clear at resume, cycle-check on insert, fatal naming both tasks and both
 objects. Blessing pattern (c) in the guide is gated on this detector existing.
@@ -254,7 +254,7 @@ Every row = one death test + one adjacent test demonstrating the sanctioned form
 | `commit()` from a grant-inheriting child (exists) | `commit()` from the grant-holding task |
 | `Task_scope` destroyed with unjoined children | `co_await scope.join()` before scope exit |
 | awaiting a cancelled value task | `is_cancelled()` check, then branch |
-| waits-for cycle (foreign await under grant; needs TODO 6.5) | the §2 hierarchy: declare / snapshot / stage |
+| circular wait (foreign await under grant; needs TODO 6.5) | the §2 hierarchy: declare / snapshot / stage |
 | `Signal` re-armed while awaited (reset misuse; verify existing guard) | settle, then `reset()` |
 
 Deleted APIs need no fatals (compile errors); the guide's migration table (§7.5) covers
@@ -361,7 +361,7 @@ Not blockers; to be worked through while the stages land:
    Two cautions the survey turned up, both recorded against their items: order-learning over
    *wait/completion* edges (as opposed to lock edges) has failed to merge into Linux twice in
    eight years on false positives (cross-release reverted in 4.15; DEPT unmerged after 4+
-   years) — keep the waits-for detector scoped to grant edges and let quiescence (6.13) carry
+   years) — keep the circular-wait detector scoped to grant edges and let quiescence (6.13) carry
    the general case. And Go's quiescence check has a documented blind spot (any live
    background thread masks a partial deadlock), which is why 6.13's outstanding-external-
    wakeup counter is load-bearing rather than optional.
@@ -457,5 +457,5 @@ Queued behind the §7 stages; numbers reference the nested-graphs review discuss
 - **Test churn** — 543 checks reshuffle; the graph/pipe/harness suites are untouched,
   the task/integration suites transform. Wave discipline as in the pipe rebase: green at
   every commit.
-- **Debuggability** — suspended frames have no stacks; the waits-for detector (stage 5)
+- **Debuggability** — suspended frames have no stacks; the circular-wait detector (stage 5)
   and the trace tooling carry more diagnostic weight. Accepted.

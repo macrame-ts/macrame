@@ -47,7 +47,7 @@ death tests), documented, and CI-gated.
   read_write` guards, promise-carried access context reinstalled at every resumption,
   implicit per-frame scope + `join_nested`, `Task_scope`, coroutine graph nodes, frame/block
   fusion (one allocation — the promise embeds the block), the bounded resume trampoline, the
-  waits-for cycle detector for suspended-ABBA.
+  circular-wait detector for suspended-ABBA.
 - **Deferred / Versioned** — staged-write layer (`Journal`/`Recorder`/`Parallel_recorder`),
   ONE auto-dispatching `commit()` (inline under a held write grant, else an enqueued write —
   `commit_async` removed), three-phase publish, replay/copy/overwrite resync,
@@ -440,7 +440,7 @@ IDs — when an item is done, mark it, don't renumber.
       list of pointers; `in_task_sync` (6.10) is likewise shipping-available. So the field's
       gate should follow "is any name-printing rule compiled in", not `TS_SAFETY_CHECKS`, and
       the block's shipping size becomes a function of `TS_ENABLED_RULES`. (Object and node names
-      are already kept in shipping, so `access_rank`'s and the waits-for detector's *object*
+      are already kept in shipping, so `access_rank`'s and the circular-wait detector's *object*
       naming is unaffected — this is only about task identity.)
       (b) 6.14's rank field on `Guarded` has the same shape.
       Consequences for this item: size targets must be stated per rule-policy, not absolutely;
@@ -464,7 +464,7 @@ IDs — when an item is done, mark it, don't renumber.
    2. `[x]` **DONE (2026-08, 6.4 stage 1).** Coroutine-frame / control-block fusion — one alloc for frame + block, not two. `Task_promise<R>` carries `Task_control_block core` as its FIRST member (so the block pointer doubles as the promise pointer) plus the result storage, and the block's `destroy` thunk destroys the coroutine frame. A coroutine task therefore allocates exactly the frame; coroutines reduce allocations rather than adding them, as the item required. Remaining allocation work is 4.1 (routing `operator new` on the promise to a size-class pool).
    3. `[ ]` **(P3)** Priority setter on the promise (it stores one; no config channel yet).
    4. `[x]` **DONE (2026-08, branch `pipe-rebase`) — coroutine-first transformation.** The shakeup: static graph + coroutines for everything dynamic; `then`/`when_all`/builder-`after`/retraction/reuse/inline-trampoline removed; `Task_scope` nursery + implicit per-frame scopes + coroutine graph nodes + awaitable access verb added; every illegal case a fatal with a companion how-to test. Design of record + staged plan: [coroutine-first.md](coroutine-first.md). Landed §7 stages 1–6; the remaining §11 action list is tracked as 6.9 below. Subsumed 6.1 (the awaitable access verb IS inline-when-free) and delivered 6.2 (frame/block fusion — the promise embeds the block, so a coroutine task is one allocation). Note the inline-dispatch trampoline was removed only from the DYNAMIC surface: `Graph_node::set_inline` and the `dispatch_ready`/`inline_pending` machinery survive as graph-internal.
-   5. `[x]` **DONE (2026-08) — waits-for cycle detector** (`TS_SAFETY_CHECKS`). The suspended-ABBA deadlock (a task holding G1 suspends awaiting G2's turn while a G2-holder awaits G1) parks no thread — both frames suspended, all workers free, the run silently never completes; graph-invisible by definition (the accesses are undeclared). At suspension-on-a-pipe record edge {holder's grants -> awaited pipe} (the harness knows both), clear at resume, cycle-check on insert, fatal naming both tasks + both objects. Gates blessing waiting-rule case (c) (coroutine-first.md §2) in the guide.
+   5. `[x]` **DONE (2026-08) — circular-wait detector** (`TS_SAFETY_CHECKS`). The suspended-ABBA deadlock (a task holding G1 suspends awaiting G2's turn while a G2-holder awaits G1) parks no thread — both frames suspended, all workers free, the run silently never completes; graph-invisible by definition (the accesses are undeclared). At suspension-on-a-pipe record edge {holder's grants -> awaited pipe} (the harness knows both), clear at resume, cycle-check on insert, fatal naming both tasks + both objects. Gates blessing waiting-rule case (c) (coroutine-first.md §2) in the guide.
       **Scope ruling (2026-08, field survey): keep it on GRANT edges; do not generalize it to
       arbitrary `Task`/`Signal` await edges.** That generalization is what Linux has failed to
       merge twice in eight years — lockdep's cross-release (covering `wait_for_completion`)
@@ -770,7 +770,7 @@ IDs — when an item is done, mark it, don't renumber.
        **The report has three tiers** (author follow-up, landed 2026-08). Rule: say everything
        cheap to collect, then name the flag that gets the rest.
        *Tier 1, always* -- the blocked waiter's identity, the quiescent window, the escapes.
-       *Tier 2, free wherever `waits_for_cycle` exists* -- the live `waits_edges` registry is
+       *Tier 2, free wherever `circular_wait` exists* -- the live `wait_edges` registry is
        printed verbatim; its entries ARE the tasks suspended while holding a grant. Sound
        because it is a POST-MORTEM: an independent mechanism already concluded the system is
        wedged, so these edges explain a verdict rather than predicting one. (The Linux
@@ -810,7 +810,7 @@ IDs — when an item is done, mark it, don't renumber.
        the layout-mismatch tripwire; verified firing (`lld-link: /failifmismatch: mismatch
        detected for 'TS_SUSPENSION_REGISTRY'`) with a deliberately mis-configured TU.
        Original text follows.
-       The waits-for
+       The circular-wait
        detector (6.5) fires *before* a deadlock and names the participants, but only for the
        shapes it models: an edge is recorded solely when a task suspends on a pipe job while
        holding grants. Cycles mediated by a task-await edge are invisible — N holds G1 and
@@ -848,14 +848,14 @@ IDs — when an item is done, mark it, don't renumber.
        awaits entirely. Two rejected shapes, two death scenarios (`access_rank_descends`,
        `access_rank_unranked`); two companions (climb; per-scope opt-out). Rule class
        **advisory** -- `ts::Relaxed_scope{ts::Rule::access_rank}` is the escape; shipping
-       default **compiled out**, and like `waits_for_cycle` it is masked off entirely without
+       default **compiled out**, and like `circular_wait` it is masked off entirely without
        `TS_SAFETY_CHECKS`, because its held-side input IS the access context.
        Two things fell out of implementing it, both kept:
        (1) **Stale grants must be skipped.** A detached coroutine carries its launcher's grant
        snapshot for its whole life; without the staleness filter (the same epoch test `check`
        uses) it would be treated as a holder forever and every later await rejected. This
        showed up immediately in `game_frame`'s fire-and-forget streaming coroutine.
-       (2) **The rule makes a genuine ABBA unrepresentable**, which means the `waits_for_cycle`
+       (2) **The rule makes a genuine ABBA unrepresentable**, which means the `circular_wait`
        death scenario can no longer be *constructed* without opting out of the rank rule --
        `abba_body` now carries a `Relaxed_scope`. That is the honest relationship between the
        two: rank prevents, the detector is what remains for programs that opted out.
@@ -872,7 +872,7 @@ IDs — when an item is done, mark it, don't renumber.
        Why this shape over the alternatives: **O(1)** (one TLS max against one field;
        `Access_context` already tracks held entries — Go's `lockrank` is a load and a branch,
        and is off by default only for a struct-size reason, not a speed one), and it fires
-       **deterministically on the first offending await**, where a waits-for cycle detector
+       **deterministically on the first offending await**, where a circular-wait detector
        needs both halves to actually interleave — a scheduling coin-flip. Driver Verifier makes
        the same choice explicitly: it bugchecks on *"the hierarchy violation… not when an actual
        deadlock situation is occurring"*.
@@ -915,7 +915,7 @@ IDs — when an item is done, mark it, don't renumber.
        `ts::set_default_relaxed_rules`, and `TS_ENABLED_RULES` with the same
        `detect_mismatch` ODR tripwire as `TS_SAFETY_CHECKS`. Defaults reproduce today's
        behavior exactly (everything checked; `await_under_guard` only in shipping). The two
-       existing checks were rewired onto it: `await_under_guard` and `waits_for_cycle`.
+       existing checks were rewired onto it: `await_under_guard` and `circular_wait`.
        **The design question the item left open answered itself, against the assumption in
        (a):** the runtime opt-out cannot be uniform. Relaxing `await_under_guard` is not
        merely permissive but unsound — a `Pipe_guard` installs its own `Access_context` as
@@ -1021,7 +1021,7 @@ IDs — when an item is done, mark it, don't renumber.
        captured sites land in the test file rather than a library header. The pack-ending
        multi-object `ts::access`/`ts::async` cannot take a trailing default, so they carry only
        an explicit `{.name = "..."}` — documented, not worked around.
-       Payoff landed with it: the waits-for cycle fatal now reads `task 'nodeA' holding 'objA'
+       Payoff landed with it: the circular-wait fatal now reads `task 'nodeA' holding 'objA'
        awaits 'objB', while task 'nodeB' holding 'objB' awaits 'objA'`. Also resolves
        Inconsistency 7. Original text follows.
        Graph nodes are named (`Node_name`, implicit from a string literal, `{}`
@@ -1176,7 +1176,7 @@ IDs — when an item is done, mark it, don't renumber.
         [pipe-rebase.md](pipe-rebase.md) §0.4; keep both benchmark lines.
 
     15. `[ ]` **(P1-cheap, CI) Gate Shipping (`TS_SAFETY_CHECKS=0`) on every push, not by hand.**
-        The safety-gated surface grew substantially (waits-for detector state, grant epochs,
+        The safety-gated surface grew substantially (circular-wait detector state, grant epochs,
         scope bookkeeping, `writer_owner`'s always-on exception), and the convention is that
         safety-only state is FULLY compiled out — a mis-gated field or an `#if`-invisible
         behavioral dependency only shows as a Shipping build/link/behaviour break. Shipping is

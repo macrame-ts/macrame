@@ -551,7 +551,7 @@ The suspended twin of the blocked-thread deadlock is also detected: two
 coroutines that each *hold* an object and `co_await` the other's object
 deadlock with **no thread parked** — both frames are suspended, every
 worker is free, and the frames simply never resume. The safety harness
-records waits-for edges at every suspension on a pipe and fatals the moment
+records wait edges at every suspension on a pipe and fatals the moment
 an edge closes a cycle, naming both tasks and both objects (§8.2 has the
 rule that avoids the shape in the first place).
 
@@ -581,7 +581,7 @@ a rank; a graph that never awaits outside its declared sets never sees this rule
 
 The rejection is deterministic — it fires on the first offending await, not when
 two halves of a cycle happen to interleave. That is the difference between this
-and the waits-for detector (§5.0.1), which needs the race to actually happen.
+and the circular-wait detector (§5.0.1), which needs the race to actually happen.
 The honest cost is the standard one for a lock hierarchy: a strict order rejects
 some correct programs. The escapes, in preference order, are to restructure
 (declare the object on the node; read a `Versioned` snapshot; stage through
@@ -631,7 +631,7 @@ deadlock: waiting on task 'frame.cpp:212', but every worker has been idle …
   (3 suspended task(s) listed above)
 ```
 
-The middle block comes free from the waits-for machinery and covers tasks
+The middle block comes free from the circular-wait machinery and covers tasks
 suspended while holding something. The full list — including tasks suspended on
 a plain `co_await` while holding nothing, which the first block cannot see — is
 the **suspension registry**, `TS_SUSPENSION_REGISTRY`. It is on in checked builds

@@ -571,7 +571,7 @@ void test_death_scope_unjoined()
 }
 #endif
 
-// Companion for the waits-for-cycle fatal (docs/coroutine-first.md §2 hierarchy, step 1):
+// Companion for the circular-wait fatal (docs/coroutine-first.md §2 hierarchy, step 1):
 // the same cross-object communication with BOTH objects declared -- compile() derives the
 // conflict edges and orders the nodes, so neither suspends and no cycle can form.
 Task<void> declared_pair_body(tests::Counter& own, tests::Counter& other)
@@ -596,11 +596,11 @@ void test_cross_object_declared()
 
 #if TS_SAFETY_CHECKS
 // The suspended-ABBA deadlock: two coroutine nodes each holding a declared grant and
-// awaiting the other's object. The waits-for detector fatals on the closing edge -- the
+// awaiting the other's object. The circular-wait detector fatals on the closing edge -- the
 // only diagnosis this shape can get (no thread parks; the frames simply never resume).
-void test_death_waits_for_cycle()
+void test_death_circular_wait()
 {
-    TS_CHECK(ts::test::expect_death("waits_for_cycle"));
+    TS_CHECK(ts::test::expect_death("circular_wait"));
 }
 #endif
 
@@ -717,7 +717,7 @@ void run_coroutine_tests()
 #endif
     run("co cross-object declared", test_cross_object_declared);
 #if TS_SAFETY_CHECKS
-    run("death: waits-for cycle", test_death_waits_for_cycle);
+    run("death: circular wait", test_death_circular_wait);
 #endif
     run("co showcase", test_showcase);
     run("frame gate releases at next boundary", test_frame_gate_releases_at_next_boundary);

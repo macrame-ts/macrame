@@ -69,15 +69,15 @@ static ts::Task<void> stale_stray(tests::Counter& k, ts::Signal go)
     k.increment();
 }
 
-// Death scenario body (`waits_for_cycle`): a coroutine graph-node body that touches its
+// Death scenario body (`circular_wait`): a coroutine graph-node body that touches its
 // declared object, waits until BOTH nodes hold their grants (the flag sync forces the
 // overlap), then awaits the OTHER node's object -- the suspended-ABBA shape. Each deferred
-// acquire records a waits-for edge; whichever inserts second closes the cycle and fatals.
+// acquire records a wait edge; whichever inserts second closes the cycle and fatals.
 static std::atomic<int> abba_holding{ 0 };
 static ts::Task<void> abba_body(tests::Counter& own, ts::Guarded<tests::Counter>& other)
 {
     // The rank rule (6.14) makes this shape UNREPRESENTABLE -- with valid ranks the two
-    // awaits cannot both climb -- so constructing it to test the waits-for detector means
+    // awaits cannot both climb -- so constructing it to test the circular-wait detector means
     // opting out of the rank rule for the body. That is the honest relationship between the
     // two: rank prevents, the detector is what remains for programs that opted out.
     ts::Relaxed_scope relax{ ts::Rule::access_rank };
@@ -522,10 +522,10 @@ void run_death_scenario(const char* name)
         ts::Signal never;
         coro_await_under_guard(w, never).sync();   // fatals during the coroutine's eager run
     }
-    else if (std::strcmp(name, "waits_for_cycle") == 0)
+    else if (std::strcmp(name, "circular_wait") == 0)
     {
         // Two independent coroutine graph nodes, each holding its declared object and
-        // awaiting the other's (see `abba_body`). The waits-for detector fatals on the
+        // awaiting the other's (see `abba_body`). The circular-wait detector fatals on the
         // closing edge. Companion: `test_cross_object_declared` (coroutine_tests) --
         // declare both objects and let compile() order the nodes.
         ts::Guarded<Counter> a{ ts::Named{ "objA" } };
@@ -543,7 +543,7 @@ void run_death_scenario(const char* name)
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
         // The shape tier 2 structurally cannot see: a node suspends on a plain task await
         // (a Signal nobody triggers) while holding its declared grant. No pipe suspension,
-        // so no waits-for edge -- only the suspension registry has it. The report should
+        // so no wait edge -- only the suspension registry has it. The report should
         // name the node, what it holds, and what it awaits.
         ts::Guarded<int> held{ ts::Named{ "held_object" }, 0 };
         ts::Signal never{ "never_triggered" };

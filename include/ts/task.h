@@ -416,7 +416,7 @@ struct Task_control_block
 #if TS_DEBUG_NAMES
     // Debug identity (`ts::Named`): the literal from the launching verb's options, else the
     // creation call site, else empty (a coroutine frame, whose promise sees no call site).
-    // Diagnostics only -- the waits-for fatal, the quiescence dump -- so it is fully gated
+    // Diagnostics only -- the circular-wait fatal, the quiescence dump -- so it is fully gated
     // and shipping carries no bytes for it (the block is deliberately small; see TODO 4.7).
     // Cold tail placement: the hot clusters above keep their layout.
     Named name{ nullptr };
