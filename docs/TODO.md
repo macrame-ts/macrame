@@ -340,6 +340,24 @@ IDs — when an item is done, mark it, don't renumber.
        full runs in flight. Interacts with the run-quiescence invariant (one run at a time, full
        barrier between) — likely needs the spilling node to detach into a tracked dynamic task
        at the fence. Speculative; validate demand on the 4-worker fixture first.
+   14. `[ ]` **(P1, author 2026-08) Declaration order must not carry intent — explicit edges
+       for logical ordering.** `compile()` derives an edge for every access conflict and
+       directs it by declaration index. That direction is currently load-bearing in the
+       sample: baseline `cmd_record`/`particles`/`UI` precede `submit` *only* because they are
+       declared first. **Author's ruling: we rely on the determinism of a COMPILED graph, not
+       on node declaration order.** A derived edge exists for safety (no data race); either
+       direction is race-free, so an optimiser is free to reorder independent conflicting
+       nodes. If node A must logically precede node B, that is intent and must be an explicit
+       `after`/`before` edge. Work: (a) audit `sample/game_frame.cpp` for every place where a
+       derived edge's *direction* encodes intent and make those explicit — the baseline
+       render-producer → `submit` edges are the known set, and note the optimised variant
+       already declares them explicitly because staging removes the conflict; (b) state the
+       rule in `docs/guide.md` and `docs/design.md` (declaration order resolves the direction
+       of a derived edge, but is not a specification — do not build semantics on it);
+       (c) consider a `compile()` diagnostic that flags a derived edge whose direction is the
+       only thing ordering two nodes, so reliance is visible rather than implicit. Enables the
+       reordering optimiser this rule is reserving room for.
+
    13. `[ ]` **(P3, doc + demonstrate — T20) Pre-compiled graph variants pattern.** For discrete
        mode sets (game-loading vs in-game driving vs boss fight vs cutscene), the intended answer
        to occasional shape change is "keep N compiled graphs, pick one per mode" rather than
@@ -413,7 +431,17 @@ IDs — when an item is done, mark it, don't renumber.
    2. `[x]` **DONE (2026-08, 6.4 stage 1).** Coroutine-frame / control-block fusion — one alloc for frame + block, not two. `Task_promise<R>` carries `Task_control_block core` as its FIRST member (so the block pointer doubles as the promise pointer) plus the result storage, and the block's `destroy` thunk destroys the coroutine frame. A coroutine task therefore allocates exactly the frame; coroutines reduce allocations rather than adding them, as the item required. Remaining allocation work is 4.1 (routing `operator new` on the promise to a size-class pool).
    3. `[ ]` **(P3)** Priority setter on the promise (it stores one; no config channel yet).
    4. `[x]` **DONE (2026-08, branch `pipe-rebase`) — coroutine-first transformation.** The shakeup: static graph + coroutines for everything dynamic; `then`/`when_all`/builder-`after`/retraction/reuse/inline-trampoline removed; `Task_scope` nursery + implicit per-frame scopes + coroutine graph nodes + awaitable access verb added; every illegal case a fatal with a companion how-to test. Design of record + staged plan: [coroutine-first.md](coroutine-first.md). Landed §7 stages 1–6; the remaining §11 action list is tracked as 6.9 below. Subsumed 6.1 (the awaitable access verb IS inline-when-free) and delivered 6.2 (frame/block fusion — the promise embeds the block, so a coroutine task is one allocation). Note the inline-dispatch trampoline was removed only from the DYNAMIC surface: `Graph_node::set_inline` and the `dispatch_ready`/`inline_pending` machinery survive as graph-internal.
-   5. `[x]` **DONE (2026-08) — waits-for cycle detector** (`TS_SAFETY_CHECKS`). The suspended-ABBA deadlock (a task holding G1 suspends awaiting G2's turn while a G2-holder awaits G1) parks no thread — both frames suspended, all workers free, the run silently never completes; graph-invisible by definition (the accesses are undeclared). At suspension-on-a-pipe record edge {holder's grants -> awaited pipe} (the harness knows both), clear at resume, cycle-check on insert, fatal naming both tasks + both objects. Gates blessing doctrine case (c) (coroutine-first.md §2) in the guide.
+   5. `[x]` **DONE (2026-08) — waits-for cycle detector** (`TS_SAFETY_CHECKS`). The suspended-ABBA deadlock (a task holding G1 suspends awaiting G2's turn while a G2-holder awaits G1) parks no thread — both frames suspended, all workers free, the run silently never completes; graph-invisible by definition (the accesses are undeclared). At suspension-on-a-pipe record edge {holder's grants -> awaited pipe} (the harness knows both), clear at resume, cycle-check on insert, fatal naming both tasks + both objects. Gates blessing waiting-rule case (c) (coroutine-first.md §2) in the guide.
+      **Scope ruling (2026-08, field survey): keep it on GRANT edges; do not generalize it to
+      arbitrary `Task`/`Signal` await edges.** That generalization is what Linux has failed to
+      merge twice in eight years — lockdep's cross-release (covering `wait_for_completion`)
+      landed in 4.14 and was reverted in 4.15 for false positives under a zero-false-positive
+      policy, and its successor DEPT, which models exactly this class of event/completion
+      edges, is unmerged after 4+ years because "the tool generates so many reports that it is
+      difficult to get a real signal out of the noise" ([LWN 1036222](https://lwn.net/Articles/1036222/)).
+      Our grant edges are structurally lock-like with known holders, so the narrow form behaves;
+      the general case is covered by 6.13's quiescence net instead, which is O(1) and cannot
+      false-positive on an ordering it merely finds surprising.
    6. `[ ]` **(P2, scoped 2026-08 — needs the platform layer, 3.6) Signal-from-OS-completion helper** — register an OVERLAPPED / fd / fence, get a `Signal` (the 9.2 packaging question, pulled by the first-class cross-frame pattern, coroutine-first.md §4.7).
       **Design note (2026-08).** The bridge itself is already trivial and needs nothing new: a
       `Signal` is a refcounted handle, so an OS callback captures one by value and calls
@@ -677,6 +705,60 @@ IDs — when an item is done, mark it, don't renumber.
        checks the declarations themselves. Limits (strictly intra-procedural, no alias tracking,
        relates only *named* capability declarations) mean it can cover named global `Guarded`
        state and not much else, but clang-cl is already a supported toolchain here.
+
+   15. `[ ]` **(P1, author 2026-08 — big, design first) Escape hatches for the waiting rules,
+       with a declared shipping policy.** Raised by the observation that a user may uphold a
+       rule by means we cannot see — an external lock discipline, a phase invariant, a
+       platform guarantee — in which case our check is a false positive and there must be a
+       way out. Two axes, both needed:
+       (a) **Opt-out granularity** — a scoped RAII form (`ts::Relaxed_scope{ts::Rule::foreign_await}`
+       or similar: documents the claim at the site, keeps the rest of the program checked) and
+       a global default for teams that want the rules as advice. Scoped is the primary form;
+       global is the blunt instrument.
+       (b) **Compile-out policy** — which checks a shipping build keeps. This is the reason
+       every rule check must be *capable* of being compiled out even when it is currently
+       always-on (the guard-across-suspension fatal is always-on today with no way to disable
+       it, which is exactly the case that motivated this item). The user should be able to
+       declare the set: e.g. keep the cheap structural checks, drop the expensive diagnostics.
+       Design questions to settle: the rule taxonomy (what is individually switchable — a flat
+       enum of rules, or classes like structural/diagnostic/net?); interaction with 6.10–6.14
+       (each new check must state its escape and its shipping default *when it lands*, not
+       retrofitted); whether an opt-out is inherited by nested/child tasks (probably yes, via
+       `Access_context`, but that makes it wider than the lexical scope suggests); and how an
+       opt-out interacts with the quiescence net (6.13), which cannot be locally suppressed
+       because it fires globally. Prior art: TSan suppressions, `[[clang::no_sanitize]]`,
+       lockdep's per-class annotations, Orleans' scoped `AllowCallChainReentrancy()`.
+
+   16. `[ ]` **(P2, author 2026-08) `when_all` as an AWAITER (not a Task combinator).** The
+       deleted `when_all` was a `Task`-level join (its own block, a result tuple, ~6 allocs —
+       the worst per-op offender in the old allocation audit). The awaiter form is a different
+       and much cheaper animal: a countdown plus one resume, no join block, no tuple. It is
+       also a popular and expected feature in coroutine libraries independent of any static
+       graph, so its absence is a gap in the graph-free story (guide §6.4). Concretely wanted
+       for the cross-frame pattern, where `co_await io_done; co_await gate.next();` is two
+       suspensions and two potential worker wakes for what should be one wait — see the
+       narrower `gate.next_after(io_done)` idea in 6.9(g). Design: variadic awaitables, resume
+       once when all have fired, results by reference from the individual handles rather than
+       moved into a tuple (avoids the old allocation profile entirely).
+
+   17. `[ ]` **(P2, author 2026-08 — reopened by the 6.8 decomposition) Retraction, or another
+       locality lever.** The resume decomposition (6.8) shows ~57% of a chained coroutine stage
+       is the work *leaving the awaiting thread* — the awaited task is dispatched outward to
+       whatever worker steals it, and the resume is dispatched again afterwards. That cost
+       grows with the number of idle workers (1930 ns at 22 workers, 681 ns at 2, 335 ns at 1).
+       The classic lever is exactly what coroutine-first deleted on purpose: **awaiting a
+       not-yet-started task runs it inline on the awaiting thread** (retraction). It was deleted
+       because as a *blocking* mechanism it could not be made safe under access control (see
+       [retraction-vs-pool-exhaustion.md](retraction-vs-pool-exhaustion.md) and coroutine-first
+       §3) — but the suspension-based form is a different proposition: a suspended awaiter holds
+       no thread, so the pool-exhaustion argument that killed it does not apply. What must be
+       re-derived from scratch: whether running the awaited task inline is safe with respect to
+       the awaiter's held grants (it inherits the context, so this is waiting-rule case (a) —
+       plausibly yes), whether the claim protocol can be reintroduced without the
+       claim/generation machinery that was removed, and what it does to determinism. Measure
+       before building: the 6.8 benchmark is a strictly serial chain, the case that maximally
+       rewards locality; a realistic fan-out workload may show much less. Do not reintroduce
+       blocking retraction.
 
 7. **Deferred / Versioned**
    1. `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.
