@@ -364,6 +364,26 @@ std::vector<double> bench_coro_nest()
     });
 }
 
+// The resume round trip, decomposed (TODO 6.8). `coro chn` minus `coro nst` is the per-stage
+// round trip; this grid splits that round trip along its two structural axes by running the
+// SAME chain on a differently-configured global scheduler (`ts::launch` dispatches through
+// `global_scheduler()`, so `Scheduler_scope` is what redirects it):
+//   idle policy -- `spin` never parks a worker, so a submit issues no wake syscall and a
+//                  waiting worker never sleeps; the delta against `spin_then_block` is the
+//                  wake+park cost.
+//   worker count -- with ONE worker the stage runs and the awaiting frame resumes on the same
+//                   thread (the resume trampoline, warm cache, own-deque submit); 2 workers
+//                   adds exactly one possible thief, and the full pool adds the scan
+//                   contention of a large idle pool.
+// What remains at 1 worker + `spin`, above `coro nst`, is the queue round trip itself. The
+// chain is strictly serial, so nothing here is paying for parallelism it gains: every stage
+// is awaited before the next is launched.
+std::vector<double> bench_coro_chain_on(ts::Scheduler_config config)
+{
+    ts::Scheduler_scope scope(config);
+    return bench_coro_chain();
+}
+
 // Awaited join over 4 async reads (the coroutine-first form of the old typed join).
 std::vector<double> bench_coro_join()
 {
@@ -500,6 +520,13 @@ void run_benchmarks()
     report("coro join", bench_coro_join());
     report("graph", bench_graph_execute());
     report("harness", bench_harness());
+
+    std::printf("\ncoroutine resume round trip, decomposed (ns/op = ns per awaited stage):\n");
+    report("N w s+blk", bench_coro_chain_on({ .idle_policy = ts::Idle_policy::spin_then_block }));
+    report("N w spin", bench_coro_chain_on({ .idle_policy = ts::Idle_policy::spin }));
+    report("1 w s+blk", bench_coro_chain_on({ .num_threads = 1, .idle_policy = ts::Idle_policy::spin_then_block }));
+    report("1 w spin", bench_coro_chain_on({ .num_threads = 1, .idle_policy = ts::Idle_policy::spin }));
+    report("2 w spin", bench_coro_chain_on({ .num_threads = 2, .idle_policy = ts::Idle_policy::spin }));
 
     std::printf("\ngame frame, graph vs graph-free (same World, same system bodies, %u hw threads):\n", hw);
     double heavy_graph = frame_us(&sample::game_frame_stats, 20, 1.0f);

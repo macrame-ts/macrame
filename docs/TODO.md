@@ -477,6 +477,58 @@ IDs — when an item is done, mark it, don't renumber.
       wake/dispatch latency (2138/1959/1809 ns per stage, of which only ~88 ns is coroutine
       machinery), so a resume that skips the queue entirely is where the remaining cost is.
 
+      **Decomposed (2026-08, and it RESCOPES this item again).** The measurement this item
+      asked for first is done: the same `chain_coro` benchmark run on differently-configured
+      global schedulers (`bench_coro_chain_on` + `Scheduler_scope`, benchmarks.cpp — five of
+      the configurations are kept as a permanent `--bench` section). Idle policy isolates the
+      wake syscall, worker count isolates the cross-thread hop. Release, 22 hw threads, quiet
+      machine, 3 full runs; ns per awaited stage, median of 4 measured rounds each:
+
+      | configuration | run 1 | run 2 | run 3 |
+      |---|---|---|---|
+      | 22 w, `spin_then_block` (the `coro chn` line) | 1932 | 1996 | 1814 |
+      | 22 w, `spin` | 1414 | 1439 | 1458 |
+      | 4 w, `spin` (not kept) | 810 | 819 | 800 |
+      | 2 w, `spin` | 681 | 668 | 659 |
+      | 2 w, `spin_then_block` (not kept) | 906 | 892 | 902 |
+      | 1 w, `spin_then_block` | 360 | 366 | 366 |
+      | 1 w, `spin` | 335 | 337 | 344 |
+      | `coro nst` (frame only, no scheduler) | 91 | 91 | 95 |
+
+      Split of the ~1930 ns default-configuration stage:
+
+      | component | isolation | ns | share |
+      |---|---|---|---|
+      | coroutine frame (alloc, promise, settled await, destroy) | `coro nst` | 91 | 5% |
+      | queue round trip on ONE thread (submit, own-deque pop, dispatch, claim, settle, resume trampoline) | 1 w spin − `coro nst` | 248 | 13% |
+      | first cross-thread hop (one possible thief: steal + cache-cold block/frame/result) | 2 w spin − 1 w spin | 331 | 17% |
+      | idle-pool scale (steal contention on the deques + a more distant core) | 22 w spin − 2 w spin | 770 | 40% |
+      | wake + park | 22 w s+blk − 22 w spin | 490 | 25% |
+
+      The wake-syscall component the item predicted is real but is a quarter of the cost, and
+      it shrinks with the pool: the same delta is 230 ns at 2 workers and 25 ns at 1 (nothing
+      parks when the single worker always has work). **The dominant term (57%) is that the
+      awaited stage leaves the awaiting thread at all**, and it gets worse the more idle
+      workers there are to take it.
+
+      Consequence for this item: **symmetric transfer can claim at most the 248 ns same-thread
+      queue round trip, ~13%** — and less than that in practice, because the resume already
+      skips the queue via the resume trampoline; the worker-loop borrow only removes that
+      trampoline's push+drain. It can claim NONE of the other 87%, because wake and migration
+      are paid dispatching the awaited stage OUTWARD, before any resume exists to transfer to.
+      The lever for the 1600 ns is locality, not transfer: keep a task its submitter is about
+      to await on the submitter's thread. The obvious shape — an await of a not-yet-STARTED
+      task runs it inline on the awaiting thread — is exactly the retraction that
+      coroutine-first deleted (deliberately: it was unsound for pipe/`async` work and made the
+      blue/red boundary mushy), so reviving it needs a design pass, not a patch; a weaker,
+      purely scheduler-side variant is to make the just-submitted-and-about-to-be-awaited task
+      unstealable for a short window. Note the benchmark is a strictly serial chain, which
+      maximally rewards locality — a policy that keeps work local must not do so when the
+      launcher does NOT immediately await, or it converts parallelism into latency. Downgrade
+      candidate: on this evidence the symmetric-transfer borrow is a P2 (13% of a cost the
+      trampoline mostly already collects), and the locality question is the P1 that inherits
+      its "why".
+
    9. `[~]` **(P1, author 2026-08) Coroutine-first post-initial action list.** The queue behind
       the landed transformation, from [coroutine-first.md](coroutine-first.md) §11. In order:
       (a) `[x]` **nested graph runs v1 — DONE (2026-08).** The lend protocol landed as
