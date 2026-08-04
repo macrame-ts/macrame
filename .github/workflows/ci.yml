@@ -58,6 +58,36 @@ jobs:
             task_system_crash.dmp
           if-no-files-found: ignore
 
+  # The shipping shape (harness + profiling compiled out) is a genuinely different binary:
+  # different class layouts, different rule set, whole test groups not applicable. It went
+  # unrun long enough to accumulate six failures and a crash, which is the argument for a
+  # job rather than a documented "remember to check this".
+  windows-shipping:
+    name: Windows / clang-cl / shipping (no harness, no profiling)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset windows-shipping
+      - name: Build
+        run: cmake --build --preset windows-shipping
+      - name: Tests
+        run: |
+          build/windows-shipping/Release/task_system.exe --tests
+          $code = $LASTEXITCODE
+          Write-Host "task_system exit code: $code (0x$('{0:X8}' -f $code))"
+          if ($code -ne 0) { exit $code }
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shipping-crash
+          path: |
+            build/windows-shipping/Release/task_system.exe
+            build/windows-shipping/Release/task_system.pdb
+            task_system_crash.dmp
+          if-no-files-found: ignore
+
   linux-tsan:
     name: Linux / clang-21 / ThreadSanitizer
     runs-on: ubuntu-latest

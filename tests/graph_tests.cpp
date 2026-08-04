@@ -17,6 +17,7 @@
 
 using namespace std::chrono_literals;
 using ts::test::run;
+using namespace ts::test;
 
 namespace
 {
@@ -832,12 +833,10 @@ void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_be
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
 void test_death_guarded_outlived() { TS_CHECK(ts::test::expect_death("guarded_outlived_by_graph")); }
 void test_death_graph_mid_run()    { TS_CHECK(ts::test::expect_death("graph_destroyed_mid_run")); }
-#if TS_SAFETY_CHECKS
 // The sharp same-object diagnostic (a node syncing an access to an object it holds --
 // the certain-deadlock shape); subprocess because the child genuinely deadlocks after
 // reporting (it aborts once the report is observed).
 void test_death_sync_own_object()  { TS_CHECK(ts::test::expect_death("sync_own_object_deadlock")); }
-#endif
 
 // The pipe-registration counts stay balanced across recompiles, moves, and a move-assign
 // overwrite -- so destroying the graphs and then the objects raises no lifetime fatal, and
@@ -1231,17 +1230,17 @@ void run_graph_tests()
     run("graph node inline on caller", test_graph_node_inline_on_caller);
     run("graph inline chain on caller", test_graph_inline_chain_on_caller);
     run("graph inline rerun", test_graph_inline_rerun);
-    run("dot dump", test_dot_dump);
-    run("graph trace", test_graph_trace);
-    run("graph trace cancelled run", test_graph_trace_cancelled);
-    run("graph trace critical path", test_graph_trace_critical);
-    run("graph trace priority", test_graph_trace_priority);
-    run("graph trace weld + dead time", test_graph_trace_weld_dead_time);
-    run("graph trace row packing", test_graph_trace_row_packing);
-    run("graph trace end-to-end utilization", test_graph_trace_end_to_end_utilization);
-    run("graph trace task count", test_graph_trace_task_count);
-    run("graph trace overhead", test_graph_trace_overhead);
-    run("graph trace overhead end-to-end", test_graph_trace_overhead_end_to_end);
+    run_if(with_profiling, "TS_PROFILING=0", "dot dump", test_dot_dump);
+    run_if(with_profiling, "TS_PROFILING=0", "graph trace", test_graph_trace);
+    run_if(with_profiling, "TS_PROFILING=0", "graph trace cancelled run", test_graph_trace_cancelled);
+    run_if(with_profiling, "TS_PROFILING=0", "graph trace critical path", test_graph_trace_critical);
+    run_if(with_profiling, "TS_PROFILING=0", "graph trace priority", test_graph_trace_priority);
+    run_if(with_profiling, "TS_PROFILING=0", "graph trace weld + dead time", test_graph_trace_weld_dead_time);
+    run_if(with_profiling, "TS_PROFILING=0", "graph trace row packing", test_graph_trace_row_packing);
+    run_if(with_profiling, "TS_PROFILING=0", "graph trace end-to-end utilization", test_graph_trace_end_to_end_utilization);
+    run_if(with_profiling, "TS_PROFILING=0", "graph trace task count", test_graph_trace_task_count);
+    run_if(with_profiling, "TS_PROFILING=0", "graph trace overhead", test_graph_trace_overhead);
+    run_if(with_profiling, "TS_PROFILING=0", "graph trace overhead end-to-end", test_graph_trace_overhead_end_to_end);
     run("nested run lends the write grant", test_nested_run_lends_write_grant);
     run("nested run: inner edges survive the lend", test_nested_run_inner_edges_survive_lend);
     run("nested run without overlap takes turns", test_nested_run_without_overlap_takes_turns);
@@ -1252,16 +1251,14 @@ void run_graph_tests()
     run("nested run: join scope, then lend", test_nested_run_join_scope_then_lend);
     run("nested run worker-less", test_nested_run_worker_less);
     run("concurrent graphs, shared objects", test_concurrent_graphs_shared_objects);
-    run("death: nested run mode conflict", test_death_nested_run_mode_conflict);
-    run("death: nested run with an unquiet scope", test_death_nested_run_unquiet_scope);
-    run("death: execute while a run is in flight", test_death_execute_in_flight);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: nested run mode conflict", test_death_nested_run_mode_conflict);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: nested run with an unquiet scope", test_death_nested_run_unquiet_scope);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: execute while a run is in flight", test_death_execute_in_flight);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
-    run("death: undeclared access", test_death_undeclared);
-    run("death: Guarded outlived by graph", test_death_guarded_outlived);
-    run("death: graph destroyed mid-run", test_death_graph_mid_run);
-#if TS_SAFETY_CHECKS
-    run("death: sync own object (sharp diagnostic)", test_death_sync_own_object);
-#endif
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: undeclared access", test_death_undeclared);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: Guarded outlived by graph", test_death_guarded_outlived);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: graph destroyed mid-run", test_death_graph_mid_run);
+    run_if(with_rule_in_task_sync, "TS_RULE_IN_TASK_SYNC off", "death: sync own object (sharp diagnostic)", test_death_sync_own_object);
     run("lifetime registration balance", test_lifetime_registration_balance);
 }

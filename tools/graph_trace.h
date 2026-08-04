@@ -324,8 +324,16 @@ public:
         double true_busy_us = 0.0;      // mean body + slices + async fan-out (owner sink)
     };
 
+    // Aggregates for one node. Well-defined for ANY index: an out-of-range one (including
+    // every index on a trace that was never populated -- which is what a `TS_PROFILING=0`
+    // build produces, since the structure export compiles to nothing) yields a zeroed
+    // `Node_stats`, whose `runs == 0` is the honest "no data". A stubbed-out tool asked for
+    // data must answer, not read past the end of a vector; the previous unchecked index was
+    // a live out-of-bounds read that crashed the Shipping suite.
     Node_stats node_stats(int index) const
     {
+        if (index < 0 || index >= static_cast<int>(nodes_.size()))
+            return {};
         const Node_agg& a = nodes_[static_cast<size_t>(index)];
         Node_stats s;
         s.runs = a.duration.n;

@@ -13,6 +13,7 @@
 #include <vector>
 
 using ts::test::run;
+using namespace ts::test;
 using tests::Counter;
 
 namespace
@@ -450,11 +451,11 @@ void run_deferred_tests()
     run("deferred: slot reuse inherits apply position", test_slot_reuse_inherits_position);
     run("deferred: recorder churn does not grow the journal", test_recorder_churn_does_not_grow_journal);
     run("deferred: parallel recorder churn", test_parallel_recorder_churn);
-    run("deferred: keeping recorders alive past max_slots is fatal", test_slot_overflow_is_fatal);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "deferred: keeping recorders alive past max_slots is fatal", test_slot_overflow_is_fatal);
     run("deferred: late-bound recorder", test_late_bound_recorder);
     run("deferred: synced commit then destroy", test_synced_commit_then_destroy);
-    run("deferred: destroy with staged commands is fatal", test_drop_staged_is_fatal);
-    run("deferred: destroy with commit in flight is fatal", test_dtor_inflight_commit_is_fatal);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "deferred: destroy with staged commands is fatal", test_drop_staged_is_fatal);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "deferred: destroy with commit in flight is fatal", test_dtor_inflight_commit_is_fatal);
 #if TS_SAFETY_CHECKS
     run("deferred: commit from nested inherited grant is fatal", test_commit_nested_grant_is_fatal);
 #endif

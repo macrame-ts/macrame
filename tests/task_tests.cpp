@@ -13,6 +13,7 @@
 
 using namespace std::chrono_literals;
 using ts::test::run;
+using namespace ts::test;
 using tests::wait_until;
 
 namespace

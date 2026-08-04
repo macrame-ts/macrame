@@ -28,6 +28,7 @@ long long game_frame_draw_count();
 
 using namespace std::chrono_literals;
 using ts::test::run;
+using namespace ts::test;
 using tests::record_max;
 using tests::wait_until;
 
@@ -792,7 +793,7 @@ void run_integration_tests()
     run("single-threaded: sync inside body", test_single_threaded_sync_inside_body);
     run("single-threaded: deterministic order", test_single_threaded_deterministic_order);
 #if TS_SAFETY_CHECKS
-    run("death: blocking sync in task", test_blocking_sync_in_task_is_fatal);
+    run_if(with_rule_in_task_sync, "TS_RULE_IN_TASK_SYNC off", "death: blocking sync in task", test_blocking_sync_in_task_is_fatal);
     run("parallel_for in node: no reports", test_parallel_for_in_node_no_reports);
 #endif
     run("multi async no deadlock", test_multi_async_no_deadlock);

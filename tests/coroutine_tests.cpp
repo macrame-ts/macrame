@@ -17,6 +17,7 @@
 #include <vector>
 
 using ts::test::run;
+using namespace ts::test;
 using ts::Task;
 using ts::Cancellation_source;
 using ts::Cancellation_token;
@@ -700,8 +701,8 @@ void run_coroutine_tests()
     run("co await as_optional", test_await_as_optional);
     run("try_take non-blocking", test_try_take);
 #if TS_SAFETY_CHECKS
-    run("death: sync on a settled task in a task", test_death_sync_settled_in_task);
-    run("death: await a settled task under a guard", test_death_await_settled_under_guard);
+    run_if(with_rule_in_task_sync, "TS_RULE_IN_TASK_SYNC off", "death: sync on a settled task in a task", test_death_sync_settled_in_task);
+    run_if(with_rule_await_under_guard, "TS_RULE_AWAIT_UNDER_GUARD off", "death: await a settled task under a guard", test_death_await_settled_under_guard);
 #endif
     run("co await under guard, split", test_await_under_guard_split);
     run("co reentrant access under guard", test_reentrant_access_under_guard);
@@ -717,7 +718,7 @@ void run_coroutine_tests()
 #endif
     run("co cross-object declared", test_cross_object_declared);
 #if TS_SAFETY_CHECKS
-    run("death: circular wait", test_death_circular_wait);
+    run_if(with_rule_circular_wait, "TS_RULE_CIRCULAR_WAIT off", "death: circular wait", test_death_circular_wait);
 #endif
     run("co showcase", test_showcase);
     run("frame gate releases at next boundary", test_frame_gate_releases_at_next_boundary);

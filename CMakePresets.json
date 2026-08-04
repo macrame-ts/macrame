@@ -17,6 +17,18 @@
             "toolset": { "value": "ClangCL", "strategy": "set" }
         },
         {
+            "name": "windows-shipping",
+            "displayName": "Windows x64 shipping (harness + profiling compiled out)",
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "architecture": { "value": "x64", "strategy": "set" },
+            "toolset": { "value": "ClangCL", "strategy": "set" },
+            "cacheVariables": {
+                "TS_SAFETY_CHECKS": "OFF",
+                "TS_PROFILING": "OFF"
+            }
+        },
+        {
             "name": "linux-clang",
             "displayName": "Linux (clang, plain stress driver)",
             "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
@@ -41,6 +53,7 @@
     "buildPresets": [
         { "name": "windows-msvc", "configurePreset": "windows-msvc", "configuration": "Release" },
         { "name": "windows-clang-cl", "configurePreset": "windows-clang-cl", "configuration": "Release" },
+        { "name": "windows-shipping", "configurePreset": "windows-shipping", "configuration": "Release" },
         { "name": "linux-clang", "configurePreset": "linux-clang" },
         { "name": "linux-tsan", "configurePreset": "linux-tsan" }
     ]

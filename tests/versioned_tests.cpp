@@ -11,6 +11,7 @@
 #include <vector>
 
 using ts::test::run;
+using namespace ts::test;
 
 namespace
 {
@@ -437,15 +438,15 @@ void run_versioned_tests()
     run("versioned: multi-recorder apply order", test_multi_recorder_order);
     run("versioned: chained publishes apply exactly once", test_chained_publishes_apply_exactly_once);
     run("versioned: cancelled publish retains commands", test_cancelled_publish_retains_commands);
-    run("versioned: reader overlaps the resync", test_reader_overlaps_resync);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0 (the probe is the divergence hook)", "versioned: reader overlaps the resync", test_reader_overlaps_resync);
     run("versioned: concurrent readers during publishes", test_concurrent_readers_and_publishes);
     run("versioned: graph -- stale before flip, fresh after", test_graph_stale_then_fresh);
     run("versioned: synced publish then graph flip is legal", test_publish_sync_then_graph_flip);
     run("versioned: dynamic publish chains behind an in-flight flip", test_dynamic_publish_chains_behind_flip);
-    run("versioned: flip catching an unresolved publish is fatal", test_mixed_publish_race_is_fatal);
-    run("versioned: nondeterministic replay is fatal", test_divergence_is_fatal);
-    run("versioned: publish_into wrong instance is fatal", test_wrong_front_is_fatal);
-    run("versioned: destroy with staged commands is fatal", test_drop_staged_is_fatal);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "versioned: flip catching an unresolved publish is fatal", test_mixed_publish_race_is_fatal);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "versioned: nondeterministic replay is fatal", test_divergence_is_fatal);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "versioned: publish_into wrong instance is fatal", test_wrong_front_is_fatal);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "versioned: destroy with staged commands is fatal", test_drop_staged_is_fatal);
     run("versioned: synced publish then destroy is clean", test_synced_publish_then_destroy);
-    run("versioned: destroy with a publish in flight is fatal", test_dtor_inflight_publish_is_fatal);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "versioned: destroy with a publish in flight is fatal", test_dtor_inflight_publish_is_fatal);
 }

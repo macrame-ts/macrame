@@ -19,6 +19,7 @@ namespace
 int g_checks = 0;
 int g_failures = 0;
 int g_current_test_failures = 0;
+int g_skipped = 0;
 long long g_ensure_failures_consumed = 0;
 
 #if TS_SAFETY_CHECKS
@@ -53,6 +54,17 @@ void run(const char* name, Test_fn fn)
     g_current_test_failures = 0;
     fn();
     std::printf("  [%s] %s\n", g_current_test_failures == 0 ? "ok  " : "FAIL", name);
+}
+
+void run_if(bool available, const char* reason, const char* name, Test_fn fn)
+{
+    if (available)
+    {
+        run(name, fn);
+        return;
+    }
+    ++g_skipped;
+    std::printf("  [skip] %s  (%s)\n", name, reason);
 }
 
 bool expect_death(const char* scenario)
@@ -106,7 +118,15 @@ int summary()
         ++g_failures;
     }
 #endif
-    std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
+    if (g_skipped != 0)
+    {
+        std::printf("\n%d checks, %d failures, %d skipped (not applicable in this configuration)\n",
+            g_checks, g_failures, g_skipped);
+    }
+    else
+    {
+        std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
+    }
     return g_failures == 0 ? 0 : 1;
 }
 

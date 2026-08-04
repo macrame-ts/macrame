@@ -13,6 +13,7 @@
 
 using ts::Rule;
 using ts::test::run;
+using namespace ts::test;
 
 namespace
 {
@@ -303,9 +304,9 @@ void run_rules_tests()
     run("rules default relaxed set", test_default_relaxed_rules);
     run("rules access rank climb", test_access_rank_climb);
     run("rules access rank relaxed", test_access_rank_relaxed);
-    run("death: access rank", test_death_access_rank);
+    run_if(with_rule_access_rank, "TS_RULE_ACCESS_RANK off", "death: access rank", test_death_access_rank);
     run("rules external wait suppresses the net", test_external_wait_suppresses_net);
     run("rules deadlock net window disable", test_deadlock_net_window_disable);
-    run("death: deadlock net", test_death_deadlock_net);
+    run_if(with_rule_deadlock_net, "TS_RULE_DEADLOCK_NET off", "death: deadlock net", test_death_deadlock_net);
     run("suspension registry tracks live suspensions", test_suspension_registry_tracks_live_suspensions);
 }

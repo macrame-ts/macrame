@@ -7,6 +7,7 @@
 #include <cstdio>
 
 using ts::test::run;
+using namespace ts::test;
 using ts::Access;
 
 namespace
@@ -172,9 +173,9 @@ void run_access_tests()
     run("ensure facility (once-per-site)", test_ensure_facility);
     run("ensure handler hook", test_ensure_handler_hook);
 #endif
-    run("death: no context", test_death_no_context);
-    run("death: read-only context + write", test_death_ro_write);
-    run("death: wrong instance", test_death_wrong_instance);
-    run("death: context overflow", test_death_context_overflow);
-    run("death: stale inherited grant", test_death_stale_grant);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: no context", test_death_no_context);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: read-only context + write", test_death_ro_write);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: wrong instance", test_death_wrong_instance);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: context overflow", test_death_context_overflow);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: stale inherited grant", test_death_stale_grant);
 }
