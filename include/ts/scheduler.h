@@ -149,6 +149,24 @@ public:
     // Worker-less (single-threaded) scheduler: no workers, tasks execute inline at submit.
     bool single_threaded() const noexcept { return single_threaded_; }
 
+    // Quiescence: every worker is sitting in the idle path and every queue is empty, so this
+    // scheduler cannot make progress on its own. Racy by nature (a worker may be between
+    // finding work and marking itself busy), which is why the deadlock net requires the
+    // condition to hold CONTINUOUSLY for a window rather than trusting one sample. Feeds
+    // `detail::scheduler_quiescent`, the seam the task layer reads (`Rule::deadlock_net`).
+    //
+    // Worker idleness is an explicit transition count, not "parked": under `Idle_policy::spin`
+    // a worker never parks, so a park-based test would never report idle. `worker_idle` /
+    // `worker_busy` fire only when a worker crosses between finding work and not finding any,
+    // so a spinning worker marks itself idle once and stays that way.
+    bool quiescent() const noexcept
+    {
+        return idle_workers_.load(std::memory_order_acquire) >= worker_count() && all_empty();
+    }
+
+    void worker_idle() noexcept { idle_workers_.fetch_add(1, std::memory_order_acq_rel); }
+    void worker_busy() noexcept { idle_workers_.fetch_sub(1, std::memory_order_acq_rel); }
+
 #if TS_PROFILING
     // Total wall time (raw `steady_clock` ticks) this scheduler's workers have spent
     // executing tasks -- every task kind (graph nodes, `parallel_for` slices, async pipe
@@ -447,6 +465,9 @@ private:
     // always-advanced epoch (see `signal_submit`), so this can be read/written relaxed -- it
     // only gates the wake syscall and the successor-promotion decision.
     std::atomic<int> num_spinning_ = 0;
+    // Workers currently in the idle path (see `quiescent`). Written only at the
+    // busy<->idle transitions, never per task, so the hot path is untouched.
+    std::atomic<int> idle_workers_ = 0;
     const Idle_policy idle_policy_;
     const std::uint32_t spin_cycles_;
     const bool single_threaded_;

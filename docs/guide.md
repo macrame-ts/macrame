@@ -555,6 +555,38 @@ records waits-for edges at every suspension on a pipe and fatals the moment
 an edge closes a cycle, naming both tasks and both objects (§8.2 has the
 rule that avoids the shape in the first place).
 
+### 5.0.2 The deadlock net
+
+The cycle detector above sees the shapes it models. Behind it sits a net that
+misses no shape at all, because it does not model anything: if **every worker
+is idle, every queue is empty, and nothing is registered as completable from
+outside the pool**, then no thread and no queue can ever settle what you are
+waiting for — progress is impossible, whatever the cause. A blue thread
+blocked in `sync()` notices this itself and aborts with a stack instead of
+hanging.
+
+The catch is the third clause, and it is your responsibility. Plenty of
+correct programs wait on something the scheduler cannot complete — an OS I/O
+completion, a GPU fence, a `Signal` triggered from a dedicated engine thread.
+Declare those:
+
+```cpp
+ts::External_wait declared;      // "a thread we do not own will complete this"
+io_done.sync();
+```
+
+`Frame_gate` does this for you (a gate handed out and not yet opened is an
+outstanding external wakeup). A **forgotten** declaration is the net's failure
+mode: it reports a correct program as deadlocked, which is why the message
+names `ts::External_wait` explicitly.
+
+The condition must hold *continuously* for a window — two seconds by default,
+since a real deadlock is permanent and a short window would fire on a slow but
+legitimate handoff between two of your own threads. Tune or disable it with
+`ts::set_deadlock_net_window(std::chrono::milliseconds{...})` (0 = off);
+`TS_ENABLED_RULES` drops it from the build. It is compiled out of shipping
+builds by default.
+
 ### 5.1 Multi-object access
 
 To touch several guarded objects in one body, use the free function:

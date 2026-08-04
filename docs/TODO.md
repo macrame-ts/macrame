@@ -725,7 +725,40 @@ IDs — when an item is done, mark it, don't renumber.
        `if constexpr`. (The `bool`-for-void variant buys only the declaration: `*m` is invalid
        for `bool`, so every generic consumer that extracts still branches — barely worth a name.)
 
-   13. `[ ]` **(P1, author 2026-08) Global quiescence deadlock detector.** The waits-for
+   13. `[x]` **(P1, author 2026-08) Global quiescence deadlock detector — DONE (2026-08).**
+       Implemented in the three-part decomposition the author asked for, so the task layer
+       stays uncoupled from the scheduler:
+       (a) **quiescence is scheduler-local** — `Scheduler::quiescent()` = every worker in the
+       idle path AND every queue empty, exposed through the plain function seam
+       `detail::scheduler_quiescent()` (defined in guarded.cpp, where the global holder is;
+       same shape as `drain_serial_pending` / `blocking_sync_diagnose`). Idleness is an
+       explicit busy<->idle **transition** count in `Worker_thread::main`, not "parked":
+       under `Idle_policy::spin` a worker never parks, so a park-based test would never
+       report idle. Two atomics per crossing, none per task. The seam returns false when no
+       scheduler exists yet -- a blue wait before the pool is created must not conjure one as
+       a side effect of a safety check.
+       (b) **the task layer interprets it from the boundary waiter** — no global per-task
+       counter, nothing on the hot path: `Task_control_block::wait()` already blocks, so it
+       polls while it is there. Quiescence must hold CONTINUOUSLY for the window (default
+       2 s over 8 samples, `ts::set_deadlock_net_window`; 0 disables): one sample is
+       worthless because a worker sits briefly between finding work and marking itself busy,
+       and a long window is free because a real deadlock is permanent while a short one would
+       fire on a slow-but-legitimate blue-to-blue handoff.
+       (c) **`ts::External_wait`** (RAII, task.h) is the outstanding-external-wakeup counter,
+       and `Frame_gate` holds one from the first `next()` of a frame until the matching
+       `open()`. The fatal names it, per the item's own warning that a forgotten registration
+       reports a correct program as deadlocked; it also names
+       `ts::set_deadlock_net_window(0ms)` and `TS_ENABLED_RULES`.
+       Rule class **net** (no scoped opt-out -- it observes the whole process, so there is no
+       call site to attribute a relaxation to); shipping default **compiled out**. Death
+       scenario `deadlock_net` plus two companions (`External_wait` suppresses it; the window
+       switch disables it).
+       **Scoped out, deliberately:** the item wanted the fatal to dump every suspended frame.
+       That needs a registry of live suspended frames, i.e. per-suspension bookkeeping --
+       exactly what (b) was designed to avoid -- so the report names the blocked waiter (by
+       `ts::Named`, from 6.19) and the state that justified the verdict, and the frame dump is
+       deferred until a debugging session actually demands it. Original text follows.
+       The waits-for
        detector (6.5) fires *before* a deadlock and names the participants, but only for the
        shapes it models: an edge is recorded solely when a task suspends on a pipe job while
        holding grants. Cycles mediated by a task-await edge are invisible — N holds G1 and

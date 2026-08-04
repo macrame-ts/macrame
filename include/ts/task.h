@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <concepts>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -43,6 +44,18 @@ namespace detail
 // work and then waits on it). No-op when nothing is pending (any scheduler mode).
 void drain_serial_pending() noexcept;
 
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+struct Task_control_block;
+// Defined in guarded.cpp (where the global scheduler holder lives) -- the scheduler-side
+// half of the deadlock net, kept behind a plain function seam so this header stays free of
+// the scheduler, exactly like `drain_serial_pending`. True when every worker is idle and
+// every queue is empty; false when no scheduler has been created yet (a blue wait before
+// the pool exists must not conjure one).
+bool scheduler_quiescent() noexcept;
+// Report the net firing. Defined in guarded.cpp so the message can name the blocked task.
+[[noreturn]] void report_deadlock(const Task_control_block* waited_on) noexcept;
+#endif
+
 #if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
 struct Task_control_block;
 // Defined in guarded.cpp (it needs the `Pipe` layout this header deliberately lacks):
@@ -51,6 +64,25 @@ struct Task_control_block;
 // (a certain deadlock), the general message otherwise. Called by `sync_wait` for every
 // in-task call, settled target or not (TODO 6.10).
 [[noreturn]] void blocking_sync_diagnose(const Task_control_block* blk) noexcept;
+#endif
+
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+// Work that only a NON-worker thread can complete, currently outstanding (see
+// `ts::External_wait`). The deadlock net's second predicate: quiescence with a nonzero count
+// is a legitimate wait, not a deadlock.
+inline std::atomic<int> outstanding_external_waits{ 0 };
+
+// How long the scheduler must stay CONTINUOUSLY quiescent before a blocked boundary waiter
+// declares deadlock, and how many samples that window is split into. Long by design: a real
+// deadlock is permanent, so latency is free, while a short window would fire on a legitimate
+// blue-to-blue handoff that happens to be slow.
+inline std::atomic<long long> deadlock_net_window_ms{ 2000 };
+inline constexpr int deadlock_net_polls = 8;
+
+inline std::chrono::milliseconds deadlock_net_window() noexcept
+{
+    return std::chrono::milliseconds(deadlock_net_window_ms.load(std::memory_order_relaxed));
+}
 #endif
 
 // Shared cancellation state behind a source / its tokens / its callbacks. The request
@@ -540,6 +572,35 @@ struct Task_control_block
     void wait()
     {
         std::unique_lock lock(mutex);
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+        // `Rule::deadlock_net` (TODO 6.13) -- Go's "all goroutines are asleep" check, with
+        // the predicate Go lacks. A boundary waiter is the natural observer: it is already
+        // blocked, so it costs nothing to have it look around. If, while it waits, the
+        // scheduler is quiescent (every worker idle, every queue empty) AND nothing is
+        // registered as completable from outside the pool, then no thread and no queue can
+        // ever settle what it is waiting for -- progress is impossible.
+        //
+        // Sampling, not bookkeeping: no per-task counter, nothing on the hot path. One
+        // sample would be worthless (a worker can sit between finding work and marking
+        // itself busy), so the condition must hold CONTINUOUSLY for the whole window.
+        std::chrono::milliseconds window = deadlock_net_window();
+        if (window.count() > 0)
+        {
+            const auto poll = window / deadlock_net_polls;
+            int quiet = 0;
+            while (!completed)
+            {
+                if (done_cv.wait_for(lock, poll, [this] { return completed; }))
+                    return;
+                bool quiescent = outstanding_external_waits.load(std::memory_order_acquire) == 0
+                    && scheduler_quiescent();
+                quiet = quiescent ? quiet + 1 : 0;
+                if (quiet >= deadlock_net_polls)
+                    report_deadlock(this);
+            }
+            return;
+        }
+#endif
         done_cv.wait(lock, [this] { return completed; });
     }
 
@@ -949,6 +1010,50 @@ struct Access_options
     const char* name = nullptr;
 };
 
+// Declares that something the task system is waiting on will be completed by a thread the
+// scheduler does not own -- an OS I/O completion, a GPU fence, a `Signal` triggered from a
+// dedicated engine thread, a `Frame_gate`'s next `open()`. Hold one for as long as that
+// wakeup is outstanding.
+//
+// This is the deadlock net's escape (`Rule::deadlock_net`, docs/waiting-rule-policy.md §7).
+// The net fires when the scheduler is quiescent and nothing is registered here -- so a
+// FORGOTTEN registration produces a false deadlock report, which is why the report names
+// this type. It is not suppressible by scope: the net observes the whole process, so there
+// is no call site to attribute a relaxation to; a build drops it with `TS_ENABLED_RULES`.
+class External_wait
+{
+public:
+    External_wait() noexcept
+    {
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+        detail::outstanding_external_waits.fetch_add(1, std::memory_order_acq_rel);
+#endif
+    }
+
+    ~External_wait()
+    {
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+        detail::outstanding_external_waits.fetch_sub(1, std::memory_order_acq_rel);
+#endif
+    }
+
+    External_wait(const External_wait&) = delete;
+    External_wait& operator=(const External_wait&) = delete;
+};
+
+// Tune the deadlock net: how long the scheduler must be continuously quiescent, with nothing
+// externally outstanding, before a blocked boundary waiter declares deadlock. 0 disables the
+// net for this process (the whole-build switch is `TS_ENABLED_RULES`). Raise it if the
+// program has legitimate blue-thread handoffs slower than the default two seconds.
+inline void set_deadlock_net_window(std::chrono::milliseconds window) noexcept
+{
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+    detail::deadlock_net_window_ms.store(window.count(), std::memory_order_relaxed);
+#else
+    (void)window;
+#endif
+}
+
 // Dispatch options for launching a standalone task (`ts::launch`) or a nested one
 // (`ts::nested`). `token` makes it skippable before it runs; `priority` sets its queue
 // position; `name` gives it a debug identity (a literal -- the launch SITE is captured by
@@ -1165,9 +1270,14 @@ auto nested(Fn&& fn, Launch_options opts = {},
 class Signal : public Task<void>
 {
 public:
-    Signal()
+    // Identified like any other task: by an explicit literal, else by its construction site
+    // (`site` is the naming boundary -- a defaulted `source_location` captures the caller).
+    explicit Signal(const char* name = nullptr,
+                    std::source_location site = std::source_location::current())
         : Task<void>(detail::make_bare_block())
-    {}
+    {
+        detail::set_task_name(detail::core_of(*this), name != nullptr ? Named(name, site) : Named(site));
+    }
 
     void trigger()
     {

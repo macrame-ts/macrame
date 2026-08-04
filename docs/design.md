@@ -461,6 +461,33 @@ one frame where a prerequisite ran long. Moving them to the *call* (unconditiona
 in `sync_wait`; `await_ready` rather than `await_suspend`) makes the first
 execution of a bad path fail, every time, on any machine.
 
+**The net behind the detectors.** Both the in-task `sync()` fatal and the
+waits-for cycle detector are *models*: they catch the shapes they were written
+for. The waits-for graph in particular is blind to a cycle that passes through
+a plain task-await edge — N holds an object and awaits foreign task T, T awaits
+that object; neither suspension records an edge, and both frames sleep forever.
+Rather than grow the model, the answer is Go's `all goroutines are asleep`
+check, which models nothing: every worker idle, every queue empty, and nothing
+completable from outside the pool ⇒ progress is impossible, whatever the shape.
+It is O(1), needs no graph, and misses no deadlock class — including lost
+wakeups, which are not cycles at all.
+
+Three properties made it worth building rather than borrowing wholesale.
+*Quiescence stays scheduler-local*, read through a plain function seam
+(`detail::scheduler_quiescent`), so the task layer still does not know the
+scheduler exists — and worker idleness is a busy↔idle transition count rather
+than "parked", because under a spin idle policy a worker never parks. *The
+interpretation costs nothing*: there is no per-task counter and nothing on the
+hot path, because the observer is a boundary waiter that is already blocked.
+And *the third clause is what Go lacks*: Go's check has a documented blind spot
+where any live background thread masks a partial deadlock, precisely because a
+goroutine cannot declare "this wait is legitimate". `ts::External_wait` is that
+declaration. Its failure mode is the honest one — a forgotten registration
+reports a correct program as deadlocked — so the fatal names the escape in its
+own message, and the window is measured *continuously* over seconds rather than
+sampled once, so a slow-but-legitimate handoff between two of the program's own
+threads does not trip it.
+
 Hoisting the guard check had a second effect worth recording: it forced the
 reentrancy exemption to be *stated*. A reentrant same-object access never
 suspends, so it never reached the old check — the exemption existed only as an

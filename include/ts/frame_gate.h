@@ -3,6 +3,7 @@
 #include "ts/task.h"
 
 #include <mutex>
+#include <optional>
 #include <utility>
 
 namespace ts
@@ -55,6 +56,13 @@ public:
     Task<void> next()
     {
         std::scoped_lock lock(mutex_);
+        // From here until the next `open()`, work is parked on something only the frame
+        // loop -- a non-worker thread -- can release. Register that with the deadlock net,
+        // or a frame whose workers happen to run dry while a task waits for the boundary
+        // reports as deadlocked (docs/waiting-rule-policy.md §7). Armed on demand rather
+        // than for the gate's lifetime, so a gate nobody is waiting on masks nothing.
+        if (!pending_)
+            pending_.emplace();
         return current_;
     }
 
@@ -66,6 +74,7 @@ public:
         {
             std::scoped_lock lock(mutex_);
             opening = std::exchange(current_, Signal{});
+            pending_.reset();   // this frame's external wakeup has arrived
         }
         ts::launch([opening]() mutable { opening.trigger(); }, { .priority = priority_ });
     }
@@ -78,6 +87,8 @@ public:
 private:
     std::mutex mutex_;
     Signal current_;
+    // Live while someone has taken this frame's gate and `open()` has not yet come.
+    std::optional<External_wait> pending_;
     Priority priority_ = Priority::low;
 };
 

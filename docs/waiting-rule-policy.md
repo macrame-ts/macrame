@@ -123,15 +123,44 @@ no thread-local, no per-awaiter field.
 
 ## 7. The quiescence net is not locally suppressible
 
-The global deadlock detector (6.13) fires on a process-wide condition — every worker idle,
-work outstanding, no registered external wakeup — with no call site to attribute it to. A
-scoped opt-out has nothing to scope, and a task that "relaxed" it is not the task the check
-is about. It is therefore compile-out-only.
+The global deadlock detector (6.13, implemented) fires on a process-wide condition — every
+worker idle, queues empty, no registered external wakeup — with no call site to attribute it
+to. A scoped opt-out has nothing to scope, and a task that "relaxed" it is not the task the
+check is about. It is therefore compile-out-only.
 
 Its escape is a different mechanism and lives at the site of the legitimate wait, not at the
 site of the report: a task waiting on something only a non-worker thread can complete
-registers that fact for the duration (`ts::External_wait`, 6.13(a)). A forgotten registration
-produces a **false deadlock report**, so the fatal must name that escape in its own message.
+registers that fact for the duration (`ts::External_wait`). A forgotten registration
+produces a **false deadlock report**, so the fatal names that escape in its own message.
+
+Shape, in three parts kept apart on purpose:
+
+1. **Quiescence is scheduler-local.** `Scheduler::quiescent()` is "every worker in the idle
+   path, every queue empty", read through the plain function seam
+   `detail::scheduler_quiescent()` — the same shape as `drain_serial_pending` and
+   `blocking_sync_diagnose`, so the task layer keeps not knowing about the scheduler.
+   Idleness is an explicit busy↔idle transition count, not "parked": under `Idle_policy::spin`
+   a worker never parks, so a park-based test would never report idle. Two atomics per
+   crossing, none per task.
+2. **The task layer interprets it, from the boundary waiter.** No global per-task counter and
+   nothing on the hot path: a blue thread blocked in `Task_control_block::wait()` is already
+   stopped, so it costs nothing to have it look around. It polls, and if quiescence holds
+   *continuously* for the whole window (default 2 s, `ts::set_deadlock_net_window`) with a
+   zero external-wait count, it reports. One sample would be worthless — a worker sits
+   briefly between finding work and marking itself busy — which is why the window is
+   continuous rather than instantaneous, and long rather than tight: a real deadlock is
+   permanent, so detection latency is free, while a short window would fire on a legitimate
+   blue-to-blue handoff that happened to be slow.
+3. **`ts::External_wait` supplies the predicate Go lacks.** Go's `all goroutines are asleep`
+   check has a documented blind spot — any live background thread masks a partial deadlock —
+   because it has no way to say "this wait is legitimate". Ours does, and `Frame_gate` holds
+   one from the first `next()` of a frame until the matching `open()`, so a frame whose
+   workers run dry while a task waits for the boundary is not reported.
+
+Known limitation, recorded rather than hidden: the report names the blocked waiter but does
+not dump every suspended frame. That needs a registry of live suspended frames — per-suspension
+bookkeeping, which is exactly what part 2 above was designed to avoid — so it is deferred
+until something demands it.
 
 ## 8. Obligations on a new rule check
 

@@ -369,6 +369,40 @@ void pipe_release(Scheduler&, Pipe& pipe, Access mode)
     release_and_redispatch(pipe, mode);
 }
 
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+// The scheduler-side half of the deadlock net (declared in task.h). Defined here rather
+// than in scheduler.cpp because this is where the global scheduler holder lives, and the
+// null check is load-bearing: a blue thread may wait on a hand-triggered `Signal` before
+// any scheduler exists, and asking `global_scheduler()` would CREATE a worker pool as a
+// side effect of a safety check.
+bool scheduler_quiescent() noexcept
+{
+    const Scheduler* scheduler = g_fast.load(std::memory_order_acquire);
+    return scheduler != nullptr && scheduler->quiescent();
+}
+
+// The net fired: the scheduler has been continuously idle with empty queues, nothing is
+// registered as completable from off-pool, and this waiter is still blocked. Names its own
+// escape, because the failure mode of the counter is a FORGOTTEN registration, which
+// presents as exactly this message on a correct program.
+[[noreturn]] void report_deadlock(const Task_control_block* waited_on) noexcept
+{
+    char target[96];
+    char message[768];
+    std::snprintf(message, sizeof message,
+        "deadlock: waiting on task '%s', but every worker has been idle with empty queues for "
+        "%lld ms and nothing is registered as completable from outside the pool -- no thread and "
+        "no queue can ever settle it. If this wait IS completed by a non-worker thread (I/O, a "
+        "GPU fence, a Signal triggered off-pool, a frame gate), hold a ts::External_wait for its "
+        "duration -- a missing registration reports a correct program as deadlocked. "
+        "ts::set_deadlock_net_window(0ms) disables the net for this process; TS_ENABLED_RULES "
+        "drops it from the build",
+        task_name(waited_on, target, sizeof target),
+        deadlock_net_window_ms.load(std::memory_order_relaxed));
+    ts::fatal(message);
+}
+#endif
+
 #if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE) || TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
 namespace
 {

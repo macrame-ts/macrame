@@ -533,6 +533,19 @@ void run_death_scenario(const char* name)
         graph.compile();
         graph.execute().sync();
     }
+    else if (std::strcmp(name, "deadlock_net") == 0)
+    {
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+        // A blue thread waits on a Signal nothing will ever trigger, with the pool idle and
+        // nothing registered as externally completable. Progress is impossible; the net
+        // notices from the waiter itself. Without it this child would hang and the parent's
+        // `expect_death` would time out rather than fail.
+        ts::launch([] {}).sync();   // make sure the scheduler exists and has gone quiet
+        ts::set_deadlock_net_window(std::chrono::milliseconds(200));
+        ts::Signal never;
+        never.sync();   // -> fatal
+#endif
+    }
     else if (std::strcmp(name, "sync_settled_in_task") == 0)
     {
         // TODO 6.10: an in-task `sync()` whose target is already settled. The old check was

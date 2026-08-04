@@ -5,6 +5,7 @@
 #include "ts/rules.h"
 #include "ts/task.h"
 
+#include <chrono>
 #include <atomic>
 #include <thread>
 
@@ -137,6 +138,69 @@ void test_default_relaxed_rules()
     TS_CHECK(!ts::rule_relaxed(Rule::in_task_sync));
 }
 
+// 6. The deadlock net (`Rule::deadlock_net`). It fires from a blocked boundary waiter when
+// the scheduler has been continuously quiescent with nothing registered as externally
+// completable -- see the `deadlock_net` death scenario. Here: the escape.
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+// Restores the process-wide window whatever the test does.
+struct Net_window
+{
+    explicit Net_window(std::chrono::milliseconds window) { ts::set_deadlock_net_window(window); }
+    ~Net_window() { ts::set_deadlock_net_window(std::chrono::milliseconds(2000)); }
+};
+#endif
+
+// A wait that only a NON-worker thread can complete is legitimate, not a deadlock -- as long
+// as it is declared. `ts::External_wait` is that declaration, and the net's fatal names it
+// because a forgotten one reports a correct program as deadlocked.
+void test_external_wait_suppresses_net()
+{
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+    Net_window window(std::chrono::milliseconds(150));
+    ts::launch([] {}).sync();   // let the pool go quiet
+
+    ts::Signal from_outside;
+    std::thread waker([from_outside]() mutable
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));   // well past the window
+        from_outside.trigger();
+    });
+    {
+        ts::External_wait declared;   // "a thread we do not own will complete this"
+        from_outside.sync();          // quiescent the whole time, and correctly not reported
+    }
+    waker.join();
+    TS_CHECK(from_outside.is_done());
+#endif
+}
+
+// The whole-process off switch, for a program whose blue-thread handoffs the net cannot
+// model. `TS_ENABLED_RULES` is the whole-build equivalent.
+void test_deadlock_net_window_disable()
+{
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+    Net_window window(std::chrono::milliseconds(0));
+    ts::launch([] {}).sync();
+
+    ts::Signal from_outside;
+    std::thread waker([from_outside]() mutable
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        from_outside.trigger();
+    });
+    from_outside.sync();   // no External_wait, no net: disabled
+    waker.join();
+    TS_CHECK(from_outside.is_done());
+#endif
+}
+
+void test_death_deadlock_net()
+{
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+    TS_CHECK(ts::test::expect_death("deadlock_net"));
+#endif
+}
+
 } // namespace
 
 void run_rules_tests()
@@ -147,4 +211,7 @@ void run_rules_tests()
     run("rules relaxed scope inherited by child", test_relaxed_scope_inherited_by_child);
     run("rules relaxed scope across suspension", test_relaxed_scope_across_suspension);
     run("rules default relaxed set", test_default_relaxed_rules);
+    run("rules external wait suppresses the net", test_external_wait_suppresses_net);
+    run("rules deadlock net window disable", test_deadlock_net_window_disable);
+    run("death: deadlock net", test_death_deadlock_net);
 }
