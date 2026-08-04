@@ -133,6 +133,27 @@ distinction is actionable: a `W->R` edge is dataflow, while `R->W`/`W->W`
 edges are ordering artifacts that versioning or deferral can delete — the
 same lever that moved the sample's audio off the post-flip tail.
 
+That provenance distinction has a consequence worth stating as a rule, because
+it is easy to get backwards. A derived edge exists for *safety*: two conflicting
+nodes must not overlap. Both directions satisfy that, so the one `compile()`
+picks — declaration index — is an artifact of how the building code is written,
+not a claim about the frame. **Declaration order resolves the direction of a
+derived edge; it is not a specification.** Logical precedence is intent and
+belongs in an explicit `after`/`before` edge, which costs nothing when it agrees
+with the derived one (they dedup into a single edge that keeps the conflict in
+its tooltip).
+
+Two things depend on holding that line. The first is refactoring: in the
+sample's optimised variant the draw producers stage through `Deferred` and stop
+touching the queue, so the conflict — and the derived edge with it — vanishes;
+only the intent edge keeps the frame correct across that change. The second is
+headroom. Because direction carries no meaning, a future `compile()` may reorder
+independent conflicting nodes to shorten the critical path. That optimisation is
+only available while no program has quietly made declaration order load-bearing,
+which is why the sample was audited and its two intent-bearing sets — the render
+producers into `submit`, and every last-frame transforms reader ahead of the
+flip — were made explicit even where a derived edge already pointed that way.
+
 Naming follows the UE convention (a debug name at creation, kept in all builds)
 with one modernization and one unification. The modernization: a defaulted
 `std::source_location` argument means an entity can identify itself by *where

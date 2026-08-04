@@ -986,6 +986,40 @@ matter. Reach for the graph when the structure is fixed and you want it derived
 and inspectable; compose by hand when the structure is dynamic, data-dependent,
 or small enough that writing the edges out is honest documentation.
 
+### 6.5 Declaration order is not a specification
+
+`compile()` derives an edge for every access conflict, and directs it by the
+order the two nodes were added. That direction is real — the schedule honours
+it — but it is **not something to build on**.
+
+A derived edge exists for *safety*: two nodes that conflict must not overlap.
+Either direction satisfies that, so which one you get is an artifact of how the
+building code happens to be written, not a statement about your frame. The rule:
+
+> **If node A must logically precede node B, that is intent — say it with an
+> explicit `after`/`before` edge.** Rely on the determinism of a *compiled*
+> graph, never on the order nodes were declared in.
+
+```cpp
+auto record = graph.add_node("cmd_record", …, draw_lists);
+auto submit = graph.add_node("submit",     …, draw_lists);
+submit.after(record);   // intent: submit consumes what record emits
+```
+
+The explicit edge costs nothing when it agrees with the derived one — `compile()`
+dedups them into a single edge (drawn solid, with the conflict still in its
+tooltip). What it buys is that the ordering survives changes to the code that
+builds the graph, and survives changes to the *declarations* too: in
+`sample/game_frame.cpp`'s optimised variant the producers stage through
+`Deferred` and no longer touch the draw queue at all, so the conflict — and with
+it the derived edge — disappears entirely. The intent edge is what keeps the
+frame correct across that refactor.
+
+This also reserves room. Because direction carries no meaning, a future
+`compile()` is free to reorder independent conflicting nodes to shorten the
+critical path. Programs that wrote their intent down keep working; programs that
+leaned on declaration order would silently change behaviour.
+
 ---
 
 ## 7. `parallel_for`

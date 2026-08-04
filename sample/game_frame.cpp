@@ -429,29 +429,32 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
         { tick_propagation(lx, b, v, rec); },
         world.local_xf, world.bodies, world.velocities);
 
-    // Render pipeline -- declared BEFORE the flip, so it reads LAST frame's transforms
-    // and overlaps this frame's simulation.
-    graph.add_node("frustum_cull", &tick_frustum_cull, world.transforms.state(), world.camera, world.renderables, world.visibility);
-    graph.add_node("occlusion_cull", &tick_occlusion_cull, world.transforms.state(), world.visibility, world.vis_final);
-    graph.add_node("shadow", &tick_shadow, world.transforms.state(), world.skeletons, world.shadow_map);
+    // Render pipeline -- reads LAST frame's transforms (so it overlaps this frame's
+    // simulation), which means every node here must run BEFORE the flip. That is intent, so
+    // it is declared as explicit edges below rather than left to the direction `compile()`
+    // happens to give the transforms conflict: a derived edge exists for safety and either
+    // direction is race-free, so declaration order is not a specification (guide §6.5).
+    auto frustum_cull = graph.add_node("frustum_cull", &tick_frustum_cull, world.transforms.state(), world.camera, world.renderables, world.visibility);
+    auto occlusion_cull = graph.add_node("occlusion_cull", &tick_occlusion_cull, world.transforms.state(), world.visibility, world.vis_final);
+    auto shadow = graph.add_node("shadow", &tick_shadow, world.transforms.state(), world.skeletons, world.shadow_map);
     auto cmd_record = add_cmd_record(graph, world, opt);
     auto particles = add_particles(graph, world, opt);
     auto UI_node = add_UI(graph, world, opt);
     auto submit = add_submit(graph, world, opt);
     submit.priority(ts::Priority::high);
-    // Baseline: submit reads the queue the producers wrote -> conflict edges order it
-    // after them. Optimised: staging holds no grant on the queue, so the ordering is
-    // intent, declared explicitly.
-    if (opt)   // L3: staged producers hold no grant; order by intent
-        submit.after(cmd_record, particles, UI_node);
+    // Submit consumes what the producers emit -- intent, in both variants. The baseline
+    // ALSO has a `draw_lists` conflict pointing the same way, but relying on that would be
+    // relying on the order the nodes happen to be added; the optimised variant stages
+    // grant-free, so there is no conflict at all and the edge is the only ordering.
+    submit.after(cmd_record, particles, UI_node);
 
     // Off-path leaves.
-    graph.add_node("audio", &tick_audio, world.transforms.state(), world.audio_out).priority(ts::Priority::low);
-    graph.add_node("vfx", &tick_vfx, world.transforms.state(), world.particles, world.vfx);
+    auto audio = graph.add_node("audio", &tick_audio, world.transforms.state(), world.audio_out).priority(ts::Priority::low);
+    auto vfx = graph.add_node("vfx", &tick_vfx, world.transforms.state(), world.particles, world.vfx);
     graph.add_node("replication", &tick_replication, world.combat, world.economy, world.quests, world.intents, world.replication);
     graph.add_node("stats", &tick_stats, world.combat, world.economy, world.bodies, world.visibility, world.stats);
     graph.add_node("gc", &tick_gc, world.assets, world.renderables, world.particles, world.gc);
-    graph.add_node("debug_overlay",   // bare generic lambda: modes probed
+    auto debug_overlay = graph.add_node("debug_overlay",   // bare generic lambda: modes probed
         [](const auto& economy, const auto& xf) { tick_debug_overlay(economy, xf); },
         world.economy, world.transforms.state()).priority(ts::Priority::low);
 
@@ -461,11 +464,22 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     // one frame of cloth latency is invisible, and cloth fills the idle capacity the
     // shortened spine leaves. Structural (the version is set by declaration order vs
     // the flip).
+    ts::Graph_node cloth;
     if (opt)   // L4: cloth on last frame's transforms
-        graph.add_node("cloth", &tick_cloth, world.transforms.state(), world.cloth);
+        cloth = graph.add_node("cloth", &tick_cloth, world.transforms.state(), world.cloth);
     auto flip = graph.add_node("flip", ts::publish_body(world.transforms), world.transforms.state());
     flip.after(propagation);
-    if (!opt)
+    // Which VERSION each transforms reader sees is the point of the whole render pipeline,
+    // so it is declared, not inferred from where the nodes happen to sit in this function.
+    // Every reader above must precede the flip to see last frame's transforms; `cloth` in
+    // the baseline must follow it to see this frame's. Each of these coincides with a
+    // derived edge in the same direction -- `compile()` dedups them -- but the derived edge
+    // is there for safety, and its direction is not a specification (guide §6.5).
+    flip.after(frustum_cull, occlusion_cull, shadow, cmd_record, particles, UI_node, submit);
+    flip.after(audio, vfx, debug_overlay);
+    if (opt)
+        flip.after(cloth);
+    else
         graph.add_node("cloth", &tick_cloth, world.transforms.state(), world.cloth).after(flip);
 
     graph.compile(DOT_path);

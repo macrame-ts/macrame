@@ -340,23 +340,37 @@ IDs — when an item is done, mark it, don't renumber.
        full runs in flight. Interacts with the run-quiescence invariant (one run at a time, full
        barrier between) — likely needs the spilling node to detach into a tracked dynamic task
        at the fence. Speculative; validate demand on the 4-worker fixture first.
-   14. `[ ]` **(P1, author 2026-08) Declaration order must not carry intent — explicit edges
-       for logical ordering.** `compile()` derives an edge for every access conflict and
-       directs it by declaration index. That direction is currently load-bearing in the
-       sample: baseline `cmd_record`/`particles`/`UI` precede `submit` *only* because they are
-       declared first. **Author's ruling: we rely on the determinism of a COMPILED graph, not
-       on node declaration order.** A derived edge exists for safety (no data race); either
-       direction is race-free, so an optimiser is free to reorder independent conflicting
-       nodes. If node A must logically precede node B, that is intent and must be an explicit
-       `after`/`before` edge. Work: (a) audit `sample/game_frame.cpp` for every place where a
-       derived edge's *direction* encodes intent and make those explicit — the baseline
-       render-producer → `submit` edges are the known set, and note the optimised variant
-       already declares them explicitly because staging removes the conflict; (b) state the
-       rule in `docs/guide.md` and `docs/design.md` (declaration order resolves the direction
-       of a derived edge, but is not a specification — do not build semantics on it);
-       (c) consider a `compile()` diagnostic that flags a derived edge whose direction is the
-       only thing ordering two nodes, so reliance is visible rather than implicit. Enables the
-       reordering optimiser this rule is reserving room for.
+   14. `[x]` **(P1, author 2026-08) Declaration order must not carry intent — explicit edges
+       for logical ordering — DONE (2026-08).** **Author's ruling: we rely on the determinism
+       of a COMPILED graph, not on node declaration order.** A derived edge exists for safety
+       (no data race); either direction is race-free, so an optimiser is free to reorder
+       independent conflicting nodes. If node A must logically precede node B, that is intent
+       and must be an explicit `after`/`before` edge.
+       (a) `sample/game_frame.cpp` audited. Two intent-bearing sets found, both now explicit
+       in BOTH variants: the render producers into `submit` (the known set — it was declared
+       explicitly only in the optimised variant, where staging removes the conflict, and left
+       to declaration order in the baseline), and — the set the audit added — **every
+       last-frame transforms reader ahead of the flip**. The sample's own comment said the
+       render pipeline reads last frame's transforms because it is "declared BEFORE the flip",
+       which is exactly declaration order carrying intent; `flip.after(frustum_cull,
+       occlusion_cull, shadow, cmd_record, particles, UI_node, submit, audio, vfx,
+       debug_overlay[, cloth])` says it instead. Every one of these coincides with a derived
+       edge in the same direction, so `compile()` dedups and the schedule is unchanged
+       (`transform0 == 5` and 2,700,000 draw commands held in both variants).
+       (b) Rule stated in `docs/guide.md` §6.5 and `docs/design.md` §2.3, with the two reasons
+       it is load-bearing: an intent edge survives a refactor that deletes the conflict (which
+       is exactly what the optimised variant's `Deferred` staging does), and the reordering
+       optimiser is only available while no program has made declaration order load-bearing.
+       (c) The `compile()` diagnostic is split out as 2.15 — **deferred by the author, 2026-08**.
+
+   15. `[ ]` **(P3, author 2026-08 — split out of 2.14, deferred) `compile()` diagnostic for
+       direction-only ordering.** A diagnostic that flags a derived edge whose *direction* is
+       the only thing ordering two nodes, so reliance on declaration order is visible rather
+       than implicit. Enables the reordering optimiser the 2.14 rule is reserving room for:
+       with the diagnostic, a graph can be checked for latent reliance before the optimiser is
+       allowed to reorder anything. Deferred by the author when 2.14 landed — the rule and the
+       sample audit were the valuable parts; the tooling can follow if reliance turns out to
+       recur in practice.
 
    13. `[ ]` **(P3, doc + demonstrate — T20) Pre-compiled graph variants pattern.** For discrete
        mode sets (game-loading vs in-game driving vs boss fight vs cutscene), the intended answer
