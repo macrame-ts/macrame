@@ -783,8 +783,34 @@ IDs — when an item is done, mark it, don't renumber.
        not an optimization — and its failure mode (a forgotten registration ⇒ a FALSE deadlock
        report) means the fatal message must name its own escape hatch.
 
-   14. `[ ]` **(P1, author 2026-08 — the one gap the field survey identified) Declared rank
-       for dynamically-awaited objects.** The canonical pipe-address order covers BATCH
+   14. `[x]` **(P1, author 2026-08 — the one gap the field survey identified) Declared rank
+       for dynamically-awaited objects — DONE (2026-08).** `ts::Rank{n}` (access.h) as an
+       optional second leading argument on `Guarded`/`Versioned` after `ts::Named`; stored on
+       the pipe and carried into every `Access_context` entry alongside the grant epoch, so
+       the held side is read from the context that already exists. Checked at `co_await`
+       ENTRY (`await_ready`, next to 6.11's guard check) in both awaiters, so it fires
+       deterministically on the first offending await rather than needing two halves of a
+       cycle to interleave.
+       As the item required, **the rank is NOT defaulted** (to address order or anything
+       else) and unranked is the strict state: holding an unranked object forbids dynamic
+       awaits entirely. Two rejected shapes, two death scenarios (`access_rank_descends`,
+       `access_rank_unranked`); two companions (climb; per-scope opt-out). Rule class
+       **advisory** -- `ts::Relaxed_scope{ts::Rule::access_rank}` is the escape; shipping
+       default **compiled out**, and like `waits_for_cycle` it is masked off entirely without
+       `TS_SAFETY_CHECKS`, because its held-side input IS the access context.
+       Two things fell out of implementing it, both kept:
+       (1) **Stale grants must be skipped.** A detached coroutine carries its launcher's grant
+       snapshot for its whole life; without the staleness filter (the same epoch test `check`
+       uses) it would be treated as a holder forever and every later await rejected. This
+       showed up immediately in `game_frame`'s fire-and-forget streaming coroutine.
+       (2) **The rule makes a genuine ABBA unrepresentable**, which means the `waits_for_cycle`
+       death scenario can no longer be *constructed* without opting out of the rank rule --
+       `abba_body` now carries a `Relaxed_scope`. That is the honest relationship between the
+       two: rank prevents, the detector is what remains for programs that opted out.
+       Adoption in-tree: three `game_frame` objects (`input`/`assets` low, `asset_source`
+       high) and the coroutine-graph-node test's trio. Everything else never awaits outside
+       its declared set and needed no rank -- which is the intended shape. Original text follows.
+       The canonical pipe-address order covers BATCH
        acquisition (`multi_acquire`, node declared sets) and makes it deadlock-free. Nothing
        relates a grant a task already HOLDS to an object it awaits LATER — that single missing
        ordering constraint is the entire suspended-ABBA hole. The field's cheap answer is a

@@ -272,11 +272,12 @@ private:
         node.pipes = { (&access.pipe_)... };
 
         auto epochs = std::make_tuple(detail::pipe_epoch(access.pipe_)...);
-        node.run = [fn = std::forward<Fn>(fn), instances, epochs]() mutable
+        auto ranks = std::make_tuple(detail::pipe_rank(access.pipe_)...);
+        node.run = [fn = std::forward<Fn>(fn), instances, epochs, ranks]() mutable
         {
             Access_context ctx;
             (ctx.add(static_cast<const void*>(std::get<I>(instances)), Modes,
-                     std::get<I>(epochs)), ...);
+                     std::get<I>(epochs), std::get<I>(ranks)), ...);
             Access_scope scope(ctx);
             using Body_result = decltype(fn(detail::mode_ref<Modes>(std::get<I>(instances))...));
             if constexpr (std::is_same_v<Body_result, Task<void>>)

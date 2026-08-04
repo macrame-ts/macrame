@@ -489,9 +489,13 @@ void test_access_reentrant_under_own_grant()
 // the node completes (releasing grants, unlocking successors) only at frame completion.
 void test_coroutine_graph_node()
 {
-    ts::Guarded<std::vector<int>> phys{ ts::Named{}, std::vector<int>{ 1, 2, 3 } };
-    ts::Guarded<int> audio{ ts::Named{}, 40 };
-    ts::Guarded<int> result{ ts::Named{}, 0 };
+    // The node holds `phys` and `result` and dynamically awaits `audio`, so all three carry a
+    // `ts::Rank` and the awaited one is strictly highest -- the waiting-rule (c) residual made
+    // representable-but-ordered (TODO 6.14). Without ranks the await is refused: an unranked
+    // held object cannot be climbed away from safely.
+    ts::Guarded<std::vector<int>> phys{ ts::Named{}, ts::Rank{ 10 }, std::vector<int>{ 1, 2, 3 } };
+    ts::Guarded<int> audio{ ts::Named{}, ts::Rank{ 30 }, 40 };
+    ts::Guarded<int> result{ ts::Named{}, ts::Rank{ 20 }, 0 };
     std::atomic<int> total{ 0 };
     std::atomic<int> successor_runs{ 0 };
 

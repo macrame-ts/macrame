@@ -213,14 +213,14 @@ struct World
     ts::Guarded<Skeletons> skeletons{ ts::Named{"skeletons"}, entity_count };
     ts::Guarded<Nav_mesh> nav_mesh{ ts::Named{"nav_mesh"}, entity_count };
     ts::Guarded<Renderables> renderables{ ts::Named{"renderables"}, entity_count };
-    ts::Guarded<Asset_source> asset_source{ ts::Named{"asset_source"}, entity_count };
+    ts::Guarded<Asset_source> asset_source{ ts::Named{"asset_source"}, ts::Rank{ 20 }, entity_count };
 
     // single-writer outputs (writer named by the type)
-    ts::Guarded<Input> input{ ts::Named{"input"}, entity_count };
+    ts::Guarded<Input> input{ ts::Named{"input"}, ts::Rank{ 10 }, entity_count };
     ts::Guarded<Camera> camera{ ts::Named{"camera"}, entity_count };
     ts::Guarded<Net> net{ ts::Named{"net"}, entity_count };
     ts::Guarded<Script_events> script_events{ ts::Named{"script_events"}, entity_count };
-    ts::Guarded<Assets> assets{ ts::Named{"assets"}, entity_count };
+    ts::Guarded<Assets> assets{ ts::Named{"assets"}, ts::Rank{ 10 }, entity_count };
     ts::Guarded<Nav_tiles> nav_tiles{ ts::Named{"nav_tiles"}, entity_count };
     ts::Guarded<Combat> combat{ ts::Named{"combat"}, entity_count };
     ts::Guarded<Economy> economy{ ts::Named{"economy"}, entity_count };

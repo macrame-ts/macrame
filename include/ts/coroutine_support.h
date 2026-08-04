@@ -108,6 +108,50 @@ inline bool reentrant_under_held_grant(const Task_control_block* blk) noexcept
     return true;
 }
 
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+// `Rule::access_rank` (TODO 6.14). Batch acquisition is already deadlock-free -- a node's
+// declared set and a multi-object `ts::access` are taken in canonical pipe-address order,
+// all-or-nothing. Nothing orders a grant a task already HOLDS against an object it awaits
+// LATER, and that one missing constraint is the whole suspended-ABBA hole. A declared rank
+// closes it: every dynamic await must strictly climb, so a cycle is unrepresentable
+// (Havender). Unlike the waits-for detector this fires DETERMINISTICALLY on the first
+// offending await, rather than needing both halves of a cycle to be suspended at once.
+//
+// O(1): one scan of the (<= 8 entry) access context against one field, on the cold await
+// path only. Declared in `guarded.cpp` so the message can name the objects.
+[[noreturn]] void report_rank_violation(const Pipe* awaited, unsigned held_max,
+                                        bool held_unranked) noexcept;
+
+// Check one awaited pipe against the current context. Skips objects the context already
+// grants: awaiting something you hold is not a later acquisition (it is reentrancy, or a
+// lend), so it cannot extend a wait chain.
+inline void check_access_rank(const Pipe* pipe, const void* instance) noexcept
+{
+    if (pipe == nullptr || current_access == nullptr || !rule_enforced(Rule::access_rank))
+        return;
+    if (instance != nullptr && current_access->check(instance, Access::read_only) != Access_context::Grant::none)
+        return;   // already held -- not a later acquisition
+    const Access_context::Rank_state held = current_access->rank_state();
+    if (held.held == 0)
+        return;   // nothing held: a top-level await orders against nothing
+    const unsigned target = pipe_rank(*pipe);
+    if (held.any_unranked || target == 0 || target <= held.max)
+        report_rank_violation(pipe, held.max, held.any_unranked);
+}
+
+// The awaited task's pipes, if it is an access. A bare task orders against nothing.
+inline void check_access_rank(const Task_control_block* blk) noexcept
+{
+    if (blk == nullptr)
+        return;
+    for (std::uint8_t i = 0; i < blk->pipe_count; ++i)
+        check_access_rank(blk->pipe_links[i].pipe, nullptr);
+}
+#else
+inline void check_access_rank(const Pipe*, const void*) noexcept {}
+inline void check_access_rank(const Task_control_block*) noexcept {}
+#endif
+
 inline constexpr const char* await_under_guard_message =
     "co_await while holding a Guarded access guard: the guard's pipe would be held across the "
     "suspension, and the guard's own access context cannot survive a resume on another thread. "
@@ -209,7 +253,10 @@ struct Task_awaiter
     bool await_ready() const noexcept
     {
         if (!reentrant_under_held_grant(core_.get()))
+        {
             check_await_under_guard(await_under_guard_message);
+            check_access_rank(core_.get());
+        }
         return core_->ready.load(std::memory_order_acquire);
     }
 
@@ -461,7 +508,7 @@ public:
     {
         if (current_access)
             ctx_ = *current_access;   // extend the coroutine's existing grant, don't replace it
-        ctx_.add(obj_, Mode, detail::pipe_epoch(pipe_));
+        ctx_.add(obj_, Mode, detail::pipe_epoch(pipe_), detail::pipe_rank(pipe_));
         prev_ = current_access;
         current_access = &ctx_;
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
@@ -533,6 +580,7 @@ struct Pipe_guard_awaiter
             "pipes across any suspension. Take them together with the multi-object form "
             "co_await ts::access(fn, a, b) (one canonically-ordered acquisition), or release "
             "the first guard before acquiring the second");
+        check_access_rank(&pipe_, obj_);
         return false;
     }
 

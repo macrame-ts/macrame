@@ -555,7 +555,40 @@ records waits-for edges at every suspension on a pipe and fatals the moment
 an edge closes a cycle, naming both tasks and both objects (§8.2 has the
 rule that avoids the shape in the first place).
 
-### 5.0.2 The deadlock net
+### 5.0.2 Lock ranks for dynamically-awaited objects
+
+Everything the graph acquires in a batch — a node's declared set, a multi-object
+`ts::access` — is taken in one canonical order, all-or-nothing, so it cannot
+deadlock however many objects it names. What nothing orders is a grant a task
+already *holds* against an object it `co_await`s **later**. That single missing
+constraint is the whole suspended-deadlock hole, and a lock rank closes it: if
+every dynamic await must strictly climb, a wait cycle cannot be written.
+
+```cpp
+ts::Guarded<Physics> physics{ ts::Named{"physics"}, ts::Rank{ 10 } };
+ts::Guarded<Audio>   audio  { ts::Named{"audio"},   ts::Rank{ 20 } };
+
+// a node holding `physics` may await `audio` (20 > 10), never the reverse
+float mix = co_await audio.access([](const Audio& a) { return a.mix_level(); });
+```
+
+Two things are deliberate. **Ranks are not defaulted** — not to address order,
+not to declaration order: a default would make rejection depend on the ABI, so a
+program that built today could be rejected tomorrow with no source change. And
+**unranked is strict**: a task holding an object with no `ts::Rank` may not
+dynamically await at all. Only objects actually involved in a dynamic await need
+a rank; a graph that never awaits outside its declared sets never sees this rule.
+
+The rejection is deterministic — it fires on the first offending await, not when
+two halves of a cycle happen to interleave. That is the difference between this
+and the waits-for detector (§5.0.1), which needs the race to actually happen.
+The honest cost is the standard one for a lock hierarchy: a strict order rejects
+some correct programs. The escapes, in preference order, are to restructure
+(declare the object on the node; read a `Versioned` snapshot; stage through
+`Deferred`), then `ts::Relaxed_scope{ts::Rule::access_rank}` for a claim the
+library cannot verify.
+
+### 5.0.3 The deadlock net
 
 The cycle detector above sees the shapes it models. Behind it sits a net that
 misses no shape at all, because it does not model anything: if **every worker

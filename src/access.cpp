@@ -21,7 +21,8 @@ const char config_safety_checks_off = 1;
 } // namespace detail
 
 void Access_context::add(const void* instance, Access mode,
-                         [[maybe_unused]] const std::atomic<std::uint64_t>* epoch) noexcept
+                         [[maybe_unused]] const std::atomic<std::uint64_t>* epoch,
+                         [[maybe_unused]] unsigned rank) noexcept
 {
 #if TS_SAFETY_CHECKS
     // Silent truncation is a latent footgun: a task declaring more than `max_entries`
@@ -34,7 +35,14 @@ void Access_context::add(const void* instance, Access mode,
             "raise Access_context::max_entries");
     }
     if (count_ < max_entries)
-        entries_[count_++] = { instance, mode, epoch, epoch ? epoch->load(std::memory_order_relaxed) : 0 };
+    {
+        entries_[count_++] = { instance, mode, epoch,
+                               epoch ? epoch->load(std::memory_order_relaxed) : 0
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+                               , rank
+#endif
+                             };
+    }
 #else
     // Staleness is a harness diagnostic; without the harness an entry is address + mode.
     if (count_ < max_entries)

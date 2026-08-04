@@ -3,6 +3,7 @@
 
 #include "ts/coroutine_support.h"
 #include "ts/rules.h"
+#include "ts/static_task_graph.h"
 #include "ts/task.h"
 
 #include <chrono>
@@ -138,7 +139,66 @@ void test_default_relaxed_rules()
     TS_CHECK(!ts::rule_relaxed(Rule::in_task_sync));
 }
 
-// 6. The deadlock net (`Rule::deadlock_net`). It fires from a blocked boundary waiter when
+// 6. Declared rank (`Rule::access_rank`, TODO 6.14). The two rejected shapes have death
+// tests (`access_rank_descends`, `access_rank_unranked`); here are the sanctioned ones.
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+ts::Task<void> climb(ts::Guarded<int>& higher, std::atomic<int>& seen)
+{
+    seen.store(co_await higher.access([](const int& v) { return v; }), std::memory_order_relaxed);
+}
+#endif
+
+// Sanctioned form 1: the awaited object outranks everything held, so the await CLIMBS and
+// Havender's argument makes a cycle through these objects unrepresentable.
+void test_access_rank_climb()
+{
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+    ts::Guarded<int> low{ ts::Named{ "low" }, ts::Rank{ 10 }, 0 };
+    ts::Guarded<int> high{ ts::Named{ "high" }, ts::Rank{ 20 }, 7 };
+    std::atomic<int> seen{ -1 };
+    ts::Static_task_graph graph;
+    graph.add_node("climber", [&high, &seen](int& own) -> ts::Task<void>
+    {
+        own = 1;
+        co_await climb(high, seen);
+    }, low);
+    graph.compile();
+    graph.execute().sync();
+    TS_CHECK(seen.load(std::memory_order_relaxed) == 7);
+#endif
+}
+
+// Sanctioned form 2: the per-scope opt-out, for a program that upholds the order by means
+// the library cannot see. Note it is advisory, so a `Relaxed_scope` really does suppress it
+// -- unlike the structural guard rule.
+void test_access_rank_relaxed()
+{
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+    ts::Guarded<int> high{ ts::Named{ "high" }, ts::Rank{ 30 }, 0 };
+    ts::Guarded<int> low{ ts::Named{ "low" }, ts::Rank{ 10 }, 5 };
+    std::atomic<int> seen{ -1 };
+    ts::Static_task_graph graph;
+    graph.add_node("descend-but-declared", [&low, &seen](int& own) -> ts::Task<void>
+    {
+        own = 1;
+        ts::Relaxed_scope relax{ ts::Rule::access_rank };
+        seen.store(co_await low.access([](const int& v) { return v; }), std::memory_order_relaxed);
+    }, high);
+    graph.compile();
+    graph.execute().sync();
+    TS_CHECK(seen.load(std::memory_order_relaxed) == 5);
+#endif
+}
+
+void test_death_access_rank()
+{
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+    TS_CHECK(ts::test::expect_death("access_rank_descends"));
+    TS_CHECK(ts::test::expect_death("access_rank_unranked"));
+#endif
+}
+
+// 7. The deadlock net (`Rule::deadlock_net`). It fires from a blocked boundary waiter when
 // the scheduler has been continuously quiescent with nothing registered as externally
 // completable -- see the `deadlock_net` death scenario. Here: the escape.
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
@@ -211,6 +271,9 @@ void run_rules_tests()
     run("rules relaxed scope inherited by child", test_relaxed_scope_inherited_by_child);
     run("rules relaxed scope across suspension", test_relaxed_scope_across_suspension);
     run("rules default relaxed set", test_default_relaxed_rules);
+    run("rules access rank climb", test_access_rank_climb);
+    run("rules access rank relaxed", test_access_rank_relaxed);
+    run("death: access rank", test_death_access_rank);
     run("rules external wait suppresses the net", test_external_wait_suppresses_net);
     run("rules deadlock net window disable", test_deadlock_net_window_disable);
     run("death: deadlock net", test_death_deadlock_net);

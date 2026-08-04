@@ -369,6 +369,56 @@ void pipe_release(Scheduler&, Pipe& pipe, Access mode)
     release_and_redispatch(pipe, mode);
 }
 
+#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE) || TS_RULE_ON(TS_RULE_IN_TASK_SYNC) || TS_RULE_ON(TS_RULE_ACCESS_RANK)
+namespace
+{
+// Display identity of a pipe's object, for a diagnostic. `buf` must outlive the use (each
+// caller keeps one buffer per name it prints in a single message).
+const char* pipe_name(const Pipe* pipe, char* buf, std::size_t size) noexcept
+{
+    return pipe != nullptr ? named_display(pipe->debug_name, buf, size, "<unnamed object>")
+                           : "<none>";
+}
+}
+#endif
+
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+// `Rule::access_rank` (TODO 6.14): a dynamic await must strictly climb the declared rank
+// order. Reported here so the message can name the object.
+[[noreturn]] void report_rank_violation(const Pipe* awaited, unsigned held_max,
+                                        bool held_unranked) noexcept
+{
+    char object[96];
+    char waiter[96];
+    char message[768];
+    const unsigned target = pipe_rank(*awaited);
+    if (held_unranked)
+    {
+        std::snprintf(message, sizeof message,
+            "access rank: task '%s' awaits '%s' while holding a grant on an object with NO declared "
+            "ts::Rank. An unranked object cannot be climbed away from safely, so it forbids dynamic "
+            "awaits while held -- that is the strict default. Give both objects a ts::Rank (the "
+            "awaited one strictly higher), or restructure: declare the object on the node, read a "
+            "Versioned snapshot, or stage via Deferred. Per-scope escape: "
+            "ts::Relaxed_scope{ts::Rule::access_rank}",
+            task_name(current_task.get(), waiter, sizeof waiter),
+            pipe_name(awaited, object, sizeof object));
+    }
+    else
+    {
+        std::snprintf(message, sizeof message,
+            "access rank: task '%s' awaits '%s' (rank %u) while holding a grant of rank %u -- a "
+            "dynamic await must strictly CLIMB the declared order, or a wait cycle becomes "
+            "representable. Raise the awaited object's ts::Rank above %u, or restructure: declare "
+            "the object on the node, read a Versioned snapshot, or stage via Deferred. Per-scope "
+            "escape: ts::Relaxed_scope{ts::Rule::access_rank}",
+            task_name(current_task.get(), waiter, sizeof waiter),
+            pipe_name(awaited, object, sizeof object), target, held_max, held_max);
+    }
+    ts::fatal(message);
+}
+#endif
+
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
 // The scheduler-side half of the deadlock net (declared in task.h). Defined here rather
 // than in scheduler.cpp because this is where the global scheduler holder lives, and the
@@ -400,19 +450,6 @@ bool scheduler_quiescent() noexcept
         task_name(waited_on, target, sizeof target),
         deadlock_net_window_ms.load(std::memory_order_relaxed));
     ts::fatal(message);
-}
-#endif
-
-#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE) || TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
-namespace
-{
-// Display identity of a pipe's object, for a diagnostic. `buf` must outlive the use (each
-// caller keeps one buffer per name it prints in a single message).
-const char* pipe_name(const Pipe* pipe, char* buf, std::size_t size) noexcept
-{
-    return pipe != nullptr ? named_display(pipe->debug_name, buf, size, "<unnamed object>")
-                           : "<none>";
-}
 }
 #endif
 

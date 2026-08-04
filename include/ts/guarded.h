@@ -67,6 +67,10 @@ struct Pipe
     // tooltips), the trace, and the access diagnostics; kept in all builds (three words --
     // a handful of objects, and the consumers are shipping-capable).
     Named debug_name{ nullptr };
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+    // The object's declared `ts::Rank`; 0 = unranked (the strict default -- see `ts::Rank`).
+    unsigned rank = 0;
+#endif
 
     // The block currently holding this pipe's WRITE grant, null outside a write window
     // (docs/pipe-rebase.md §0.2). Always-on: behavior keys off it (`Deferred::commit`
@@ -102,6 +106,17 @@ inline const std::atomic<std::uint64_t>* pipe_epoch([[maybe_unused]] const Pipe&
     return &pipe.write_epoch;
 #else
     return nullptr;
+#endif
+}
+
+// The pipe's declared `ts::Rank`, or 0 when the rank rule is compiled out. Same shape as
+// `pipe_epoch`: one spelling for the capture sites, which compile in every config.
+inline unsigned pipe_rank([[maybe_unused]] const Pipe& pipe) noexcept
+{
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+    return pipe.rank;
+#else
+    return 0;
 #endif
 }
 
@@ -437,6 +452,21 @@ public:
         pipe_.debug_name = name;
     }
 
+    // With a declared lock rank (`ts::Rank`, access.h): required only for objects that are
+    // DYNAMICALLY AWAITED while another grant is held -- batch acquisition needs no rank.
+    template<typename N, typename... Args>
+        requires std::same_as<std::remove_cvref_t<N>, Named> && std::constructible_from<T, Args...>
+    Guarded(N&& name, Rank rank, Args&&... args)
+        : instance_(std::forward<Args>(args)...)
+    {
+        pipe_.debug_name = name;
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+        pipe_.rank = rank.value;
+#else
+        (void)rank;
+#endif
+    }
+
     // Identity matters (it is the access key); waits out pending accesses so the object
     // outlives its last one. The drain is load-bearing even when every access was already
     // `sync()`ed: a task settles in the order settle -> notify waiters -> `on_complete` ->
@@ -548,12 +578,13 @@ private:
         auto core = [&]
         {
             const std::atomic<std::uint64_t>* epoch = detail::pipe_epoch(pipe_);
+            const unsigned rank = detail::pipe_rank(pipe_);
             if constexpr (detail::accessor_takes_token_v<Fn, decltype(*inst)>)
             {
-                auto body = [inst, epoch, fn = std::forward<Fn>(fn)](const Cancellation_token& tok) mutable -> R
+                auto body = [inst, epoch, rank, fn = std::forward<Fn>(fn)](const Cancellation_token& tok) mutable -> R
                 {
                     Access_context ctx;
-                    ctx.add(inst, mode, epoch);
+                    ctx.add(inst, mode, epoch, rank);
                     Access_scope scope(ctx);
                     return fn(*inst, tok);
                 };
@@ -561,10 +592,10 @@ private:
             }
             else
             {
-                auto body = [inst, epoch, fn = std::forward<Fn>(fn)]() mutable -> R
+                auto body = [inst, epoch, rank, fn = std::forward<Fn>(fn)]() mutable -> R
                 {
                     Access_context ctx;
-                    ctx.add(inst, mode, epoch);
+                    ctx.add(inst, mode, epoch, rank);
                     Access_scope scope(ctx);
                     return fn(*inst);
                 };
@@ -680,12 +711,13 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
     using R = std::invoke_result_t<Fn, Mode_ref_t<Modes, Ts>...>;
     auto instances = std::make_tuple(Guarded_access::instance(objs)...);
     auto epochs = std::make_tuple(pipe_epoch(Guarded_access::pipe(objs))...);
+    auto ranks = std::make_tuple(pipe_rank(Guarded_access::pipe(objs))...);
 
-    auto body = [instances, epochs, fn = std::forward<Fn>(fn)]() mutable -> R
+    auto body = [instances, epochs, ranks, fn = std::forward<Fn>(fn)]() mutable -> R
     {
         Access_context ctx;
         (ctx.add(static_cast<const void*>(std::get<I>(instances)), Modes,
-                 std::get<I>(epochs)), ...);
+                 std::get<I>(epochs), std::get<I>(ranks)), ...);
         Access_scope scope(ctx);
         return fn(mode_ref<Modes>(std::get<I>(instances))...);
     };

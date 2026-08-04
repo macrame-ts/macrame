@@ -76,6 +76,11 @@ static ts::Task<void> stale_stray(tests::Counter& k, ts::Signal go)
 static std::atomic<int> abba_holding{ 0 };
 static ts::Task<void> abba_body(tests::Counter& own, ts::Guarded<tests::Counter>& other)
 {
+    // The rank rule (6.14) makes this shape UNREPRESENTABLE -- with valid ranks the two
+    // awaits cannot both climb -- so constructing it to test the waits-for detector means
+    // opting out of the rank rule for the body. That is the honest relationship between the
+    // two: rank prevents, the detector is what remains for programs that opted out.
+    ts::Relaxed_scope relax{ ts::Rule::access_rank };
     own.increment();
     abba_holding.fetch_add(1, std::memory_order_acq_rel);
     while (abba_holding.load(std::memory_order_acquire) < 2)
@@ -532,6 +537,41 @@ void run_death_scenario(const char* name)
         graph.add_node("nodeB", [&a](Counter& own) { return abba_body(own, a); }, b);
         graph.compile();
         graph.execute().sync();
+    }
+    else if (std::strcmp(name, "access_rank_descends") == 0)
+    {
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+        // A node holds the HIGHER-ranked object and dynamically awaits a lower one: the
+        // await descends, which is what makes a wait cycle representable. Rejected on the
+        // first offending await, deterministically -- no second half of a cycle needed.
+        ts::Guarded<Counter> high{ ts::Named{ "high" }, ts::Rank{ 30 } };
+        ts::Guarded<Counter> low{ ts::Named{ "low" }, ts::Rank{ 10 } };
+        ts::Static_task_graph g;
+        g.add_node("descend", [&low](Counter& own) -> ts::Task<void>
+        {
+            own.increment();
+            co_await low.access([](const Counter& k) { return k.value(); });   // -> fatal
+        }, high);
+        g.compile();
+        g.execute().sync();
+#endif
+    }
+    else if (std::strcmp(name, "access_rank_unranked") == 0)
+    {
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+        // The strict default: the held object has no declared rank, so no dynamic await is
+        // permitted while it is held -- there is no order to climb.
+        ts::Guarded<Counter> held{ ts::Named{ "held" } };
+        ts::Guarded<Counter> target{ ts::Named{ "target" }, ts::Rank{ 50 } };
+        ts::Static_task_graph g;
+        g.add_node("unranked", [&target](Counter& own) -> ts::Task<void>
+        {
+            own.increment();
+            co_await target.access([](const Counter& k) { return k.value(); });   // -> fatal
+        }, held);
+        g.compile();
+        g.execute().sync();
+#endif
     }
     else if (std::strcmp(name, "deadlock_net") == 0)
     {

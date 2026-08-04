@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ts/named.h"
+#include "ts/rules.h"   // TS_RULE_ON: the rank bookkeeping below is `Rule::access_rank`'s
 
 #include <atomic>
 #include <cstdint>
@@ -44,6 +45,27 @@ inline const char* const config_tripwire = &config_safety_checks_off;
 
 enum class Access { read_only, read_write };
 
+// A guarded object's LOCK RANK, for `Rule::access_rank` (TODO 6.14). Batch acquisition is
+// already deadlock-free -- a node's declared set and a multi-object `ts::access` are taken
+// in canonical pipe-address order, all-or-nothing. What nothing orders is a grant a task
+// already HOLDS against an object it awaits LATER, and that single missing constraint is
+// the whole suspended-ABBA hole. A rank closes it by Havender's argument: every dynamic
+// await must climb, so a cycle is unrepresentable.
+//
+//   ts::Guarded<Nav> nav{ ts::Named{"nav"}, ts::Rank{ 20 } };
+//
+// Ranks start at 1; **0 means "unranked", and unranked is the strict default**: a task
+// holding an unranked grant may not dynamically await at all, and an unranked object may not
+// be dynamically awaited while anything is held. Rank is deliberately NOT defaulted to
+// address order -- that would make rejection ABI-dependent and irreproducible across builds,
+// so a program that compiled and ran today could be rejected tomorrow for no source change.
+// Only objects that are actually awaited need one.
+struct Rank
+{
+    constexpr explicit Rank(unsigned value) noexcept : value(value) {}
+    unsigned value;
+};
+
 // Per-task permission set, installed thread-locally while a task runs. Small by
 // design: a task touches a handful of instances, so an inline array + linear
 // scan beats a hash set. Identity of an instance is its address.
@@ -66,7 +88,8 @@ public:
     enum class Grant { none, granted, stale };
 
     void add(const void* instance, Access mode) noexcept { add(instance, mode, nullptr); }
-    void add(const void* instance, Access mode, const std::atomic<std::uint64_t>* epoch) noexcept;
+    void add(const void* instance, Access mode, const std::atomic<std::uint64_t>* epoch,
+             unsigned rank = 0) noexcept;
     Grant check(const void* instance, Access mode) const noexcept;
     bool grants(const void* instance, Access mode) const noexcept
     {
@@ -115,6 +138,43 @@ public:
     }
 #endif
 
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+    // Held-side input to the rank check (`Rule::access_rank`). Only PIPE-BACKED entries
+    // count -- a grant-free entry (a `Versioned` shadow, a hand-built context) excludes
+    // nobody, so it constrains no later await. Returns the number of such entries, the
+    // highest rank among them, and whether any of them is unranked (rank 0), which by
+    // itself forbids a dynamic await: an object nobody gave an order cannot be climbed away
+    // from safely.
+    struct Rank_state
+    {
+        int held = 0;
+        unsigned max = 0;
+        bool any_unranked = false;
+    };
+
+    Rank_state rank_state() const noexcept
+    {
+        Rank_state state;
+        for (int i = 0; i < count_; ++i)
+        {
+            if (entries_[i].epoch == nullptr)
+                continue;
+            // A grant whose window has closed excludes nobody, so it constrains no later
+            // await -- the same staleness test `check` applies. This is what keeps a
+            // detached coroutine, which carries its launcher's grant snapshot forever, from
+            // being treated as a holder after the launcher released.
+            if (entries_[i].epoch->load(std::memory_order_relaxed) != entries_[i].captured)
+                continue;
+            ++state.held;
+            if (entries_[i].rank == 0)
+                state.any_unranked = true;
+            else if (entries_[i].rank > state.max)
+                state.max = entries_[i].rank;
+        }
+        return state;
+    }
+#endif
+
 private:
     static constexpr int max_entries = 8;
 
@@ -123,8 +183,11 @@ private:
         const void* instance;
         Access mode;
 #if TS_SAFETY_CHECKS
-        const std::atomic<std::uint64_t>* epoch;   // null = never stale
+        const std::atomic<std::uint64_t>* epoch;   // null = never stale (and not pipe-backed)
         std::uint64_t captured;
+#endif
+#if TS_RULE_ON(TS_RULE_ACCESS_RANK)
+        unsigned rank;   // the object's declared `ts::Rank`; 0 = unranked
 #endif
     };
 

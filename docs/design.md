@@ -461,6 +461,36 @@ one frame where a prerequisite ran long. Moving them to the *call* (unconditiona
 in `sync_wait`; `await_ready` rather than `await_suspend`) makes the first
 execution of a bad path fail, every time, on any machine.
 
+**Ranks close the one structural hole.** Batch acquisition — a node's declared
+set, a multi-object `ts::access` — is conservative two-phase locking in canonical
+pipe-address order, deadlock-free by construction and independent of how many
+objects it names. A field survey of Bevy, Unity DOTS, Legion, Orleans, oneTBB and
+the Rust ecosystem found no deadlock attributable to declared-access *fatness*
+anywhere; every reported one is a wait inside work. So the residual hole is
+exactly one edge: nothing relates a grant a task already holds to an object it
+awaits later. A declared `ts::Rank` supplies that edge, and Havender's argument
+does the rest.
+
+Two decisions carry the design. Ranks are **not defaulted** — not to address
+order, which would make rejection ABI-dependent and non-reproducible across
+builds, and not to declaration order, which is not a specification (§2.x). And
+unranked is the **strict** state: holding an unranked object forbids dynamic
+awaits, because an order that does not exist cannot be climbed. Only objects
+that participate in a dynamic await need one, which is also the population that
+can appear in a cycle.
+
+The choice of rank over the alternatives was made on when it fires, not on what
+it costs. It is O(1) — one scan of an eight-entry access context against one
+field, on the cold await path — but so is a waits-for edge insertion. The
+difference is that a rank violation is a property of *one* await, so it fires the
+first time the path executes, on any machine; a waits-for cycle needs both halves
+concurrently suspended, which is a scheduling coin-flip. Driver Verifier makes
+the same argument explicitly: it bugchecks on the hierarchy violation, not when
+an actual deadlock is occurring. One refinement fell out of implementing it: a
+grant whose window has closed constrains nothing, so stale entries are skipped —
+otherwise a detached coroutine, which carries its launcher's grant snapshot for
+its whole life, would be treated as a holder forever.
+
 **The net behind the detectors.** Both the in-task `sync()` fatal and the
 waits-for cycle detector are *models*: they catch the shapes they were written
 for. The waits-for graph in particular is blind to a cycle that passes through

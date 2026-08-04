@@ -49,15 +49,16 @@
 #endif
 #endif
 
-// Not every rule can be honoured in every configuration: `waits_for_cycle` reads grant
-// bookkeeping (`Access_context` epochs, `Pipe::write_epoch`) that exists only under
-// `TS_SAFETY_CHECKS`, so it cannot outlive it whatever the policy asks for. The EFFECTIVE
+// Not every rule can be honoured in every configuration: `waits_for_cycle` and `access_rank`
+// both read grant bookkeeping (`Access_context` entry epochs and ranks, `Pipe::write_epoch`)
+// that exists only under `TS_SAFETY_CHECKS`, so neither can outlive it whatever the policy
+// asks for -- the *held* side of a rank comparison is the access context itself. The EFFECTIVE
 // mask is the policy intersected with what the build can support; everything downstream
 // (including `rule_compiled_in`) reads the effective mask.
 #if TS_SAFETY_CHECKS
 #define TS_RULES_AVAILABLE TS_RULE_ALL
 #else
-#define TS_RULES_AVAILABLE (TS_RULE_ALL & ~TS_RULE_WAITS_FOR_CYCLE)
+#define TS_RULES_AVAILABLE (TS_RULE_ALL & ~TS_RULE_WAITS_FOR_CYCLE & ~TS_RULE_ACCESS_RANK)
 #endif
 
 #define TS_RULES_EFFECTIVE ((TS_ENABLED_RULES) & (TS_RULES_AVAILABLE))
