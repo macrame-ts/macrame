@@ -67,7 +67,15 @@ namespace detail
 inline thread_local int pipe_guard_depth = 0;
 #endif
 
-// The guard-across-suspension check, at every site that can genuinely suspend.
+// The guard-across-suspension check. It lives at `co_await` ENTRY (`await_ready`), not at
+// the suspension (TODO 6.11): a `co_await` that happens to complete synchronously is just
+// as illegal as one that suspends, and gating on "did it actually suspend" made the check
+// fire only on the runs where timing was unfriendly -- so a hold-then-await shipped
+// undiagnosed whenever the target pipe was momentarily free.
+//
+// The reentrancy exemption used to be EMERGENT (a reentrant same-object access never
+// suspends, so it never reached the check). Hoisting forces it to be stated: see
+// `reentrant_under_held_grant` below. Everything else is illegal, guard depth > 0.
 inline void check_await_under_guard(const char* message)
 {
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
@@ -77,6 +85,35 @@ inline void check_await_under_guard(const char* message)
     (void)message;
 #endif
 }
+
+// The one stated exemption to the rule above. An access whose every pipe is currently
+// write-owned by THIS task ran inline under that held grant (`Guarded::access`'s reentrant
+// arm, waiting rule (b)): it never touched the pipe, it is settled before the `co_await`
+// is even evaluated, and it cannot suspend by construction rather than by timing.
+// `writer_owner` is always-on state, so this works in every build.
+//
+// Deliberately narrow. A READ access under a read guard is NOT exempt: it reaches the pipe,
+// and if a writer is queued ahead it enqueues and suspends -- with our own read hold
+// blocking that writer. That is the genuine hazard, not a false positive.
+inline bool reentrant_under_held_grant(const Task_control_block* blk) noexcept
+{
+    if (blk == nullptr || blk->pipe_count == 0)
+        return false;
+    for (std::uint8_t i = 0; i < blk->pipe_count; ++i)
+    {
+        const Pipe* pipe = blk->pipe_links[i].pipe;
+        if (pipe == nullptr || pipe->writer_owner.load(std::memory_order_acquire) != current_task.get())
+            return false;
+    }
+    return true;
+}
+
+inline constexpr const char* await_under_guard_message =
+    "co_await while holding a Guarded access guard: the guard's pipe would be held across the "
+    "suspension, and the guard's own access context cannot survive a resume on another thread. "
+    "Use the functor form co_await obj.access(fn), or split the scope (release the guard, "
+    "await, re-acquire). This rule is structural -- it has no runtime opt-out; a build can drop "
+    "it wholesale with TS_ENABLED_RULES";
 
 // Segment bracket, resolved per promise type: enter installs the coroutine's `current_task`
 // (and, in the promise, its access snapshot is applied by the resume path); exit restores.
@@ -171,6 +208,8 @@ struct Task_awaiter
 
     bool await_ready() const noexcept
     {
+        if (!reentrant_under_held_grant(core_.get()))
+            check_await_under_guard(await_under_guard_message);
         return core_->ready.load(std::memory_order_acquire);
     }
 
@@ -189,11 +228,8 @@ struct Task_awaiter
     template<typename P>
     bool await_suspend(std::coroutine_handle<P> h)
     {
-        // Suspension detector: reaching here means `await_ready` was false, so `co_await`ing
-        // this task suspends the coroutine. Doing so while holding a `Pipe_guard` would hold
-        // that pipe across the suspension (serialize / deadlock) -- the anti-pattern.
-        check_await_under_guard("co_await while holding a Guarded guard (pipe held across suspension)");
-
+        // The guard-across-suspension rule was already checked at `co_await` entry
+        // (`await_ready`), so reaching here means it passed.
 #if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
         // Waits-for edges (docs/coroutine-first.md §2): suspending on a PIPE JOB while this
         // context holds grants -- the job's turn cannot arrive until its pipes drain, so a
@@ -485,7 +521,20 @@ struct Pipe_guard_awaiter
     Pipe_guard_awaiter(const Pipe_guard_awaiter&) = delete;
     Pipe_guard_awaiter& operator=(const Pipe_guard_awaiter&) = delete;
 
-    bool await_ready() const noexcept { return false; }   // must attempt the acquire (side effects)
+    // Must attempt the acquire (side effects), so this never reports ready -- but it is
+    // still where the guard rule is checked, at `co_await` entry. Acquiring a second guard
+    // while one is live is illegal whether or not the pipe happens to be free right now:
+    // if it is not, the frame suspends holding the first guard, which is the ABBA shape.
+    // No exemption -- re-acquiring the SAME object would queue behind the caller's own hold.
+    bool await_ready() const noexcept
+    {
+        check_await_under_guard(
+            "co_await a Guarded access guard while another is live: nested guards hold both "
+            "pipes across any suspension. Take them together with the multi-object form "
+            "co_await ts::access(fn, a, b) (one canonically-ordered acquisition), or release "
+            "the first guard before acquiring the second");
+        return false;
+    }
 
     template<typename P>
     bool await_suspend(std::coroutine_handle<P> h)
@@ -511,11 +560,8 @@ struct Pipe_guard_awaiter
             return false;   // held now -> don't suspend; `await_resume` builds the guard
         }
 
-        // Deferred: we are about to suspend. Suspending while holding another guard is the
-        // lock-across-suspension anti-pattern.
-        check_await_under_guard(
-            "co_await a Guarded guard while holding another (pipe held across suspension)");
-
+        // Deferred: we are about to suspend. The guard rule was already checked at
+        // `co_await` entry (`await_ready`).
 #if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
         // Waits-for edge (docs/coroutine-first.md §2): a deferred acquire is a genuine
         // suspension on this pipe; record {each held grant -> pipe_} and cycle-check.
@@ -580,6 +626,12 @@ struct Join_awaiter
 
     bool await_ready()
     {
+        // Checked before the settled children are erased: whether the scope happens to be
+        // drained at this instant is exactly the timing the rule must not depend on.
+        check_await_under_guard(
+            "co_await a scope join while holding a Guarded access guard: the children may not "
+            "be settled, and the guard's pipe would be held across the wait. Join the scope "
+            "before acquiring the guard, or release the guard first");
         std::erase_if(children_, [](const Task_ptr& c)
         {
             return c->ready.load(std::memory_order_acquire);
@@ -591,8 +643,6 @@ struct Join_awaiter
     template<typename P>
     bool await_suspend(std::coroutine_handle<P> h)
     {
-        check_await_under_guard("co_await while holding a Guarded guard (pipe held across suspension)");
-
         exit_segment_if_ours(h.promise());
 
         for (Task_ptr& c : children_)

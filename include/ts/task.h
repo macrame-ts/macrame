@@ -43,14 +43,14 @@ namespace detail
 // work and then waits on it). No-op when nothing is pending (any scheduler mode).
 void drain_serial_pending() noexcept;
 
-#if TS_SAFETY_CHECKS
+#if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
 struct Task_control_block;
 // Defined in guarded.cpp (it needs the `Pipe` layout this header deliberately lacks):
-// diagnose a blocking `sync()` issued from inside a task -- fatal, with the sharp
-// same-object message when the target is an async access on an object the current
-// context holds (certain deadlock), the general never-park message otherwise. Called
-// by `sync_wait` only when the wait is genuinely about to park.
-void blocking_sync_diagnose(const Task_control_block* blk) noexcept;
+// report a `sync()`/`take()` issued from inside a task -- fatal, with the sharp
+// same-object message when the target is an access on an object the current context holds
+// (a certain deadlock), the general message otherwise. Called by `sync_wait` for every
+// in-task call, settled target or not (TODO 6.10).
+[[noreturn]] void blocking_sync_diagnose(const Task_control_block* blk) noexcept;
 #endif
 
 // Shared cancellation state behind a source / its tokens / its callbacks. The request
@@ -744,15 +744,17 @@ inline void Task_control_block::sync_wait(const Task_ptr& blk)
     // queued on THIS thread's serial trampoline behind the current frame -- run it
     // before parking, or nothing ever would. No-op otherwise.
     drain_serial_pending();
-#if TS_SAFETY_CHECKS
-    // Coroutine-first (docs/coroutine-first.md §4.1): about to genuinely park INSIDE a
-    // task on work the waiter cannot help along -- fatal, not a warning: the park
-    // occupies a worker and risks pool-exhaustion deadlock, and `co_await` is the
-    // sanctioned wait. `parallel_for` joins never route here (they wait on the group
-    // state directly, on provably running helpers). `ready` is an approximation (the
-    // target may complete concurrently after the check) -- a rare borderline fatal on
-    // a genuinely-parking call, never a missed hazard class.
-    if (current_task && !blk->ready.load(std::memory_order_acquire))
+#if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
+    // `Rule::in_task_sync` (docs/coroutine-first.md §4.1, TODO 6.10): `sync()`/`take()`
+    // inside a task is illegal WHETHER OR NOT the target has already settled. The check
+    // used to fire only when the wait would genuinely park, which inverted its coverage:
+    // a call whose target is usually settled never tripped in development, then parked a
+    // worker on the one frame a prerequisite ran long, and in shipping it was compiled out
+    // entirely. A check whose trigger is the hazard's TIMING inherits the hazard's
+    // nondeterminism -- so it triggers on the rule instead, deterministically on the first
+    // execution of the path. `parallel_for` joins are structurally exempt (they wait on
+    // group state directly, on provably running helpers, and never route here).
+    if (current_task && rule_enforced(Rule::in_task_sync))
         blocking_sync_diagnose(blk.get());
 #endif
     blk->wait();

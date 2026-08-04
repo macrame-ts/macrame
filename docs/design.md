@@ -447,6 +447,29 @@ bounded, deadlock-free, no retraction needed. With no retraction there is
 also exactly one dispatch per run, which collapsed the claim/generation
 machinery to a plain store plus a safety-check assert.
 
+**Check the rule, not the incident.** Both of the checks guarding this
+boundary — the in-task `sync()` fatal and the no-await-under-a-guard fatal —
+were originally written at the point where the hazard would *materialize*: the
+first fired only when the wait was about to park, the second only when the
+`co_await` actually suspended. That is the wrong trigger, and the reason is
+general enough to be a rule for any safety check in this library: **a check
+whose trigger condition is the hazard's timing inherits the hazard's
+nondeterminism.** In development a `sync()` target is usually already settled
+and a contended pipe is usually free, so both checks stayed quiet through
+every test run and then fired — or worse, did not fire — in production, on the
+one frame where a prerequisite ran long. Moving them to the *call* (unconditional
+in `sync_wait`; `await_ready` rather than `await_suspend`) makes the first
+execution of a bad path fail, every time, on any machine.
+
+Hoisting the guard check had a second effect worth recording: it forced the
+reentrancy exemption to be *stated*. A reentrant same-object access never
+suspends, so it never reached the old check — the exemption existed only as an
+accident of where the check sat. Now it is a predicate (every pipe of the
+awaited task is write-owned by this task, so the access ran inline under the
+held grant) with the narrowness spelled out: a *read* access under a *read*
+guard is not exempt, because it does reach the pipe and can queue behind a
+waiting writer that our own read hold is blocking.
+
 ### 4.5 Two real races, and the method that caught them
 
 The (since-deleted) reuse×retraction corner produced the two hardest bugs in

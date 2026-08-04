@@ -608,8 +608,23 @@ IDs — when an item is done, mark it, don't renumber.
       Open discussion queue: [coroutine-first.md](coroutine-first.md) §10 (waiting-rule
       relaxations, HALO reality on MSVC/clang-cl, the graph-free usage model).
 
-   10. `[ ]` **(P1, author 2026-08) Check the rule, not the incident — structural in-task
-       `sync()` fatal.** The diagnostic in `sync_wait` is gated on `!blk->ready`, so it fires
+   10. `[x]` **(P1, author 2026-08) Check the rule, not the incident — structural in-task
+       `sync()` fatal — DONE (2026-08).** `sync_wait`'s check dropped its `!blk->ready` gate:
+       `sync()`/`take()` inside a task is fatal whether or not the target has settled, so the
+       first execution of a bad path fails deterministically. `blocking_sync_diagnose` is now
+       `[[noreturn]]`, gated on `TS_RULE_ON(TS_RULE_IN_TASK_SYNC)` rather than
+       `TS_SAFETY_CHECKS` (only its sharp same-object arm needs the harness), and both
+       messages name the participating task and object by `ts::Named` plus the escapes:
+       `co_await`, `try_take()` (6.12), and `ts::Relaxed_scope{ts::Rule::in_task_sync}`.
+       Rule class **advisory**; shipping default **compiled out**.
+       Two in-tree call sites were relying on the old timing gate and are the interesting
+       evidence that the item was right: `test_access_reentrant_under_own_grant` did
+       `r.sync()` on a provably-settled task (now `try_take()`), and the worker-less
+       `test_single_threaded_sync_inside_body` genuinely relies on the serial trampoline's
+       drain hook — a claim the library cannot verify, so it now carries a `Relaxed_scope`
+       and doubles as the opt-out's companion test. New death scenario
+       `sync_settled_in_task` covers exactly the shape that used to pass. Original text follows.
+       The diagnostic in `sync_wait` is gated on `!blk->ready`, so it fires
        only when the wait would *genuinely park*. That inverts its coverage: an in-task
        `sync()` whose target is usually already settled never trips in dev (checked builds
        skew further toward "already done" via their own overhead), then parks a worker on the
@@ -622,8 +637,30 @@ IDs — when an item is done, mark it, don't renumber.
        `if (t.is_done()) v = t.sync();` idiom needs a non-blocking spelling before the
        unconditional fatal removes it. `parallel_for` joins stay structurally exempt.
 
-   11. `[ ]` **(P1, author 2026-08) Same fix for the guard-across-suspension fatal.** The
-       `pipe_guard_depth > 0` check lives in `await_suspend`, so a `co_await` that happens to
+   11. `[x]` **(P1, author 2026-08) Same fix for the guard-across-suspension fatal — DONE
+       (2026-08).** The `pipe_guard_depth > 0` check moved from `await_suspend` to
+       `await_ready` in all three awaiters (`Task_awaiter`, `Pipe_guard_awaiter`,
+       `Join_awaiter`), so an await under a live guard is illegal whether or not it suspends.
+       For `Join_awaiter` the check runs BEFORE the settled children are erased -- whether the
+       scope happens to be drained at that instant is precisely the timing the rule must not
+       depend on. Each of the three carries its own message naming the sanctioned form
+       (functor `co_await obj.access(fn)`; split the scope; multi-object
+       `co_await ts::access(fn, a, b)` instead of nested guards) and stating that the rule is
+       structural -- no runtime opt-out, only `TS_ENABLED_RULES` (rule class **structural**;
+       shipping default **kept**, as before the policy existed).
+       **The reentrancy exemption is now stated rather than emergent**, which was the item's
+       real content: `detail::reentrant_under_held_grant` returns true when every pipe of the
+       awaited block is write-owned by the current task -- i.e. `Guarded::access` took its
+       reentrant arm and ran the body inline under the held grant, so the task is settled
+       before the `co_await` is evaluated and cannot suspend by construction. It keys off
+       `Pipe::writer_owner`, which is always-on state, so the exemption works in every build.
+       Deliberately narrow: a READ access under a READ guard is NOT exempt (it reaches the
+       pipe, and a queued writer -- blocked by our own read hold -- makes it suspend). New
+       death scenario `await_settled_under_guard` covers the shape §2.3(f) of
+       [static-order-checking-and-ww-mutex.md](static-order-checking-and-ww-mutex.md)
+       identified as passing undiagnosed; companions `co await under guard, split` and
+       `co reentrant access under guard`. Original text follows.
+       The `pipe_guard_depth > 0` check lives in `await_suspend`, so a `co_await` that happens to
        complete synchronously is never examined — the same timing-luck coverage as 6.10, one
        degree less bad (the check is not `TS_SAFETY_CHECKS`-gated, so the latent case aborts in
        shipping rather than silently serializing). Fix: hoist the test to `co_await` *entry*

@@ -344,6 +344,64 @@ void test_death_await_cancelled_value()
 }
 #endif
 
+// TODO 6.10/6.11 -- the two structural entry checks and their sanctioned forms.
+
+#if TS_SAFETY_CHECKS
+void test_death_sync_settled_in_task()
+{
+    TS_CHECK(ts::test::expect_death("sync_settled_in_task"));
+}
+
+void test_death_await_settled_under_guard()
+{
+    TS_CHECK(ts::test::expect_death("await_settled_under_guard"));
+}
+#endif
+
+// Companion to `await_settled_under_guard`: split the scope. The guard is released before
+// the await and re-acquired after -- the object is free while the frame is suspended, which
+// is the whole point of the rule.
+Task<int> await_under_guard_split(ts::Guarded<tests::Counter>& w, ts::Task<int> other)
+{
+    {
+        auto g = co_await ts::read_write(w);
+        g->increment();
+    }                                   // guard released
+    int value = co_await other;         // legal: nothing is held across the suspension
+    {
+        auto g = co_await ts::read_write(w);
+        g->add(value);
+        co_return g->value();
+    }
+}
+
+void test_await_under_guard_split()
+{
+    ts::Guarded<tests::Counter> w{ ts::Named{ "w" } };
+    ts::Guarded<int> value{ ts::Named{ "value" }, 4 };
+    ts::Task<int> other = value.async([](const int& v) { return v; });
+    TS_CHECK(await_under_guard_split(w, std::move(other)).sync() == 5);
+}
+
+// Companion to `sync_settled_in_task`, and the stated exemption to the guard rule: a
+// reentrant same-object access runs INLINE under the held grant (waiting rule (b)), so its
+// task is settled before the `co_await` is evaluated and cannot suspend by construction.
+// That is the one shape `await_ready` lets through with a guard live.
+Task<int> reentrant_access_under_guard(ts::Guarded<tests::Counter>& w)
+{
+    auto g = co_await ts::read_write(w);
+    g->increment();
+    // `w`'s writer_owner is this frame, so `access` takes the reentrant arm.
+    int seen = co_await w.access([](const tests::Counter& k) { return k.value(); });
+    co_return seen;
+}
+
+void test_reentrant_access_under_guard()
+{
+    ts::Guarded<tests::Counter> w{ ts::Named{ "w" } };
+    TS_CHECK(reentrant_access_under_guard(w).sync() == 1);
+}
+
 // The other companion to that fatal, and the one that needs no polling: `as_optional()`
 // waits like a plain `co_await` and yields an empty optional on cancellation.
 Task<int> await_optional(ts::Task<int> maybe_cancelled)
@@ -371,10 +429,16 @@ void test_try_take()
 {
     ts::Guarded<int> d{ ts::Named{ "d" }, 11 };
 
-    ts::Signal gate;
-    ts::Task<int> pending = ts::launch([gate]() mutable { gate.sync(); return 3; });
+    // Spin rather than `gate.sync()`: a blocking wait inside a task is itself illegal.
+    std::atomic<bool> release{ false };
+    ts::Task<int> pending = ts::launch([&release]
+    {
+        while (!release.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        return 3;
+    });
     TS_CHECK(!pending.try_take().has_value());   // unsettled -> empty, no park
-    gate.trigger();
+    release.store(true, std::memory_order_release);
     pending.sync();
     TS_CHECK(pending.try_take() == 3);
 
@@ -409,7 +473,9 @@ void test_access_reentrant_under_own_grant()
         v = 5;
         ts::Task<int> r = a.access([](const int& x) { return x; });   // reentrant: inline, done
         TS_CHECK(r.is_done());
-        seen.store(r.sync());   // settled -> sync is a plain read, legal in-task
+        // `sync()` inside a task is illegal even on a settled target (TODO 6.10 -- the rule,
+        // not the incident); `try_take()` is the non-blocking read.
+        seen.store(r.try_take().value_or(-1));
     }, a);
     g.compile();
     g.execute().sync();
@@ -629,6 +695,12 @@ void run_coroutine_tests()
     run("co await cancelled checked", test_await_cancelled_checked);
     run("co await as_optional", test_await_as_optional);
     run("try_take non-blocking", test_try_take);
+#if TS_SAFETY_CHECKS
+    run("death: sync on a settled task in a task", test_death_sync_settled_in_task);
+    run("death: await a settled task under a guard", test_death_await_settled_under_guard);
+#endif
+    run("co await under guard, split", test_await_under_guard_split);
+    run("co reentrant access under guard", test_reentrant_access_under_guard);
 #if TS_SAFETY_CHECKS
     run("death: await cancelled value", test_death_await_cancelled_value);
 #endif

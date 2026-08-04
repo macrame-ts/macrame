@@ -369,6 +369,19 @@ void pipe_release(Scheduler&, Pipe& pipe, Access mode)
     release_and_redispatch(pipe, mode);
 }
 
+#if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE) || TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
+namespace
+{
+// Display identity of a pipe's object, for a diagnostic. `buf` must outlive the use (each
+// caller keeps one buffer per name it prints in a single message).
+const char* pipe_name(const Pipe* pipe, char* buf, std::size_t size) noexcept
+{
+    return pipe != nullptr ? named_display(pipe->debug_name, buf, size, "<unnamed object>")
+                           : "<none>";
+}
+}
+#endif
+
 #if TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
 // ===== waits-for cycle detector (docs/coroutine-first.md §2) ================================
 //
@@ -401,13 +414,6 @@ const Pipe* pipe_from_epoch(const std::atomic<std::uint64_t>* epoch) noexcept
         reinterpret_cast<const char*>(epoch) - offsetof(Pipe, write_epoch));
 }
 
-// Display identity of a pipe's object. `buf` must outlive the use (each caller keeps one
-// per name it prints in a single message).
-const char* pipe_name(const Pipe* pipe, char* buf, std::size_t size) noexcept
-{
-    return pipe != nullptr ? named_display(pipe->debug_name, buf, size, "<unnamed object>")
-                           : "<none>";
-}
 
 // Does a chain of edges lead from `from` back to `target`? (`held == from` edges step to
 // their awaited pipe.) Depth-bounded for safety; the registry is tiny (live suspensions).
@@ -504,14 +510,20 @@ void waits_for_clear(const void* ticket) noexcept
 }
 #endif   // TS_RULE_ON(TS_RULE_WAITS_FOR_CYCLE)
 
-#if TS_SAFETY_CHECKS
-// The `sync_wait` diagnostic (declared in task.h, defined here for the `Pipe` layout):
-// the caller established that the wait is about to park inside a task. Sharp message
-// when the wait target is a pipe task queued on a pipe the current scope's grant covers
-// -- that shape deadlocks (the entry sits behind the very grant the waiter holds). The
-// links carry the pipe identities, so multi-object jobs get the sharp match too.
-void blocking_sync_diagnose(const Task_control_block* blk) noexcept
+#if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
+// The `sync_wait` diagnostic (declared in task.h, defined here for the `Pipe` layout): a
+// `sync()`/`take()` was issued from inside a task. Sharp message when the target is a pipe
+// task on a pipe the current scope's grant covers -- that shape deadlocks outright (the
+// entry sits behind the very grant the waiter holds). The links carry the pipe identities,
+// so multi-object jobs get the sharp match too.
+//
+// The target may already be settled: the rule is about the call, not the incident (TODO
+// 6.10), so the message names the escapes rather than describing a park that may not
+// happen this run.
+[[noreturn]] void blocking_sync_diagnose(const Task_control_block* blk) noexcept
 {
+    char waiter[96];
+#if TS_SAFETY_CHECKS
     if (current_access != nullptr)
     {
         for (std::uint8_t i = 0; i < blk->pipe_count; ++i)
@@ -519,14 +531,28 @@ void blocking_sync_diagnose(const Task_control_block* blk) noexcept
             const Pipe_link& l = blk->pipe_links[i];
             if (l.pipe != nullptr && current_access->holds_epoch(&l.pipe->write_epoch))
             {
-                ts::fatal("sync() inside a task on an access to an object this task already "
-                    "holds -- this deadlocks; co_await it, or commit()/access under the held "
-                    "grant");
+                char message[512];
+                char object[96];
+                std::snprintf(message, sizeof message,
+                    "sync()/take() inside task '%s' on an access to '%s', which this task already "
+                    "holds -- the access queues behind the waiter's own grant, so this deadlocks. "
+                    "co_await it, or commit()/access under the held grant",
+                    task_name(current_task.get(), waiter, sizeof waiter),
+                    pipe_name(l.pipe, object, sizeof object));
+                ts::fatal(message);
             }
         }
     }
-    ts::fatal("blocking sync() inside a task -- parks a worker and risks pool-exhaustion "
-        "deadlock; co_await the task instead (or ts::nested / parallel_for for fork-join)");
+#endif
+    char message[512];
+    std::snprintf(message, sizeof message,
+        "sync()/take() inside task '%s' -- a blocking wait inside a task occupies a worker and "
+        "risks pool-exhaustion deadlock, whether or not the target happens to be settled right "
+        "now. Use co_await, or try_take() for the non-blocking read; if the wait is genuinely "
+        "bounded by something we cannot see, declare it with "
+        "ts::Relaxed_scope{ts::Rule::in_task_sync}",
+        task_name(current_task.get(), waiter, sizeof waiter));
+    ts::fatal(message);
 }
 #endif
 

@@ -519,15 +519,29 @@ and `async` alike (a cancellation token, a scheduling priority). There is no
 Blocking inside a task or node body ties up a worker and risks
 pool-exhaustion deadlock; the rule is "await results with `co_await`, or
 gate sub-work with `ts::nested` — never `sync()` inside a body". In
-`TS_SAFETY_CHECKS` builds a violation is **fatal** at the call: a `sync()`
-that is genuinely about to park inside a task aborts with a stack, with two
+`TS_SAFETY_CHECKS` builds a violation is **fatal** at the call, with two
 messages:
 
-- *"sync() inside a task on an access to an object this task already
+- *"sync()/take() inside task X on an access to Y, which this task already
   holds"* — the certain-deadlock shape: the awaited access is queued behind
   the very grant you are waiting inside.
-- *"blocking sync() inside a task"* — the general hazard; `co_await` it
-  instead.
+- *"sync()/take() inside task X"* — the general hazard; `co_await` it, or
+  read it with `try_take()` (§4.3).
+
+The check fires on the **call**, not on whether that particular run would
+have blocked: `sync()` inside a task is illegal even when the target is
+already settled. That is deliberate. A check that triggers only when the wait
+genuinely parks inherits the hazard's own timing — it stays quiet through
+development, where targets are usually settled, and then parks a worker on the
+one frame a prerequisite runs long. Checking the rule instead means the first
+execution of a bad path fails, every time.
+
+If you know the wait is bounded by something the library cannot see, say so at
+the site and keep the rest of the program checked:
+
+```cpp
+ts::Relaxed_scope relax{ ts::Rule::in_task_sync };   // "this wait cannot deadlock, and here is why"
+```
 
 What does **not** fire: `parallel_for` inside a node (its join runs chunks
 on the caller and waits only on provably running helpers), and any `sync()`
@@ -998,8 +1012,31 @@ ts::Task<void> update(ts::Guarded<World>& world)
 Unlike a callback `access`/`async`, the guard gives you a scope with real control flow over
 the object. One hard rule: **never `co_await` anything else while holding a
 guard** — that would keep the object locked across a suspension of unknown
-duration. The library enforces it: such an await is fatal (the suspension
-detector), so the mistake cannot ship silently.
+duration, and the guard's own access context cannot survive a resume on a
+different thread. The library enforces it at the `co_await`, whether or not
+that particular await would have suspended: an await that happens to complete
+synchronously is just as illegal, and gating on "did it actually suspend" would
+let the mistake ship on every run where timing was friendly.
+
+The sanctioned forms are the functor verb (`co_await obj.access(fn)` — the grant
+lives only for `fn`) and splitting the scope: release the guard, await,
+re-acquire. For two objects at once, take them together with
+`co_await ts::access(fn, a, b)`, which acquires in one canonically-ordered step
+rather than nesting guards.
+
+There is exactly one exemption, and it is stated rather than emergent: an access
+to an object *this task already holds the write grant on* runs inline under that
+grant (waiting rule (b)), so it is settled before the `co_await` is evaluated and
+cannot suspend by construction.
+
+```cpp
+auto g = co_await ts::read_write(world);
+int n = co_await world.access([](const World& w) { return w.size(); });   // reentrant: fine
+```
+
+This rule has no runtime opt-out — it protects an invariant the implementation
+relies on, not a hazard you might know is absent (§8.3). A build can drop the
+check entirely with `TS_ENABLED_RULES`.
 
 ### 8.3 Rule policy: turning a check off
 

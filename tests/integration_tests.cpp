@@ -694,6 +694,12 @@ void test_single_threaded_end_to_end()
 // The drain-before-park rule: a body that admits pipe work and then blocks on it must not
 // deadlock -- `sync()` drains the thread's serial trampoline (where the admitted job sits,
 // behind the running body's frame) before parking.
+//
+// Doubles as the sanctioned use of the `in_task_sync` opt-out: an in-task `sync()` is
+// illegal by rule, and here the caller knows something the library cannot see -- the target
+// is a pipe job admitted onto THIS thread's trampoline, so the drain hook resolves it. That
+// claim is exactly what `ts::Relaxed_scope` is for, and it stays scoped to the body making
+// it (the rest of the suite remains checked).
 void test_single_threaded_sync_inside_body()
 {
     ts::Scheduler_scope scope{ { .single_threaded = true } };
@@ -701,6 +707,7 @@ void test_single_threaded_sync_inside_body()
     ts::Guarded<tests::Counter> c{ ts::Named{} };
     int seen = ts::launch([&c]
     {
+        ts::Relaxed_scope relax{ ts::Rule::in_task_sync };
         ts::Task<int> inner = c.async([](tests::Counter& k) { k.add(9); return k.value(); });
         return inner.sync();   // admitted behind this frame; the drain hook runs it
     }).sync();

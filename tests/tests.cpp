@@ -84,6 +84,18 @@ static ts::Task<void> abba_body(tests::Counter& own, ts::Guarded<tests::Counter>
     guard->increment();
 }
 
+// Death scenario body (`await_settled_under_guard`, TODO 6.11): holds a write guard and
+// awaits a task that is ALREADY SETTLED. Before the check was hoisted to `co_await` entry
+// this ran clean -- `await_ready` was true, so `await_suspend` (where the fatal lived) was
+// never reached, and the illegal hold-then-await shipped undiagnosed on every run where
+// timing was friendly. Companion: `test_await_under_guard_split` (coroutine_tests).
+static ts::Task<void> await_settled_under_guard(ts::Guarded<tests::Counter>& w, ts::Task<int> settled)
+{
+    auto g = co_await ts::read_write(w);
+    (void)co_await settled;   // settled -> would not suspend -> fatal anyway (the rule, not the incident)
+    g->increment();
+}
+
 // Death scenario body (`signal_reset_awaited`): parks a coroutine on the signal so the
 // re-arm-while-awaited misuse has a live awaiter.
 static ts::Task<void> await_signal(ts::Signal s)
@@ -131,10 +143,10 @@ void run_death_scenario(const char* name)
         ts::Static_task_graph g;
         g.add_node(ts::Named{}, [&a](int&)
         {
-            // Queues behind this node's own write hold -> never admitted; the sync
-            // diagnostic fires the sharp same-object message, then the worker parks
-            // forever. The child's main thread observes the report and aborts, so the
-            // parent sees a death instead of a hang.
+            // Queues behind this node's own write hold -> never admitted. The sync
+            // diagnostic fires the sharp same-object message and aborts on the worker.
+            // (The bounded wait below is the pre-6.10 fallback, when the diagnostic was a
+            // report rather than a fatal; it keeps a regression from HANGING the parent.)
             a.async([](int& v) { v = 1; }).sync();
         }, a);
         g.compile();
@@ -520,6 +532,29 @@ void run_death_scenario(const char* name)
         graph.add_node("nodeB", [&a](Counter& own) { return abba_body(own, a); }, b);
         graph.compile();
         graph.execute().sync();
+    }
+    else if (std::strcmp(name, "sync_settled_in_task") == 0)
+    {
+        // TODO 6.10: an in-task `sync()` whose target is already settled. The old check was
+        // gated on "the wait would genuinely park", so this shape passed in development and
+        // parked a worker only on the frame a prerequisite ran long. Now it is the rule that
+        // fires, deterministically on the first execution.
+        ts::Guarded<int> value{ ts::Named{ "value" }, 4 };
+        ts::launch([&value]
+        {
+            ts::Task<int> settled = value.async([](const int& v) { return v; });
+            while (!settled.is_done())
+                std::this_thread::yield();
+            (void)settled.sync();   // settled, and still fatal -> the rule, not the incident
+        }).sync();
+    }
+    else if (std::strcmp(name, "await_settled_under_guard") == 0)
+    {
+        ts::Guarded<Counter> w{ ts::Named{ "w" } };
+        ts::Guarded<int> value{ ts::Named{ "value" }, 1 };
+        ts::Task<int> settled = value.async([](const int& v) { return v; });
+        settled.sync();   // blue thread: legal
+        await_settled_under_guard(w, std::move(settled)).sync();
     }
     else if (std::strcmp(name, "signal_reset_awaited") == 0)
     {
