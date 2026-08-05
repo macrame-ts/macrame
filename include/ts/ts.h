@@ -8,7 +8,7 @@
 #include "ts/version.h"            // TS_VERSION_* macros
 #include "ts/scheduler.h"          // ts::Scheduler, Scheduler_config, Idle_policy, Priority
 #include "ts/guarded.h"            // ts::Guarded<T>, ts::async (multi-object)
-#include "ts/task.h"               // ts::Task<R>, launch/nested, Signal, cancellation
+#include "ts/task.h"               // ts::Task<R>, ts::launch, Signal, cancellation
 #include "ts/static_task_graph.h"  // ts::Static_task_graph, Graph_node
 #include "ts/parallel_for.h"       // ts::parallel_for
 #include "ts/deferred.h"           // ts::Deferred<T>

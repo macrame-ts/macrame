@@ -4,7 +4,7 @@
 // `std::shared_ptr`'s separate control block + two-word handle. A type `T` that inherits
 // `detail::Ref_counted<T>` (CRTP) gets an intrusive count and is held by `detail::Ref_ptr<T>`.
 // This generalizes the pattern `Task_control_block`/`Task_ptr` already use by hand (which keeps
-// its own `destroy`-thunk variant because it is aliased inside `Result_block`/`Executable`
+// its own `destroy`-thunk variant because it is aliased inside `Executable`/coroutine-frame
 // wrappers; a plain `Ref_counted<T>` deletes as `T*`, correct for types that ARE the allocation).
 //
 // Prefer this over `std::shared_ptr` for types WE control (see CLAUDE.md). Ordering matches the

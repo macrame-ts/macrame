@@ -79,8 +79,8 @@ public:
     // Dispatch this node INLINE: when it becomes ready, run it on the thread that settled
     // its last prerequisite (and acquired its objects) instead of queueing -- but only if
     // that thread can acquire ALL its objects synchronously; if any is contended (held by
-    // async), it defers to the queue. Bounded by the shared inline trampoline. Same
-    // trade-offs as `Task_builder::set_inline` (nondeterministic thread, must not block).
+    // async), it defers to the queue. Bounded by the shared inline trampoline. Trade-offs:
+    // it runs on a nondeterministic thread and must not block.
     Graph_node& set_inline();
 
     int index() const noexcept { return index_; }

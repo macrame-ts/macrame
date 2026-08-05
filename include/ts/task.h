@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ts/access.h"   // grant inheritance for launched/nested sub-work (snapshot_access)
+#include "ts/access.h"   // grant inheritance for launched/parallel_for sub-work (snapshot_access)
 #include "ts/fatal.h"
 #include "ts/named.h"   // ts::Named -- debug identity for tasks (and nodes and objects)
 #include "ts/priority.h"
@@ -307,8 +307,8 @@ void pipe_enter_first(Task_control_block* blk, Task_ptr* record = nullptr);
 // The refcounted completion/dependency core behind a `Task<R>` handle. FULLY
 // MONOMORPHIC — parameterized on nothing. The result type is erased behind a
 // `void* result_ptr` (nullptr => no result: `void`/bodyless); a body, when present,
-// hangs off a `Result_block<R>`/executable wrapper that has `core` as its first
-// member so a `Task_control_block*` aliases it (see docs/task-internals.md §2).
+// hangs off an `Executable<Body,R>` wrapper (or a coroutine promise frame) that has
+// `core` as its first member so a `Task_control_block*` aliases it (see docs/task-internals.md §2).
 // Continuations receive `(result_ptr-or-nullptr, cancelled)` so they propagate a
 // cancellation to their own subsequent. `settle()` is idempotent — the first settle
 // wins (so a bodyless block can be triggered; see `Signal`). Result-consumption contract:
@@ -333,8 +333,8 @@ struct Task_control_block
     std::atomic<std::uint32_t> refcount{ 0 };
     std::atomic<std::uint32_t> num_locks{ 0 };
 
-    // Type-erased destroy thunk that deletes the enclosing wrapper (`Result_block<R>` /
-    // `Executable<Body,R>` / `Graph_node_block` / a bare block).
+    // Type-erased destroy thunk that deletes the enclosing wrapper (`Executable<Body,R>` /
+    // `Graph_node_block` / a coroutine promise frame / a bare block).
     void (*destroy)(Task_control_block*) = nullptr;
     void* result_ptr = nullptr;        // -> the wrapper's stored R (set before complete), or null
     void (*execute)(const Task_ptr&, std::uint64_t generation) = nullptr;   // run the body (null => bodyless)
@@ -689,22 +689,6 @@ inline void intrusive_dec(Task_control_block* p) noexcept
     q.draining = false;
 }
 
-// Result storage composed around the monomorphic block. `core` is the FIRST member so
-// a `Task_control_block*` aliases the wrapper. `store()` moves the value in and points
-// `result_ptr` at it (before the caller `complete()`s the core).
-template<typename R>
-struct Result_block
-{
-    Task_control_block core;
-    std::optional<R> result;
-
-    void store(R value)
-    {
-        result.emplace(std::move(value));
-        core.result_ptr = &*result;
-    }
-};
-
 // A bare block (no result, no body -- `Signal`): one allocation, destroyed as a plain
 // `Task_control_block` when its refcount hits 0.
 inline Task_ptr make_bare_block()
@@ -729,25 +713,6 @@ inline const Task_ptr& cancelled_void_core()
 {
     static Task_ptr core = [] { Task_ptr b = make_bare_block(); b->cancel(); return b; }();
     return core;
-}
-
-// Make a fresh block for a `Task<R>`; returns the handle core plus (for a non-void R) a RAW
-// pointer to the typed wrapper the producer stores into. The wrapper is owned by the block's
-// intrusive refcount (`core`), so the raw pointer stays valid as long as any `Task_ptr` to
-// the block does -- capture `core` (owning) alongside it, never the raw pointer alone.
-template<typename R>
-auto make_block()
-{
-    if constexpr (std::is_void_v<R>)
-    {
-        return make_bare_block();
-    }
-    else
-    {
-        auto* wrapper = new Result_block<R>();
-        wrapper->core.destroy = [](Task_control_block* c) { delete reinterpret_cast<Result_block<R>*>(c); };
-        return std::pair{ Task_ptr(&wrapper->core), wrapper };
-    }
 }
 
 // Record `name` on a freshly created block (no-op in shipping, where the block has no
