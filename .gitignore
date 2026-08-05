@@ -380,3 +380,6 @@ claude_resume.bat
 
 # Crash dumps from death tests
 *.dmp
+
+# VS per-user launch arguments
+*.args.json
