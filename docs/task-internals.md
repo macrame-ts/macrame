@@ -62,8 +62,6 @@ Three types on the Task tier; two private, two public handles (one shared).
 
 - **Storage wrappers** (private, per instantiation) — everything that carries a type
   is composed *around* the block, not into it:
-  - `Result_block<R>  { Task_control_block core; std::optional<R> result; }` — for
-    results with no body (detail-level producers).
   - `Executable<Body,R> { Task_control_block core; Result_storage<R> storage; Body body; }`
     — for `async` / `launch`.
   - `Task_promise<R>` — the **fused coroutine frame**: the promise embeds the block
@@ -175,7 +173,7 @@ execution_flag = 0x8000'0000        // MSB; set at execution start
 pipe task        : num_locks = pipe_count        // one lock per pipe turn
 turn arrives     : --num_locks; if 0 -> dispatch
 
-execute (claim)  : claim(gen) on run_state       // one-runner CAS; then
+execute (claim)  : claim() on body_claimed       // one-runner CAS; then
                    num_locks = execution_flag+1  // executing + body self-lock
 coroutine birth  : num_locks = execution_flag+1  // the promise arms it directly
                                                  // (born executing, eager start)
@@ -185,10 +183,10 @@ nested completes : n = --num_locks; if n == execution_flag -> Close()
 ```
 
 - Below `execution_flag`, the count is outstanding pipe turns (the pipe rebase's
-  `pipe_count` trigger); reaching 0 dispatches. The one-runner claim moved off
-  this counter onto `run_state` (generation + claim bit fused in one atomic);
-  with one dispatch per run and re-arm only after settle, a failed claim is a
-  machinery bug (fatal under `TS_SAFETY_CHECKS`), not a dedup path.
+  `pipe_count` trigger); reaching 0 dispatches. The one-runner claim lives off
+  this counter on the `body_claimed` atomic (a plain false→true CAS); with one
+  dispatch per run and re-arm only after settle, a failed claim is a machinery bug
+  (fatal under `TS_SAFETY_CHECKS`), not a dedup path.
 - The `+1` self-lock ensures a nested task completing mid-body cannot `Close`
   the parent before the body finishes. A coroutine promise arms
   `execution_flag + 1` at construction (the body starts eagerly, so the frame is
@@ -623,9 +621,10 @@ TSan): the block settles exactly once, either way.
 - **Historical record (built, validated, deleted 2026-08 in coroutine-first):**
   `then` rebased onto proper prerequisite-linked tasks; `when_all` with the
   one-allocation intrusive join; `ts::task(fn).after(...)` builders with
-  frozen-at-launch enforcement; builder-handle reusable tasks (the fused
-  `run_state` generation+claim atomic remains, simplified to one-dispatch-per-run
-  with a machinery-bug assert); deep retraction (+ the never-landed pipe-task
+  frozen-at-launch enforcement; builder-handle reusable tasks (the generation/reuse
+  substrate that survived them — `run_state`'s generation high bits and the
+  `dispatch_arg` per-dispatch slot — was retired 2026-08; the one-runner claim remains
+  as the plain `body_claimed` flag with its machinery-bug assert); deep retraction (+ the never-landed pipe-task
   retraction design — its admission-ordering analysis is preserved in the TODO
   §1.14 addendum); dynamic-task inline dispatch (`set_inline`/`run_inline` —
   the flag and per-thread FIFO trampoline survive as the graph's

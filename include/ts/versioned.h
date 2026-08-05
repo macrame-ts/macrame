@@ -244,7 +244,7 @@ public:
             {
                 auto core = detail::make_executable<void>(std::move(phase1), {});
                 core->flags.priority = priority;
-                detail::submit_ready(core, core->generation());
+                detail::submit_ready(core);
             });
 
         return swapped;

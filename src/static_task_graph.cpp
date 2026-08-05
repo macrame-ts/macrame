@@ -349,7 +349,7 @@ void Static_task_graph::on_data_ready(Run_state& run, int index)
     run.stamps.mark_ready(index);
     Node& node = run.graph->nodes_[index];
     if (node.block->pipe_count == 0)
-        detail::Task_control_block::dispatch_ready(node.block, node.block->generation());
+        detail::Task_control_block::dispatch_ready(node.block);
     else
         detail::pipe_enter_first(node.block.get());
 }
@@ -362,11 +362,11 @@ void Static_task_graph::on_data_ready(Run_state& run, int index)
 // completes once the self-lock and any nested completions release. The block carries the
 // run's `token`, so a cancelled node skips its body (settling cancelled) -- `on_complete`
 // still fires, keeping the drain going.
-void Static_task_graph::run_graph_node(const detail::Task_ptr& block, std::uint64_t gen)
+void Static_task_graph::run_graph_node(const detail::Task_ptr& block)
 {
     using Block = detail::Task_control_block;
 
-    if (!block->claim(gen))
+    if (!block->claim())
         return;   // already claimed (belt-and-suspenders; graph nodes dispatch once)
 
     auto* self = reinterpret_cast<Graph_node_block*>(block.get());
@@ -598,7 +598,7 @@ Task<void> Static_task_graph::execute(Execution_options opts)
         auto* w = reinterpret_cast<Graph_node_block*>(nodes_[i].block.get());
         w->graph = this;   // refresh back pointer too (see above)
         detail::Task_control_block& b = w->core;
-        b.run_state.store(0, std::memory_order_relaxed);   // generation 0, unclaimed (nodes aren't reset())
+        b.body_claimed.store(false, std::memory_order_relaxed);   // unclaimed (nodes aren't reset())
         b.completed = false;
         b.cancelled = false;
         b.prereq_cancelled.store(false, std::memory_order_relaxed);

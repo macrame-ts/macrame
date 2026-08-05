@@ -285,10 +285,8 @@ private:
 
 // Submit a block whose prerequisites are all met to run (defined in the scheduler
 // layer; task.h stays scheduler-independent). Runs `execute` if it has a body, else
-// `complete`s it. `gen` is the generation the CALLER captured when the block became
-// ready (at/before the `num_locks` decrement that hit zero) -- never re-read at submit
-// time; see `release` and `dispatch_arg` for the TOCTOU this closes.
-void submit_ready(Task_ptr block, std::uint64_t gen);
+// `complete`s it.
+void submit_ready(Task_ptr block);
 
 // A task's per-pipe queue entry (full definition in ts/detail/pipe_link.h).
 struct Pipe_link;
@@ -321,8 +319,10 @@ struct Task_control_block
     // (below the 8-byte block) so they share padding instead of each punching a hole between
     // pointers/atomics, and the two 32-bit atomics sit together to fill one 8-byte slot.
     // sizeof shrank 336 -> 320 by this reorder alone, 320 -> 280 when the coroutine-first
-    // deletions dropped the `prerequisites` vector, and 280 -> 264 when `successors` collapsed
-    // to the single `nested_parent` slot (clang-cl x64). See docs/task-internals.md §2.
+    // deletions dropped the `prerequisites` vector, 280 -> 264 when `successors` collapsed
+    // to the single `nested_parent` slot, and 264 -> 248 when the generation/reuse substrate
+    // was retired (`dispatch_arg` deleted, `run_state` reduced to the one-byte `body_claimed`
+    // claim) (clang-cl x64, TS_DEBUG_NAMES off). See docs/task-internals.md §2.
 
     // Intrusive strong refcount (see `Task_ptr`) + `num_locks`. Two 32-bit atomics packed
     // adjacent = one 8-byte slot, no padding. `refcount` starts at 0 (first `Task_ptr` -> 1).
@@ -337,28 +337,11 @@ struct Task_control_block
     // `Graph_node_block` / a coroutine promise frame / a bare block).
     void (*destroy)(Task_control_block*) = nullptr;
     void* result_ptr = nullptr;        // -> the wrapper's stored R (set before complete), or null
-    void (*execute)(const Task_ptr&, std::uint64_t generation) = nullptr;   // run the body (null => bodyless)
+    void (*execute)(const Task_ptr&) = nullptr;   // run the body (null => bodyless)
     // Fired once at `settle` (completed OR cancelled), after continuations/successors.
     // Unlike a continuation it is NOT consumed, so a reused block (e.g. a re-armed graph
     // node) keeps it across runs -- an alloc-free completion hook. Null for most tasks.
     void (*on_complete)(Task_control_block*) = nullptr;
-    // One-runner claim + re-arm generation fused into ONE atomic. Bits [63:1] =
-    // generation (bumped by `reset` -- `Signal::reset`, the graph's per-run re-arm),
-    // bit [0] = body claimed. A dispatch captures the generation it was queued for and
-    // calls `claim(gen)`. Every run has exactly ONE dispatch (`fetch_sub` values are
-    // unique, so one releaser crosses zero), consumed before the run settles, and
-    // `reset` requires a settled run -- so a claim can never legitimately fail; the CAS
-    // is a machinery-bug detector (fatal under `TS_SAFETY_CHECKS`, skip in shipping),
-    // not a dedup mechanism.
-    std::atomic<std::uint64_t> run_state{ 0 };
-    // Per-dispatch argument, published by the dispatcher right before handing the block to the
-    // scheduler queue (release store; the trampoline's load is the acquire) so the payload need
-    // not ride in the 16-byte `Task_entry` (the work-stealing deque stores those as
-    // `std::atomic<Task_entry>`, lock-free only at two words). Carries the generation the
-    // releaser captured at/before its `num_locks` decrement (see `release`). Pipe tasks
-    // dispatch through the same trampoline at generation 0 (their blocks are never `reset`),
-    // so the slot's meaning is uniform.
-    std::atomic<std::uint64_t> dispatch_arg{ 0 };
     // The task's pipe entries (docs/pipe-rebase.md §0.2): an array of `pipe_count` links
     // embedded in the owning allocation (`Piped_executable` or the graph's per-node slab),
     // in canonical (ascending pipe-address) order. Null / 0 for a non-pipe task.
@@ -384,6 +367,13 @@ struct Task_control_block
     // already executing (a cancelled nested child): the flag is only read at execution
     // start. Reset by `reset()` / graph re-arm.
     std::atomic<bool> prereq_cancelled{ false };
+    // One-runner claim: set by the sole dispatch of a run before the body runs (`claim()`).
+    // Every run has exactly ONE dispatch (`fetch_sub` values are unique, so one releaser
+    // crosses zero), consumed before the run settles, and `reset` requires a settled run --
+    // so a claim can never legitimately fail; the CAS is a machinery-bug detector (fatal
+    // under `TS_SAFETY_CHECKS`, skip in shipping) across the inline / queue / node dispatch
+    // routes, not a dedup mechanism. Cleared by `reset()` / graph re-arm.
+    std::atomic<bool> body_claimed{ false };
     bool completed = false;            // mutex-only
     bool cancelled = false;            // mutex-only
     // Pipe fields (see `pipe_links`): entry count / trigger threshold, and cascade progress.
@@ -433,20 +423,15 @@ struct Task_control_block
 #endif
     }
 
-    // This block's current re-arm generation — the high bits of `run_state`, above the
-    // claim bit (`run_state >> 1`). Bumped by `reset()` on each re-arm. A dispatch
-    // captures this value and passes it to `claim(gen)`. See `run_state`.
-    std::uint64_t generation() const noexcept { return run_state.load(std::memory_order_relaxed) >> 1; }
-
-    // Claim the body for `gen`; true if this caller should run it. One dispatch per run
-    // and re-arm only after settle mean failure is impossible in a correct program (see
-    // `run_state`) -- a failed CAS here is a duplicate or stale dispatch, i.e. a
+    // Claim the body to run; true if this caller should run it. One dispatch per run and
+    // re-arm only after settle mean failure is impossible in a correct program (see
+    // `body_claimed`) -- a failed CAS here is a duplicate or stale dispatch, i.e. a
     // machinery bug: fatal under `TS_SAFETY_CHECKS`, degrade to a skip in shipping.
-    bool claim(std::uint64_t gen) noexcept
+    bool claim() noexcept
     {
-        std::uint64_t expected = gen << 1;
-        const bool ok = run_state.compare_exchange_strong(
-            expected, (gen << 1) | 1u, std::memory_order_acq_rel, std::memory_order_relaxed);
+        bool expected = false;
+        const bool ok = body_claimed.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel, std::memory_order_relaxed);
 #if TS_SAFETY_CHECKS
         if (!ok)
             ts::fatal("Task_control_block::claim failed -- duplicate or stale dispatch (machinery bug)");
@@ -468,15 +453,11 @@ struct Task_control_block
     {
         if (prereq_cancelled)
             blk->prereq_cancelled.store(true, std::memory_order_relaxed);
-        // Capture the generation BEFORE the decrement. Our not-yet-released lock pins the
-        // current run (it cannot start, so it cannot complete, so `reset()` cannot re-arm
-        // it), so this read names exactly the run this lock belongs to.
-        std::uint64_t gen = blk->generation();
         std::uint32_t now = blk->num_locks.fetch_sub(1, std::memory_order_acq_rel) - 1;
         if (now == 0)
-            dispatch_ready(blk, gen);     // pre-execution: all locks (incl. pipe turns) met
+            dispatch_ready(blk);          // pre-execution: all locks (incl. pipe turns) met
         else if (now == execution_flag)
-            blk->complete();              // post-execution: nested done -> complete (`gen` unused)
+            blk->complete();              // post-execution: nested done -> complete
         else if (now == blk->pipe_count)
             pipe_enter_first(blk.get());  // only pipe locks left -> enter line 0 (§5.5 pipes last)
         // The pipe branch is exact: pre-execution counts decrease monotonically (the
@@ -492,30 +473,25 @@ struct Task_control_block
     // stack. The first inline dispatch on a thread starts the drain; inline tasks made
     // ready during the drain just push and are picked up in order (head advances as the
     // vector grows). `clear()` at the end retains capacity -> no steady-state allocation.
-    // Each entry carries the GENERATION captured at release time (same TOCTOU as the queued
-    // path: re-reading `generation()` at drain time could see a newer gen if the block was
-    // re-armed between the push and the drain step).
-    inline static thread_local std::vector<std::pair<Task_ptr, std::uint64_t>> inline_pending;
+    inline static thread_local std::vector<Task_ptr> inline_pending;
     inline static thread_local bool inline_draining = false;
 
-    // `gen` is the generation captured by the caller when the block became ready (see
-    // `release`); threaded through both dispatch routes, never re-read here.
-    static void dispatch_ready(const Task_ptr& blk, std::uint64_t gen)
+    static void dispatch_ready(const Task_ptr& blk)
     {
         if (!blk->flags.run_inline)
         {
-            submit_ready(blk, gen);   // queued: the scheduler runs it (at blk->flags.priority)
+            submit_ready(blk);   // queued: the scheduler runs it (at blk->flags.priority)
             return;
         }
-        inline_pending.push_back({ blk, gen });
+        inline_pending.push_back(blk);
         if (inline_draining)
             return;              // an active drain on this thread will run it
         inline_draining = true;
         for (std::size_t head = 0; head < inline_pending.size(); ++head)
         {
-            auto [b, g] = std::move(inline_pending[head]);
+            Task_ptr b = std::move(inline_pending[head]);
             if (b->execute)
-                b->execute(b, g);   // claims + runs the body on this thread
+                b->execute(b);   // claims + runs the body on this thread
             else
                 b->complete();
         }
@@ -626,7 +602,7 @@ struct Task_control_block
     {
         if (!ready.load(std::memory_order_acquire))
             ts::fatal("Task_control_block::reset() on a task that has not settled");
-        run_state.store((generation() + 1) << 1, std::memory_order_relaxed);   // next generation, unclaimed
+        body_claimed.store(false, std::memory_order_relaxed);   // unclaimed for the next run
         completed = false;
         cancelled = false;
         prereq_cancelled.store(false, std::memory_order_relaxed);
@@ -816,9 +792,9 @@ struct Executable
         : body(std::move(b))
     {}
 
-    static void run(const Task_ptr& c, std::uint64_t gen)
+    static void run(const Task_ptr& c)
     {
-        if (!c->claim(gen))
+        if (!c->claim())
             return;   // machinery bug (fatal under TS_SAFETY_CHECKS); skip in shipping
 
         auto* self = reinterpret_cast<Executable*>(c.get());
@@ -1130,7 +1106,7 @@ auto build_bare_task(Fn&& fn, Launch_options opts, std::source_location site)
     Task_ptr core = make_executable<R>(std::forward<Fn>(fn), std::move(opts.token));
     core->flags.priority = opts.priority;
     set_task_name(core, named_from(opts, site));
-    submit_ready(core, core->generation());   // fresh block, pre-dispatch: gen 0, race-free read
+    submit_ready(core);
     return Task<R>(core);
 }
 

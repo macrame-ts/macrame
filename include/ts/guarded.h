@@ -616,7 +616,7 @@ private:
             if (owner != nullptr && owner == detail::current_task.get())
             {
                 detail::bind_pipe_link(core.get(), 0, pipe_, mode);   // diagnostics only; never enqueued
-                core->execute(core, 0);
+                core->execute(core);
                 return Task<R>(core);
             }
         }

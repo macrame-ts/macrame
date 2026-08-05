@@ -73,30 +73,23 @@ void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closur
 }
 
 // Trampoline for a queued block dispatch: the block travels as the entry's `data_` (its ref
-// adopted from the queue), the generation via the block's `dispatch_arg`. No heap
-// closure -- the block IS the payload -- so a bare task dispatch allocates nothing beyond its
-// own block (killing the per-dispatch `submit_closure` alloc that hit every queued task).
+// adopted from the queue). No heap closure -- the block IS the payload -- so a bare task
+// dispatch allocates nothing beyond its own block (killing the per-dispatch `submit_closure`
+// alloc that hit every queued task).
 static void run_block_dispatch(void* data)
 {
     Task_ptr block(static_cast<Task_control_block*>(data), Adopt_ref{});   // adopt the queued ref
-    std::uint64_t gen = block->dispatch_arg.load(std::memory_order_acquire);
     if (block->execute)
-        block->execute(block, gen);              // claims `gen` internally
-    else if (block->claim(gen))                  // bodyless: claim guards against machinery bugs
+        block->execute(block);              // claims internally
+    else if (block->claim())                // bodyless: claim guards against machinery bugs
         block->complete();
 }   // `block` decrements here -> releases the ref the queue held
 
 // A block whose prerequisites are all met: schedule it to run (its body, or, if
 // bodyless, just complete). Bridges task.h's lock-counter to the scheduler.
-//
-// `gen` was captured by the RELEASER at/before the `num_locks` decrement that hit zero (see
-// `release`), so it names the run that actually became ready -- it is never re-read here.
-// One dispatch per run and re-arm only after settle (see `run_state`) mean the slot holds
-// at most one live value at a time, so a plain release store publishes it.
-void submit_ready(Task_ptr block, std::uint64_t gen)
+void submit_ready(Task_ptr block)
 {
     Priority priority = block->flags.priority;
-    block->dispatch_arg.store(gen, std::memory_order_release);
     // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
     global_scheduler().submit(&run_block_dispatch, block.release(), priority);
 }
@@ -330,7 +323,7 @@ bool pipe_try_inline(Scheduler&, Pipe& pipe, Access mode, const Task_ptr& block)
 
     // Admitted: run the body inline on THIS thread (it installs its own access scope). The
     // caller blocks for its duration; the settle's `advance_pipe_links` releases the pipe.
-    block->execute(block, /*gen*/ 0);
+    block->execute(block);
     return true;
 }
 
