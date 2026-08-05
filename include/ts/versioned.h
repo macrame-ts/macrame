@@ -41,17 +41,17 @@ enum class Resync
     overwrite,
 };
 
-// `Versioned<T>` -- double-buffered state with an atomic publish step: a coarse, batched
+// `Versioned<T>` - double-buffered state with an atomic publish step: a coarse, batched
 // cousin of RCU / MVCC snapshot isolation. It keeps two copies of `T` behind one
-// `Guarded<T>` "front": readers always see the last published version -- a stable
-// snapshot, taken without locking the writer -- while a producer prepares the next.
+// `Guarded<T>` "front": readers always see the last published version - a stable
+// snapshot, taken without locking the writer - while a producer prepares the next.
 // Writes surface at the next `publish()`, not immediately: a one-version lag. You
 // typically publish once per update cycle (a frame, in a game loop) but may publish as
 // often as you version.
 //
 // Producers `stage()` closures into a private journal (grant-free, no contention between
 // producers). `publish()` prepares the next version off to the side, then briefly takes
-// exclusive (write) access to the front to swap it in -- readers of the previous version
+// exclusive (write) access to the front to swap it in - readers of the previous version
 // finish first, so the exclusive window is tiny. Access control is `Guarded`'s: readers
 // declare an ordinary read on the front (`state()`), so the harness and any
 // `Static_task_graph` treat it like a normal guarded object. (Swap/resync mechanics:
@@ -59,18 +59,19 @@ enum class Resync
 //
 // Use (dynamic tasks):
 //   ts::Versioned<Transforms> tf;                    // double-buffered; owns both replicas
-//   ts::Guarded<Transforms>& front = tf.state();     // its front -- a Guarded readers access
+//   ts::Guarded<Transforms>& front = tf.state();     // its front - a Guarded readers access
 //   auto rec = tf.recorder();
 //   rec.stage([b = std::move(out)](Transforms& t){ t.apply(b); });  // stage next version
 //   tf.publish();                                    // fire-and-forget, or await it
 //   co_await tf.read([](const Transforms& t){ render(t); });        // read the current version
 // Composes with `Static_task_graph`: a `ts::publish_body(tf)` node is the flip; declaring a
-// read on the front before it reads the previous version, after it the fresh one.
+// read on the front before it reads the previous version, after it the fresh one. see
+// game_frame.cpp sample.
 //
 // Contract:
 //  - No read-your-writes: `read()` sees the last published version; staged writes appear
 //    only at the next `publish()`.
-//  - One publisher at a time -- sync the `publish()`, or order it before a run. A
+//  - One publisher at a time - sync the `publish()`, or order it before a run. A
 //    graph/inline publish that catches an unresolved dynamic one is fatal.
 //  - Under `replay` resync (the default) commands must be deterministic, so both copies
 //    converge. If yours can't be, set the policy to `copy` or `overwrite` (no
@@ -80,11 +81,11 @@ enum class Resync
 //    destruction are fatal lost writes (`discard()` drops them).
 //
 // Not the right tool when you need a write visible in the same version, or when producing
-// the next version is heavy compute rather than a data delta -- then keep the machine in
+// the next version is heavy compute rather than a data delta - then keep the machine in
 // one sealed `Guarded` and version its output extract instead (see `sample/physics.cpp`).
 //
 // Sibling `Deferred<T>` shares the same staging journal but applies to a single object
-// with no second replica or snapshot -- reach for `Deferred<T>` to batch writes and apply
+// with no second replica or snapshot - reach for `Deferred<T>` to batch writes and apply
 // them at a chosen point, `Versioned<T>` when readers need a stable snapshot across a cycle.
 template<typename T>
 class Versioned

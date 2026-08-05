@@ -11,19 +11,19 @@
 namespace ts
 {
 
-// `Deferred<T>` -- a command buffer over a `Guarded<T>`: producers record writes now, one
+// `Deferred<T>` - a command buffer over a `Guarded<T>`: producers record writes now, one
 // commit applies them later. Also known as a deferred-write / write-behind / staging
-// buffer (UE's `ENQUEUE_RENDER_COMMAND` / RHI command list is the same idea). Many
-// producers `stage()` closures into a private journal -- grant-free, contending with
-// neither each other nor readers -- and a single commit then replays the whole batch as
+// buffer / command list, popular in game engines rendering systems. Many
+// producers `stage()` closures into a private journal - grant-free, contending with
+// neither each other nor readers - and a single commit then replays the whole batch as
 // one write to the bound object. Readers between stage and commit see none of the staged
 // writes; after it, all of them.
 //
 // Access control is `Guarded`'s: the commit is an ordinary write, staging touches nothing
-// shared. ONE commit verb, auto-dispatching on grant ownership -- called from the task that
-// holds the target's write grant (a graph node's declared write, an `async`/`access` write
-// body) `commit()` applies INLINE under that grant, no second acquisition; called from
-// anywhere else it enqueues an ordinary async write and returns a task to await.
+// shared. `commit` called from the task that holds the target's write grant (a graph node's 
+// declared write, an `async`/`access` write body) `commit()` applies inline under that grant, 
+// no second acquisition; called from anywhere else it enqueues an ordinary async write and 
+// returns a task to await.
 //
 // Use:
 //   ts::Guarded<Draw_list> queue;                     // the target
@@ -32,15 +32,15 @@ namespace ts
 //   rec.stage([cmd](Draw_list& q){ q.push(cmd); });   // record now, grant-free (many producers)
 //   co_await dl.commit();                             // apply the batch as one write
 // In a graph, a node that already holds the target's write grant just calls `commit()`;
-// order producers before the commit with an edge.
+// order producers before the commit with an edge. see game_frame.cpp sample.
 //
 // Contract:
 //  - Ordering: intra-recorder FIFO is semantic (build on it); cross-recorder order is
-//    arbitrary -- never build semantics on it -- but deterministic given a deterministic
+//    arbitrary - never build semantics on it - but deterministic given a deterministic
 //    mint/destroy sequence, so runs are reproducible (see journal.h). Commands staged
 //    after a commit's cut ride the next commit.
-//  - Await the task an ENQUEUED `commit()` returns before destroying the `Deferred` (the
-//    pending write still references it) -- violating it is fatal under `TS_SAFETY_CHECKS`.
+//  - Await the task an enqueued `commit()` returns before destroying the `Deferred` (the
+//    pending write still references it) - violating it is fatal under `TS_SAFETY_CHECKS`.
 //    Leftover staged-but-uncommitted commands at destruction are fatal lost writes
 //    (`discard()` drops them). Must outlive any outstanding `Recorder`.
 //
