@@ -25,6 +25,9 @@
     <Filter Include="include\ts\detail">
       <UniqueIdentifier>{07777777-7777-7777-7777-777777777777}</UniqueIdentifier>
     </Filter>
+    <Filter Include="tsan">
+      <UniqueIdentifier>{a8888888-8888-8888-8888-888888888888}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\access.cpp">
@@ -98,6 +101,18 @@
     </ClCompile>
     <ClCompile Include="tests\versioned_tests.cpp">
       <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\named_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\pipe_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\rules_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tsan\tsan_main.cpp">
+      <Filter>tsan</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -217,6 +232,30 @@
     </ClInclude>
     <ClInclude Include="tests\versioned_tests.h">
       <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\named_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\pipe_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\rules_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\frame_gate.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\named.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\rules.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\detail\pipe_link.h">
+      <Filter>include\ts\detail</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\detail\suspension_registry.h">
+      <Filter>include\ts\detail</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
