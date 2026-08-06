@@ -587,10 +587,6 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     }
 #endif
 
-    // Resolve lending and bind the links BEFORE the per-node re-arm below, which seeds each
-    // block's lock counter from its (possibly reduced) `pipe_count`.
-    bind_links_for_run(opts.detach);
-
     // Runs on the one global scheduler (whatever a `Scheduler_scope` currently has it
     // configured as).
     Scheduler& scheduler = global_scheduler();
@@ -604,7 +600,25 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     run.scheduler = &scheduler;
     run.token = token;
     run.done = detail::make_bare_block();
+
+    // Arm the trace and snapshot the machinery/body counters BEFORE the per-run setup below,
+    // so the setup span the `Trace_setup_scope` books folds into this run's machinery delta.
     run.stamps.begin_run(trace_, scheduler);
+
+#if TS_PROFILING
+    // Fold the per-run setup + initial dispatch (link binding, node re-arm, indegree init,
+    // root dispatch) into machinery M -- that work runs here on the calling thread in no
+    // `run_task` span, scales with node count, and previously escaped the overhead metric
+    // entirely. Function-scope, so it also covers the early empty-graph return. In worker-less
+    // mode the initial dispatch drains the whole frame inline within this span; the scope flags
+    // it `run_task`-booked, so each inline body nets its own span back out, leaving pure
+    // machinery. Armed-only; a no-op on an untraced run.
+    detail::Trace_setup_scope setup_cost;
+#endif
+
+    // Resolve lending and bind the links BEFORE the per-node re-arm below, which seeds each
+    // block's lock counter from its (possibly reduced) `pipe_count`.
+    bind_links_for_run(opts.detach);
 
     for (size_t i = 0; i < nodes_.size(); ++i)
     {

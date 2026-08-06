@@ -16,6 +16,14 @@ thread_local Scheduler* current_scheduler = nullptr;
 thread_local int current_worker_index = -1;
 
 #if TS_PROFILING
+// Declared in guarded.h; used only by the machinery bridge below to resolve the ambient
+// scheduler when `execute()`'s per-run setup runs on a non-worker thread (the frame loop),
+// where `current_scheduler` is null. A graph run always targets the global scheduler, so this
+// is the scheduler the setup belongs to.
+Scheduler& global_scheduler();
+#endif
+
+#if TS_PROFILING
 namespace detail
 {
 // The owner-attribution bridge (declared scheduler-free in detail/trace_owner.h so task.h
@@ -39,6 +47,21 @@ void (*trace_body_only)(long long) = +[](long long dt)
 {
     if (Scheduler* s = current_scheduler)
         s->add_body_only(current_worker_index, dt);
+};
+// The per-run graph-setup bridge: `Trace_setup_scope` (in static_task_graph.cpp's execute())
+// routes the setup+initial-dispatch span to machinery on the calling worker -- or the overflow
+// lane when `execute()` runs on a non-worker thread (the common case: the frame loop / a test).
+// This folds the node-count-scaling per-run setup (link binding, node re-arm, indegree init,
+// root dispatch), which lives in no `run_task` span, into the machinery accumulator M.
+void (*trace_machinery_add)(long long) = +[](long long dt)
+{
+    // Unlike the body bridges (which always run on a worker or inside the worker-less drain,
+    // where `current_scheduler` is set), the setup span is booked from `execute()` on the
+    // calling thread -- the frame loop, where `current_scheduler` is null. Fall back to the
+    // ambient scheduler (the global one a graph run always targets); the non-worker
+    // `current_worker_index == -1` then lands in that scheduler's overflow lane.
+    Scheduler* s = current_scheduler ? current_scheduler : &global_scheduler();
+    s->add_machinery_ticks(current_worker_index, dt);
 };
 }
 #endif
@@ -117,7 +140,14 @@ Scheduler::Scheduler(Scheduler_config config)
         local_normal_.push_back(std::make_unique<detail::Work_stealing_deque<detail::Task_entry>>());
 
 #if TS_PROFILING
-    busy_ = std::vector<Busy_slot>(num_threads);   // before any worker starts (run_task writes)
+    // One busy slot per worker PLUS a trailing overflow lane (the last slot) for non-worker
+    // callers (`current_worker_index < 0`): body/machinery charged from the main thread (a
+    // graph `execute()`'s per-run setup) or an external submitter lands here instead of being
+    // dropped. Worker-less mode has zero workers, so the overflow lane is the only slot -- it
+    // is what makes the body accumulator (and the worker-less ground-truth overhead) work with
+    // no workers. Buckets are worker-only (run_task, index >= 0), so bucket_busy_ stays sized
+    // to the worker count.
+    busy_ = std::vector<Busy_slot>(num_threads + 1);   // +1 overflow lane; before any worker starts
     bucket_busy_ = std::vector<Bucket_row>(num_threads);
 #endif
 

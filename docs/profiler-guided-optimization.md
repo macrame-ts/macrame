@@ -207,6 +207,53 @@ relaxed load + branch, unmeasurable on the spin throughput series — bench held
   benchmark (~200 ns/op) omits; the two are not directly comparable, the bench is
   the untraced-bare floor.
 
+Done (2026-08): **the overhead metric, two blind spots closed + a ground-truth
+oracle.** The summed-M metric above had a known under-count and no cross-check.
+Both are now addressed; the summed-M number stays, extended, and gains a
+side-by-side oracle.
+  - **Per-run setup folded into M (blind spot 1).** The per-run graph setup
+    (`bind_links_for_run` + the per-node re-arm loop + indegree init + the initial
+    root dispatch) runs on the calling thread in `execute()`, inside *no* `run_task`
+    span, and scales with node count — so it escaped M entirely. A `Trace_setup_scope`
+    (in `detail/trace_owner.h`, armed-only, gated) now brackets it and routes the span
+    to M via a new `trace_machinery_add` → `Scheduler::add_machinery_ticks` bridge
+    (mirroring `trace_body_add`). Two mechanics make it exact: (a) an **overflow lane**
+    — the scheduler's busy vector is sized `workers + 1`, and a non-worker caller
+    (`current_worker_index < 0`, e.g. the frame loop) lands in the trailing slot instead
+    of being dropped; the bridge falls back to `global_scheduler()` when
+    `current_scheduler` is null (the main thread), which is the scheduler a graph run
+    always targets. (b) The setup scope flags its span `run_task`-booked, so a body
+    dispatched *inline* within it (a `set_inline` root, or — in worker-less mode — every
+    node, since the whole frame drains serially inside the scope) nets its own span back
+    out, leaving pure machinery. `begin_run` was moved ahead of the setup so the snapshot
+    brackets it. Measured cost on game_frame: ~0.30 µs/node (baseline, 35 nodes → 10.6
+    µs/frame) / ~0.40 µs/node (optimised, 37 nodes) — small next to fat bodies, but it is
+    the term that grows with a large cheap-bodied graph.
+  - **Worker-less ground truth (the oracle).** In a single-thread (`single_threaded =
+    true`) traced run the whole frame is serial on one thread with no idle to confound
+    it, so `framework = total_wall − B` is the *complete* framework cost by pure
+    subtraction — setup, dispatch, completion, pipe, trampoline, everything, with zero
+    blind spot. `total` is bracketed in the sample around the whole `execute().sync()`
+    frame loop (not the trace's node-span makespan, which omits pre-first-node setup and
+    the fold); B is the body accumulator, fed here by the overflow lane since a
+    worker-less run has no workers. Reported as `overhead_true = (total − B)/total`. On
+    game_frame this is ~2.2%. The summed-M accumulator read off the *same* worker-less
+    run closes to it **exactly** (gap 0.00 pt) — the built-in validation that the
+    accounting has no serial blind spot; it is therefore the per-op framework **floor**.
+  - **Dual print + the gap.** The `--trace` console lines and the SVG headline
+    (`graph_trace.h` `write_SVG`, via `set_ground_truth_overhead`) now show BOTH the
+    multi-worker summed-M overhead (incl. setup) AND the worker-less serial floor, plus
+    the gap. game_frame, 6-worker trace, 100 frames: **baseline summed-M 10.5% (B 38.3
+    ms / M 4.51 ms) vs serial floor 2.3% → gap +8.3 pt; optimised summed-M 4.4% (B 38.0 /
+    M 1.74) vs floor 2.2% → gap +2.2 pt.** The gap direction is the point and is *not*
+    fudged to match: the multi-worker figure is *higher* than the serial floor, and the
+    gap is the machinery only workers pay — cross-thread dispatch, pipe hand-off,
+    park/wake, steal — i.e. the price of the parallelism, not a metric error. The
+    serial-floor validation (gap 0 on the serial run) is what licenses reading the
+    multi-worker gap as real parallel cost rather than an accumulator blind spot. All
+    `TS_PROFILING`-gated and armed-only (disarmed = one relaxed load + branch; the
+    throughput series is untouched — it never arms).
+
 Remaining:
 - **Per-kind aggregates + scheduling counters.** Per task kind {node, slice,
   async, continuation, nested}: count + Welford duration + total busy. Plus

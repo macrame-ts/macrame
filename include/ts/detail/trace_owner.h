@@ -44,6 +44,7 @@ extern std::atomic<int> trace_owner_armed;
 extern void (*trace_owner_add)(int owner, long long dt);
 extern void (*trace_body_add)(long long dt);   // B += dt, M -= dt (body booked under run_task)
 extern void (*trace_body_only)(long long dt);  // B += dt only (inline body: no run_task M to net)
+extern void (*trace_machinery_add)(long long dt);  // M += dt (per-run graph setup, no run_task span)
 
 inline thread_local int current_trace_owner = -1;
 // True while this thread is inside a user functor (a `Trace_busy_scope`). The scheduler's
@@ -130,11 +131,55 @@ private:
     long long t0_ = 0;
 };
 
+// Brackets a graph run's per-run setup + initial dispatch (link binding, node re-arm,
+// indegree init, root dispatch) in `Static_task_graph::execute()`. That work runs on the
+// calling thread inside NO `run_task` span, so it escaped the machinery accumulator entirely
+// and scaled with node count -- this scope folds it in. While armed it (1) records its wall
+// span as machinery via `trace_machinery_add`, and (2) flags the span as `run_task`-booked
+// (`trace_body_under_run_task`), so any body dispatched INLINE within it (a `set_inline` root,
+// or every node in worker-less mode where the whole frame drains serially here) nets its own
+// span back OUT of this machinery span -- exactly as a body nets out of `run_task`'s span. So
+// the setup span minus the inline bodies it contains = pure machinery. Disarmed cost: one
+// relaxed load + branch (no clock read). Non-worker callers land in the scheduler's overflow
+// lane (the frame loop / a test), workers in their own slot (a nested `execute()`).
+class Trace_setup_scope
+{
+public:
+    Trace_setup_scope() noexcept
+    {
+        if (trace_owner_armed.load(std::memory_order_relaxed) != 0)
+        {
+            active_ = true;
+            prev_booked_ = trace_body_under_run_task;
+            trace_body_under_run_task = true;   // inline bodies within net out of this span
+            t0_ = std::chrono::steady_clock::now().time_since_epoch().count();
+        }
+    }
+    ~Trace_setup_scope()
+    {
+        if (active_)
+        {
+            long long dt = std::chrono::steady_clock::now().time_since_epoch().count() - t0_;
+            trace_body_under_run_task = prev_booked_;
+            if (trace_machinery_add)
+                trace_machinery_add(dt);
+        }
+    }
+    Trace_setup_scope(const Trace_setup_scope&) = delete;
+    Trace_setup_scope& operator=(const Trace_setup_scope&) = delete;
+
+private:
+    bool active_ = false;
+    bool prev_booked_ = false;
+    long long t0_ = 0;
+};
+
 #else   // TS_PROFILING == 0: everything compiles away
 
 inline int trace_owner() noexcept { return -1; }
 class Trace_owner_scope { public: explicit Trace_owner_scope(int) noexcept {} };
 class Trace_busy_scope { public: Trace_busy_scope() noexcept {} };
+class Trace_setup_scope { public: Trace_setup_scope() noexcept {} };
 
 #endif
 

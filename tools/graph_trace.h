@@ -297,8 +297,11 @@ public:
     double tasks_per_run() const { return tasks_per_run_.mean; }  // mean tasks per run
 
     // Task-system overhead, [0,1]: mean machinery / (mean body + mean machinery) over the
-    // folded runs. An UPPER bound on scheduler cost -- the coarse per-task clock brackets
-    // charge their own read latency to machinery. Cross-check against the microbench ns/op.
+    // folded runs. Machinery now includes the per-run graph setup + initial dispatch (folded in
+    // via `Trace_setup_scope`), which previously escaped it and scaled with node count. An UPPER
+    // bound on scheduler cost -- the coarse per-task clock brackets charge their own read latency
+    // to machinery. Cross-check against the worker-less ground truth (`set_ground_truth_overhead`)
+    // and the microbench ns/op.
     double body_us() const { return body_us_.mean; }
     double machinery_us() const { return machinery_us_.mean; }
     double overhead() const
@@ -361,6 +364,15 @@ public:
     {
         title_ = std::move(title);
     }
+
+    // Attach the worker-less ground-truth overhead (the oracle) so `write_SVG` prints it next
+    // to the summed-M metric. Measured on a serial single-thread run of the SAME frame as
+    // `(total_wall - body) / total_wall` -- the complete framework cost by pure subtraction, no
+    // idle to confound it. On a serial run the summed-M accumulator closes to this exactly (the
+    // validation: gap ~0), so it is the per-op framework FLOOR. The gap `overhead() - this` on a
+    // multi-worker run is the machinery only workers pay (cross-thread dispatch, pipe hand-off,
+    // park/wake) -- not an accumulator blind spot. Negative = unset. Reported as-is, not matched.
+    void set_ground_truth_overhead(double complement) { ground_truth_overhead_ = complement; }
 
     // Render the average run; returns false (reported to stderr) on I/O failure.
     bool write_SVG(const char* path) const;
@@ -642,6 +654,7 @@ private:
     Welford tasks_per_run_;       // tasks per run
     Welford body_us_;             // per-run user-functor wall time (B), summed over workers, µs
     Welford machinery_us_;        // per-run scheduler machinery (M), summed over workers, µs
+    double ground_truth_overhead_ = -1.0;   // worker-less (total-B)/total oracle; <0 = unset
     std::string title_;   // survives reset()/begin_structure(); set once by the owner
 };
 
@@ -1045,14 +1058,29 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
 
         // Third classifier: task-system overhead -- machinery / (body + machinery) compute
-        // (idle excluded). See the band constants; reported as an upper bound.
+        // (idle excluded). Now includes the per-run graph setup (`Trace_setup_scope`). See the
+        // band constants; reported as an upper bound.
         double ov = overhead();
         const char* ov_color = ov <= overhead_ok_share ? "#a6e22e"
                              : ov <= overhead_bad_share ? "#e6db74" : "#ff5f45";
         out += "<tspan fill=\"#cfcfc2\"> | </tspan>";
         out += "<tspan fill=\"" + std::string(ov_color) + "\">";
-        append_escaped(out, "task-system overhead: " + fmt_us(100.0 * ov) + "%");
-        out += "</tspan></text>\n";
+        append_escaped(out, "task-system overhead: " + fmt_us(100.0 * ov) + "% (summed-M)");
+        out += "</tspan>";
+        // The worker-less ground-truth complement, when attached: the oracle (total-B)/total on
+        // a serial run of the same frame -- the per-op framework floor with no parallelization
+        // tax. The gap (summed-M minus the floor) is the machinery only the multi-worker run
+        // pays: cross-thread dispatch, pipe hand-off, park/wake. Reported as-is, not fudged.
+        if (ground_truth_overhead_ >= 0.0)
+        {
+            double gt = ground_truth_overhead_;
+            double gap = ov - gt;
+            out += "<tspan fill=\"#cfcfc2\"> | serial floor (worker-less): </tspan>";
+            out += "<tspan fill=\"#a6e22e\">" + fmt_us(100.0 * gt) + "%</tspan>";
+            out += "<tspan fill=\"#cfcfc2\"> | gap +</tspan>";
+            out += "<tspan fill=\"#e6db74\">" + fmt_us(100.0 * gap) + "%</tspan>";
+        }
+        out += "</text>\n";
 
         // "critical path" = the CPM critical-path length: the dependency lower bound on
         // frame time from median durations and edges alone (no scheduling waits). The

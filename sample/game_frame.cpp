@@ -1512,10 +1512,76 @@ std::string described_SVG_path(const char* base, const char* description)
 }
 #endif
 
+#if TS_PROFILING
+// Convert a steady_clock tick count (the unit of `Scheduler::body_ticks()` etc.) to µs.
+double ticks_to_us(long long ticks)
+{
+    return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::duration(ticks)).count();
+}
+
+// The worker-less ground-truth overhead for a variant. On a single-thread serial run the whole
+// frame executes inline on one thread with no idle to confound it, so `total_wall - B` is the
+// COMPLETE framework cost by pure subtraction (setup, dispatch, completion, pipe, trampoline --
+// everything the summed-M accumulator may still miss on a multi-worker run). This is the oracle
+// the multi-worker summed-M is measured against. Returns the complement `(total - B)/total`,
+// which the caller attaches to the multi-worker trace for the dual print.
+//
+// B comes from the scheduler's body accumulator (fed here by the overflow lane, since a
+// worker-less run has no workers). `total` is the wall of the whole `execute().sync()` frame
+// loop -- not the trace's node-span makespan, which omits the pre-first-node setup and the fold.
+// A trace is attached only to arm the body/machinery tracking (its fold is skipped for a
+// worker-less run); no SVG is written. Also reports the worker-less summed-M `M/(B+M)` read off
+// the SAME run: with the setup scope wrapping the inline drain and inline bodies netting out,
+// M settles to `total - B`, so worker-less summed-M should track the complement -- the apples-
+// to-apples serial validation, whose residual gap is a pure blind-spot measurement.
+double serial_ground_truth(int frames, Frame_variant variant, const char* description)
+{
+    constexpr int entities = 1000;
+    time_scale = 1.0f;
+    reset_stats();
+
+    ts::Scheduler_scope pool{ { .single_threaded = true } };
+    World world{ entities };
+    ts::Static_task_graph graph = build_frame_graph(world, variant, nullptr);
+
+    ts::tools::Graph_trace trace;   // attach only to arm body/machinery tracking (fold is skipped)
+    graph.set_trace(&trace);
+
+    ts::Scheduler& sched = ts::global_scheduler();
+    long long body0 = sched.body_ticks();
+    long long mach0 = sched.machinery_ticks();
+    auto t0 = std::chrono::steady_clock::now();
+    for (int f = 0; f < frames; ++f)
+        graph.execute().sync();
+    auto t1 = std::chrono::steady_clock::now();
+    long long body1 = sched.body_ticks();
+    long long mach1 = sched.machinery_ticks();
+    graph.set_trace(nullptr);
+
+    double total_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+    double body_us = ticks_to_us(body1 - body0);
+    double mach_us = ticks_to_us(mach1 - mach0);
+    double per_run_total = total_us / frames;
+    double per_run_body = body_us / frames;
+    double per_run_mach = mach_us / frames;
+    double complement = total_us > 0.0 ? (total_us - body_us) / total_us : 0.0;
+    double wl_summed_M = (body_us + mach_us) > 0.0 ? mach_us / (body_us + mach_us) : 0.0;
+
+    std::printf("[game_frame] %s worker-less ground truth: %.1f us/frame total, %.1f us body -> "
+                "framework (total-B)/total = %.1f%%  (serial summed-M M/(B+M) = %.1f%%, gap %.2f pt)\n",
+        description, per_run_total, per_run_body, 100.0 * complement, 100.0 * wl_summed_M,
+        100.0 * (complement - wl_summed_M));
+    (void)per_run_mach;
+    return complement;
+}
+#endif
+
 // One traced variant on the current scheduler: build the variant's graph on a
-// fresh World, attach a fresh trace, run, write the described SVG.
+// fresh World, attach a fresh trace, run, write the described SVG. `ground_truth` is the
+// worker-less complement for this variant (negative = none), shown next to the summed-M
+// overhead in the SVG headline and the console line.
 void trace_variant(int frames, Frame_variant variant, const char* base_SVG_path, const char* description,
-    const char* DOT_path)
+    const char* DOT_path, double ground_truth = -1.0)
 {
     constexpr int entities = 1000;
     time_scale = 1.0f;
@@ -1530,6 +1596,8 @@ void trace_variant(int frames, Frame_variant variant, const char* base_SVG_path,
     if (*description)
         title += std::string(" (") + description + ")";
     trace.set_title(std::move(title));
+    if (ground_truth >= 0.0)
+        trace.set_ground_truth_overhead(ground_truth);
     graph.set_trace(&trace);
     for (int f = 0; f < frames; ++f)
         graph.execute().sync();
@@ -1537,10 +1605,21 @@ void trace_variant(int frames, Frame_variant variant, const char* base_SVG_path,
     std::string path = described_SVG_path(base_SVG_path, description);
     trace.write_SVG(path.c_str());
     std::printf("[game_frame] %s: traced %lld runs -> %s\n", description, trace.run_count(), path.c_str());
+    // Dual print: the multi-worker summed-M overhead (now including per-run setup) side by side
+    // with the worker-less serial floor and their gap. The multi-worker figure sits ABOVE the
+    // floor; the gap is the machinery only workers pay (cross-thread dispatch, pipe hand-off,
+    // park/wake) -- the price of the parallelism, not a measurement error.
+    double ov = trace.overhead();
+    std::printf("[game_frame] %s: task-system overhead summed-M = %.1f%% (body %.1f / machinery %.1f us per run)",
+        description, 100.0 * ov, trace.body_us(), trace.machinery_us());
+    if (ground_truth >= 0.0)
+        std::printf("; worker-less serial floor = %.1f%%; gap +%.2f pt (parallelization tax above the floor)",
+            100.0 * ground_truth, 100.0 * (ov - ground_truth));
+    std::printf("\n");
 #else
     for (int f = 0; f < frames; ++f)
         graph.execute().sync();
-    (void)base_SVG_path; (void)description;
+    (void)base_SVG_path; (void)description; (void)ground_truth;
     std::printf("[game_frame] TS_PROFILING is 0: ran %d frames\n", frames);
 #endif
 }
@@ -1553,9 +1632,17 @@ void trace_variant(int frames, Frame_variant variant, const char* base_SVG_path,
 // trace). Writes one average-run SVG per variant plus the structure DOT.
 void trace_game_frame(int frames, const char* DOT_path, const char* SVG_path)
 {
+#if TS_PROFILING
+    // Worker-less ground truth first (its own single-thread scheduler per variant): the serial
+    // (total-B)/total oracle, attached to the multi-worker trace below for the dual print.
+    double gt_baseline = serial_ground_truth(frames, Frame_variant::baseline, "baseline");
+    double gt_optimised = serial_ground_truth(frames, Frame_variant::optimised, "optimised");
+#else
+    double gt_baseline = -1.0, gt_optimised = -1.0;
+#endif
     ts::Scheduler_scope pool{ { .num_threads = static_cast<uint32_t>(variant_workers) } };
-    trace_variant(frames, Frame_variant::baseline, SVG_path, "baseline", DOT_path);
-    trace_variant(frames, Frame_variant::optimised, SVG_path, "optimised", nullptr);
+    trace_variant(frames, Frame_variant::baseline, SVG_path, "baseline", DOT_path, gt_baseline);
+    trace_variant(frames, Frame_variant::optimised, SVG_path, "optimised", nullptr, gt_optimised);
 }
 
 // Headless run of the OPTIMISED variant on a dedicated `workers`-thread

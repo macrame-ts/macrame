@@ -244,22 +244,27 @@ public:
         slot.machinery.fetch_add(dt, std::memory_order_relaxed);
     }
     // Move `dt` ticks of a worker's time from machinery to body (a user functor ran) -- the
-    // `trace_body_add` bridge target. Single writer (this worker). No-op off-worker.
+    // `trace_body_add` bridge target. Single writer per slot. A non-worker caller lands in the
+    // overflow lane (the last slot), so an inline body run on the main thread still nets.
     void add_body_ticks(int worker_index, long long dt) noexcept
     {
-        if (worker_index < 0)
-            return;
-        Busy_slot& slot = busy_[static_cast<size_t>(worker_index)];
+        Busy_slot& slot = busy_[busy_slot_index(worker_index)];
         slot.body.fetch_add(dt, std::memory_order_relaxed);
         slot.machinery.fetch_add(-dt, std::memory_order_relaxed);
     }
     // Credit `dt` ticks to body without netting machinery -- an inline-dispatched body that
-    // did not pass through `run_task` (nothing booked its span as machinery). No-op off-worker.
+    // did not pass through `run_task` (nothing booked its span as machinery). A non-worker
+    // caller (worker-less mode's inline drain, an external submit) lands in the overflow lane;
+    // this is what feeds body (B) for the worker-less ground-truth overhead.
     void add_body_only(int worker_index, long long dt) noexcept
     {
-        if (worker_index < 0)
-            return;
-        busy_[static_cast<size_t>(worker_index)].body.fetch_add(dt, std::memory_order_relaxed);
+        busy_[busy_slot_index(worker_index)].body.fetch_add(dt, std::memory_order_relaxed);
+    }
+    // Add `dt` ticks of machinery -- the `trace_machinery_add` bridge target (a graph run's
+    // per-run setup span, folded into M). A non-worker caller lands in the overflow lane.
+    void add_machinery_ticks(int worker_index, long long dt) noexcept
+    {
+        busy_[busy_slot_index(worker_index)].machinery.fetch_add(dt, std::memory_order_relaxed);
     }
     // Move `dt` ticks of a worker's time from body to machinery (a `submit` ran inside a
     // functor -- fan-out dispatch is task-system cost, not user work). No-op off-worker.
@@ -368,6 +373,17 @@ private:
 #endif
         return find_work(worker_index, out);
     }
+#if TS_PROFILING
+    // Map a worker index to its busy slot: a real worker gets its own slot; a non-worker
+    // caller (`worker_index < 0`) gets the trailing overflow lane (`busy_.size() - 1`), which
+    // always exists (the ctor sizes `busy_` to worker_count + 1, so even worker-less mode has
+    // one slot).
+    std::size_t busy_slot_index(int worker_index) const noexcept
+    {
+        return worker_index >= 0 ? static_cast<std::size_t>(worker_index) : busy_.size() - 1;
+    }
+#endif
+
     // Approximate: all global queues AND all local deques empty (racy; shutdown-drain check).
     bool all_empty() const;
 
