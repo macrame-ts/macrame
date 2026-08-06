@@ -1049,6 +1049,56 @@ void stress_physics()
 }
 
 
+// TODO 7.3 (a KNOWN, unfixed race, present until the body-lifetime fix lands): a functor
+// task's `Executable` holds `Body body;` as a plain member, so the closure and everything it
+// captured are destroyed only when the block's refcount hits zero -- which happens on the
+// WORKER (`run_block_dispatch` in src/guarded.cpp drops the last ref) AFTER the task settled
+// and the caller's completion returned. So a resource captured in a task body is torn down on
+// the worker AFTER the caller moved on, racing whatever the caller does with that memory next
+// (in game_frame it races the next frame's `World` at the same stack address).
+//
+// Reproduced distilled and reliably: a `Body_lifetime_probe` captured by value writes a plain
+// shared location in its destructor; the caller joins a SEPARATE completion (an atomic the
+// body sets), NOT the task -- mirroring game_frame, where the caller joins the frame, not the
+// leaf async whose body holds the `Recorder`. The launch handle is discarded at the `;`, so
+// the worker is the LAST ref-holder and `~Body_lifetime_probe` reliably runs on the worker,
+// after the body already woke the caller. TSan flags the worker's destructor write against the
+// caller's reuse write. NOT in the `--tests` suite: this is a deliberate pre-fix race the
+// deterministic guard (tests/task_tests.cpp `captures destroyed before sync`) asserts without
+// a detector. It runs LAST here so the race-free scenarios report first under `halt_on_error`.
+struct Body_lifetime_probe
+{
+    int* shared;
+    ~Body_lifetime_probe()
+    {
+        if (shared)
+            *shared = 0xDEAD;   // plain write to caller-reused memory: the racing access
+    }
+};
+
+void stress_body_lifetime_after_sync()
+{
+    ts::Scheduler_scope scope{ ts::Scheduler_config{ .num_threads = 2 } };
+    int shared = 0;                    // scenario-lifetime; the caller AND a worker's ~Probe write it
+    std::atomic<bool> ran{ false };    // the body's completion signal -- joined instead of the task
+    constexpr int iters = 500;
+    for (int i = 0; i < iters; ++i)
+    {
+        ran.store(false, std::memory_order_relaxed);
+        // Fire-and-forget: the returned handle is dropped at the `;`, so once the body runs the
+        // only ref left is the worker's -- it destroys the body (and the captured probe) at
+        // settle-time teardown. The body signals `ran`; the caller joins that, not this task.
+        ts::launch([&ran, probe = Body_lifetime_probe{ &shared }]
+        {
+            ran.store(true, std::memory_order_release);
+        });
+        while (!ran.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        shared = i;   // caller reuses the location while the worker tears the probe down -> race
+    }
+    (void)shared;
+}
+
 } // namespace
 
 // The entry point, renamed when this TU is compiled into the Windows binary.
@@ -1118,6 +1168,11 @@ int main()
     }
     std::puts("tsan: game_frame optimised frames");
     sample::stress_game_frame_optimised(40, 4);   // gameplay Versioned + Deferred staging
+    // TODO 7.3: a DELIBERATE, known race (functor body torn down on a worker after the caller's
+    // completion returned). Runs last: under halt_on_error the race-free scenarios above all
+    // report clean first, then TSan flags this one -- expected until the body-lifetime fix.
+    std::puts("tsan: body lifetime after sync (KNOWN RACE, TODO 7.3)");
+    stress_body_lifetime_after_sync();
     std::puts("tsan: done (no races)");
     return 0;
 }

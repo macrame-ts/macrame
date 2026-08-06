@@ -334,6 +334,41 @@ void test_launch_void()
     TS_CHECK(ran.load() == 1);
 }
 
+// TODO 7.3 (a KNOWN bug, pending fix): a functor task's `Executable` holds `Body body;` as a
+// plain member, so the closure and everything it captured are destroyed only when the block's
+// refcount hits zero -- on a worker, AFTER `settle()` and AFTER a `sync()` on the task
+// returned. A resource captured in a task body therefore outlives the `sync()` meant to bound
+// it (in game_frame this races the next frame's `World` at the same stack address; the racy
+// form is tsan/tsan_main.cpp's `body lifetime after sync` scenario).
+//
+// This asserts the fix's guarantee deterministically, with no race detector: `t` is held
+// across the check, so the block's refcount is >= 1 and it CANNOT be freed here. Without the
+// fix nothing else destroys the body, so `destroyed == 0` -- guaranteed, not racy (there is no
+// path that runs `~Executable` while a handle is live). With the fix (body destroyed inside
+// `settle()` before `notify_all()` wakes `sync()`), the captured `Probe` is gone before
+// `sync()` returns, so `destroyed == 1`.
+//
+// EXPECTED TO FAIL until the 7.3 fix lands; registered SKIPPED in `run_task_tests` so the suite
+// stays green. The fix turn flips its `run_if` predicate to active -- it then guards the fix
+// (captured resources destroyed before `sync()` returns).
+void test_captures_destroyed_before_sync()
+{
+    std::atomic<int> destroyed{ 0 };
+    struct Probe
+    {
+        std::atomic<int>* d;
+        explicit Probe(std::atomic<int>* p) : d(p) {}
+        Probe(Probe&& o) noexcept : d(o.d) { o.d = nullptr; }   // a moved-from Probe doesn't count
+        ~Probe() { if (d) d->fetch_add(1, std::memory_order_relaxed); }
+    };
+
+    ts::Task<void> t = ts::launch([p = Probe{ &destroyed }] { (void)p; });
+    t.sync();
+    // `t` is still alive -> the block holds a ref -> it is not freed -> without the fix the
+    // captured `Probe` cannot have been destroyed yet, so this observes 0.
+    TS_CHECK(destroyed.load(std::memory_order_relaxed) == 1);
+}
+
 // `sync()` returns `const R&` and does not consume: the same task can be sync'd repeatedly,
 // and readers (another sync, an awaiting coroutine) all see the same result.
 void test_sync_const_ref_multi()
@@ -502,6 +537,11 @@ void run_task_tests()
     run("cancel callback stateless token", test_cancel_callback_stateless_token);
     run("launch value", test_launch_value);
     run("launch void", test_launch_void);
+    // Skipped until the TODO 7.3 fix lands (it fails deterministically until then: the body,
+    // with its captured resources, is destroyed on a worker after `sync()` returns). The fix
+    // turn flips `false` -> active, turning this into the fix's regression guard.
+    run_if(false, "TODO 7.3 (pending fix): body destroyed on worker after sync()",
+           "captures destroyed before sync", test_captures_destroyed_before_sync);
     run("sync const-ref multi-consumer", test_sync_const_ref_multi);
     run("take moves move-only", test_take_moves_move_only);
     run("launch priority", test_launch_priority);
