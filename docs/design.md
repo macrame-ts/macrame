@@ -278,30 +278,43 @@ closing it is resume locality, and the practical reading is that hand
 composition is free on millisecond-grained systems and starts to cost at
 fine grain.
 
-### 2.5 The cost of the coroutine-first node
+### 2.5 The cost of the coroutine-first node dispatch
 
-Making every graph node a coroutine-capable block is not free, and the honest
-accounting belongs next to §2.4's. The coroutine-first `Graph_node_block` — the
-one that can hold a `ts::Task<void>` frame and gate the node's completion on it
-through `detail::add_nested` — carries roughly **9% more framework overhead per
-node** than the pre-transformation block did. The measurement is clean-machine
-and isolates the block itself: the delta persists in a Shipping build (so it is
-not the safety harness), persists with object-free nodes (so it is not the pipe
-or the acquire cascade), and persists independent of the scheduler path — what is
-left is the node block's own setup and completion machinery.
+The coroutine-first graph runs each node's dispatch through the same
+ownership-carrying block path as every other task, and that is not free. The
+current per-node machinery costs roughly **9% more per node** than the
+pre-transformation block did (in frame terms, under 1% of wall time — framework
+machinery is only ~4–10% of a real `game_frame`, §2.4). This section records the
+*measured* cause, because the intuitive one is wrong.
 
-This is accepted, not a regression to chase. In frame terms it is under 1% of
-wall time. Framework machinery is only ~4–10% of a real `game_frame` (§2.4's own
-trace: baseline-variant overhead 10.3%, optimised 4.2%), so a 9% increase on that
-fraction moves the frame by a fraction of a percent — well inside the noise of the
-optimisation levers §2.4 measures. What the extra machinery buys is exactly the
-coroutine-first model: a node body may `co_await` (an inner `execute()`, an async
-access, a `Task`) and the node still completes only when the whole frame does,
-because the block gates on the `add_nested` child rather than on the body's first
-suspension. That capability is the whole point of the transformation; ~9% on the
-node block is its documented price. (Keep this distinct from §2.4's resume-locality
-finding, which compares graph against graph-free — this one compares the current
-coroutine-first node block against the block that preceded the transformation.)
+Deterministic instruction counting (callgrind, two isolated Shipping-like builds,
+a 1000-empty-node worker-less driver so machinery dominates) puts it at **522 →
+648 instructions/node** and attributes it precisely
+([graph-regression-callgrind.md](graph-regression-callgrind.md)). The tempting
+explanation — the coroutine-capable completion path, the `execution_flag`
+self-lock in `run_graph_node`, the `add_nested` gating — is **disproven**: that
+code is byte-identical between the two versions and predates coroutine-first, and
+the settle/completion path is in fact *cheaper* now. The actual cost is the
+**dispatch trampoline**. Coroutine-first unified node dispatch onto the generic
+refcounted block path — `submit_ready(Task_ptr` by value, an atomic increment`)`
+→ `run_block_dispatch` (adopt + destructor, an atomic decrement) → `execute` —
+where the baseline queued a **borrowed raw `Node*`** with no reference counting.
+That per-node atomic inc/dec pair plus the `Task_ptr` churn is the bulk; the
+remainder is `global_scheduler()` re-resolved per dispatch (the baseline cached
+it) and an unconditional `advance_pipe_links` on object-free nodes.
+
+What the unified path buys is real — one dispatch/cascade code path shared by
+dynamic multi-object `async`, coroutine node frames, and nested `execute()`
+lends, and correct block ownership when a node body genuinely outlives its
+synchronous return (a `co_await`). But most of the cost is **recoverable** on the
+common case that does *not* need block ownership: a plain functor node whose block
+is owned by `Run_state` for the whole run can dispatch as a borrowed pointer, the
+scheduler pointer can be cached per run, and `advance_pipe_links` can be skipped
+when `pipe_count == 0`. Those are tracked as a low-risk optimisation (TODO §2.16);
+the current cost is documented and tolerable, not a blocker. (Keep this distinct
+from §2.4's resume-locality finding, which compares graph against graph-free; this
+one compares the current node dispatch against the block that preceded the
+transformation.)
 
 ---
 

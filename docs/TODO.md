@@ -386,6 +386,25 @@ IDs — when an item is done, mark it, don't renumber.
        scheduling difference (a cutscene graph genuinely out-scheduling the driving graph on the
        same work); build that demonstration before writing it up, else it is unsubstantiated
        advice.
+   16. `[ ]` **(P2, author 2026-08 — root-caused, low-risk) Borrowed-pointer node dispatch fast
+       path.** Callgrind (deterministic, 1000-empty-node worker-less driver, two Shipping-like
+       builds; full report [graph-regression-callgrind.md](graph-regression-callgrind.md))
+       root-caused the ~9%/node graph-execute regression vs the pre-transformation block:
+       **522 → 648 instructions/node**, and it is NOT the completion/`add_nested`/`execution_flag`
+       path (byte-identical, settle is cheaper now) but the **ownership-carrying dispatch
+       trampoline** — coroutine-first unified node dispatch onto the generic refcounted block
+       path (`submit_ready(Task_ptr` by value = atomic inc`)` → `run_block_dispatch` adopt+dtor
+       = atomic dec, plus `Task_ptr` churn), where the baseline queued a borrowed raw `Node*`
+       with no refcount. Recoverable levers, in impact order: (a) **borrowed-pointer dispatch for
+       plain functor / zero-nested nodes** — the block is owned by `Run_state` for the whole run
+       (exactly what the baseline relied on), so per-dispatch refcounting is redundant on the
+       common case; keep the refcounted path only where a node body genuinely outlives its return
+       (a `co_await`, an inner `execute()` lend). The big lever. (b) **cache the scheduler
+       pointer per run** (baseline cached `run.scheduler`; current re-resolves `global_scheduler()`
+       per dispatch, +11/node). (c) **skip `advance_pipe_links` when `pipe_count == 0`** (+3/node
+       on object-free nodes). Concurrency-sensitive (touches the dispatch path) — TSan-gate any
+       change. Optional: the frame-level cost is <1% (design §2.5), so this is perf recovery, not
+       a fix — but the levers are low-risk and the mechanism is fully understood.
 3. **Scheduler**
    0. `[x]` **Single global scheduler — DONE (2026-07, `d173d9a`+`2b48a5b`).** Author chose single-global over the ambient-multi model (3.1). Exactly one scheduler process-wide, reachable via `global_scheduler()` (renamed from `default_scheduler`); reconfigurable by teardown+recreate (`configure_scheduler(config)`, a coarse quiescent-point op, NOT thread-safe against concurrent use) + a scoped `Scheduler_scope(config)` RAII (snapshot→reconfigure→restore) for running a block on a specific pool. `execute()` drops its `Scheduler&` arg (uses the global); `parallel_for` fans out on `current_scheduler` (Phase-1 fix `ea471dd` — a parallel_for inside a task uses that task's pool, not the global default, which had silently oversubscribed the sample's variant traces). Supersedes 3.1's ambient-override idea and its `Launch_options{.scheduler}` (nothing to select among). **Residual (P3): compile-time ban on ad-hoc `ts::Scheduler`.** The public ctor still compiles, so `ts::Scheduler s{...}` is constructible but INERT (nothing routes to it — a footgun). Finish via a `detail::make_scheduler(config)` factory (returns `unique_ptr`; class non-movable) used by the global holder AND the internal scheduler tests, public ctor removed. Cost: `scheduler_tests.cpp` unit-tests the class directly (ctor/dtor drain, 3 idle policies, valve — 13 sites) so it migrates to the factory; benchmarks/tsan likewise (~21 sites, mechanical). Author 2026-07: leave the ctor public for now (behavioral single-global suffices), do the ban later.
    1. `[~]` **(P1, superseded by 3.0) Ambient (overridable) scheduler** — was: `launch`/`task`/`access` resolve to an *ambient* scheduler + `Scheduler_scope` override + `Launch_options{.scheduler}`. The single-global model (3.0) took the simpler road: one reconfigurable global, `Scheduler_scope` reconfigures it rather than overriding among many. Kept for the record. [§D3]
