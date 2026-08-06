@@ -1121,32 +1121,47 @@ IDs — when an item is done, mark it, don't renumber.
        same constraint that forced `Node_name` to lead). Ratify alongside Inconsistency 7
        (the naming surface review, which explicitly wants this settled *before* more tooling
        depends on it) — this item is exactly that dependency arriving.
+   20. `[ ]` **(P2, BUG — sibling of 7.3, found 2026-08) Coroutine-frame captures outlive the
+       task's settle.** The 7.3 fix destroys a FUNCTOR task's body before it settles, but a
+       COROUTINE frame is a separate lifetime: the frame (and anything stored in it — a by-value
+       coroutine PARAMETER holding a resource, or a variable that lives across a suspension) is
+       destroyed by the frame's own `destroy` thunk at refcount-zero, on a worker, *after* the
+       task settled — the same "captured resource outlives `sync()`" class 7.3 fixed for
+       `Executable`. A by-value `Recorder` parameter to a coroutine would race exactly as
+       `gf_propagation` did. Not currently hit (the samples don't pass resources by value into
+       coroutine params), so lower urgency, but a real gap in the same guarantee. Harder than
+       7.3: a coroutine's locals die at `co_return` (before `final_suspend`), so those are
+       already fine — the exposure is *parameters* and *cross-suspension* state, which the frame
+       owns until teardown. Options: destroy parameter/frame-state at `final_suspend` (before the
+       completion the awaiter observes) rather than at frame destruction; or document that
+       resources must not be passed by value into a coroutine that outlives the caller (weaker,
+       and the un-checkable footgun 7.3 argued against).
 
 7. **Deferred / Versioned**
    1. `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.
    2. `[ ]` **(P2) Lock-free `stage()`** — kill the per-slot mutex (it exists ONLY for the dynamic stage-vs-cut race; single producer per slot otherwise — handoff doc §5). Falls out of 7.1's arena step: single-producer chunked bump allocation makes `stage` a lock-free bump, and the cut becomes a chain-head exchange. `Parallel_recorder` already gives thread-keyed slots (per-worker + overflow lane); this removes the last lock on the staging path. Split out of 7.1 for referenceability — implement together with the arena.
-   3. `[ ]` **(P1, BUG — found 2026-08 by TSan during the graph-dispatch opt work; PROVEN
-       PRE-EXISTING, not caused by any opt) Task holding a `Recorder` can have its journal
-       slot released after `sync()` returns.** A task block that captured a `Recorder<T>` into a
-       `Deferred`/`Versioned` journal is destroyed on a WORKER (the refcounted dispatch dtor)
-       *after* `sync()` has returned — teardown lags settle. The `Recorder`'s destruction calls
-       `Journal::release_slot`, touching the journal, while the caller has moved on. In
-       `game_frame` this races: `gf_propagation` (multi-object `ts::async`) tears down on a
-       worker and its `Recorder<Transforms>` releases a slot in the `Versioned<Transforms>`
-       journal, racing MAIN constructing the next iteration's `World` (a fresh
-       `Versioned<Transforms>`) **at the same reused stack address**. Reproduced under a focused
-       TSan loop on committed master (Opt 1 7/15, Opt 2 5/15, Opt 5 8/15 — always the identical
-       journal race, zero new races from any opt); rare on single-pass `tsan/run.sh` (~3%),
-       which is why it slipped through. **Root:** `sync()` returning means *settled*, not
-       *destroyed* — the block refcount drop trails on the worker; `~Guarded` closes this with a
-       pipe drain (`wait_until_idle`), but the **journal has no equivalent drain**. Same
-       "completion ≠ full teardown" seam as the `~Guarded`/sync-then-destroy case, on the layer
-       that lacks the safety net. **Two fix angles (author to choose):** (a) SAMPLE — don't hold
-       a `Recorder` in a task whose block can outlive the `World` stack frame; (b) LIBRARY — give
-       the journal a drain so a `Recorder`'s slot release cannot lag past the task's `sync()`
-       (the more general fix; the sample only exposed it). Read the `Journal::release_slot` /
-       block-teardown ordering before deciding. Narrow + rare, so not push-blocking, but a
-       genuine data race.
+   3. `[x]` **DONE (2026-08) — a task's captured resources are now destroyed before it settles,
+       not at refcount-zero.** Was: a functor task's `Executable` held `Body body;` as a plain
+       member, so the closure (and anything it captured — e.g. a `Recorder<T>` into a
+       `Deferred`/`Versioned` journal) was destroyed only when the block's refcount hit zero, on a
+       WORKER, *after* the task settled and a `sync()` returned. So a captured resource outlived
+       the `sync()` meant to bound it — in `game_frame`, `gf_propagation`'s `Recorder<Transforms>`
+       released a journal slot on a worker while MAIN was constructing the next frame's `World` at
+       the same reused address (a real data race, ~3% on `tsan/run.sh`, root-caused during the
+       graph-dispatch opt work). **Fix:** `Executable::run` destroys the body in the TYPED context,
+       right after the invoke (and in the cancel branch), before `complete()`/`settle()`. The body
+       moved to a flagless `union { Body }` so `~Executable` no longer auto-destroys it; a
+       `TS_SAFETY_CHECKS`-only assertion in `~Executable` catches a never-run block (the union
+       leak). No fn-ptr — `run()` is typed, so it destroys directly. `Piped_executable`
+       (multi-object `async`) is covered automatically (it embeds `Executable`). The guarantee:
+       **captured resources are gone before the task settles**, i.e. before any `sync()`/`co_await`
+       (or downstream gated on settle) is woken — so a journal/`Recorder` drain is unnecessary
+       (contrast `~Guarded`'s pipe `wait_until_idle`, kept because pipe release is unbounded). This
+       is the *right* seam: destroying a closure is bounded (no cascade), unlike pipe release, so
+       it can run synchronously before `notify_all`. Guarded deterministically by
+       `tests/task_tests.cpp` `captures destroyed before sync` (holds the handle, `sync()`s, asserts
+       the capture is gone — fails pre-fix `destroyed==0`, passes post-fix) + `game_frame` under
+       TSan. **Not covered (separate lifetime, see 6.20):** a coroutine frame's captures.
 
 8. **Task chaining**
    1. `[—]` **MOOT (2026-08, 6.4).** Results-on-`after` — `after` and the whole builder are

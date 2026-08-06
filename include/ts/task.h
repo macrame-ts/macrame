@@ -830,21 +830,52 @@ struct Executable
 {
     Task_control_block core;   // MUST be first
     Result_storage<R> storage;   // empty for void
-    Body body;
+    // The body lives in a union so `~Executable` does NOT auto-destroy it (TODO 7.3). The block
+    // outlives the task's settle -- its last ref is dropped on a worker, so a plain member would
+    // keep the closure (and everything it captured: a `Recorder` into a journal, an escaped
+    // reference) alive until then, past a `sync()` that already returned. `run()` destroys the
+    // body in this TYPED context right after its last use, BEFORE the task settles, so captured
+    // resources die before any waiter is woken.
+    union { Body body; };
+#if TS_SAFETY_CHECKS
+    bool body_destroyed_ = false;   // set by `run()`; asserted in `~Executable` (never leaked)
+#endif
 
     explicit Executable(Body b)
         : body(std::move(b))
     {}
 
+    ~Executable()
+    {
+#if TS_SAFETY_CHECKS
+        // The union body is destroyed exactly once, in `run()`. Reaching the dtor without that
+        // is a "settled without running" regression that would leak the body -- catch it.
+        if (!body_destroyed_)
+            ts::fatal("Executable destroyed without its body being run (TODO 7.3): body leaked");
+#endif
+    }
+
+    // Destroy the body (and its captures) exactly once. Called on every run path that took
+    // ownership of the run (post-`claim`), after the body's last use, before the task settles.
+    void destroy_body() noexcept
+    {
+        std::destroy_at(&body);
+#if TS_SAFETY_CHECKS
+        body_destroyed_ = true;
+#endif
+    }
+
     static void run(const Task_ptr& c)
     {
         if (!c->claim())
             return;   // machinery bug (fatal under TS_SAFETY_CHECKS); skip in shipping
+                      // -- the LOSING dispatch never ran the body, so it must NOT destroy it.
 
         auto* self = reinterpret_cast<Executable*>(c.get());
         if (c->token.is_cancel_requested() || c->prereq_cancelled.load(std::memory_order_acquire))
         {
-            c->cancel();   // own token, or a prerequisite cancelled (no result to consume)
+            self->destroy_body();   // never invoked -> destroy before settle, no result to consume
+            c->cancel();   // own token, or a prerequisite cancelled
             return;
         }
 
@@ -873,6 +904,11 @@ struct Executable
         }
 
         current_task = std::move(prev);
+
+        // Destroy the body (and its captures) now that it has run and any result is emplaced --
+        // BEFORE the task settles, so a captured `Recorder`/reference cannot outlive a `sync()`
+        // (TODO 7.3). Nested tasks launched during the body do not reference the body member.
+        self->destroy_body();
 
         // Drop the self-lock. If it was the only remaining lock, no nested tasks are
         // pending -> complete now; otherwise the last nested task will complete us.
