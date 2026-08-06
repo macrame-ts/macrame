@@ -517,6 +517,34 @@ struct Task_control_block
 
     void settle(bool cancel_)
     {
+        // Graph node fast path (Opt 5): a node block has NO external `sync()`/`co_await`
+        // waiter (a node exposes no `Task<>` handle -- `execute()` returns the run's `done`
+        // handle, never a node), NO continuations (`attach` only ever targets awaited `Task`
+        // cores), and is NEVER a nested child (`add_nested` attaches the coroutine frame / a
+        // nested run as the child, with the node as parent -- so `nested_parent` here stays
+        // empty). So its completion needs none of the generic primitive: skip the mutex, the
+        // `done_cv.notify_all()` that wakes nobody, and the always-empty continuations drain,
+        // and fire `on_complete` directly under the atomic flags. The `num_locks` gating that
+        // decides WHEN a node settles is unchanged (in `run_graph_node` / `release`, before
+        // this call), and exactly one settle occurs per run (`claim()` + a single threshold
+        // crossing), so no idempotency lock is needed. The real cross-thread happens-before
+        // for a dispatched successor is the scheduler queue / `remaining_deps` / the pipe --
+        // never this block's mutex, which synchronized no one.
+        if (flags.borrowed)
+        {
+#if TS_SAFETY_CHECKS
+            if (nested_parent || !continuations.empty())
+                ts::fatal("graph node block unexpectedly carries a nested parent or continuations "
+                          "(the slim completion path assumes neither)");
+#endif
+            completed = true;
+            cancelled = cancel_;
+            ready.store(true, std::memory_order_release);
+            if (on_complete)
+                on_complete(this);
+            return;
+        }
+
         std::vector<std::move_only_function<void(void*, bool)>> conts;
         Task_ptr parent;
         void* r = nullptr;               // the result for continuations, captured under the lock
