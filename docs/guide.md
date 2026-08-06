@@ -902,7 +902,7 @@ not, and nothing at all with `TS_PROFILING=0`. Cancelled runs are not folded;
 a recompile re-pushes the structure and resets the aggregates.
 
 The sample wires this up as `task_system --trace [frames]`, tracing two
-variants of the same ~30-system frame on a 6-worker scheduler — a `baseline`
+variants of the same ~34-system frame on a 6-worker scheduler — a `baseline`
 and an `optimised` version tuned by reading the baseline's own trace —
 writing `sample_game_frame_avg_baseline.svg` and
 `sample_game_frame_avg_optimised.svg` plus `sample_game_frame.dot`; a
@@ -1343,13 +1343,22 @@ starvation).
 
 ### 10.2 Scheduler configuration
 
+There is one process-wide scheduler; you reconfigure it rather than
+constructing your own. `configure_scheduler` tears the current pool down
+(joins its workers) and builds a new one — a coarse lifecycle operation for a
+quiescent point, not a per-call knob:
+
 ```cpp
-ts::Scheduler s{ {
+ts::configure_scheduler({
     .num_threads = 0,                                // 0 = hardware concurrency
     .idle_policy = ts::Idle_policy::spin_then_block, // the default
     .spin_cycles = 64,
-} };
+});
 ```
+
+For a bounded region, `ts::Scheduler_scope` (RAII) reconfigures on entry and
+restores the previous config on exit — the way to run a block on a specific
+pool.
 
 Idle policies decide what a worker does when it finds no work: `spin` (never
 sleeps — lowest latency, burns idle cores), `spin_then_block` (default: spin
@@ -1502,8 +1511,11 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
   (one control block per task; journal commands heap past a small-buffer
   threshold). Several planned optimizations (pools, arenas, a typed command
   tier) are designed but not landed.
-- **Scheduler selection** — WIP. `launch`/`async` use a process-wide default
-  scheduler; scoped/ambient scheduler override is designed, not implemented.
+- **Scheduler selection** — partial. There is one process-wide scheduler;
+  `configure_scheduler` / `ts::Scheduler_scope` reconfigure it (teardown +
+  recreate) so a scoped block runs on a chosen pool. What remains WIP is
+  *ambient per-call* selection — running two live pools at once and routing
+  individual `launch`/`async`/`execute` calls between them.
 - **Platform breadth** — WIP. Developed on Windows (MSVC/clang-cl); the test
   suite also runs on Linux under Clang/TSan. No macOS/console/mobile support
   claims yet.

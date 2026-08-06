@@ -13,9 +13,11 @@ at the [end](#appendices--references).
 ## 1. Thesis and lineage
 
 The author designed and implemented Unreal Engine's Tasks System. This
-library keeps what that system proved — work-stealing scheduling,
-prerequisites, nested tasks/events, pipes, priorities with a small fixed set
-of levels — and rebuilds around a different central idea:
+library keeps what that system proved — work-stealing scheduling, ordered
+prerequisites, nesting, events, pipes, priorities with a small fixed set of
+levels — as concepts, though they take different form here (prerequisites are
+`co_await` at the top of a body; nesting is internal completion-gating, not a
+user-facing `nested` verb) and rebuilds around a different central idea:
 
 **Access-declared concurrency.** Every unit of work declares which shared
 objects it reads and which it writes. From those declarations the library
@@ -275,6 +277,31 @@ handle suspends a frame and resumes it through the trampoline. So the lever for
 closing it is resume locality, and the practical reading is that hand
 composition is free on millisecond-grained systems and starts to cost at
 fine grain.
+
+### 2.5 The cost of the coroutine-first node
+
+Making every graph node a coroutine-capable block is not free, and the honest
+accounting belongs next to §2.4's. The coroutine-first `Graph_node_block` — the
+one that can hold a `ts::Task<void>` frame and gate the node's completion on it
+through `detail::add_nested` — carries roughly **9% more framework overhead per
+node** than the pre-transformation block did. The measurement is clean-machine
+and isolates the block itself: the delta persists in a Shipping build (so it is
+not the safety harness), persists with object-free nodes (so it is not the pipe
+or the acquire cascade), and persists independent of the scheduler path — what is
+left is the node block's own setup and completion machinery.
+
+This is accepted, not a regression to chase. In frame terms it is under 1% of
+wall time. Framework machinery is only ~4–10% of a real `game_frame` (§2.4's own
+trace: baseline-variant overhead 10.3%, optimised 4.2%), so a 9% increase on that
+fraction moves the frame by a fraction of a percent — well inside the noise of the
+optimisation levers §2.4 measures. What the extra machinery buys is exactly the
+coroutine-first model: a node body may `co_await` (an inner `execute()`, an async
+access, a `Task`) and the node still completes only when the whole frame does,
+because the block gates on the `add_nested` child rather than on the body's first
+suspension. That capability is the whole point of the transformation; ~9% on the
+node block is its documented price. (Keep this distinct from §2.4's resume-locality
+finding, which compares graph against graph-free — this one compares the current
+coroutine-first node block against the block that preceded the transformation.)
 
 ---
 
@@ -915,9 +942,10 @@ their exit code on any — a tripped ensure cannot pass CI by virtue of the
 program having survived it. (The mechanism's first user — the blocking-sync
 warning — was later *promoted to fatal* when coroutine-first made an in-task
 `sync()` a bug by definition rather than a hazard: the check lives at the
-one chokepoint every blocking wait passes through (`sync_wait`), fires only
-when the wait is genuinely about to park inside a task, and distinguishes
-the certain-deadlock shape — the target is an access to an object the
+one chokepoint every blocking wait passes through (`sync_wait`) and fires
+unconditionally when a task calls it — whether or not the target has already
+settled, since the rule, not the wait's timing, is the hazard (§4.4) — and
+distinguishes the certain-deadlock shape — the target is an access to an object the
 waiting task holds, matched by comparing the target pipe's epoch address
 against the context's captured epoch sources — from the general never-block
 violation. `parallel_for` joins through its own counter and is structurally
