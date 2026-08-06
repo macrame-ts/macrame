@@ -348,10 +348,21 @@ void Static_task_graph::on_data_ready(Run_state& run, int index)
 {
     run.stamps.mark_ready(index);
     Node& node = run.graph->nodes_[index];
-    if (node.block->pipe_count == 0)
-        detail::Task_control_block::dispatch_ready(node.block);
+    detail::Task_control_block* blk = node.block.get();
+    if (blk->pipe_count == 0)
+    {
+        // Object-free node: dispatch directly. An inline node keeps the shared inline
+        // trampoline; a queued node goes to the run's cached scheduler (Opt 1) rather than
+        // re-resolving `global_scheduler()` per node inside `submit_ready`.
+        if (blk->flags.run_inline)
+            detail::Task_control_block::dispatch_ready(node.block);
+        else
+            detail::submit_ready_on(*run.scheduler, node.block);
+    }
     else
-        detail::pipe_enter_first(node.block.get());
+    {
+        detail::pipe_enter_first(blk);
+    }
 }
 
 

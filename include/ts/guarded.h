@@ -29,6 +29,12 @@ namespace detail
 void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closure,
                     Priority priority = Priority::normal);
 
+// `submit_ready` (task.h), but to an explicitly resolved scheduler rather than
+// `global_scheduler()`. The graph run caches its scheduler once (`Run_state::scheduler`)
+// and dispatches every node through this, so the per-node dispatch skips the `g_fast`
+// re-resolve (Opt 1 in docs/graph-regression-callgrind.md §4).
+void submit_ready_on(Scheduler& scheduler, Task_ptr block);
+
 // A per-object reader/writer pipe (the evolved mutex pipe, docs/pipe-rebase.md §0.2).
 // Entries are admitted in FIFO order; consecutive readers run concurrently, a writer runs
 // alone (no readers, no other writer). Different objects have independent pipes and run in

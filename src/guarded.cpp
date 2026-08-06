@@ -85,13 +85,21 @@ static void run_block_dispatch(void* data)
         block->complete();
 }   // `block` decrements here -> releases the ref the queue held
 
+// A block whose prerequisites are all met: schedule it to run on `scheduler` (its body,
+// or, if bodyless, just complete). The explicit-scheduler form; `submit_ready` resolves
+// the global and delegates here.
+void submit_ready_on(Scheduler& scheduler, Task_ptr block)
+{
+    Priority priority = block->flags.priority;
+    // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
+    scheduler.submit(&run_block_dispatch, block.release(), priority);
+}
+
 // A block whose prerequisites are all met: schedule it to run (its body, or, if
 // bodyless, just complete). Bridges task.h's lock-counter to the scheduler.
 void submit_ready(Task_ptr block)
 {
-    Priority priority = block->flags.priority;
-    // Hand the block's ref to the queue (release, no dec); the trampoline adopts it back.
-    global_scheduler().submit(&run_block_dispatch, block.release(), priority);
+    submit_ready_on(global_scheduler(), std::move(block));
 }
 
 // ===== the evolved mutex pipe (docs/pipe-rebase.md §0.2) ====================================
