@@ -85,6 +85,36 @@ static void run_block_dispatch(void* data)
         block->complete();
 }   // `block` decrements here -> releases the ref the queue held
 
+// Trampoline for a BORROWED block dispatch: the block travels as the entry's `data_` as a
+// raw pointer with NO ref transferred (the queue borrows it). The block's owner -- a graph
+// `Run_state`, which holds the node block for the whole run -- provably outlives the
+// dispatch, so the queue need not keep it alive. Saves the dispatch-hop inc/dec that
+// `run_block_dispatch` pays. `Adopt_ref` wraps the pointer without an inc; `release()`
+// detaches without the matching dec (this frame never owned a ref). The `current_task`
+// swap inside the body still takes its own (necessary) ref, balanced by its own lifetime.
+static void run_borrowed_dispatch(void* data)
+{
+    auto* blk = static_cast<Task_control_block*>(data);
+    Task_ptr borrowed(blk, Adopt_ref{});   // wrap without inc -- we own no ref
+    if (blk->execute)
+        blk->execute(borrowed);            // claims internally
+    else if (blk->claim())                 // bodyless: claim guards against machinery bugs
+        blk->complete();
+    borrowed.release();                    // detach without dec
+}
+
+// A borrowed block whose prerequisites are all met: schedule it on `scheduler`, carrying a
+// raw pointer (no refcount). Only for `flags.borrowed` blocks (owner outlives the dispatch).
+void submit_borrowed_on(Scheduler& scheduler, Task_control_block* blk)
+{
+    scheduler.submit(&run_borrowed_dispatch, blk, blk->flags.priority);
+}
+
+void submit_borrowed(Task_control_block* blk)
+{
+    submit_borrowed_on(global_scheduler(), blk);
+}
+
 // A block whose prerequisites are all met: schedule it to run on `scheduler` (its body,
 // or, if bodyless, just complete). The explicit-scheduler form; `submit_ready` resolves
 // the global and delegates here.

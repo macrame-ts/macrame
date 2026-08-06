@@ -252,6 +252,10 @@ void Static_task_graph::compile(const char* DOT_path)
         wrapper->index = i;
         wrapper->core.execute = &run_graph_node;
         wrapper->core.on_complete = &graph_node_completed;
+        // The node block is owned by this graph (its `Task_ptr` below) for the whole run, so
+        // its queued dispatch borrows a raw pointer -- no dispatch-hop refcount (Opt 2). Set
+        // once here; the per-run re-arm rewrites priority/run_inline but preserves this bit.
+        wrapper->core.flags.borrowed = true;
         nodes_[i].block = detail::Task_ptr(&wrapper->core);
         // The node's block carries the node's identity, so every diagnostic that names a
         // task names the node -- including the pipe entries it takes, which ARE this block.
@@ -357,7 +361,7 @@ void Static_task_graph::on_data_ready(Run_state& run, int index)
         if (blk->flags.run_inline)
             detail::Task_control_block::dispatch_ready(node.block);
         else
-            detail::submit_ready_on(*run.scheduler, node.block);
+            detail::submit_borrowed_on(*run.scheduler, blk);
     }
     else
     {

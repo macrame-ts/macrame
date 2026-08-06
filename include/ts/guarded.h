@@ -35,6 +35,10 @@ void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closur
 // re-resolve (Opt 1 in docs/graph-regression-callgrind.md §4).
 void submit_ready_on(Scheduler& scheduler, Task_ptr block);
 
+// `submit_borrowed` (task.h) to an explicitly resolved scheduler -- the cached-scheduler
+// borrowed dispatch a graph run uses for its object-free nodes (Opt 1 + Opt 2).
+void submit_borrowed_on(Scheduler& scheduler, Task_control_block* blk);
+
 // A per-object reader/writer pipe (the evolved mutex pipe, docs/pipe-rebase.md §0.2).
 // Entries are admitted in FIFO order; consecutive readers run concurrently, a writer runs
 // alone (no readers, no other writer). Different objects have independent pipes and run in

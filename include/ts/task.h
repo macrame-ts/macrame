@@ -288,6 +288,12 @@ private:
 // `complete`s it.
 void submit_ready(Task_ptr block);
 
+// Like `submit_ready`, but the block is EXTERNALLY OWNED for its whole dispatch (its
+// `flags.borrowed` is set -- a graph node block, held by `Run_state` for the run), so the
+// queue carries a BORROWED raw pointer with no per-dispatch refcount inc/dec. Only valid
+// when the owner provably outlives the dispatch. Defined in the scheduler layer.
+void submit_borrowed(Task_control_block* blk);
+
 // A task's per-pipe queue entry (full definition in ts/detail/pipe_link.h).
 struct Pipe_link;
 
@@ -386,6 +392,11 @@ struct Task_control_block
     {
         Priority priority : 2 = Priority::normal;   // queue position when dispatched
         bool run_inline : 1 = false;                // dispatch on the settling thread, not the queue
+        // The block is EXTERNALLY OWNED for its whole dispatch lifetime (a graph node block,
+        // held by `Run_state` for the run), so the queued dispatch carries a BORROWED raw
+        // pointer -- no per-dispatch refcount inc/dec (`submit_borrowed`). Set once at
+        // compile(); never true for async/coroutine blocks, which the queue must own.
+        bool borrowed : 1 = false;
     };
     Flags flags;
     // -----------------------------------------------------------------------------------
@@ -480,7 +491,12 @@ struct Task_control_block
     {
         if (!blk->flags.run_inline)
         {
-            submit_ready(blk);   // queued: the scheduler runs it (at blk->flags.priority)
+            // queued: the scheduler runs it (at blk->flags.priority). A borrowed block (a
+            // graph node, owned by its `Run_state`) skips the dispatch-hop refcount.
+            if (blk->flags.borrowed)
+                submit_borrowed(blk.get());
+            else
+                submit_ready(blk);
             return;
         }
         inline_pending.push_back(blk);
