@@ -280,12 +280,14 @@ fine grain.
 
 ### 2.5 The cost of the coroutine-first node dispatch
 
-The coroutine-first graph runs each node's dispatch through the same
-ownership-carrying block path as every other task, and that is not free. The
-current per-node machinery costs roughly **9% more per node** than the
-pre-transformation block did (in frame terms, under 1% of wall time — framework
-machinery is only ~4–10% of a real `game_frame`, §2.4). This section records the
-*measured* cause, because the intuitive one is wrong.
+The coroutine-first graph unified each node's dispatch onto the same
+ownership-carrying block path as every other task, and that was not free: it cost
+roughly **9% more per node** than the pre-transformation block (in frame terms,
+under 1% of wall time — framework machinery is only ~4–10% of a real `game_frame`,
+§2.4). This section records the *measured* cause, because the intuitive one is
+wrong — and the recovery, which not only erased the regression but took the
+per-node machinery *below* the old block by slimming a completion cost both
+versions shared.
 
 Deterministic instruction counting (callgrind, two isolated Shipping-like builds,
 a 1000-empty-node worker-less driver so machinery dominates) puts it at **522 →
@@ -306,15 +308,37 @@ it) and an unconditional `advance_pipe_links` on object-free nodes.
 What the unified path buys is real — one dispatch/cascade code path shared by
 dynamic multi-object `async`, coroutine node frames, and nested `execute()`
 lends, and correct block ownership when a node body genuinely outlives its
-synchronous return (a `co_await`). But most of the cost is **recoverable** on the
-common case that does *not* need block ownership: a plain functor node whose block
-is owned by `Run_state` for the whole run can dispatch as a borrowed pointer, the
-scheduler pointer can be cached per run, and `advance_pipe_links` can be skipped
-when `pipe_count == 0`. Those are tracked as a low-risk optimisation (TODO §2.16);
-the current cost is documented and tolerable, not a blocker. (Keep this distinct
-from §2.4's resume-locality finding, which compares graph against graph-free; this
-one compares the current node dispatch against the block that preceded the
-transformation.)
+synchronous return (a `co_await`). And most of the cost has now been **recovered**
+on the common case that does *not* need block ownership, all measured on the same
+harness (a re-measured baseline of **662 ins/node** on the current toolchain):
+
+- **Borrowed-pointer dispatch.** A plain functor node's block is owned by
+  `Run_state` for the whole run (runs are sequential and joined, the block is never
+  freed mid-run), so its queued dispatch carries a borrowed raw pointer with no
+  reference count — a `flags.borrowed` bit selects the path, keeping the
+  ownership-carrying path for async/coroutine/multi-object blocks that can outlive
+  their launcher. **−24 ins/node.**
+- **Cached scheduler.** The run resolves `global_scheduler()` once into
+  `Run_state` and dispatches its nodes through that, not a per-node re-resolve.
+  **−23 ins/node.**
+- **Skip `advance_pipe_links` when `pipe_count == 0`** (an object-free node entered
+  no pipes). **~−2 ins/node.**
+- **Slim node completion (the biggest lever).** A graph node block never has an
+  external `sync()`/`co_await` waiter, continuations, or a nested parent, yet it
+  paid the full generic `Task_control_block` completion primitive — a `std::mutex`,
+  a `condition_variable::notify_all` that wakes nobody, and an empty continuations
+  vector — every node. The node-specific completion fires `on_complete` directly
+  under the atomic flags. **−153 ins/node.**
+
+Together these bring the per-node machinery from **662 → 459 ins/node (−30.7%)** —
+below the 522-ins/node pre-transformation block, because slimming the completion
+primitive helps a cost that *predated* the transformation and was present in both
+versions. Wall-clock on the worker-less machinery microbench moved ~53 → ~45
+ns/node (~15%; smaller than the instruction delta because the removed mutex/condvar
+were uncontended there). (A per-run re-arm batching lever was attempted and reverted
+— its gain sat below the measurement noise floor. Keep this whole finding distinct
+from §2.4's resume-locality result, which compares graph against graph-free; this one
+compares node dispatch against the block that preceded the transformation.)
 
 ---
 

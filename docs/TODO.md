@@ -386,8 +386,32 @@ IDs — when an item is done, mark it, don't renumber.
        scheduling difference (a cutscene graph genuinely out-scheduling the driving graph on the
        same work); build that demonstration before writing it up, else it is unsubstantiated
        advice.
-   16. `[ ]` **(P2, author 2026-08 — root-caused, low-risk) Borrowed-pointer node dispatch fast
-       path.** Callgrind (deterministic, 1000-empty-node worker-less driver, two Shipping-like
+   16. `[x]` **(P2, author 2026-08 — DONE for the four proven levers; one reverted) Borrowed-pointer
+       node dispatch fast path + slim node completion.**
+       **LANDED 2026-08** (commits: cache scheduler / borrowed dispatch / skip advance_pipe_links /
+       slim completion). Measured on the same harness (re-measured baseline **662 ins/node** on the
+       current clang 21 toolchain; the 648 below was an earlier commit/build):
+       - **(b) cache scheduler pointer per run** — a run resolves `global_scheduler()` once into
+         `Run_state::scheduler` and dispatches its nodes through it. **−23 ins/node.**
+       - **(a) borrowed-pointer dispatch** — a `flags.borrowed` bit (set on every node block at
+         `compile()`) routes the queued node dispatch through `submit_borrowed`/`run_borrowed_dispatch`,
+         which carry a raw pointer with no dispatch-hop refcount (the block is owned by `Run_state` for
+         the whole run; runs are sequential/joined, so it cannot be freed mid-dispatch). Async /
+         coroutine / multi-object blocks keep the owning path. **−24 ins/node.**
+       - **(c) skip `advance_pipe_links` when `pipe_count == 0`.** **~−2 ins/node.**
+       - **(1 in the cost map, the BIGGEST lever) slim node completion** — `settle()` fast-paths on
+         `flags.borrowed`: a node block has no external `sync()`/`co_await` waiter, no continuations,
+         and is never a nested child, so it fires `on_complete` directly under the atomic flags,
+         skipping the `std::mutex`, the `done_cv.notify_all()` that wakes nobody, and the empty
+         continuations drain (a `TS_SAFETY_CHECKS` assertion guards the invariant). **−153 ins/node.**
+       Total **662 → 459 ins/node (−30.7%)**, below the 522 pre-transformation block; wall-clock
+       ~53 → ~45 ns/node (~15%) on the worker-less machinery microbench. TSan-gated (full `tsan/run.sh`
+       clean + a high-exposure focused loop showing zero new races). **Still open:** (4) re-arm field
+       resets — ATTEMPTED and REVERTED (flag-byte-store + skip-empty-token; gain sat below the
+       measurement noise floor, not worth touching the hot re-arm path). (2) full `Task_ptr` refcount
+       removal beyond the dispatch hop and (3) scheduler `submit`/`run_serial` ~80/node are untouched
+       (structural). Historical root-cause analysis retained below.
+       Callgrind (deterministic, 1000-empty-node worker-less driver, two Shipping-like
        builds; full report [graph-regression-callgrind.md](graph-regression-callgrind.md))
        root-caused the ~9%/node graph-execute regression vs the pre-transformation block:
        **522 → 648 instructions/node**, and it is NOT the completion/`add_nested`/`execution_flag`

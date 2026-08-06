@@ -6,8 +6,8 @@ targets a future optimization would attack. Baseline (`1652818`) diff follows as
 secondary context. Tool: valgrind callgrind 3.26 (exact instruction counting), WSL
 Ubuntu 26.04 / clang 21.
 
-> Status: measurement report for review. Not committed. Delete once folded into the
-> TODO / a fix lands.
+> Status: root-cause record + after-report. The optimizations landed 2026-08 (§6); §1–§5
+> are the historical diagnosis. TODO 2.16.
 
 ## 1. Method
 
@@ -172,3 +172,39 @@ inherent to the generic `Task_control_block` completion primitive, not the regre
 The regression proper is the +126/node of ownership-refcount the transformation added;
 the completion path is the larger standing target that predates it. Both are addressed
 by items 1–2 in §4.
+
+---
+
+## 6. After — the landed optimizations (2026-08, TODO 2.16)
+
+Four of the §4 levers landed and were TSan-gated (the fifth, re-arm batching, was
+attempted and reverted — its gain sat below the measurement noise floor). Re-measured on
+the same harness with the current clang 21 toolchain, whose baseline reads **662.1
+ins/node** (vs the 647.9 of §5's older commit/build — same family, ~2% toolchain drift);
+deltas below are against that re-measured 662.1 baseline:
+
+| step | change | ins/node | Δ |
+|---|---|---:|---:|
+| baseline | (current master `2a5e697`) | 662.1 | — |
+| Opt 1 | cache `Run_state::scheduler` for node dispatch | 639.0 | −23 |
+| Opt 2 | borrowed-pointer dispatch (`flags.borrowed`, no dispatch-hop refcount) | 614.5 | −24 |
+| Opt 3 | skip `advance_pipe_links` when `pipe_count == 0` | 612.0 | −2 |
+| Opt 5 | slim node completion (skip mutex + `notify_all` + conts) | **458.7** | **−153** |
+
+**Total 662.1 → 458.7 ins/node (−203, −30.7%)** — below the 522 pre-transformation
+block, because Opt 5 slims the completion primitive that predated the transformation and
+was present in both versions (the §5 finding). Wall-clock on the worker-less machinery
+microbench moved ~53 → ~45 ns/node (~15%; smaller than the instruction delta because the
+removed mutex/condvar were uncontended there).
+
+Mapping to §4's fat targets: Opt 5 is target 1 (the standout, node completion); Opt 2 is
+target 2 (the ownership refcount, the actual regression); Opt 1 is target 3
+(`global_scheduler` per dispatch); Opt 3 is target 5. Target 4 (re-arm resets) is the
+reverted one, and target 2's *remaining* refcount (beyond the dispatch hop) plus the
+scheduler `submit`/`run_serial` cost are untouched (structural). The borrowed-pointer and
+slim-completion paths are graph-node-specific (`flags.borrowed`); the async / coroutine /
+multi-object dispatch and the generic `Task_control_block` completion primitive are
+unchanged.
+
+> Status: measurement report, superseded by the landed work above. The §1–§5 diagnosis
+> stands as the historical root-cause record.
