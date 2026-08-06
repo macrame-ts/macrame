@@ -1,166 +1,174 @@
-# Graph `execute()` regression — callgrind root-cause (untracked)
+# Graph `execute()` machinery — callgrind cost map (untracked)
 
-Deterministic instruction-count profiling of the ~10% `graph.execute()` regression
-between the pre-transformation baseline and current `master`. Tool: valgrind
-callgrind 3.26 (exact instruction counting), on WSL Ubuntu 26.04 / clang 21.
+Deterministic instruction-count profiling of the current `master` node-block
+machinery: where `graph.execute()` spends its instructions per node, and the fat
+targets a future optimization would attack. Baseline (`1652818`) diff follows as
+secondary context. Tool: valgrind callgrind 3.26 (exact instruction counting), WSL
+Ubuntu 26.04 / clang 21.
 
-> Status: measurement report for review. Not committed. Delete after the finding
-> is folded into the TODO / a fix lands.
+> Status: measurement report for review. Not committed. Delete once folded into the
+> TODO / a fix lands.
 
 ## 1. Method
 
-- **Two throwaway Linux-local clones**, built identically:
-  - baseline = `1652818` (callback composition, `std::deque` pipe, no `ts::Named`)
-  - current = `master` tip (`1ff7781`; coroutine-first, evolved pipe, `ts::Named`)
-- Build (both): `clang++ -std=c++23 -O2 -g -fno-exceptions -pthread -DTS_SAFETY_CHECKS=0 -DTS_PROFILING=0`
-  over the same library TU set as `tsan/run.sh` (`scheduler, worker_thread, guarded,
+- **Build** (`master`, `1ff7781`), shipping-like so callgrind sees only real machinery:
+  `clang++ -std=c++23 -O2 -g -fno-exceptions -pthread -DTS_SAFETY_CHECKS=0 -DTS_PROFILING=0`
+  over the `tsan/run.sh` library TU set (`scheduler, worker_thread, guarded,
   static_task_graph, access, fatal`) + a driver, `-latomic` (16-byte `Task_entry`
-  atomics need it on libstdc++). Shipping-like: harness + trace compiled out, so
-  callgrind sees only the real node machinery (trace `mark_*`/`fold`, `Trace_*_scope`
-  are no-ops).
-- **Matched driver** per version: build 1000 object-free empty-lambda nodes
-  (`add_node([]{})` on base; `add_node(ts::Named{nullptr}, []{})` on current),
-  `compile()` once, then `execute().sync()` × 200. **Worker-less scheduler**
-  (`Scheduler_config{.single_threaded = true}`) so callgrind sees the whole
-  machinery call tree deterministically on one thread, no worker-thread noise.
-  Empty bodies ⇒ machinery dominates. 200 000 node-executes measured.
-- The only measurement-harness adjustment was `-latomic` (identical on both) — no
-  library-behavior change on either clone.
+  atomic). Harness + trace compiled out (`Trace_*_scope`, `stamps.*` are no-ops).
+- **Driver**: 1000 object-free empty-lambda nodes (`add_node(ts::Named{nullptr}, []{})`),
+  `compile()` once, `execute().sync()` × 200. **Worker-less scheduler**
+  (`Scheduler_config{.single_threaded = true}`) → the whole machinery call tree runs
+  deterministically on one thread, no worker noise. 200 000 node-executes measured.
+  Empty bodies ⇒ machinery dominates.
+- `valgrind --tool=callgrind --dump-instr=yes`, then `callgrind_annotate --auto=yes`.
+  Deterministic: re-run reproduced 129,583,340 Ir exactly.
 
-## 2. Headline number — the regression reproduces in instruction count
+## 2. Headline: per-node cost of `graph.execute()`
 
-| | instructions (Ir) | per node-exec |
+Total program **129,583,340 Ir**, splitting into:
+
+- **steady-state execute loop = 118,510,161 Ir ⇒ 592.6 instructions per node-execute**
+  (the number that matters — pure per-node graph machinery)
+- one-time setup/startup = 11,073,179 Ir (`compile()` once + dynamic-loader/PLT
+  resolve + TLS init + MPMC-queue ctor + `detect_cycles`) — not per-node, ignore for
+  optimization.
+
+So **each trivial graph node costs ~593 instructions of framework machinery** end to
+end (dispatch → body shim → completion → successor wake → re-arm amortized). With an
+empty body, ~2.7% of that is the body invoke; the other ~97% is pure framework.
+
+## 3. The per-node cost map (current master)
+
+Steady-state execute loop, self-cost bucketed by phase, ins/node = Ir / 200 000:
+
+| ins/node | % | phase | what it is |
+|---:|---:|---|---|
+| **133.8** | 22.6% | **`Task_ptr` reference counting** | ctor/dtor/copy/move atomics: the dispatch-hop ref released into / adopted out of the queue, plus the `current_task` swap in `run_graph_node`. ~4 atomic inc/dec + null-check scaffolding per node |
+| **80.0** | 13.5% | scheduler: `submit` + `run_serial` | worker-less inline FIFO trampoline (enqueue + pop + invoke). Structural |
+| **75.1** | 12.7% | **completion notify: `std::mutex` + condvar broadcast** | `settle()` takes `scoped_lock(mutex)` and calls `done_cv.notify_all()` **per node** — `pthread_mutex_lock` 31 + `unlock` 21 + `cond_broadcast`/`notify_all` 21. Nothing waits on a node's condvar (only the run's `done` is `sync()`ed) |
+| **68.1** | 11.5% | `execute()` top: per-run re-arm | the `for (nodes_)` loop resets ~10 fields/node/run (`remaining_deps`, `completed`, `ready`, `num_locks`, `token` copy, flags…) + `make_bare_block()` done handle + `add_nested` |
+| **67.1** | 11.3% | **`settle()` self** | constructs+destructs an empty `std::vector<move_only_function>` `conts` (+ its memset), sets flags, moves out `continuations`/`nested_parent` — all no-op payload for a graph node |
+| **51.0** | 8.6% | `run_graph_node` self | the `num_locks` self-lock `store(execution_flag+1)` + `fetch_sub`, `reinterpret_cast`, cancel-check, no-op `Trace_*_scope` brackets (refcount of its `current_task` swap is in the refcount row) |
+| **39.0** | 6.6% | dispatch trampoline | `dispatch_ready` → `submit_ready(Task_ptr by value)` → `run_block_dispatch(adopt)` |
+| **38.0** | 6.4% | `node_complete` | successor `remaining_deps.fetch_sub` loop + `remaining_nodes.fetch_sub` + ready-successor dispatch |
+| **16.1** | 2.7% | node body invoke | the empty lambda through `move_only_function::_S_invoke` |
+| **11.0** | 1.9% | `global_scheduler()` per dispatch | the lock-free `g_fast` read, re-resolved on every node instead of cached |
+| **9.9** | 1.7% | allocation | `make_bare_block()` done-handle malloc/free — one per **run** (0.01/node), rest is libc mem |
+| **3.0** | 0.5% | `graph_node_completed` + `advance_pipe_links` | completion entry hop + pipe-link retirement (loops over zero links for object-free nodes) |
+
+### Grouped by logical phase
+
+- **Node completion / settle** — `settle` self 67.1 + mutex/condvar notify 75.1 +
+  `node_complete` 38.0 + `graph_node_completed` 3.0 = **~183 ins/node (31%)**. The
+  single fattest area, and the most removable: a graph node block has exactly one
+  `on_complete` (the graph's), never external `sync()` waiters or continuations, yet
+  it pays the full generic `Task_control_block` completion primitive — a `std::mutex`,
+  a `condition_variable::notify_all`, and an empty continuations vector — every node.
+- **Reference counting** — **~134 ins/node (23%)**. ~4 atomic inc/dec per node from
+  the ownership-carrying dispatch (`Task_ptr` released into and adopted back out of the
+  queue) and the `current_task` swap.
+- **Scheduler + dispatch** — `submit`/`run_serial` 80 + trampoline 39 +
+  `global_scheduler` 11 = **~130 ins/node (22%)**.
+- **Per-run re-arm** — `execute()` top **68 ins/node (11.5%)**, amortized: ~10 field
+  resets/node/run.
+- **`run_graph_node` self-lock + shim** — **51 ins/node (8.6%)**.
+
+## 4. Fat targets — what a future optimization would attack
+
+Ordered by payoff × safety (all instruction-count, so a lower bound on wall-clock for
+the atomic-heavy ones):
+
+1. **Slim the graph-node completion path (~183/node, biggest lever).** A graph-node
+   block never has external `sync()` waiters or `continuations`; it is driven solely by
+   `on_complete`. Giving graph nodes a completion that skips the `std::mutex` +
+   `done_cv.notify_all()` + `conts` vector — fire `on_complete` directly under the
+   existing atomic `completed`/`ready` flags — would reclaim most of the 75/node condvar
+   traffic and much of the 67/node `settle` self. The generic `settle` stays for
+   externally-awaited tasks (`async`/`launch`/coroutines). This is the standout finding:
+   the per-node **`pthread` mutex+condvar is 12.7% of the entire cost and wakes nobody**.
+
+2. **Borrowed-pointer dispatch for functor nodes (~134/node refcount, big lever).** The
+   block is owned by `Run_state` for the whole run and provably outlives every dispatch,
+   so the queue need not own a `Task_ptr` ref. A raw-pointer dispatch for the common
+   object-free / zero-nested-frame functor node (the baseline did exactly this) removes
+   the dispatch-hop inc/dec and the `Task_ptr` scaffolding. Keep the ownership-carrying
+   path for async/coroutine blocks that can outlive their launcher.
+
+3. **Cache the scheduler pointer (~11/node, trivial).** `execute()` already stores
+   `run.scheduler`; the dispatch path should use it instead of calling
+   `global_scheduler()` per node. ~2% for near-zero risk.
+
+4. **Trim the re-arm loop (~68/node, moderate).** ~10 separate relaxed stores + a
+   `Cancellation_token` copy per node per run. Batch the flag resets (a single memset of
+   a POD sub-block, or a packed flags word) and skip the `token` copy when the run token
+   is empty.
+
+5. **Skip `advance_pipe_links` when `pipe_count == 0` (~2/node, trivial).**
+
+Realistic reclaim from (1)+(2)+(3) alone is on the order of ~250–300 ins/node — roughly
+half the per-node machinery — for the object-free functor-node case, without touching
+the async/coroutine paths.
+
+Note on atomics: several hot phases are `lock`-prefixed RMWs (refcount inc/dec, the
+`num_locks` self-lock `store`/`fetch_sub`, `remaining_deps`/`remaining_nodes`
+`fetch_sub`). Uncontended here (single thread), so instruction count captures only their
+issue cost; on a contended multi-worker frame their cache-coherence cost is *additional*,
+so these rows understate real wall-clock weight — another reason the refcount and
+completion levers are attractive.
+
+---
+
+## 5. Baseline diff (secondary context) — is current heavier than the old block, and where
+
+Same driver/build on `1652818` (callback composition, `std::deque` pipe, no `ts::Named`):
+
+| | Ir | ins/node |
 |---|---|---|
 | baseline `1652818` | 104,450,328 | 522.3 |
 | current `master`   | 129,583,340 | 647.9 |
-| **delta**          | **+25,133,012 (+24.1%)** | **+125.7 ins/node** |
+| **delta** | **+25,133,012 (+24.1%)** | **+125.7 ins/node** |
 
-So this is **not** a cache / branch-mispredict / atomic-contention effect invisible
-to instruction counting — the extra work is real, retired instructions. Callgrind is
-the right tool.
+(Per-node here over all 200 000 node-execs incl. amortized one-time setup; §2's 592.6
+is the steady-state-only figure. The two denominators differ; both are internally
+consistent.)
 
-Reconciling +24% here with the reported ~10% wall-clock: this microbenchmark is
-100% machinery (empty nodes), so the fixed per-node overhead shows at full weight.
-On a real frame the node bodies do actual work that dilutes the fixed ~+126 ins/node,
-landing the observable delta lower — consistent with ~10%. One caveat pointing the
-other way: the new cost includes two **atomic** RMWs/node (see §4); those are
-uncontended in this single-thread run, so on a contended multi-worker frame their
-cache-coherence cost is *additional* to the instruction count — instruction count is
-a lower bound there.
+The regression reproduces in instruction count — real retired work, not an
+invisible cache/atomic effect, so callgrind is the right tool. The ~24% on this
+pure-machinery microbench vs the reported ~10% wall on real frames is consistent: real
+node bodies dilute the fixed ~+126 ins/node.
 
-## 3. What it is NOT (hypotheses falsified)
+**Where the +126/node came from** (source-verified, not just symbol names):
 
-- **NOT the `execution_flag` self-lock completion path.** `Static_task_graph::run_graph_node`
-  is **byte-identical** between the two commits — same `num_locks.store(execution_flag+1)`,
-  same body bracket, same `fetch_sub`/`complete()`. The only textual difference is the
-  baseline's extra `std::uint64_t gen` param (`claim(gen)`). Self-cost: 10.2M (cur) vs
-  10.4M (base) — neutral. The self-lock predates the transformation; the leading
-  hypothesis is wrong.
-- **NOT the scheduler.** `Scheduler::submit` self = 2.20M both; `Scheduler::run_serial`
-  self = 10.60M both. Identical.
-- **NOT completion/settle.** These got *cheaper* on current: `settle` self 13.4M vs
-  17.6M (−4.2M), `node_complete` 6.0M vs 7.6M (−1.6M), `graph_node_completed` inclusive
-  8.24M vs 8.63M. (Some of that is refcount work relocating out of these functions'
-  self-cost — see the attribution caveat in §4.)
+- **NOT the `execution_flag` self-lock.** `run_graph_node` is **byte-identical**
+  between the commits (same `num_locks.store(execution_flag+1)` / `fetch_sub` /
+  `complete()`; baseline only carries an extra `gen` param). That path predates
+  coroutine-first — the leading hypothesis is false.
+- **NOT the scheduler** (`submit`/`run_serial` self-costs identical) and **NOT the
+  completion self/`node_complete`**, which are actually *cheaper* on current (settle
+  self −4.2M, node_complete −1.6M — partly refcount relocating out; see below).
+- **It is the unified ownership-carrying dispatch trampoline.** Baseline queued a
+  **borrowed raw `Node*`** (`run_node → submit(&node_trampoline, &node) → node_trampoline
+  → block->execute`, zero reference counting). Current routes every node through the
+  generic block path (`dispatch_ready → submit_ready(Task_ptr by value = atomic INC) →
+  run_block_dispatch(adopt + dtor = atomic DEC) → execute`), adding +1 atomic inc + 1
+  dec + `Task_ptr` ctor/dtor per node. Secondary: `global_scheduler()` per dispatch
+  (+11/node) vs baseline's cached `run.scheduler`; unconditional `advance_pipe_links`
+  (+3/node); `execute`/`graph_node_completed` indirection.
 
-## 4. Root cause — the unified ownership-carrying dispatch trampoline
+Attribution caveat: the `Task_ptr` refcount trio shows +26.7M gross self, but part is
+debuginfo inlining-attribution relocation — the identical `current_task` swap is
+attributed to `run_graph_node`/`acquire_next`/`settle` **self** in the baseline binary
+and to standalone `Task_ptr` symbols in the current one (which is why baseline's
+`acquire_next` 7.2M and `settle` 17.6M look inflated). The inlining-independent truths
+are the grand total (+25.1M) and the source diff. The mechanistic net, grouping to
+cancel the relocation: dispatch-machinery functions are ~net-neutral, the refcount
+inc/dec on the dispatch hop is the genuine new cost, plus `global_scheduler` (+2.2M)
+and `execute` (+1.6M), offset by cheaper settle/node_complete (−5.8M).
 
-The regression is entirely in the **per-node dispatch hop**, and it is a deliberate
-structural change from coroutine-first: every ready node now dispatches through the
-one generic block trampoline (shared with `async`/`launch`/coroutines/the pipe
-cascade) instead of the graph's old bespoke one.
-
-**Baseline** — dispatch carries a **raw `Node*`**, zero reference counting:
-```
-on_data_ready → acquire_next → run_node
-    → submit(&node_trampoline, &node, prio)       // bare pointer into the queue
-node_trampoline(void* node) → block->execute(block, gen)
-```
-
-**Current** — dispatch carries an **owned `Task_ptr` through the queue**:
-```
-on_data_ready → dispatch_ready(node.block)
-    → submit_ready(Task_ptr block)                // by value: copy ctor = atomic INC
-        → submit(&run_block_dispatch, block.release(), prio)   // release into queue
-run_block_dispatch(void* d):
-    Task_ptr block(d, Adopt_ref{});               // adopt
-    block->execute(block); … }                    // dtor at scope end = atomic DEC
-```
-Net new work per node vs baseline: **+1 atomic increment + 1 atomic decrement +
-`Task_ptr` construct/destruct scaffolding**, on the dispatch hop that baseline did
-with a bare pointer.
-
-### Per-function net-delta (self Ir, renamed pairs merged, ×200k = per node)
-
-| Δ Ir | Δ/node | cur | base | function |
-|---:|---:|---:|---:|---|
-| +11,698,957 | +58.5 | 11.70M | ~0 | `Task_ptr::~Task_ptr` |
-| +10,039,396 | +50.2 | 10.04M | 0 | `Task_ptr::operator=(Task_ptr&&)` |
-| +5,400,000  | +27.0 | 5.40M | 0 | `Task_control_block::dispatch_ready` |
-| +5,000,000  | +25.0 | 5.00M | 0 | `Task_ptr::operator=(const Task_ptr&)` |
-| +2,400,000  | +12.0 | 2.40M | 0 | `run_block_dispatch` |
-| +2,200,000  | +11.0 | 2.20M | ~0 | `global_scheduler()` |
-| +1,602,003  | +8.0  | 13.62M | 12.02M | `execute` |
-| +600,000    | +3.0  | 1.60M | 1.00M | `graph_node_completed` |
-| +600,000    | +3.0  | 0.60M | 0 | `advance_pipe_links` |
-| −200,000    | −1.0  | 10.20M | 10.40M | `run_graph_node` (identical source) |
-| −1,200,000  | −6.0  | 0 | 1.20M | `node_trampoline` (baseline-only) |
-| −1,600,000  | −8.0  | 6.00M | 7.60M | `node_complete` |
-| −4,200,000  | −21.0 | 13.40M | 17.60M | `settle` |
-| −7,200,000  | −36.0 | 0 | 7.20M | `acquire_next` (baseline-only) |
-| | | | | (sum = **+25.13M**) |
-
-**Attribution caveat (important, and it does not change the verdict).** The `Task_ptr`
-refcount trio shows +26.7M gross, but that overstates the *new* work: the identical
-`current_task` swap inside `run_graph_node` is inlined-and-attributed to `run_graph_node`
-/`acquire_next`/`settle` **self** in the baseline build, and to the standalone `Task_ptr`
-symbols in the current build (a debuginfo inlining-attribution difference between the two
-binaries). That is exactly why baseline's `acquire_next` (7.2M) and `settle` (17.6M)
-look inflated and current's look smaller — the same refcount instructions moved symbol.
-The **inlining-independent** truths are the grand total (+25.1M) and the source diff
-above; the per-symbol rows are directional, not literal.
-
-Grouping the net delta by mechanism (this *is* inlining-robust — it nets the relocation):
-
-- **Dispatch-machinery functions** — baseline `{acquire_next −7.2M, node_trampoline
-  −1.2M}` removed vs current `{dispatch_ready +5.4M, run_block_dispatch +2.4M,
-  advance_pipe_links +0.6M, graph_node_completed +0.6M}` added ⇒ **~net-neutral (+0.6M)**
-  at the named-function level.
-- **Refcount traffic** (`Task_ptr` trio, net of the relocation) ⇒ the **dominant
-  positive**: the dispatch-hop inc/dec that baseline's raw-`Node*` trampoline never paid.
-- **`global_scheduler()` per dispatch** ⇒ **+2.2M (+11/node)**: current calls
-  `global_scheduler().submit(...)` on every node; baseline cached `run.scheduler->submit(...)`.
-- **`advance_pipe_links` unconditional** ⇒ **+0.6M (+3/node)**: `graph_node_completed`
-  calls it every completion even when `pipe_count == 0` (the object-free node case).
-- **`execute` top-level** ⇒ **+1.6M (+8/node)**.
-- **Offset**: cheaper `settle` + `node_complete` ⇒ **−5.8M**.
-
-## 5. Verdict
-
-The +125.7 instructions/node (+24.1% of pure machinery; ≈ the reported ~10% wall on
-real frames once node bodies dilute it) is **the unified ownership-carrying dispatch
-trampoline** introduced by coroutine-first: each ready node is now released into and
-adopted back out of the scheduler queue as a reference-counted `Task_ptr` (one atomic
-increment + one atomic decrement + `Task_ptr` ctor/dtor per node), where the baseline
-queued a borrowed raw `Node*` and did no reference counting. Secondary, smaller
-contributors: `global_scheduler()` re-resolved per dispatch (+11/node), an
-unconditional `advance_pipe_links` on object-free nodes (+3/node), and the extra
-`graph_node_completed`/`execute` indirection. It is **not** the `execution_flag`
-self-lock (byte-identical to baseline), **not** the scheduler (identical), and **not**
-the completion/settle path (measurably cheaper on current).
-
-**Tolerable-or-fixable:** largely fixable, low-risk, and it recovers most of the delta:
-
-1. **Cache the scheduler pointer** on the dispatch path (`run_.scheduler`) instead of
-   `global_scheduler()` per node — trivial, ≈ −2.2M (−11/node, ~9% of the regression).
-2. **Borrowed-pointer dispatch fast-path for object-free / zero-nested-frame functor
-   nodes** — the block is owned by `Run_state` for the whole run and provably outlives
-   every dispatch (the baseline relied on exactly this to queue a raw `Node*`), so the
-   queue does not need to own a ref. Restoring a raw-pointer trampoline for the common
-   functor-node case reclaims the refcount trio — the single big lever (~+100/node).
-3. **Skip `advance_pipe_links` when `pipe_count == 0`** — ≈ −3/node.
-
-The transformation traded per-node atomic refcount churn for one cascade serving nodes,
-multi-object `async`, and coroutines. The cost is real and instruction-count-visible;
-most of it is reclaimable for the graph's functor-node fast path without giving up the
-unified cascade for the paths that genuinely need block ownership.
+The baseline finding aligns with the current-version map: the biggest *absolute* cost
+today (node completion, ~183/node) is largely present in both versions — it is
+inherent to the generic `Task_control_block` completion primitive, not the regression.
+The regression proper is the +126/node of ownership-refcount the transformation added;
+the completion path is the larger standing target that predates it. Both are addressed
+by items 1–2 in §4.

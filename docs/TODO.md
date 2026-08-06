@@ -405,6 +405,20 @@ IDs — when an item is done, mark it, don't renumber.
        on object-free nodes). Concurrency-sensitive (touches the dispatch path) — TSan-gate any
        change. Optional: the frame-level cost is <1% (design §2.5), so this is perf recovery, not
        a fix — but the levers are low-risk and the mechanism is fully understood.
+       **Full per-node cost map (callgrind, current master, ~593 ins/node of framework on a
+       trivial node — 97% machinery, 3% body).** Ranked self-cost, and note the fattest target
+       is a STANDING inefficiency that largely PREDATES the regression, so a bigger absolute win
+       than 2.16's regression recovery: (1) **node completion/settle ~183/node (31%)** — every
+       node's `settle()` takes a `std::mutex` and calls `done_cv.notify_all()` **though nothing
+       waits on an individual node's condvar** (only the run's terminal `done` handle is
+       `sync()`ed), plus an always-empty `conts` vector ctor/dtor; slim graph-node completion to
+       fire `on_complete` under the atomic flags, skipping the mutex+condvar+vector. Inherent to
+       the generic `Task_control_block` settle path, not graph-specific — a broad lever. (2)
+       `Task_ptr` refcounting ~134/node (23%, the 2.16 regression). (3) scheduler
+       `submit`+`run_serial` ~80/node. (4) re-arm field resets ~68/node (batchable). (5)
+       `global_scheduler()` per dispatch ~11/node. Targets 1–3 could reclaim ~half the per-node
+       machinery for the functor-node case without touching the async/coroutine paths. Full
+       report: [graph-regression-callgrind.md](graph-regression-callgrind.md).
 3. **Scheduler**
    0. `[x]` **Single global scheduler — DONE (2026-07, `d173d9a`+`2b48a5b`).** Author chose single-global over the ambient-multi model (3.1). Exactly one scheduler process-wide, reachable via `global_scheduler()` (renamed from `default_scheduler`); reconfigurable by teardown+recreate (`configure_scheduler(config)`, a coarse quiescent-point op, NOT thread-safe against concurrent use) + a scoped `Scheduler_scope(config)` RAII (snapshot→reconfigure→restore) for running a block on a specific pool. `execute()` drops its `Scheduler&` arg (uses the global); `parallel_for` fans out on `current_scheduler` (Phase-1 fix `ea471dd` — a parallel_for inside a task uses that task's pool, not the global default, which had silently oversubscribed the sample's variant traces). Supersedes 3.1's ambient-override idea and its `Launch_options{.scheduler}` (nothing to select among). **Residual (P3): compile-time ban on ad-hoc `ts::Scheduler`.** The public ctor still compiles, so `ts::Scheduler s{...}` is constructible but INERT (nothing routes to it — a footgun). Finish via a `detail::make_scheduler(config)` factory (returns `unique_ptr`; class non-movable) used by the global holder AND the internal scheduler tests, public ctor removed. Cost: `scheduler_tests.cpp` unit-tests the class directly (ctor/dtor drain, 3 idle policies, valve — 13 sites) so it migrates to the factory; benchmarks/tsan likewise (~21 sites, mechanical). Author 2026-07: leave the ctor public for now (behavioral single-global suffices), do the ban later.
    1. `[~]` **(P1, superseded by 3.0) Ambient (overridable) scheduler** — was: `launch`/`task`/`access` resolve to an *ambient* scheduler + `Scheduler_scope` override + `Launch_options{.scheduler}`. The single-global model (3.0) took the simpler road: one reconfigurable global, `Scheduler_scope` reconfigures it rather than overriding among many. Kept for the record. [§D3]
