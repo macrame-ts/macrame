@@ -419,8 +419,11 @@ void Static_task_graph::graph_node_completed(detail::Task_control_block* block)
     auto* self = reinterpret_cast<Graph_node_block*>(block);
     // The settle-must-advance-links contract (the graph is the second pipe-task creation
     // site next to `make_piped_executable`): retire this node's line entries FIRST, so a
-    // successor going data-ready below enters lines the node no longer holds.
-    detail::advance_pipe_links(block);
+    // successor going data-ready below enters lines the node no longer holds. An object-free
+    // node entered no pipes (`pipe_count == 0`, its data-ready path dispatched directly), so
+    // it has nothing to advance -- skip the cross-TU call entirely (Opt 3).
+    if (block->pipe_count != 0)
+        detail::advance_pipe_links(block);
     node_complete(*self->graph->run_, self->index);
 }
 
