@@ -4,12 +4,16 @@
 #include "ts/coroutine_support.h"
 #include "ts/guarded.h"
 #include "ts/parallel_for.h"
+#include "ts/scheduler.h"
 #include "ts/static_task_graph.h"
 #include "ts/frame_gate.h"
 #include "test_util.h"
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <cstdio>
+#include <future>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -291,6 +295,66 @@ void test_showcase()
         TS_CHECK(t.sync() == -1);
     }
 }
+
+// 14. Pool-exhaustion proof: a recursive fork-join, expressed with `co_await`, that a
+// BLOCKING wait could not complete on a worker pool smaller than the join's depth/width --
+// the exact deadlock class that retraction used to break by running the not-yet-started
+// child inline on the blocked waiter. Coroutine-first eliminates that class structurally:
+// a `co_await` on unfinished sub-work SUSPENDS (freeing the worker) instead of blocking, so
+// a waiting frame never occupies a worker while its children need one.
+//
+// Each frame first hops onto a worker with `co_await ts::launch([]{})`, so every recursive
+// call is an eager coroutine that immediately suspends on its own hop, becoming a queued
+// unit a worker must pick up; when a frame later `co_await`s its two children it is itself
+// running ON a worker. On ONE worker a blocking wait would be an instant classic deadlock
+// (the sole worker runs a frame, the frame blocks on a child, the child can't run because
+// the worker is occupied); with suspension the frame yields the worker, the worker runs the
+// queued child, and its completion resumes the parent. (A blocking variant is deliberately
+// NOT implemented: an in-task sync()/take() on unfinished work is fatal by design.)
+constexpr int fork_join_leaves = 96;   // tree depth ~7, ~190 nodes -- far exceeds 1-2 workers
+
+Task<long long> co_sum_range(const int* values, int lo, int hi)
+{
+    co_await ts::launch([] {});   // hop onto a worker: this frame becomes a scheduled unit
+    if (hi - lo <= 1)
+        co_return values[lo];
+    int mid = lo + (hi - lo) / 2;
+    Task<long long> left = co_sum_range(values, lo, mid);
+    Task<long long> right = co_sum_range(values, mid, hi);
+    co_return co_await left + co_await right;   // suspends here, freeing the worker
+}
+
+void run_fork_join_on_pool(int workers)
+{
+    std::vector<int> values(fork_join_leaves);
+    long long expected = 0;
+    for (int i = 0; i < fork_join_leaves; ++i) { values[i] = i; expected += i; }
+
+    // Run on a helper thread so a HANG cannot wedge the suite: wait on the future with a
+    // deadline and report a failure instead of blocking forever.
+    std::promise<long long> prom;
+    std::future<long long> fut = prom.get_future();
+    std::thread runner([&]
+    {
+        ts::Scheduler_scope scope{ { .num_threads = static_cast<uint32_t>(workers) } };
+        long long r = co_sum_range(values.data(), 0, fork_join_leaves).sync();
+        prom.set_value(r);
+    });
+
+    if (fut.wait_for(std::chrono::seconds(20)) == std::future_status::ready)
+    {
+        runner.join();
+        TS_CHECK(fut.get() == expected);
+    }
+    else
+    {
+        TS_CHECK(false && "fork-join hung: worker pool exhausted (suspension regression)");
+        runner.detach();
+    }
+}
+
+void test_fork_join_one_worker()  { run_fork_join_on_pool(1); }
+void test_fork_join_two_workers() { run_fork_join_on_pool(2); }
 
 // --- coroutine-first §6 matrix companions ---------------------------------
 
@@ -670,6 +734,8 @@ void run_coroutine_tests()
     run_if(with_rule_circular_wait, "TS_RULE_CIRCULAR_WAIT off", "death: circular wait", test_death_circular_wait);
 #endif
     run("co showcase", test_showcase);
+    run("co fork-join 1 worker (pool-exhaustion proof)", test_fork_join_one_worker);
+    run("co fork-join 2 workers (pool-exhaustion proof)", test_fork_join_two_workers);
     run("frame gate releases at next boundary", test_frame_gate_releases_at_next_boundary);
     run("frame gate many waiters", test_frame_gate_many_waiters);
     run("frame gate idle open", test_frame_gate_idle_open);
