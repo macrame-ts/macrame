@@ -1125,6 +1125,28 @@ IDs — when an item is done, mark it, don't renumber.
 7. **Deferred / Versioned**
    1. `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.
    2. `[ ]` **(P2) Lock-free `stage()`** — kill the per-slot mutex (it exists ONLY for the dynamic stage-vs-cut race; single producer per slot otherwise — handoff doc §5). Falls out of 7.1's arena step: single-producer chunked bump allocation makes `stage` a lock-free bump, and the cut becomes a chain-head exchange. `Parallel_recorder` already gives thread-keyed slots (per-worker + overflow lane); this removes the last lock on the staging path. Split out of 7.1 for referenceability — implement together with the arena.
+   3. `[ ]` **(P1, BUG — found 2026-08 by TSan during the graph-dispatch opt work; PROVEN
+       PRE-EXISTING, not caused by any opt) Task holding a `Recorder` can have its journal
+       slot released after `sync()` returns.** A task block that captured a `Recorder<T>` into a
+       `Deferred`/`Versioned` journal is destroyed on a WORKER (the refcounted dispatch dtor)
+       *after* `sync()` has returned — teardown lags settle. The `Recorder`'s destruction calls
+       `Journal::release_slot`, touching the journal, while the caller has moved on. In
+       `game_frame` this races: `gf_propagation` (multi-object `ts::async`) tears down on a
+       worker and its `Recorder<Transforms>` releases a slot in the `Versioned<Transforms>`
+       journal, racing MAIN constructing the next iteration's `World` (a fresh
+       `Versioned<Transforms>`) **at the same reused stack address**. Reproduced under a focused
+       TSan loop on committed master (Opt 1 7/15, Opt 2 5/15, Opt 5 8/15 — always the identical
+       journal race, zero new races from any opt); rare on single-pass `tsan/run.sh` (~3%),
+       which is why it slipped through. **Root:** `sync()` returning means *settled*, not
+       *destroyed* — the block refcount drop trails on the worker; `~Guarded` closes this with a
+       pipe drain (`wait_until_idle`), but the **journal has no equivalent drain**. Same
+       "completion ≠ full teardown" seam as the `~Guarded`/sync-then-destroy case, on the layer
+       that lacks the safety net. **Two fix angles (author to choose):** (a) SAMPLE — don't hold
+       a `Recorder` in a task whose block can outlive the `World` stack frame; (b) LIBRARY — give
+       the journal a drain so a `Recorder`'s slot release cannot lag past the task's `sync()`
+       (the more general fix; the sample only exposed it). Read the `Journal::release_slot` /
+       block-teardown ordering before deciding. Narrow + rare, so not push-blocking, but a
+       genuine data race.
 
 8. **Task chaining**
    1. `[—]` **MOOT (2026-08, 6.4).** Results-on-`after` — `after` and the whole builder are
