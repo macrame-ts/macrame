@@ -194,7 +194,7 @@ void run_mem_profile()
 
     std::printf("\nallocation profile (allocs & bytes charged per op, all threads):\n");
 
-    ts::Guarded<int> a{ 0 }, b{ 0 };
+    ts::Guarded<int> a{ ts::Named{"a"}, 0 }, b{ ts::Named{"b"}, 0 };
 
     measure("launch", k, []
     {
@@ -236,11 +236,11 @@ void run_mem_profile()
     });
 
     {
-        ts::Guarded<int> g1{ 0 }, g2{ 0 }, g3{ 0 };
+        ts::Guarded<int> g1{ ts::Named{"g1"}, 0 }, g2{ ts::Named{"g2"}, 0 }, g3{ ts::Named{"g3"}, 0 };
         ts::Static_task_graph graph;
-        graph.add_node([](int& x) { x = 1; }, g1);
-        graph.add_node([](const int& x, int& y) { y = x + 1; }, g1, g2);
-        graph.add_node([](const int& x, const int& y, int& z) { z = x + y; }, g1, g2, g3);
+        graph.add_node(ts::Named{"n1"}, [](int& x) { x = 1; }, g1);
+        graph.add_node(ts::Named{"n2"}, [](const int& x, int& y) { y = x + 1; }, g1, g2);
+        graph.add_node(ts::Named{"n3"}, [](const int& x, const int& y, int& z) { z = x + y; }, g1, g2, g3);
         graph.compile();
         measure("graph execute", k, [&graph]
         {
