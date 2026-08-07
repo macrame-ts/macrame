@@ -215,6 +215,18 @@ public:
             sum += slot.body.load(std::memory_order_relaxed);
         return sum;
     }
+    // Total orchestration ticks (the dedicated per-run `execute()` setup accumulator, Phase 1
+    // of the four-way breakdown), summed over workers; relaxed -- advisory. No in-flight
+    // compensation: the setup span is booked whole at `Trace_setup_scope` exit, never a
+    // partially-elapsed in-flight task like a `run_task` body. The trace takes a begin/end
+    // delta per run, exactly like `body_ticks`/`machinery_ticks`.
+    long long orchestration_ticks() const noexcept
+    {
+        long long sum = 0;
+        for (const Busy_slot& slot : busy_)
+            sum += slot.orchestration.load(std::memory_order_relaxed);
+        return sum;
+    }
     long long machinery_ticks() const noexcept
     {
         // Mirror `busy_ticks`' in-flight handling, for the same reason: the reader is often
@@ -265,6 +277,15 @@ public:
     void add_machinery_ticks(int worker_index, long long dt) noexcept
     {
         busy_[busy_slot_index(worker_index)].machinery.fetch_add(dt, std::memory_order_relaxed);
+    }
+    // Add `dt` ticks of ORCHESTRATION -- the `trace_orchestration_add` bridge target (Phase 1
+    // of the four-way subtraction breakdown). Same per-run graph-setup span the machinery
+    // bridge sees, booked to a DEDICATED accumulator so the four-way split has a clean
+    // off-worker bucket while summed-M stays whole. A non-worker caller lands in the overflow
+    // lane, exactly like `add_machinery_ticks`.
+    void add_orchestration_ticks(int worker_index, long long dt) noexcept
+    {
+        busy_[busy_slot_index(worker_index)].orchestration.fetch_add(dt, std::memory_order_relaxed);
     }
     // Move `dt` ticks of a worker's time from body to machinery (a `submit` ran inside a
     // functor -- fan-out dispatch is task-system cost, not user work). No-op off-worker.
@@ -505,6 +526,10 @@ private:
         // machinery = dispatch + completion + successor/fan-out submit + successful scans.
         std::atomic<long long> body{ 0 };
         std::atomic<long long> machinery{ 0 };
+        // Phase 1 four-way breakdown: the per-run `execute()` setup span, booked here IN
+        // ADDITION to `machinery` (via `add_orchestration_ticks`), so the subtraction split
+        // has a dedicated off-worker bucket without perturbing summed-M. Single writer.
+        std::atomic<long long> orchestration{ 0 };
     };
     std::vector<Busy_slot> busy_;
     std::atomic<int> busy_tracking_{ 0 };   // armed-consumer count; 0 = untimed fast path

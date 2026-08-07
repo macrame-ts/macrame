@@ -45,6 +45,12 @@ extern void (*trace_owner_add)(int owner, long long dt);
 extern void (*trace_body_add)(long long dt);   // B += dt, M -= dt (body booked under run_task)
 extern void (*trace_body_only)(long long dt);  // B += dt only (inline body: no run_task M to net)
 extern void (*trace_machinery_add)(long long dt);  // M += dt (per-run graph setup, no run_task span)
+// Phase 1 (additive) of the subtraction-based four-way overhead breakdown: a DEDICATED
+// orchestration accumulator, parallel to (not replacing) the summed-M machinery above.
+// `Trace_setup_scope` routes its per-run `execute()` setup span here IN ADDITION to
+// `trace_machinery_add`, so the summed-M metric stays intact while the four-way split gets a
+// clean fourth bucket (framework work done OFF-worker, absent from `busy_ticks`). Scheduler-free.
+extern void (*trace_orchestration_add)(long long dt);  // Orch += dt (per-run graph setup, off-worker)
 
 inline thread_local int current_trace_owner = -1;
 // True while this thread is inside a user functor (a `Trace_busy_scope`). The scheduler's
@@ -162,7 +168,9 @@ public:
             long long dt = std::chrono::steady_clock::now().time_since_epoch().count() - t0_;
             trace_body_under_run_task = prev_booked_;
             if (trace_machinery_add)
-                trace_machinery_add(dt);
+                trace_machinery_add(dt);           // summed-M (unchanged): M += dt
+            if (trace_orchestration_add)
+                trace_orchestration_add(dt);        // four-way (additive): Orch += dt
         }
     }
     Trace_setup_scope(const Trace_setup_scope&) = delete;

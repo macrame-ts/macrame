@@ -63,6 +63,15 @@ void (*trace_machinery_add)(long long) = +[](long long dt)
     Scheduler* s = current_scheduler ? current_scheduler : &global_scheduler();
     s->add_machinery_ticks(current_worker_index, dt);
 };
+// The dedicated orchestration bridge (Phase 1 of the four-way subtraction breakdown): the SAME
+// per-run setup span the machinery bridge above receives, routed additionally to a separate
+// accumulator so the four-way split (body / machinery(M_core) / idle / orchestration) has a
+// clean off-worker bucket. Same overflow-lane fallback as `trace_machinery_add`.
+void (*trace_orchestration_add)(long long) = +[](long long dt)
+{
+    Scheduler* s = current_scheduler ? current_scheduler : &global_scheduler();
+    s->add_orchestration_ticks(current_worker_index, dt);
+};
 }
 #endif
 

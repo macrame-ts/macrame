@@ -254,6 +254,38 @@ side-by-side oracle.
     `TS_PROFILING`-gated and armed-only (disarmed = one relaxed load + branch; the
     throughput series is untouched — it never arms).
 
+Done (2026-08): **Phase 1 (additive): four-way subtraction breakdown.** The summed-M
+metric answers "how much of compute is machinery" by *accumulation*; this adds the
+complementary *subtraction* view over core-time, and prints both side by side so the two
+can be diffed. Additive and reversible — no existing machinery was removed; a parallel
+computation runs alongside summed-M.
+  - **The model.** In core-time `T = workers × makespan`, every worker-moment is body,
+    framework-machinery, or idle: `T = B + M_core + P`, so `M_core = busy − B` and
+    `P = T − busy` (`busy` = `busy_ticks()`, the `run_task` span sum; `B` = `body_ticks()`).
+    Framework work done OFF-worker — the per-run `execute()` setup on the frame-loop thread —
+    is absent from `busy`, so it is a separate fourth bucket, **Orchestration**. The headline
+    is a four-way split **body / machinery(M_core) / idle / orchestration** as shares of `T`.
+  - **Mechanism** (all `TS_PROFILING`-gated, armed-only, disarmed = one relaxed load+branch).
+    A dedicated per-`Busy_slot` `orchestration` accumulator + `Scheduler::add_orchestration_ticks`
+    (overflow-lane aware) + a `trace_orchestration_add` bridge (`trace_owner.h`/`scheduler.cpp`,
+    mirroring `trace_machinery_add`). `Trace_setup_scope` now books its span to `trace_orchestration_add`
+    IN ADDITION to `trace_machinery_add`, so summed-M is untouched. The fold (`trace_stamps.h` →
+    `Graph_trace::on_run_complete`) snapshots an orchestration delta and computes the per-run four-way
+    (`four_way_*_share()` getters); `--trace` console and the SVG headline print both metrics plus a
+    reconciliation line.
+  - **The reconciliation is the point.** Summed-M already includes the setup span (via the
+    unchanged machinery bridge), so summed-M vs `(M_core + Orch)` leaves a residual =
+    **successful-`find_work` dispatch + inline-body time** — both counted in summed-M but living
+    OUTSIDE `busy`, so outside `M_core = busy − B`. It reconciles tightly: game_frame, 6-worker
+    trace, 200 frames — **baseline** summed-M 4334 µs vs (M_core 4293 + Orch 18 = 4311) → residual
+    **23 µs** (~0.5%); **optimised** summed-M 1825 µs vs (M_core 1788 + Orch 15 = 1804) → residual
+    **21 µs**. Orchestration is ~16–18 µs/frame. The four-way shares: **baseline** body 80.8% /
+    M_core 9.1% / idle 10.2% / orch ~0.0% (of a ~47 ms core-time `T`); **optimised** body 92.4% /
+    M_core 4.3% / idle 3.3% / orch ~0.0% — the optimised frame converts idle and M_core into body
+    share, matching the summed-M and dead-time stories. A large residual would be data, not a bug
+    (Phase 2 — retiring the direct-M accumulation in favour of pure subtraction — is gated on human
+    review of these numbers, not done here).
+
 Remaining:
 - **Per-kind aggregates + scheduling counters.** Per task kind {node, slice,
   async, continuation, nested}: count + Welford duration + total busy. Plus

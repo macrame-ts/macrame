@@ -150,7 +150,8 @@ public:
                          const long long* util_bucket_busy = nullptr,
                          int util_bucket_count = 0, long long bucket_width_ticks = 0,
                          const long long* owner_busy = nullptr, long long task_count = 0,
-                         long long body_ticks = 0, long long machinery_ticks = 0)
+                         long long body_ticks = 0, long long machinery_ticks = 0,
+                         long long orchestration_ticks = 0)
     {
         if (node_count != static_cast<int>(nodes_.size()))
             return;   // structure not pushed (or a stale attach) -- drop the sample
@@ -249,6 +250,28 @@ public:
         body_us_.add(static_cast<double>(body_ticks) * ticks_to_us);
         machinery_us_.add(static_cast<double>(machinery_ticks) * ticks_to_us);
 
+        // Four-way subtraction breakdown (Phase 1, additive -- parallel to the summed-M above,
+        // not a replacement). In core-time T = workers x makespan, every worker-moment is body,
+        // framework-machinery, or idle: T = B + M_core + P, so M_core = busy - B and P = T - busy
+        // (busy = the run_task span sum). Framework work done OFF-worker (the per-run execute()
+        // setup on the frame-loop thread) is absent from busy, so it is a separate 4th bucket,
+        // Orchestration, measured by its own accumulator. Shares reported vs T. The reconciliation
+        // summed-M vs (M_core + Orch) is the diff this phase exists to expose -- see `residual_us`.
+        if (worker_count > 0 && window > 0)
+        {
+            double t_us = static_cast<double>(worker_count) * static_cast<double>(window) * ticks_to_us;
+            double busy_us = static_cast<double>(busy_ticks) * ticks_to_us;
+            double b_us = static_cast<double>(body_ticks) * ticks_to_us;
+            double m_core_us = busy_us - b_us;                   // machinery inside worker spans
+            double idle_us = t_us - busy_us;                     // P = T - busy
+            double orch_us = static_cast<double>(orchestration_ticks) * ticks_to_us;
+            four_T_us_.add(t_us);
+            four_body_us_.add(b_us);
+            four_m_core_us_.add(m_core_us);
+            four_idle_us_.add(idle_us);
+            four_orch_us_.add(orch_us);
+        }
+
         ++runs_;
     }
 
@@ -280,6 +303,11 @@ public:
         tasks_per_run_ = {};
         body_us_ = {};
         machinery_us_ = {};
+        four_T_us_ = {};
+        four_body_us_ = {};
+        four_m_core_us_ = {};
+        four_idle_us_ = {};
+        four_orch_us_ = {};
         critical_work_ = {};
         makespan_ = {};
         makespan_min_ = 0.0;
@@ -308,6 +336,46 @@ public:
     {
         double b = body_us_.mean, m = machinery_us_.mean;
         return (b + m) > 0.0 ? m / (b + m) : 0.0;
+    }
+
+    // --- Four-way subtraction breakdown (Phase 1, additive) -----------------------------
+    // Shares of core-time T = workers x makespan: body / machinery(M_core) / idle / orchestration.
+    // M_core = busy - B (machinery inside worker run_task spans); idle = T - busy; orchestration =
+    // the off-worker per-run execute() setup. These four are a partition of T by construction (they
+    // sum to 1 up to the orchestration term, which sits OUTSIDE busy and so adds on top -- body +
+    // M_core + idle = busy + idle = T exactly, and orchestration is the extra off-worker framework
+    // slice T does not otherwise see). Reported as mean-component / mean-T (mirrors `overhead()`).
+    double four_way_body_share() const
+    {
+        return four_T_us_.mean > 0.0 ? four_body_us_.mean / four_T_us_.mean : 0.0;
+    }
+    double four_way_machinery_share() const
+    {
+        return four_T_us_.mean > 0.0 ? four_m_core_us_.mean / four_T_us_.mean : 0.0;
+    }
+    double four_way_idle_share() const
+    {
+        return four_T_us_.mean > 0.0 ? four_idle_us_.mean / four_T_us_.mean : 0.0;
+    }
+    double four_way_orchestration_share() const
+    {
+        return four_T_us_.mean > 0.0 ? four_orch_us_.mean / four_T_us_.mean : 0.0;
+    }
+    // Per-run means (µs) of the four-way components, for the console reconciliation line.
+    double four_way_body_us() const { return four_body_us_.mean; }
+    double four_way_machinery_us() const { return four_m_core_us_.mean; }
+    double four_way_idle_us() const { return four_idle_us_.mean; }
+    double four_way_orchestration_us() const { return four_orch_us_.mean; }
+    double four_way_core_time_us() const { return four_T_us_.mean; }
+    // Reconciliation: summed-M is the existing accumulator (busy - B_runtask + orch + dispatch +
+    // submit); the subtraction split accounts M_core + Orch. Their residual is summed-M minus
+    // (M_core + Orch) = successful-find_work dispatch + inline-body time (both counted in summed-M
+    // but outside busy, so outside M_core). Positive residual is expected, not a bug -- it is the
+    // machinery summed-M sees that lives off the run_task span. Reported for the diff, not fixed.
+    double four_way_summed_m_us() const { return machinery_us_.mean; }
+    double four_way_reconcile_residual_us() const
+    {
+        return machinery_us_.mean - (four_m_core_us_.mean + four_orch_us_.mean);
     }
 
     // Mean core utilization over the folded runs, [0,1] (see the band constants above).
@@ -654,6 +722,14 @@ private:
     Welford tasks_per_run_;       // tasks per run
     Welford body_us_;             // per-run user-functor wall time (B), summed over workers, µs
     Welford machinery_us_;        // per-run scheduler machinery (M), summed over workers, µs
+    // Four-way subtraction breakdown (Phase 1, additive): per-run core-time T = workers x makespan
+    // and its partition -- body, M_core = busy - B, idle = T - busy, and the off-worker
+    // orchestration slice. Averaged independently, shares taken vs mean T (mirrors body/machinery).
+    Welford four_T_us_;           // per-run core-time (workers x makespan), µs
+    Welford four_body_us_;        // per-run body B, µs
+    Welford four_m_core_us_;      // per-run M_core = busy - B, µs
+    Welford four_idle_us_;        // per-run idle P = T - busy, µs
+    Welford four_orch_us_;        // per-run orchestration (off-worker setup), µs
     double ground_truth_overhead_ = -1.0;   // worker-less (total-B)/total oracle; <0 = unset
     std::string title_;   // survives reset()/begin_structure(); set once by the owner
 };
@@ -852,7 +928,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // a few px of breathing room, so the bars start as far left as the labels permit.
     const double pad_l = 24.0, pad_r = 28.0, plot_w = 1150.0;
     // Legend reflowed into three columns (3 rows, 18px pitch), height-optimised.
-    const double header_h = 84.0, axis_h = 30.0, legend_h = 68.0;
+    const double header_h = 102.0, axis_h = 30.0, legend_h = 68.0;
     const double row_h = 30.0, bar_h = 20.0;
     // Ranking table below the legend: title + column header + one row per ranked node
     // + an omission footer when the share cutoff dropped any, 16px row pitch.
@@ -1098,6 +1174,22 @@ inline bool Graph_trace::write_SVG(const char* path) const
         out += "<text x=\"16\" y=\"68\" font-size=\"11\" fill=\"#cfcfc2\">";
         append_escaped(out, stats);
         out += "</text>\n";
+
+        // Four-way subtraction breakdown (Phase 1, additive): shares of core-time T = workers x
+        // makespan. body / machinery(M_core = busy - B) / idle / orchestration, plus the
+        // reconciliation of summed-M against (M_core + Orch) so the divergence stays visible.
+        {
+            out += "<text x=\"16\" y=\"86\" font-size=\"11\" fill=\"#cfcfc2\">";
+            std::string four = "four-way (of core-time): body " + fmt_us(100.0 * four_way_body_share())
+                + "% | machinery(M_core) " + fmt_us(100.0 * four_way_machinery_share())
+                + "% | idle " + fmt_us(100.0 * four_way_idle_share())
+                + "% | orchestration " + fmt_us(100.0 * four_way_orchestration_share()) + "%";
+            four += "   |   reconcile: summed-M " + fmt_us(four_way_summed_m_us())
+                + " \xC2\xB5s vs M_core+Orch " + fmt_us(four_way_machinery_us() + four_way_orchestration_us())
+                + " \xC2\xB5s (residual " + fmt_us(four_way_reconcile_residual_us()) + " \xC2\xB5s: dispatch + inline body)";
+            append_escaped(out, four);
+            out += "</text>\n";
+        }
     }
 
     // Time grid + axis labels: a 1/2/5-series step giving at most ~8 ticks.

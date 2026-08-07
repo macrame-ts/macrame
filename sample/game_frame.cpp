@@ -1616,6 +1616,21 @@ void trace_variant(int frames, Frame_variant variant, const char* base_SVG_path,
         std::printf("; worker-less serial floor = %.1f%%; gap +%.2f pt (parallelization tax above the floor)",
             100.0 * ground_truth, 100.0 * (ov - ground_truth));
     std::printf("\n");
+    // Phase 1 (additive) four-way subtraction breakdown: every worker-moment of core-time
+    // T = workers x makespan is body, machinery (M_core = busy - B), idle (T - busy), or the
+    // off-worker orchestration (the per-run execute() setup). Printed alongside summed-M with a
+    // reconciliation line -- summed-M vs (M_core + Orch) -- so the divergence (dispatch + inline
+    // body, counted in summed-M but outside busy) is visible for the diff.
+    std::printf("[game_frame] %s: four-way (of core-time) body %.1f%% | machinery(M_core) %.1f%% | "
+                "idle %.1f%% | orchestration %.1f%%\n",
+        description, 100.0 * trace.four_way_body_share(), 100.0 * trace.four_way_machinery_share(),
+        100.0 * trace.four_way_idle_share(), 100.0 * trace.four_way_orchestration_share());
+    std::printf("[game_frame] %s: reconcile summed-M %.1f us vs (M_core %.1f + Orch %.1f = %.1f) us "
+                "-> residual %.1f us (dispatch + inline body); orchestration %.1f us/frame\n",
+        description, trace.four_way_summed_m_us(), trace.four_way_machinery_us(),
+        trace.four_way_orchestration_us(),
+        trace.four_way_machinery_us() + trace.four_way_orchestration_us(),
+        trace.four_way_reconcile_residual_us(), trace.four_way_orchestration_us());
 #else
     for (int f = 0; f < frames; ++f)
         graph.execute().sync();
