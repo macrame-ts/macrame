@@ -77,7 +77,8 @@ void count_up(void* p)   { static_cast<std::atomic<uint64_t>*>(p)->fetch_add(1, 
 // single producer floods a batch, then drains; measures raw submit+execute throughput
 std::vector<double> bench_throughput(ts::Idle_policy policy)
 {
-    ts::Scheduler sched{ { .idle_policy = policy } };
+    ts::Scheduler_scope scope{ { .idle_policy = policy } };
+    ts::Scheduler& sched = ts::global_scheduler();
     std::atomic<uint64_t> remaining{ 0 };
     constexpr uint64_t batch = 50000;
 
@@ -96,7 +97,8 @@ std::vector<double> bench_throughput(ts::Idle_policy policy)
 // in `block` mode the pool re-sleeps between pings, so this captures wake latency.
 std::vector<double> bench_wake_latency(ts::Idle_policy policy)
 {
-    ts::Scheduler sched{ { .idle_policy = policy } };
+    ts::Scheduler_scope scope{ { .idle_policy = policy } };
+    ts::Scheduler& sched = ts::global_scheduler();
     std::atomic<uint64_t> done{ 0 };
 
     return measure([&]() -> uint64_t
@@ -112,7 +114,8 @@ std::vector<double> bench_wake_latency(ts::Idle_policy policy)
 // N producer threads hammer submit concurrently; measures `queue_mutex_` contention
 std::vector<double> bench_contention(ts::Idle_policy policy, unsigned producers)
 {
-    ts::Scheduler sched{ { .idle_policy = policy } };
+    ts::Scheduler_scope scope{ { .idle_policy = policy } };
+    ts::Scheduler& sched = ts::global_scheduler();
     std::atomic<uint64_t> completed{ 0 };
 
     auto run_once = [&]() -> uint64_t
@@ -187,7 +190,8 @@ void fj_task(void* p)
 
 std::vector<double> bench_fork_join(ts::Idle_policy policy)
 {
-    ts::Scheduler sched{ { .idle_policy = policy } };
+    ts::Scheduler_scope scope{ { .idle_policy = policy } };
+    ts::Scheduler& sched = ts::global_scheduler();
     return measure([&]() -> uint64_t
     {
         constexpr int64_t n = 100000;

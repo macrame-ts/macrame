@@ -124,6 +124,13 @@ inline constexpr std::size_t priority_count = 3;
 } // namespace detail
 
 class Scheduler;
+
+// The one process-wide scheduler (defined in guarded.cpp, where the reconfigurable holder
+// lives). Declared here so the ambient/global API -- `Scheduler_scope`, `configure_scheduler`,
+// and every caller that reconfigures then submits to the running pool -- is reachable from
+// `scheduler.h` alone.
+Scheduler& global_scheduler();
+
 extern thread_local Scheduler* current_scheduler;
 // This thread's worker index within `current_scheduler` (>= 0 for a worker of it, else -1).
 // Routes a worker's own `normal` submits to its local deque, and identifies it in stealing.

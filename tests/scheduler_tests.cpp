@@ -19,10 +19,15 @@ void inc(void* p)
     static_cast<std::atomic<int>*>(p)->fetch_add(1, std::memory_order_relaxed);
 }
 
+// These exercise the scheduler OBJECT, but through the single process-wide pool: each test
+// reconfigures the global for its scope (`Scheduler_scope`, which tears down + rebuilds the
+// one pool) and drives `global_scheduler()`. There are no ad-hoc `Scheduler` instances -- at
+// most one worker pool ever runs at a time.
 void test_single_task()
 {
     std::atomic<int> n{ 0 };
-    ts::Scheduler s;
+    ts::Scheduler_scope scope{ {} };
+    ts::Scheduler& s = ts::global_scheduler();
     s.submit(inc, &n);
     wait_until([&] { return n.load() == 1; });
     TS_CHECK(n.load() == 1);
@@ -32,7 +37,8 @@ void test_many_tasks()
 {
     constexpr int count = 5000;
     std::atomic<int> n{ 0 };
-    ts::Scheduler s;
+    ts::Scheduler_scope scope{ {} };
+    ts::Scheduler& s = ts::global_scheduler();
     for (int i = 0; i < count; ++i)
         s.submit(inc, &n);
     wait_until([&] { return n.load() == count; });
@@ -63,7 +69,8 @@ void rec_fn(void* p)
 // they drain in priority order.
 void test_priority_order()
 {
-    ts::Scheduler s{ { .num_threads = 1 } };
+    ts::Scheduler_scope scope{ { .num_threads = 1 } };
+    ts::Scheduler& s = ts::global_scheduler();
     std::atomic<bool> started{ false }, go{ false };
     std::atomic<int> idx{ 0 };
     int order[3] = { -1, -1, -1 };
@@ -85,7 +92,8 @@ void test_priority_order()
 void run_mode(ts::Idle_policy policy, int count)
 {
     std::atomic<int> n{ 0 };
-    ts::Scheduler s{ { .idle_policy = policy } };
+    ts::Scheduler_scope scope{ { .idle_policy = policy } };
+    ts::Scheduler& s = ts::global_scheduler();
     for (int i = 0; i < count; ++i)
         s.submit(inc, &n);
     wait_until([&] { return n.load() == count; });
@@ -101,7 +109,8 @@ void test_handoff_mode()         { run_mode(ts::Idle_policy::handoff, 2000); }
 void test_handoff_single_worker()
 {
     std::atomic<int> n{ 0 };
-    ts::Scheduler s{ { .num_threads = 1, .idle_policy = ts::Idle_policy::handoff } };
+    ts::Scheduler_scope scope{ { .num_threads = 1, .idle_policy = ts::Idle_policy::handoff } };
+    ts::Scheduler& s = ts::global_scheduler();
     for (int i = 0; i < 2000; ++i)
         s.submit(inc, &n);
     wait_until([&] { return n.load() == 2000; });
@@ -113,7 +122,8 @@ void test_handoff_single_worker()
 void test_handoff_bursts()
 {
     std::atomic<int> n{ 0 };
-    ts::Scheduler s{ { .idle_policy = ts::Idle_policy::handoff } };
+    ts::Scheduler_scope scope{ { .idle_policy = ts::Idle_policy::handoff } };
+    ts::Scheduler& s = ts::global_scheduler();
     constexpr int bursts = 20, per = 200;
     for (int b = 0; b < bursts; ++b)
     {
@@ -129,18 +139,19 @@ void test_shutdown_drains()
     constexpr int count = 2000;
     std::atomic<int> n{ 0 };
     {
-        ts::Scheduler s;
+        ts::Scheduler_scope scope{ {} };
+        ts::Scheduler& s = ts::global_scheduler();
         for (int i = 0; i < count; ++i)
             s.submit(inc, &n);
-    }   // destructor sets quit + joins; queued tasks must have run
+    }   // scope exit reconfigures: tears the pool down (quit + join, draining queued tasks)
     TS_CHECK(n.load() == count);
 }
 
 void test_empty_exit()
 {
-    { ts::Scheduler s{ { .idle_policy = ts::Idle_policy::spin } }; }
-    { ts::Scheduler s{ { .idle_policy = ts::Idle_policy::spin_then_block } }; }
-    { ts::Scheduler s{ { .idle_policy = ts::Idle_policy::handoff } }; }
+    { ts::Scheduler_scope scope{ { .idle_policy = ts::Idle_policy::spin } }; }
+    { ts::Scheduler_scope scope{ { .idle_policy = ts::Idle_policy::spin_then_block } }; }
+    { ts::Scheduler_scope scope{ { .idle_policy = ts::Idle_policy::handoff } }; }
     TS_CHECK(true);   // reaching here means none hung on shutdown
 }
 
@@ -154,7 +165,8 @@ void outer_fn(void* p)
 
 void test_submit_from_task()
 {
-    ts::Scheduler s;
+    ts::Scheduler_scope scope{ {} };
+    ts::Scheduler& s = ts::global_scheduler();
     std::atomic<int> n{ 0 };
     Nested x{ &s, &n };
     s.submit(outer_fn, &x);
@@ -167,7 +179,8 @@ void test_stress()
     constexpr int count = 100000;
     std::atomic<int> n{ 0 };
     {
-        ts::Scheduler s;
+        ts::Scheduler_scope scope{ {} };
+        ts::Scheduler& s = ts::global_scheduler();
         for (int i = 0; i < count; ++i)
             s.submit(inc, &n);
     }
@@ -189,7 +202,8 @@ void order_fn(void* p)
 // valve `low` runs LAST (order == normals); with it, it runs mid-stream (well before the end).
 void test_low_starvation_valve()
 {
-    ts::Scheduler s{ { .num_threads = 1 } };
+    ts::Scheduler_scope scope{ { .num_threads = 1 } };
+    ts::Scheduler& s = ts::global_scheduler();
     std::atomic<bool> started{ false }, go{ false };
     std::atomic<int> seq{ 0 }, low_order{ -1 };
 
@@ -215,7 +229,8 @@ void test_low_starvation_valve()
 // submitting thread, before `submit` returns.
 void test_single_threaded_inline()
 {
-    ts::Scheduler s{ { .single_threaded = true } };
+    ts::Scheduler_scope scope{ { .single_threaded = true } };
+    ts::Scheduler& s = ts::global_scheduler();
     TS_CHECK(s.worker_count() == 0);
 
     struct Probe
@@ -238,7 +253,8 @@ void test_single_threaded_inline()
 // running body finishes before its submissions run, and they run in submission order.
 void test_single_threaded_chain_order()
 {
-    ts::Scheduler s{ { .single_threaded = true } };
+    ts::Scheduler_scope scope{ { .single_threaded = true } };
+    ts::Scheduler& s = ts::global_scheduler();
 
     struct Chain
     {

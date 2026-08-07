@@ -54,7 +54,8 @@ void inc(void* p)
 void stress_scheduler()
 {
     constexpr int producers = 8, per = 5000;
-    ts::Scheduler s;
+    ts::Scheduler_scope scope{ {} };
+    ts::Scheduler& s = ts::global_scheduler();
     std::atomic<int> done{ 0 };
     {
         std::vector<std::jthread> ps;
@@ -798,7 +799,8 @@ void stress_idle_policy(ts::Idle_policy policy)
 {
     // Sustained multi-producer submit.
     {
-        ts::Scheduler s{ { .idle_policy = policy } };
+        ts::Scheduler_scope scope{ { .idle_policy = policy } };
+        ts::Scheduler& s = ts::global_scheduler();
         std::atomic<int> n{ 0 };
         constexpr int per_producer = 20000, producers = 4;
         {
@@ -812,7 +814,8 @@ void stress_idle_policy(ts::Idle_policy policy)
     }
     // Burst/drain: fully park the pool between bursts so the producer 0->1 wake restarts it.
     {
-        ts::Scheduler s{ { .idle_policy = policy } };
+        ts::Scheduler_scope scope{ { .idle_policy = policy } };
+        ts::Scheduler& s = ts::global_scheduler();
         std::atomic<int> n{ 0 };
         constexpr int bursts = 200, per = 300;
         for (int b = 0; b < bursts; ++b)

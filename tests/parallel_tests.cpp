@@ -255,17 +255,19 @@ void test_parallel_for_priority_order()
     wait_until([&exited, workers] { return exited.load() == workers + 1; });
 }
 
-// A parallel_for launched from a task fans out on THAT task's scheduler, not the global
-// default: run it inside a task on a dedicated 2-worker scheduler and assert every executor
-// that touched an item reports a worker index of THAT scheduler ([0, 2)). If the old code
-// fanned out to the wider default pool, indices would exceed 1.
+// A parallel_for launched from a task fans out on the running pool: reconfigure the one global
+// scheduler to 2 workers, run parallel_for inside a task on it, and assert every executor that
+// touched an item reports a worker index in [0, 2). (With the single-global collapse there is
+// no separate "current" pool to route to; this pins that fan-out stays on the running pool's
+// workers and inherits their indices.)
 constexpr int pf_sched_n = 512;
 std::vector<int> pf_sched_worker;      // static storage so the fn-ptr task can reach it
 std::atomic<bool> pf_sched_done{ false };
 
 void test_parallel_for_current_scheduler()
 {
-    ts::Scheduler dedicated{ { .num_threads = 2 } };
+    ts::Scheduler_scope scope{ { .num_threads = 2 } };
+    ts::Scheduler& dedicated = ts::global_scheduler();
     pf_sched_worker.assign(pf_sched_n, -2);
     pf_sched_done.store(false);
 
