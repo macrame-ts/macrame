@@ -1365,7 +1365,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
         const double cx_rank = 34.0, cx_name = 46.0, cx_share = 268.0, cx_mean = 356.0,
                      cx_key = 452.0, cx_dead = 548.0, cx_slack = 628.0, cx_p95 = 712.0;
         std::string title_row = "critical-path ranking \xE2\x80\x94 "
-            + std::to_string(runs_) + " runs, makespan " + fmt_ms(makespan_.mean) + " ms";
+            + std::to_string(runs_) + " runs, frame time " + fmt_ms(makespan_.mean) + " ms";
         out += "<text x=\"16\" y=\"" + std::to_string(tbase + 16.0)
              + "\" font-size=\"12\" font-weight=\"600\" fill=\"#f8f8f2\">";
         append_escaped(out, title_row);
@@ -1922,10 +1922,10 @@ inline bool Graph_trace::write_SVG(const char* path) const
         "var fg=document.createElementNS(NS,'g');svg.insertBefore(fg,tt);\n"
         "function sink(e){if(anchor)anchor.parentNode.insertBefore(e,anchor);}\n"
         "if(anchor)Array.prototype.forEach.call(edges,function(e){sink(e);});\n"
-        "function hiEdges(id){Array.prototype.forEach.call(edges,function(e){if(e.getAttribute('data-a')===id||e.getAttribute('data-b')===id){e.setAttribute('opacity','1');fg.appendChild(e);}});}\n"
-        "function loEdges(){while(fg.firstChild){fg.firstChild.setAttribute('opacity',fg.firstChild.getAttribute('data-op'));sink(fg.firstChild);}}\n"
+        "function hiEdges(id){Array.prototype.forEach.call(edges,function(e){if(e.getAttribute('data-a')===id||e.getAttribute('data-b')===id){e.setAttribute('opacity','1');e.setAttribute('pointer-events','none');fg.appendChild(e);}});}\n"
+        "function loEdges(){while(fg.firstChild){var c=fg.firstChild;c.setAttribute('opacity',c.getAttribute('data-op'));c.setAttribute('pointer-events','auto');sink(c);}}\n"
         "Array.prototype.forEach.call(document.querySelectorAll('.hv'),function(el){\n"
-        "  el.addEventListener('mouseenter',function(e){show(el,e);var n=el.getAttribute('data-node');\n"
+        "  el.addEventListener('mouseenter',function(e){loEdges();show(el,e);var n=el.getAttribute('data-node');\n"
         "    if(n!==null)hiEdges(n);else if(el.getAttribute('data-a')!==null){el.setAttribute('opacity','1');fg.appendChild(el);}});\n"
         "  el.addEventListener('mousemove',move);\n"
         "  el.addEventListener('mouseleave',function(){tt.setAttribute('visibility','hidden');loEdges();});\n"
