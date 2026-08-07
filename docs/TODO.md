@@ -1291,6 +1291,17 @@ IDs — when an item is done, mark it, don't renumber.
         Release and TSan legs (build + `--tests` + `--stress`), so a mixed-config mistake fails
         the push rather than the next release.
 
+    16. `[ ]` **(P3, tooling/docs — trace tooltips) Deep-link the glossary tooltips to per-term doc
+        pages.** Each header glossary term (core utilization, critical path dead time,
+        core-bound/dependency/mixed, core-time, body, framework overhead, idle, frame time,
+        critical path, orchestration) carries a short hover tooltip (`graph_trace.h` `write_SVG`,
+        the `.term` overlay). When the public docs exist, give each term its OWN page — the full
+        explanation (what it measures, how it's computed, the threshold bands) plus concrete
+        guidance for improving it (the cause-specific fixes the tooltip only summarises) — and turn
+        each tooltip into a link to that page (a footer line the overlay renders as a clickable
+        anchor / opens in a new tab). The tooltip stays the short form, the page is the long form.
+        Gated on the docs site existing; until then the tooltips are self-contained.
+
 ---
 
 ## Inconsistencies to resolve (pre-public sweep)
