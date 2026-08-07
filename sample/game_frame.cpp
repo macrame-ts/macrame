@@ -1529,11 +1529,10 @@ double ticks_to_us(long long ticks)
 // B comes from the scheduler's body accumulator (fed here by the overflow lane, since a
 // worker-less run has no workers). `total` is the wall of the whole `execute().sync()` frame
 // loop -- not the trace's node-span makespan, which omits the pre-first-node setup and the fold.
-// A trace is attached only to arm the body/machinery tracking (its fold is skipped for a
-// worker-less run); no SVG is written. Also reports the worker-less summed-M `M/(B+M)` read off
-// the SAME run: with the setup scope wrapping the inline drain and inline bodies netting out,
-// M settles to `total - B`, so worker-less summed-M should track the complement -- the apples-
-// to-apples serial validation, whose residual gap is a pure blind-spot measurement.
+// A trace is attached only to arm the body tracking (its fold is skipped for a worker-less run);
+// no SVG is written. B comes from the scheduler's body accumulator (add-only), fed here by the
+// overflow lane since a worker-less run has no workers; machinery is not accumulated -- the whole
+// serial framework cost is the pure subtraction `total - B`, which is what makes this the oracle.
 double serial_ground_truth(int frames, Frame_variant variant, const char* description)
 {
     constexpr int entities = 1000;
@@ -1544,34 +1543,27 @@ double serial_ground_truth(int frames, Frame_variant variant, const char* descri
     World world{ entities };
     ts::Static_task_graph graph = build_frame_graph(world, variant, nullptr);
 
-    ts::tools::Graph_trace trace;   // attach only to arm body/machinery tracking (fold is skipped)
+    ts::tools::Graph_trace trace;   // attach only to arm body tracking (fold is skipped)
     graph.set_trace(&trace);
 
     ts::Scheduler& sched = ts::global_scheduler();
     long long body0 = sched.body_ticks();
-    long long mach0 = sched.machinery_ticks();
     auto t0 = std::chrono::steady_clock::now();
     for (int f = 0; f < frames; ++f)
         graph.execute().sync();
     auto t1 = std::chrono::steady_clock::now();
     long long body1 = sched.body_ticks();
-    long long mach1 = sched.machinery_ticks();
     graph.set_trace(nullptr);
 
     double total_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
     double body_us = ticks_to_us(body1 - body0);
-    double mach_us = ticks_to_us(mach1 - mach0);
     double per_run_total = total_us / frames;
     double per_run_body = body_us / frames;
-    double per_run_mach = mach_us / frames;
     double complement = total_us > 0.0 ? (total_us - body_us) / total_us : 0.0;
-    double wl_summed_M = (body_us + mach_us) > 0.0 ? mach_us / (body_us + mach_us) : 0.0;
 
     std::printf("[game_frame] %s worker-less ground truth: %.1f us/frame total, %.1f us body -> "
-                "framework (total-B)/total = %.1f%%  (serial summed-M M/(B+M) = %.1f%%, gap %.2f pt)\n",
-        description, per_run_total, per_run_body, 100.0 * complement, 100.0 * wl_summed_M,
-        100.0 * (complement - wl_summed_M));
-    (void)per_run_mach;
+                "framework (total-B)/total = %.1f%%\n",
+        description, per_run_total, per_run_body, 100.0 * complement);
     return complement;
 }
 #endif
@@ -1605,32 +1597,25 @@ void trace_variant(int frames, Frame_variant variant, const char* base_SVG_path,
     std::string path = described_SVG_path(base_SVG_path, description);
     trace.write_SVG(path.c_str());
     std::printf("[game_frame] %s: traced %lld runs -> %s\n", description, trace.run_count(), path.c_str());
-    // Dual print: the multi-worker summed-M overhead (now including per-run setup) side by side
-    // with the worker-less serial floor and their gap. The multi-worker figure sits ABOVE the
-    // floor; the gap is the machinery only workers pay (cross-thread dispatch, pipe hand-off,
+    // Dual print: the multi-worker overhead (machinery M = busy - B, pure subtraction) side by
+    // side with the worker-less serial floor and their gap. The multi-worker figure sits ABOVE
+    // the floor; the gap is the machinery only workers pay (cross-thread dispatch, pipe hand-off,
     // park/wake) -- the price of the parallelism, not a measurement error.
     double ov = trace.overhead();
-    std::printf("[game_frame] %s: task-system overhead summed-M = %.1f%% (body %.1f / machinery %.1f us per run)",
+    std::printf("[game_frame] %s: task-system overhead (M = busy - B) = %.1f%% (body %.1f / machinery %.1f us per run)",
         description, 100.0 * ov, trace.body_us(), trace.machinery_us());
     if (ground_truth >= 0.0)
         std::printf("; worker-less serial floor = %.1f%%; gap +%.2f pt (parallelization tax above the floor)",
             100.0 * ground_truth, 100.0 * (ov - ground_truth));
     std::printf("\n");
-    // Phase 1 (additive) four-way subtraction breakdown: every worker-moment of core-time
-    // T = workers x makespan is body, machinery (M_core = busy - B), idle (T - busy), or the
-    // off-worker orchestration (the per-run execute() setup). Printed alongside summed-M with a
-    // reconciliation line -- summed-M vs (M_core + Orch) -- so the divergence (dispatch + inline
-    // body, counted in summed-M but outside busy) is visible for the diff.
-    std::printf("[game_frame] %s: four-way (of core-time) body %.1f%% | machinery(M_core) %.1f%% | "
-                "idle %.1f%% | orchestration %.1f%%\n",
+    // Four-way subtraction breakdown: every worker-moment of core-time T = workers x makespan is
+    // body, machinery (M = busy - B), or idle (T - busy); the per-run top-level execute() setup is
+    // the off-worker orchestration bucket on top.
+    std::printf("[game_frame] %s: four-way (of core-time) body %.1f%% | machinery(M = busy - B) %.1f%% | "
+                "idle %.1f%% | orchestration %.1f%% (%.1f us/frame)\n",
         description, 100.0 * trace.four_way_body_share(), 100.0 * trace.four_way_machinery_share(),
-        100.0 * trace.four_way_idle_share(), 100.0 * trace.four_way_orchestration_share());
-    std::printf("[game_frame] %s: reconcile summed-M %.1f us vs (M_core %.1f + Orch %.1f = %.1f) us "
-                "-> residual %.1f us (dispatch + inline body); orchestration %.1f us/frame\n",
-        description, trace.four_way_summed_m_us(), trace.four_way_machinery_us(),
-        trace.four_way_orchestration_us(),
-        trace.four_way_machinery_us() + trace.four_way_orchestration_us(),
-        trace.four_way_reconcile_residual_us(), trace.four_way_orchestration_us());
+        100.0 * trace.four_way_idle_share(), 100.0 * trace.four_way_orchestration_share(),
+        trace.four_way_orchestration_us());
 #else
     for (int f = 0; f < frames; ++f)
         graph.execute().sync();

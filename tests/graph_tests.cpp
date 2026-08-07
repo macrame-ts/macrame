@@ -754,8 +754,8 @@ void test_graph_trace_task_count()
     TS_CHECK(trace.tasks_per_run() > 1.0);
 }
 
-// Task-system overhead metric on SYNTHETIC folds: `on_run_complete`'s trailing body/machinery
-// deltas drive `overhead()` = M / (B + M) and the headline. Deterministic arithmetic.
+// Task-system overhead metric on SYNTHETIC folds: `on_run_complete` derives machinery by pure
+// subtraction, M = busy - B, and `overhead()` = M / (B + M). Deterministic arithmetic.
 void test_graph_trace_overhead()
 {
     auto ticks = [](double us)
@@ -772,11 +772,11 @@ void test_graph_trace_overhead()
     long long starts[1] = { ticks(0) };
     long long ends[1] = { ticks(900) };
     int workers[1] = { 0 };
-    // body 900 us, machinery 100 us per run -> overhead exactly 0.10.
+    // busy 1000 us, body 900 us -> machinery M = busy - B = 100 us -> overhead exactly 0.10.
     for (int i = 0; i < 8; ++i)
     {
-        trace.on_run_complete(readys, starts, ends, workers, 1, 0, ticks(1000), ticks(900), 1,
-            nullptr, 0, 0, nullptr, 1, ticks(900), ticks(100));
+        trace.on_run_complete(readys, starts, ends, workers, 1, 0, ticks(1000), ticks(1000), 1,
+            nullptr, 0, 0, nullptr, 1, ticks(900), 0);
     }
 
     TS_CHECK(std::abs(trace.overhead() - 0.10) < 1e-9);
@@ -807,9 +807,10 @@ void test_graph_trace_overhead_end_to_end()
     };
 
     ts::Static_task_graph g;
-    // Fan out: the in-body `parallel_for` submits slice tasks, which reclassify to machinery
-    // (submit-from-within-a-functor), so machinery is deterministically nonzero -- a single
-    // coarse body would leave setup below the ~100 ns clock tick and read ~0.
+    // Fan out: the in-body `parallel_for` submits many slice tasks. Each slice is a real task
+    // with its own run_task span and a successful find_work dispatch scan, so `M = busy - B`
+    // (setup/completion + dispatch, everything in busy that is not the slice body) is
+    // deterministically nonzero -- a single coarse body would leave it below the clock tick.
     g.add_node("ov_a", [busy](int& v) { ts::parallel_for(32, [&busy](int) { busy(20); }); ++v; }, x);
     g.add_node("ov_b", [busy](int& v) { ts::parallel_for(32, [&busy](int) { busy(20); }); ++v; }, x);
     g.compile();

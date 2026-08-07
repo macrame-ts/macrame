@@ -48,7 +48,6 @@ public:
             busy_begin_ = scheduler.busy_ticks();
             tasks_begin_ = scheduler.task_count();
             body_begin_ = scheduler.body_ticks();
-            machinery_begin_ = scheduler.machinery_ticks();
             orchestration_begin_ = scheduler.orchestration_ticks();
         }
     }
@@ -86,7 +85,6 @@ public:
         long long busy_delta = scheduler_->busy_ticks() - busy_begin_;
         long long task_delta = scheduler_->task_count() - tasks_begin_;
         long long body_delta = scheduler_->body_ticks() - body_begin_;
-        long long machinery_delta = scheduler_->machinery_ticks() - machinery_begin_;
         long long orchestration_delta = scheduler_->orchestration_ticks() - orchestration_begin_;
         long long bucket_width = scheduler_->bucket_width();
         long long bucket_busy[Scheduler::util_bucket_count];
@@ -100,7 +98,7 @@ public:
         trace->on_run_complete(ready_.data(), start_.data(), end_.data(), worker_.data(),
             node_count, run_begin_, now(), busy_delta,
             scheduler_->worker_count(), bucket_busy, Scheduler::util_bucket_count, bucket_width,
-            owner_busy.data(), task_delta, body_delta, machinery_delta, orchestration_delta);
+            owner_busy.data(), task_delta, body_delta, orchestration_delta);
     }
 
 private:
@@ -117,7 +115,6 @@ private:
     long long busy_begin_ = 0;
     long long tasks_begin_ = 0;
     long long body_begin_ = 0;
-    long long machinery_begin_ = 0;
     long long orchestration_begin_ = 0;
     Scheduler* scheduler_ = nullptr;   // non-const: fold disarms the busy tracking
     bool tracing_ = false;

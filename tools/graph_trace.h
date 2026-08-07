@@ -150,8 +150,7 @@ public:
                          const long long* util_bucket_busy = nullptr,
                          int util_bucket_count = 0, long long bucket_width_ticks = 0,
                          const long long* owner_busy = nullptr, long long task_count = 0,
-                         long long body_ticks = 0, long long machinery_ticks = 0,
-                         long long orchestration_ticks = 0)
+                         long long body_ticks = 0, long long orchestration_ticks = 0)
     {
         if (node_count != static_cast<int>(nodes_.size()))
             return;   // structure not pushed (or a stale attach) -- drop the sample
@@ -243,31 +242,26 @@ public:
         tasks_total_ += task_count;
         tasks_per_run_.add(static_cast<double>(task_count));
 
-        // Task-system cost: body (B) = user-functor wall time, machinery (M) = scheduler
-        // overhead (task setup/completion, successful find_work scans, in-functor submits),
-        // summed over workers per run. Overhead = M / (B + M). Idle (lack of parallelism) is
-        // NOT in either bucket, so this is a clean compute-cost split, not a utilization one.
-        body_us_.add(static_cast<double>(body_ticks) * ticks_to_us);
-        machinery_us_.add(static_cast<double>(machinery_ticks) * ticks_to_us);
-
-        // Four-way subtraction breakdown (Phase 1, additive -- parallel to the summed-M above,
-        // not a replacement). In core-time T = workers x makespan, every worker-moment is body,
-        // framework-machinery, or idle: T = B + M_core + P, so M_core = busy - B and P = T - busy
-        // (busy = the run_task span sum). Framework work done OFF-worker (the per-run execute()
-        // setup on the frame-loop thread) is absent from busy, so it is a separate 4th bucket,
-        // Orchestration, measured by its own accumulator. Shares reported vs T. The reconciliation
-        // summed-M vs (M_core + Orch) is the diff this phase exists to expose -- see `residual_us`.
+        // Task-system cost, PURE SUBTRACTION (Phase 2): in core-time T = workers x makespan
+        // every worker-moment is body, framework-machinery, or idle: T = B + M + P, so machinery
+        // is DERIVED, `M = busy - B` (busy = the run_task span sum + successful find_work scans),
+        // and idle `P = T - busy`. There is no machinery accumulator. Framework work done
+        // OFF-worker (the per-run top-level execute() setup on the frame-loop thread) is absent
+        // from busy, so it is a separate fourth bucket, Orchestration, with its own accumulator.
+        // Overhead = M / (B + M) (idle excluded -- a clean compute-cost split). Fed only for a
+        // multi-worker run (busy/T are meaningful only then); the worker-less oracle reads B
+        // directly off the scheduler, not through this fold.
         if (worker_count > 0 && window > 0)
         {
             double t_us = static_cast<double>(worker_count) * static_cast<double>(window) * ticks_to_us;
             double busy_us = static_cast<double>(busy_ticks) * ticks_to_us;
             double b_us = static_cast<double>(body_ticks) * ticks_to_us;
-            double m_core_us = busy_us - b_us;                   // machinery inside worker spans
+            double m_us = busy_us - b_us;                        // M = busy - B (derived machinery)
             double idle_us = t_us - busy_us;                     // P = T - busy
             double orch_us = static_cast<double>(orchestration_ticks) * ticks_to_us;
+            body_us_.add(b_us);
+            machinery_us_.add(m_us);
             four_T_us_.add(t_us);
-            four_body_us_.add(b_us);
-            four_m_core_us_.add(m_core_us);
             four_idle_us_.add(idle_us);
             four_orch_us_.add(orch_us);
         }
@@ -304,8 +298,6 @@ public:
         body_us_ = {};
         machinery_us_ = {};
         four_T_us_ = {};
-        four_body_us_ = {};
-        four_m_core_us_ = {};
         four_idle_us_ = {};
         four_orch_us_ = {};
         critical_work_ = {};
@@ -324,12 +316,13 @@ public:
     long long task_total() const { return tasks_total_; }        // tasks (every kind) across the trace
     double tasks_per_run() const { return tasks_per_run_.mean; }  // mean tasks per run
 
-    // Task-system overhead, [0,1]: mean machinery / (mean body + mean machinery) over the
-    // folded runs. Machinery now includes the per-run graph setup + initial dispatch (folded in
-    // via `Trace_setup_scope`), which previously escaped it and scaled with node count. An UPPER
-    // bound on scheduler cost -- the coarse per-task clock brackets charge their own read latency
-    // to machinery. Cross-check against the worker-less ground truth (`set_ground_truth_overhead`)
-    // and the microbench ns/op.
+    // Task-system overhead, [0,1]: mean machinery / (mean body + mean machinery) over the folded
+    // runs, where machinery `M = busy - B` is derived by PURE SUBTRACTION (Phase 2) -- it captures
+    // task setup/completion, successful find_work scans, and on-worker inline machinery, all inside
+    // `busy`; the per-run top-level graph setup is the separate off-worker Orchestration bucket. An
+    // UPPER bound on scheduler cost -- the coarse per-task clock brackets charge their own read
+    // latency to the body span (and so shrink M). Cross-check against the worker-less ground truth
+    // (`set_ground_truth_overhead`) and the microbench ns/op.
     double body_us() const { return body_us_.mean; }
     double machinery_us() const { return machinery_us_.mean; }
     double overhead() const
@@ -338,20 +331,18 @@ public:
         return (b + m) > 0.0 ? m / (b + m) : 0.0;
     }
 
-    // --- Four-way subtraction breakdown (Phase 1, additive) -----------------------------
-    // Shares of core-time T = workers x makespan: body / machinery(M_core) / idle / orchestration.
-    // M_core = busy - B (machinery inside worker run_task spans); idle = T - busy; orchestration =
-    // the off-worker per-run execute() setup. These four are a partition of T by construction (they
-    // sum to 1 up to the orchestration term, which sits OUTSIDE busy and so adds on top -- body +
-    // M_core + idle = busy + idle = T exactly, and orchestration is the extra off-worker framework
-    // slice T does not otherwise see). Reported as mean-component / mean-T (mirrors `overhead()`).
+    // --- Four-way subtraction breakdown ------------------------------------------------
+    // Shares of core-time T = workers x makespan: body / machinery(M = busy - B) / idle(T - busy) /
+    // orchestration (the off-worker per-run top-level execute() setup). These four are a partition of
+    // T by construction (body + M + idle = busy + idle = T exactly, and orchestration is the extra
+    // off-worker framework slice T does not otherwise see). Reported as mean-component / mean-T.
     double four_way_body_share() const
     {
-        return four_T_us_.mean > 0.0 ? four_body_us_.mean / four_T_us_.mean : 0.0;
+        return four_T_us_.mean > 0.0 ? body_us_.mean / four_T_us_.mean : 0.0;
     }
     double four_way_machinery_share() const
     {
-        return four_T_us_.mean > 0.0 ? four_m_core_us_.mean / four_T_us_.mean : 0.0;
+        return four_T_us_.mean > 0.0 ? machinery_us_.mean / four_T_us_.mean : 0.0;
     }
     double four_way_idle_share() const
     {
@@ -361,22 +352,12 @@ public:
     {
         return four_T_us_.mean > 0.0 ? four_orch_us_.mean / four_T_us_.mean : 0.0;
     }
-    // Per-run means (µs) of the four-way components, for the console reconciliation line.
-    double four_way_body_us() const { return four_body_us_.mean; }
-    double four_way_machinery_us() const { return four_m_core_us_.mean; }
+    // Per-run means (µs) of the four-way components.
+    double four_way_body_us() const { return body_us_.mean; }
+    double four_way_machinery_us() const { return machinery_us_.mean; }
     double four_way_idle_us() const { return four_idle_us_.mean; }
     double four_way_orchestration_us() const { return four_orch_us_.mean; }
     double four_way_core_time_us() const { return four_T_us_.mean; }
-    // Reconciliation: summed-M is the existing accumulator (busy - B_runtask + orch + dispatch +
-    // submit); the subtraction split accounts M_core + Orch. Their residual is summed-M minus
-    // (M_core + Orch) = successful-find_work dispatch + inline-body time (both counted in summed-M
-    // but outside busy, so outside M_core). Positive residual is expected, not a bug -- it is the
-    // machinery summed-M sees that lives off the run_task span. Reported for the diff, not fixed.
-    double four_way_summed_m_us() const { return machinery_us_.mean; }
-    double four_way_reconcile_residual_us() const
-    {
-        return machinery_us_.mean - (four_m_core_us_.mean + four_orch_us_.mean);
-    }
 
     // Mean core utilization over the folded runs, [0,1] (see the band constants above).
     double core_utilization() const { return core_util_.mean; }
@@ -433,13 +414,12 @@ public:
         title_ = std::move(title);
     }
 
-    // Attach the worker-less ground-truth overhead (the oracle) so `write_SVG` prints it next
-    // to the summed-M metric. Measured on a serial single-thread run of the SAME frame as
-    // `(total_wall - body) / total_wall` -- the complete framework cost by pure subtraction, no
-    // idle to confound it. On a serial run the summed-M accumulator closes to this exactly (the
-    // validation: gap ~0), so it is the per-op framework FLOOR. The gap `overhead() - this` on a
+    // Attach the worker-less ground-truth overhead (the oracle) so `write_SVG` prints it next to
+    // the `M = busy - B` overhead metric. Measured on a serial single-thread run of the SAME frame
+    // as `(total_wall - body) / total_wall` -- the complete framework cost by pure subtraction, no
+    // idle to confound it, so it is the per-op framework FLOOR. The gap `overhead() - this` on a
     // multi-worker run is the machinery only workers pay (cross-thread dispatch, pipe hand-off,
-    // park/wake) -- not an accumulator blind spot. Negative = unset. Reported as-is, not matched.
+    // park/wake) -- not a metric blind spot. Negative = unset. Reported as-is, not matched.
     void set_ground_truth_overhead(double complement) { ground_truth_overhead_ = complement; }
 
     // Render the average run; returns false (reported to stderr) on I/O failure.
@@ -721,15 +701,13 @@ private:
     long long tasks_total_ = 0;   // total tasks (every kind) run across the trace
     Welford tasks_per_run_;       // tasks per run
     Welford body_us_;             // per-run user-functor wall time (B), summed over workers, µs
-    Welford machinery_us_;        // per-run scheduler machinery (M), summed over workers, µs
-    // Four-way subtraction breakdown (Phase 1, additive): per-run core-time T = workers x makespan
-    // and its partition -- body, M_core = busy - B, idle = T - busy, and the off-worker
-    // orchestration slice. Averaged independently, shares taken vs mean T (mirrors body/machinery).
+    Welford machinery_us_;        // per-run scheduler machinery, M = busy - B (derived), µs
+    // Four-way subtraction breakdown: per-run core-time T = workers x makespan and its partition --
+    // body (`body_us_`), machinery M = busy - B (`machinery_us_`), idle = T - busy, and the
+    // off-worker orchestration slice. Shares taken vs mean T.
     Welford four_T_us_;           // per-run core-time (workers x makespan), µs
-    Welford four_body_us_;        // per-run body B, µs
-    Welford four_m_core_us_;      // per-run M_core = busy - B, µs
     Welford four_idle_us_;        // per-run idle P = T - busy, µs
-    Welford four_orch_us_;        // per-run orchestration (off-worker setup), µs
+    Welford four_orch_us_;        // per-run orchestration (off-worker top-level setup), µs
     double ground_truth_overhead_ = -1.0;   // worker-less (total-B)/total oracle; <0 = unset
     std::string title_;   // survives reset()/begin_structure(); set once by the owner
 };
@@ -1134,19 +1112,19 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
 
         // Third classifier: task-system overhead -- machinery / (body + machinery) compute
-        // (idle excluded). Now includes the per-run graph setup (`Trace_setup_scope`). See the
+        // (idle excluded), with machinery `M = busy - B` derived by pure subtraction. See the
         // band constants; reported as an upper bound.
         double ov = overhead();
         const char* ov_color = ov <= overhead_ok_share ? "#a6e22e"
                              : ov <= overhead_bad_share ? "#e6db74" : "#ff5f45";
         out += "<tspan fill=\"#cfcfc2\"> | </tspan>";
         out += "<tspan fill=\"" + std::string(ov_color) + "\">";
-        append_escaped(out, "task-system overhead: " + fmt_us(100.0 * ov) + "% (summed-M)");
+        append_escaped(out, "task-system overhead: " + fmt_us(100.0 * ov) + "% (M = busy - B)");
         out += "</tspan>";
         // The worker-less ground-truth complement, when attached: the oracle (total-B)/total on
         // a serial run of the same frame -- the per-op framework floor with no parallelization
-        // tax. The gap (summed-M minus the floor) is the machinery only the multi-worker run
-        // pays: cross-thread dispatch, pipe hand-off, park/wake. Reported as-is, not fudged.
+        // tax. The gap (multi-worker overhead minus the floor) is the machinery only the
+        // multi-worker run pays: cross-thread dispatch, pipe hand-off, park/wake. Not fudged.
         if (ground_truth_overhead_ >= 0.0)
         {
             double gt = ground_truth_overhead_;
@@ -1175,18 +1153,15 @@ inline bool Graph_trace::write_SVG(const char* path) const
         append_escaped(out, stats);
         out += "</text>\n";
 
-        // Four-way subtraction breakdown (Phase 1, additive): shares of core-time T = workers x
-        // makespan. body / machinery(M_core = busy - B) / idle / orchestration, plus the
-        // reconciliation of summed-M against (M_core + Orch) so the divergence stays visible.
+        // Four-way subtraction breakdown: shares of core-time T = workers x makespan.
+        // body / machinery(M = busy - B) / idle(T - busy) / orchestration (off-worker top-level setup).
         {
             out += "<text x=\"16\" y=\"86\" font-size=\"11\" fill=\"#cfcfc2\">";
             std::string four = "four-way (of core-time): body " + fmt_us(100.0 * four_way_body_share())
-                + "% | machinery(M_core) " + fmt_us(100.0 * four_way_machinery_share())
+                + "% | machinery(M = busy - B) " + fmt_us(100.0 * four_way_machinery_share())
                 + "% | idle " + fmt_us(100.0 * four_way_idle_share())
-                + "% | orchestration " + fmt_us(100.0 * four_way_orchestration_share()) + "%";
-            four += "   |   reconcile: summed-M " + fmt_us(four_way_summed_m_us())
-                + " \xC2\xB5s vs M_core+Orch " + fmt_us(four_way_machinery_us() + four_way_orchestration_us())
-                + " \xC2\xB5s (residual " + fmt_us(four_way_reconcile_residual_us()) + " \xC2\xB5s: dispatch + inline body)";
+                + "% | orchestration " + fmt_us(100.0 * four_way_orchestration_share()) + "%"
+                + "   |   orchestration " + fmt_us(four_way_orchestration_us()) + " \xC2\xB5s/run";
             append_escaped(out, four);
             out += "</text>\n";
         }
