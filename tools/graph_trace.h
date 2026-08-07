@@ -1422,15 +1422,14 @@ inline bool Graph_trace::write_SVG(const char* path) const
             append_escaped(out, text);
             out += "</text>\n";
         };
-        // A column header carrying a styled hover tooltip (headline + body lines), like the
-        // header glossary terms but WITHOUT the pill (the pill loop targets tspans-in-text, and a
-        // dense table reads cleaner unpilled) -- a help cursor is the affordance. `#`/`node` stay
-        // plain (self-explanatory).
+        // A column header styled exactly like the header glossary terms: a `term hv` tspan gets a
+        // pill (drawn by the overlay's getBBox loop, which targets a tspan inside a text) + a
+        // styled hover tooltip, so the affordance is visible. `#`/`node` stay plain.
         auto hcell = [&](double cx, const char* anchor, const std::string& text, std::initializer_list<const char*> tip)
         {
             out += "<text x=\"" + std::to_string(cx) + "\" y=\"" + std::to_string(ty)
                  + "\" font-size=\"11\" font-family=\"" + std::string(mono) + "\" text-anchor=\""
-                 + anchor + "\" fill=\"#75715e\" cursor=\"help\" class=\"hv\" data-hl=\"#66d9ef\" data-tip=\"";
+                 + anchor + "\" fill=\"#cfcfc2\"><tspan class=\"term hv\" data-hl=\"#66d9ef\" data-tip=\"";
             bool first = true;
             for (const char* ln : tip)
             {
@@ -1441,7 +1440,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
             }
             out += "\">";
             append_escaped(out, text);
-            out += "</text>\n";
+            out += "</tspan></text>\n";
         };
         cell(cx_rank, "end", "#75715e", "#");
         cell(cx_name, "start", "#75715e", "node");
@@ -1461,8 +1460,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
             "ready but waiting (for a core or a predecessor)",
             "before it ran, on runs where it bound the chain." });
         hcell(cx_slack, "end", "slack", { "slack",
-            "How far this node could slip without extending the",
-            "frame (CPM float). 0 = on the critical path, no room." });
+            "How far this node could slip without extending the frame",
+            "(structural float from the critical-path method).",
+            "0 = on the critical path, with no room to slip." });
         hcell(cx_p95, "end", "P95", { "P95",
             "95th-percentile duration: the node's near-worst-case",
             "time, vs its mean." });
