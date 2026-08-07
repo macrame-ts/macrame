@@ -131,9 +131,10 @@ class Scheduler;
 // `scheduler.h` alone.
 Scheduler& global_scheduler();
 
-extern thread_local Scheduler* current_scheduler;
-// This thread's worker index within `current_scheduler` (>= 0 for a worker of it, else -1).
-// Routes a worker's own `normal` submits to its local deque, and identifies it in stealing.
+// This thread's worker index within the one process-wide `global_scheduler()` (>= 0 for a
+// worker of it, else -1). It is the sole worker-vs-external discriminator now that there is a
+// single pool: `>= 0` means "a worker of the running pool". Routes a worker's own `normal`
+// submits to its local deque, identifies it in stealing, and selects its profiling busy slot.
 extern thread_local int current_worker_index;
 
 class Scheduler

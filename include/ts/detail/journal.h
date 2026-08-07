@@ -255,7 +255,6 @@ public:
 
     Parallel_recorder(Parallel_recorder&& other) noexcept
         : journal_(std::exchange(other.journal_, nullptr))
-        , scheduler_(std::exchange(other.scheduler_, nullptr))
         , slots_(std::move(other.slots_))
     {
         other.slots_.clear();
@@ -267,7 +266,6 @@ public:
         {
             release();
             journal_ = std::exchange(other.journal_, nullptr);
-            scheduler_ = std::exchange(other.scheduler_, nullptr);
             slots_ = std::move(other.slots_);
             other.slots_.clear();
         }
@@ -299,7 +297,6 @@ private:
 
     Parallel_recorder(detail::Journal<T>& journal, Scheduler& scheduler)
         : journal_(&journal)
-        , scheduler_(&scheduler)
     {
         int workers = scheduler.worker_count();
         slots_.reserve(static_cast<std::size_t>(workers) + 1);
@@ -313,21 +310,20 @@ private:
             journal_->release_slot(*slot);
         slots_.clear();
         journal_ = nullptr;
-        scheduler_ = nullptr;
     }
 
-    // This thread's slot: its worker index + 1 when it is a worker of the bound
-    // scheduler, else the shared overflow lane (0). One TLS read + two compares.
+    // This thread's slot: its worker index + 1 when it is a worker of the one process-wide pool
+    // the recorder is bound to (the only pool with workers), else the shared overflow lane (0).
+    // One TLS read + two compares.
     std::size_t lane() const
     {
         int w = current_worker_index;
-        if (current_scheduler != scheduler_ || w < 0 || static_cast<std::size_t>(w) + 1 >= slots_.size())
+        if (w < 0 || static_cast<std::size_t>(w) + 1 >= slots_.size())
             return 0;
         return static_cast<std::size_t>(w) + 1;
     }
 
     detail::Journal<T>* journal_ = nullptr;
-    Scheduler* scheduler_ = nullptr;
     std::vector<typename detail::Journal<T>::Slot*> slots_;
 };
 

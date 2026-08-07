@@ -10,7 +10,6 @@ Worker_thread::Worker_thread(Scheduler& scheduler, int index)
 
 void Worker_thread::main(Scheduler& scheduler, int index)
 {
-    current_scheduler = &scheduler;
     current_worker_index = index;
 
     // Busy/idle state for the scheduler's quiescence signal (`Scheduler::quiescent`, the
@@ -55,7 +54,6 @@ void Worker_thread::main(Scheduler& scheduler, int index)
 
     mark(false);   // leaving the pool: no longer a worker that could be idle
     current_worker_index = -1;
-    current_scheduler = nullptr;
 }
 
 } // namespace ts::detail

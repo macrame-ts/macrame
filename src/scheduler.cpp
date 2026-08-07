@@ -12,41 +12,34 @@
 namespace ts
 {
 
-thread_local Scheduler* current_scheduler = nullptr;
 thread_local int current_worker_index = -1;
-
-#if TS_PROFILING
-// Declared in guarded.h; used only by the machinery bridge below to resolve the ambient
-// scheduler when `execute()`'s per-run setup runs on a non-worker thread (the frame loop),
-// where `current_scheduler` is null. A graph run always targets the global scheduler, so this
-// is the scheduler the setup belongs to.
-Scheduler& global_scheduler();
-#endif
 
 #if TS_PROFILING
 namespace detail
 {
 // The owner-attribution bridge (declared scheduler-free in detail/trace_owner.h so task.h
-// can use it): a running task's `Trace_busy_scope` routes its busy span here, to whichever
-// scheduler is current. Armed count bumped by `arm/disarm_busy_tracking`.
+// can use it): a running task's `Trace_busy_scope` routes its busy span here. Every bridge
+// resolves the one process-wide `global_scheduler()` -- with the single-global collapse there
+// is no ambient "current" pool to pick, and each bridge fires only while a traced run is armed
+// (see `trace_owner_armed`), so the global pool always exists (no side-effect creation). The
+// worker index selects the busy slot: a real worker gets its own, a non-worker caller (the
+// frame loop, a test, the worker-less drain -- `current_worker_index == -1`) lands in the
+// scheduler's overflow lane. Armed count bumped by `arm/disarm_busy_tracking`.
 std::atomic<int> trace_owner_armed{ 0 };
 void (*trace_owner_add)(int, long long) = +[](int owner, long long dt)
 {
-    if (Scheduler* s = current_scheduler)
-        s->add_owner_busy(owner, dt);
+    global_scheduler().add_owner_busy(owner, dt);
 };
 // The body/machinery split bridge: a functor's span moves from machinery to body on the
 // worker that ran it (the task-system-cost metric).
 void (*trace_body_add)(long long) = +[](long long dt)
 {
-    if (Scheduler* s = current_scheduler)
-        s->add_body_ticks(current_worker_index, dt);
+    global_scheduler().add_body_ticks(current_worker_index, dt);
 };
 // Inline-body variant: credit body only, no machinery netting (no run_task span to net).
 void (*trace_body_only)(long long) = +[](long long dt)
 {
-    if (Scheduler* s = current_scheduler)
-        s->add_body_only(current_worker_index, dt);
+    global_scheduler().add_body_only(current_worker_index, dt);
 };
 // The per-run graph-setup bridge: `Trace_setup_scope` (in static_task_graph.cpp's execute())
 // routes the setup+initial-dispatch span to machinery on the calling worker -- or the overflow
@@ -55,22 +48,15 @@ void (*trace_body_only)(long long) = +[](long long dt)
 // root dispatch), which lives in no `run_task` span, into the machinery accumulator M.
 void (*trace_machinery_add)(long long) = +[](long long dt)
 {
-    // Unlike the body bridges (which always run on a worker or inside the worker-less drain,
-    // where `current_scheduler` is set), the setup span is booked from `execute()` on the
-    // calling thread -- the frame loop, where `current_scheduler` is null. Fall back to the
-    // ambient scheduler (the global one a graph run always targets); the non-worker
-    // `current_worker_index == -1` then lands in that scheduler's overflow lane.
-    Scheduler* s = current_scheduler ? current_scheduler : &global_scheduler();
-    s->add_machinery_ticks(current_worker_index, dt);
+    global_scheduler().add_machinery_ticks(current_worker_index, dt);
 };
 // The dedicated orchestration bridge (Phase 1 of the four-way subtraction breakdown): the SAME
 // per-run setup span the machinery bridge above receives, routed additionally to a separate
 // accumulator so the four-way split (body / machinery(M_core) / idle / orchestration) has a
-// clean off-worker bucket. Same overflow-lane fallback as `trace_machinery_add`.
+// clean off-worker bucket.
 void (*trace_orchestration_add)(long long) = +[](long long dt)
 {
-    Scheduler* s = current_scheduler ? current_scheduler : &global_scheduler();
-    s->add_orchestration_ticks(current_worker_index, dt);
+    global_scheduler().add_orchestration_ticks(current_worker_index, dt);
 };
 }
 #endif
@@ -199,10 +185,14 @@ void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
         return;
     }
 
-    // A worker submitting `normal` to its OWN scheduler pushes to its local deque (LIFO,
-    // cache-hot, no shared cache line -- the producer fast path). External/non-normal submits,
-    // and a full local deque, go to the global queue for the priority.
-    if (priority == Priority::normal && current_scheduler == this && current_worker_index >= 0
+    // A worker submitting `normal` pushes to its own local deque (LIFO, cache-hot, no shared
+    // cache line -- the producer fast path). External/non-normal submits, and a full local
+    // deque, go to the global queue for the priority. With the single-global collapse, being on
+    // a worker (`current_worker_index >= 0`) means being on THIS pool's worker -- the only pool
+    // with workers -- so the index is a valid slot; the size check is a cheap belt-and-braces
+    // guard (an isolated worker-less instance never reaches here -- it returns above).
+    if (priority == Priority::normal && current_worker_index >= 0
+        && static_cast<std::size_t>(current_worker_index) < local_normal_.size()
         && local_normal_[static_cast<std::size_t>(current_worker_index)]->push({ func, data }))
     {
         signal_submit();   // wake a thief to help (no-op if none parked)
@@ -244,15 +234,10 @@ void Scheduler::run_serial(Task_func_ptr func, void* data)
         return;   // the active drain on this thread runs it, in order
 
     serial_draining = true;
-    // Install this scheduler as the thread's current one for the drain: nested submits
-    // (and anything else resolving the ambient scheduler) must land here even when the
-    // submitting thread is external.
-    // `current_worker_index` stays -1 -- there are no workers, and the profiling
-    // accumulators no-op on negative indices.
-    Scheduler* prev = current_scheduler;
-    current_scheduler = this;
+    // Nested submits resolve the one process-wide `global_scheduler()` (this worker-less pool),
+    // so no per-thread scheduler install is needed. `current_worker_index` stays -1 -- there
+    // are no workers, and the profiling accumulators land in the overflow lane on -1.
     drain_serial();
-    current_scheduler = prev;
     serial_pending.clear();   // retains capacity
     serial_head = 0;
     serial_draining = false;

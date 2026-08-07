@@ -139,20 +139,13 @@ void parallel_helper(void* p)
     intrusive_dec(&st->core);
 }
 
-// A parallel_for launched from a task must fan out on THAT task's scheduler, not the global
-// default: a graph node running on a dedicated scheduler has to use that pool, or its slices
-// escape to the default pool (breaking per-scheduler tracing, and splitting the frame's work
-// across two pools). Off-worker callers (no current scheduler) fall back to the default. The
-// ambient-scheduler direction, TODO 3.1.
-inline Scheduler& current_or_global_scheduler() noexcept
-{
-    return current_scheduler ? *current_scheduler : global_scheduler();
-}
-
+// `parallel_for` fans out on the one process-wide `global_scheduler()`. With the single-global
+// collapse there is no separate pool a task could belong to -- the running pool IS the global,
+// so a graph node's slices and an off-worker caller's slices both land here.
 template<typename Body>
 Parallel_state<Body>* make_parallel_state(int n, Body&& body, Parallel_options opts, int& conc_out)
 {
-    int conc = opts.concurrency > 0 ? opts.concurrency : current_or_global_scheduler().worker_count();
+    int conc = opts.concurrency > 0 ? opts.concurrency : global_scheduler().worker_count();
     if (conc < 1)
         conc = 1;
     if (conc > n)
@@ -186,7 +179,7 @@ void parallel_for(int n, Body&& body, Parallel_options opts = {})
     st->core.refcount.fetch_add(conc - 1, std::memory_order_relaxed);   // one ref per submitted helper
 
     Priority prio = detail::resolved_priority(opts.priority);   // resolved once, on the calling thread
-    Scheduler& sched = detail::current_or_global_scheduler();
+    Scheduler& sched = global_scheduler();
     for (int t = 0; t < conc - 1; ++t)
         sched.submit(&detail::parallel_helper<std::decay_t<Body>>, st, prio);
 
@@ -222,7 +215,7 @@ Task<void> async_parallel_for(int n, Body&& body, Parallel_options opts = {})
     st->core.refcount.fetch_add(conc, std::memory_order_relaxed);   // one ref per helper
 
     Priority prio = detail::resolved_priority(opts.priority);   // resolved once, on the calling thread
-    Scheduler& sched = detail::current_or_global_scheduler();
+    Scheduler& sched = global_scheduler();
     for (int t = 0; t < conc; ++t)
         sched.submit(&detail::parallel_helper<std::decay_t<Body>>, st, prio);
 
