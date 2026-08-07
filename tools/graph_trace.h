@@ -924,8 +924,11 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // the height signal without stealing plot space.
     const double util_strip_h = row_h;
     const double strip_gap = 6.0;
-    const double strip_top = header_h;
-    const double rows_top = header_h + util_strip_h + strip_gap;
+    // A view-bar of restyle buttons (script-wired) sits between the header text and the
+    // util strip; the strip and everything below shift down by its height.
+    const double btn_band_h = 30.0;
+    const double strip_top = header_h + btn_band_h;
+    const double rows_top = strip_top + util_strip_h + strip_gap;
     const double rows_bottom = rows_top + row_count * row_h;
     const double total_w = pad_l + plot_w + pad_r;
     const double total_h = rows_bottom + axis_h + legend_h + table_h;
@@ -1287,6 +1290,41 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
     }
 
+    // View bar: a row of restyle buttons below the header. Each is a `<g class="btn"
+    // data-view="...">` with a rounded rect + centered label; the overlay script wires
+    // clicks (toggle or cycle a view, brighten the active button, relabel the cycles).
+    // Widths are sized for the widest cycle label so relabeling never overflows the rect.
+    // Inert under <img> (script-gated) like the rest of the interactivity.
+    {
+        struct Btn { const char* view; const char* label; double w; };
+        static constexpr Btn btns[] = {
+            { "crit",   "Critical focus",  100.0 },
+            { "edges",  "Edges: on",        78.0 },
+            { "kind",   "Edge type: all",  116.0 },
+            { "cone",   "Cone: off",        82.0 },
+            { "dead",   "Dead-time focus", 112.0 },
+            { "metric", "Colour: crit",    104.0 },
+        };
+        double bx = 16.0;
+        const double by = header_h + 5.0;
+        const double bh = 20.0;
+        for (const Btn& b : btns)
+        {
+            out += "<g class=\"btn\" data-view=\"";
+            out += b.view;
+            out += "\" style=\"cursor:pointer\">";
+            line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" rx=\"4\" fill=\"#3e3d32\" "
+                 "stroke=\"#75715e\" stroke-width=\"1\"/>", bx, by, b.w, bh);
+            line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"11\" fill=\"#cfcfc2\" text-anchor=\"middle\">",
+                 bx + b.w * 0.5, by + 14.0);
+            append_escaped(out, b.label);
+            out += "</text></g>\n";
+            bx += b.w + 8.0;
+        }
+        line("<text x=\"%.1f\" y=\"%.1f\" font-size=\"10\" fill=\"#75715e\">views: click to toggle; "
+             "cycles relabel; Cone: pick a node</text>\n", bx + 6.0, by + 14.0);
+    }
+
     // Time grid + axis labels: a 1/2/5-series step giving at most ~8 ticks.
     {
         double step = std::pow(10.0, std::floor(std::log10(std::max(1.0, span_us / 8.0))));
@@ -1299,7 +1337,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
         for (double t = 0.0; t <= span_us + 1e-9; t += step)
         {
             line("<line x1=\"%.1f\" y1=\"%.0f\" x2=\"%.1f\" y2=\"%.0f\" stroke=\"#3e3d32\" stroke-width=\"1\"/>\n",
-                 X(t), header_h - 4.0, X(t), rows_bottom);
+                 X(t), strip_top - 4.0, X(t), rows_bottom);
             std::string lbl = fmt_us(t) + " \xC2\xB5s";
             out += "<text x=\"" + std::to_string(X(t)) + "\" y=\"" + std::to_string(rows_bottom + 18.0)
                  + "\" font-size=\"10\" fill=\"#cfcfc2\" text-anchor=\"middle\">";
@@ -1548,7 +1586,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
         if (!g.has_band)
             continue;
         const char* pattern = g.cls == 2 ? "deadcore" : g.cls == 1 ? "deadmix" : "dead";
-        line("<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" "
+        line("<rect class=\"deadband\" x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" "
              "fill=\"url(#%s)\" opacity=\"%.2f\" pointer-events=\"none\"/>\n",
              X(g.t0), rows_top, (g.t1 - g.t0) * px_per_us, rows_bottom - rows_top,
              pattern, std::clamp(g.share, 0.10, 1.0));
@@ -1586,6 +1624,13 @@ inline bool Graph_trace::write_SVG(const char* path) const
     {
         return runs_ > 0
             ? static_cast<double>(edges_[static_cast<size_t>(ei)].critical_runs) / static_cast<double>(runs_) : 0.0;
+    };
+    // Raw numeric attribute value (no unit) for the view-bar's data-* metrics.
+    auto attr_num = [](double v)
+    {
+        char b[32];
+        std::snprintf(b, sizeof b, "%.4f", v);
+        return std::string(b);
     };
 
     // Bars (tooltip data on the group; the overlay script renders it), then edges on top.
@@ -1665,7 +1710,11 @@ inline bool Graph_trace::write_SVG(const char* path) const
 
         // data-nc: tooltip headline (node name) in the priority colour. data-prio: the
         // right-aligned priority tag on that line, same colour.
-        out += "<g class=\"hv\" data-node=\"" + std::to_string(i) + "\" data-hl=\"" + color
+        out += "<g class=\"hv\" data-node=\"" + std::to_string(i)
+            + "\" data-crit=\"" + attr_num(s.critical_share)
+            + "\" data-dispatch=\"" + attr_num(s.dispatch_wait_us)
+            + "\" data-slack=\"" + attr_num(slack[static_cast<size_t>(i)])
+            + "\" data-hl=\"" + color
             + "\" data-nc=\"" + label_fill
             + "\" data-prio=\"" + priority_word(a.priority) + "-pri\" data-pc=\"" + label_fill
             + "\" data-tip=\"";
@@ -1793,6 +1842,8 @@ inline bool Graph_trace::write_SVG(const char* path) const
         std::string ops = opb;
         out += "<g class=\"hv edge\" data-a=\"" + std::to_string(e.from) + "\" data-b=\""
             + std::to_string(e.to) + "\" data-op=\"" + ops + "\" opacity=\"" + ops
+            + "\" data-crit=\"" + attr_num(share)
+            + "\" data-kind=\"" + (e.explicit_ordering ? "explicit" : "derived")
             + "\" data-hl=\"" + stroke + "\" data-tip=\"";
         append_tip_attr(tip);
         out += "\">\n";
@@ -1922,7 +1973,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
         "var fg=document.createElementNS(NS,'g');svg.insertBefore(fg,tt);\n"
         "function sink(e){if(anchor)anchor.parentNode.insertBefore(e,anchor);}\n"
         "if(anchor)Array.prototype.forEach.call(edges,function(e){sink(e);});\n"
-        "function hiEdges(id){Array.prototype.forEach.call(edges,function(e){if(e.getAttribute('data-a')===id||e.getAttribute('data-b')===id){e.setAttribute('opacity','1');e.setAttribute('pointer-events','none');fg.appendChild(e);}});}\n"
+        "function hiEdges(id){Array.prototype.forEach.call(edges,function(e){if((e.getAttribute('data-a')===id||e.getAttribute('data-b')===id)&&parseFloat(e.getAttribute('data-op'))>0){e.setAttribute('opacity','1');e.setAttribute('pointer-events','none');fg.appendChild(e);}});}\n"
         "function loEdges(){while(fg.firstChild){var c=fg.firstChild;c.setAttribute('opacity',c.getAttribute('data-op'));c.setAttribute('pointer-events','auto');sink(c);}}\n"
         "Array.prototype.forEach.call(document.querySelectorAll('.hv'),function(el){\n"
         "  el.addEventListener('mouseenter',function(e){loEdges();show(el,e);var n=el.getAttribute('data-node');\n"
@@ -1930,6 +1981,68 @@ inline bool Graph_trace::write_SVG(const char* path) const
         "  el.addEventListener('mousemove',move);\n"
         "  el.addEventListener('mouseleave',function(){tt.setAttribute('visibility','hidden');loEdges();});\n"
         "});\n"
+        // ---- View bar: restyle toggles/cycles wired to the .btn buttons. A single
+        // restyle() recomputes every element's target opacity from the current view state
+        // (so views compose and never fight the hover edge-raise: it sets each edge's
+        // data-op resting opacity, which hiEdges/loEdges already honour). ----
+        "var critView=false,edgesOn=true,kindMode=0,coneMode=false,coneNode=null,deadView=false,metricMode=0;\n"
+        "var deadbands=document.querySelectorAll('.deadband');\n"
+        // Capture immutable originals before any restyle mutates them.
+        "Array.prototype.forEach.call(edges,function(e){e._op0=parseFloat(e.getAttribute('data-op'));});\n"
+        "Array.prototype.forEach.call(deadbands,function(r){r._op0=parseFloat(r.getAttribute('opacity'))||0.1;});\n"
+        "Array.prototype.forEach.call(bars,function(g){var r=g.querySelector('rect');if(r)g._st0=r.getAttribute('stroke');});\n"
+        // Adjacency for the dependency cone (ancestors via in-edges, descendants via out-edges).
+        "var inAdj={},outAdj={};\n"
+        "Array.prototype.forEach.call(edges,function(e){var a=e.getAttribute('data-a'),b=e.getAttribute('data-b');(outAdj[a]=outAdj[a]||[]).push(b);(inAdj[b]=inAdj[b]||[]).push(a);});\n"
+        "function walk(start,adj){var seen={},st=[start];while(st.length){var n=st.pop();var nb=adj[n]||[];for(var i=0;i<nb.length;i++){if(!seen[nb[i]]){seen[nb[i]]=1;st.push(nb[i]);}}}return seen;}\n"
+        "function cone(id){var s={};s[id]=1;var up=walk(id,inAdj),dn=walk(id,outAdj);for(var k in up)s[k]=1;for(var k2 in dn)s[k2]=1;return s;}\n"
+        // green(0) -> yellow -> red(1) ramp, matching the util wash palette.
+        "function ramp(t){t=Math.max(0,Math.min(1,t));var a,b,f;if(t<0.5){a=[0xa6,0xe2,0x2e];b=[0xe6,0xdb,0x74];f=t*2;}else{a=[0xe6,0xdb,0x74];b=[0xff,0x5f,0x45];f=(t-0.5)*2;}var r=Math.round(a[0]+(b[0]-a[0])*f),g=Math.round(a[1]+(b[1]-a[1])*f),c=Math.round(a[2]+(b[2]-a[2])*f);return '#'+((1<<24)+(r<<16)+(g<<8)+c).toString(16).slice(1);}\n"
+        "function paintMetric(){\n"
+        "  if(metricMode===0){Array.prototype.forEach.call(bars,function(g){var r=g.querySelector('rect');if(r&&g._st0)r.setAttribute('stroke',g._st0);});return;}\n"
+        "  var attr=metricMode===1?'data-dispatch':'data-slack';var mx=0;\n"
+        "  Array.prototype.forEach.call(bars,function(g){mx=Math.max(mx,parseFloat(g.getAttribute(attr))||0);});\n"
+        "  if(mx<=0)mx=1;\n"
+        // dispatch: long wait -> red; slack: tight (low) slack -> red (invert).
+        "  Array.prototype.forEach.call(bars,function(g){var v=(parseFloat(g.getAttribute(attr))||0)/mx;var t=metricMode===2?1-v:v;var r=g.querySelector('rect');if(r)r.setAttribute('stroke',ramp(t));});\n"
+        "}\n"
+        "function restyle(){\n"
+        "  var cs=(coneMode&&coneNode!=null)?cone(coneNode):null;\n"
+        "  Array.prototype.forEach.call(bars,function(g){var op=1;\n"
+        "    if(critView&&(parseFloat(g.getAttribute('data-crit'))||0)<0.15)op=Math.min(op,0.15);\n"
+        "    if(cs&&!cs[g.getAttribute('data-node')])op=Math.min(op,0.12);\n"
+        "    if(deadView)op=Math.min(op,0.30);\n"
+        "    g.setAttribute('opacity',op);});\n"
+        "  Array.prototype.forEach.call(edges,function(e){var op=e._op0;\n"
+        "    var a=e.getAttribute('data-a'),b=e.getAttribute('data-b');\n"
+        "    if(!edgesOn)op=0;\n"
+        "    if(kindMode===1&&e.getAttribute('data-kind')!=='explicit')op=0;\n"
+        "    if(kindMode===2&&e.getAttribute('data-kind')!=='derived')op=0;\n"
+        "    if(critView&&(parseFloat(e.getAttribute('data-crit'))||0)<0.15)op=Math.min(op,0.03);\n"
+        "    if(cs&&!(cs[a]&&cs[b]))op=Math.min(op,0.03);\n"
+        "    if(deadView)op=Math.min(op,0.04);\n"
+        "    e.setAttribute('data-op',op);if(e.parentNode!==fg)e.setAttribute('opacity',op);});\n"
+        "  Array.prototype.forEach.call(deadbands,function(r){r.setAttribute('opacity',deadView?Math.min(1,r._op0*3+0.3):r._op0);});\n"
+        "  paintMetric();\n"
+        "}\n"
+        "function setActive(b,on){var r=b.querySelector('rect');if(!r)return;r.setAttribute('fill',on?'#75715e':'#3e3d32');r.setAttribute('stroke',on?'#a6e22e':'#75715e');}\n"
+        "function setLabel(b,t){var x=b.querySelector('text');if(x)x.textContent=t;}\n"
+        "Array.prototype.forEach.call(document.querySelectorAll('.btn'),function(b){\n"
+        "  b.addEventListener('click',function(ev){ev.stopPropagation();var v=b.getAttribute('data-view');\n"
+        "    if(v==='crit'){critView=!critView;setActive(b,critView);}\n"
+        "    else if(v==='edges'){edgesOn=!edgesOn;setActive(b,!edgesOn);setLabel(b,'Edges: '+(edgesOn?'on':'off'));}\n"
+        "    else if(v==='kind'){kindMode=(kindMode+1)%3;setActive(b,kindMode!==0);setLabel(b,'Edge type: '+['all','explicit','derived'][kindMode]);}\n"
+        "    else if(v==='cone'){coneMode=!coneMode;if(!coneMode)coneNode=null;setActive(b,coneMode);setLabel(b,'Cone: '+(coneMode?'pick':'off'));}\n"
+        "    else if(v==='dead'){deadView=!deadView;setActive(b,deadView);}\n"
+        "    else if(v==='metric'){metricMode=(metricMode+1)%3;setActive(b,metricMode!==0);setLabel(b,'Colour: '+['crit','dispatch','slack'][metricMode]);}\n"
+        "    restyle();});\n"
+        "});\n"
+        // Cone selection: with cone mode on, a node click isolates its ancestors+descendants;
+        // a background click clears the pick. stopPropagation on the node keeps the same click
+        // from immediately clearing.
+        "var coneBtn=document.querySelector('.btn[data-view=\"cone\"]');\n"
+        "Array.prototype.forEach.call(bars,function(g){g.addEventListener('click',function(ev){if(coneMode){coneNode=g.getAttribute('data-node');ev.stopPropagation();if(coneBtn)setLabel(coneBtn,'Cone: set');restyle();}});});\n"
+        "svg.addEventListener('click',function(){if(coneMode&&coneNode!=null){coneNode=null;if(coneBtn)setLabel(coneBtn,'Cone: pick');restyle();}});\n"
         "})();\n"
         "]]></script>\n";
 
