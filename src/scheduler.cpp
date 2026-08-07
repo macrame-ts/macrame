@@ -151,6 +151,16 @@ Scheduler::Scheduler(Scheduler_config config)
         workers_.emplace_back(*this, static_cast<int>(i));
 }
 
+namespace detail
+{
+// The sanctioned `Scheduler` factory (the ctor is private). A friend, so it can reach the
+// private constructor; hands back a `unique_ptr` because `Scheduler` is non-movable.
+std::unique_ptr<Scheduler> make_scheduler(Scheduler_config config)
+{
+    return std::unique_ptr<Scheduler>(new Scheduler(config));
+}
+}
+
 Scheduler::~Scheduler()
 {
     quit_.store(true, std::memory_order_release);

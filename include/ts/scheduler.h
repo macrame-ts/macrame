@@ -131,6 +131,16 @@ class Scheduler;
 // `scheduler.h` alone.
 Scheduler& global_scheduler();
 
+namespace detail
+{
+// The ONLY sanctioned way to construct a `Scheduler`. The constructor is private, so ad-hoc
+// `ts::Scheduler s{cfg}` no longer compiles -- construction is reserved to the process-wide
+// holder in guarded.cpp (and any legitimately-isolated, non-competing object-unit test).
+// Returns a `unique_ptr` because `Scheduler` is non-movable. This upholds the single-pool
+// invariant at the type level: you cannot casually stand up a second worker pool.
+std::unique_ptr<Scheduler> make_scheduler(Scheduler_config config = {});
+}
+
 // This thread's worker index within the one process-wide `global_scheduler()` (>= 0 for a
 // worker of it, else -1). It is the sole worker-vs-external discriminator now that there is a
 // single pool: `>= 0` means "a worker of the running pool". Routes a worker's own `normal`
@@ -140,9 +150,9 @@ extern thread_local int current_worker_index;
 class Scheduler
 {
     friend class detail::Worker_thread;
+    friend std::unique_ptr<Scheduler> detail::make_scheduler(Scheduler_config);
 
 public:
-    Scheduler(Scheduler_config config = {});
     ~Scheduler();
 
     Scheduler(const Scheduler&) = delete;
@@ -382,6 +392,11 @@ public:
 #endif
 
 private:
+    // Construct via `detail::make_scheduler` only (the process-wide holder). Private so ad-hoc
+    // `Scheduler s{cfg}` does not compile; `Scheduler` is non-movable, so the factory returns a
+    // `unique_ptr`. Enforces the single-pool invariant at the type level.
+    explicit Scheduler(Scheduler_config config = {});
+
     // Find one task for worker `worker_index`, scanning: global high -> its own local deque
     // (LIFO, cache-hot) -> global normal -> global low -> steal `normal` from a random victim.
     // High stays strict (checked first). True if a task was found.

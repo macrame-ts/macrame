@@ -34,7 +34,7 @@ Scheduler& global_scheduler()
     std::lock_guard lock(g_sched_mutex);
     if (!g_scheduler)
     {
-        g_scheduler = std::make_unique<Scheduler>(g_config);
+        g_scheduler = detail::make_scheduler(g_config);
         g_fast.store(g_scheduler.get(), std::memory_order_release);
     }
     return *g_scheduler;
@@ -52,7 +52,7 @@ void configure_scheduler(Scheduler_config config)
     g_fast.store(nullptr, std::memory_order_release);
     g_scheduler.reset();   // dtor: quit + join workers, drain queued tasks
     g_config = config;
-    g_scheduler = std::make_unique<Scheduler>(config);
+    g_scheduler = detail::make_scheduler(config);
     g_fast.store(g_scheduler.get(), std::memory_order_release);
 }
 
