@@ -131,11 +131,13 @@ summary + the forward plan.
    `shadow_ready`. The entry-install simultaneously makes a dynamic publish
    arriving mid-flip chain behind the flip. Empty-batch path must still
    trigger the signal (the chain always resolves).
-5. **`Parallel_recorder` lane routing**: worker index + 1 when
-   `current_scheduler` matches the bound scheduler and the index fits, else
-   the overflow lane (0) — which absorbs the `parallel_for` caller's own
-   share, retraction-inline bodies, `set_inline` on external threads, and
-   foreign-scheduler workers. One TLS read + two compares per stage.
+5. **`Parallel_recorder` lane routing**: worker index + 1 when the caller is a
+   worker of the one process-wide pool (`current_worker_index >= 0`) and the
+   index fits, else the overflow lane (0) — which absorbs the `parallel_for`
+   caller's own share, inline bodies, and external threads. (Since the
+   single-global collapse there is one pool with workers, so "am I a worker of
+   the bound scheduler" reduces to `current_worker_index >= 0`.) One TLS read +
+   two compares per stage.
 6. **Per-slot mutex exists only for the dynamic stage-vs-cut race**;
    uncontended in one-producer use; graphs edge-order it away entirely. It is
    the thing the arena/record-stream rebase can remove.

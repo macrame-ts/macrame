@@ -276,7 +276,7 @@ spawned.
 
 - The parent is found via `thread_local Task_ptr current_task`, installed at
   execution start — and, for a coroutine, re-installed around every resumed
-  segment (companion to `thread_local Scheduler* current_scheduler` and the
+  segment (companion to the `thread_local current_worker_index` and the
   per-task `Access_context`).
 - Registration (`detail::add_nested`, spelled `ts::nested` publicly): the
   nested task `++`s the parent's `num_locks` and records the parent in its

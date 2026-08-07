@@ -220,9 +220,11 @@ side-by-side oracle.
     (mirroring `trace_body_add`). Two mechanics make it exact: (a) an **overflow lane**
     — the scheduler's busy vector is sized `workers + 1`, and a non-worker caller
     (`current_worker_index < 0`, e.g. the frame loop) lands in the trailing slot instead
-    of being dropped; the bridge falls back to `global_scheduler()` when
-    `current_scheduler` is null (the main thread), which is the scheduler a graph run
-    always targets. (b) The setup scope flags its span `run_task`-booked, so a body
+    of being dropped; the bridge resolves `global_scheduler()` directly (the scheduler a
+    graph run always targets, and armed-only so it exists), so a non-worker caller on the
+    main thread routes to that overflow lane. (Originally the bridge read a `current_scheduler`
+    thread-local and fell back to the global when null; that selector was retired with the
+    single-global collapse — see design.md §3.) (b) The setup scope flags its span `run_task`-booked, so a body
     dispatched *inline* within it (a `set_inline` root, or — in worker-less mode — every
     node, since the whole frame drains serially inside the scope) nets its own span back
     out, leaving pure machinery. `begin_run` was moved ahead of the setup so the snapshot

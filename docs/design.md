@@ -399,6 +399,23 @@ describe the trampoline, not scheduling); their clean per-node durations are
 the planned serial-baseline lane for the profiler-guided-optimization cost
 model. Priorities and idle policies are inert in this mode by design.
 
+**Exactly one worker pool, ever.** There is a single process-wide scheduler,
+reconfigured by teardown+recreate (`configure_scheduler` / the RAII
+`Scheduler_scope`), never a set of coexisting pools. This is an invariant, not
+a default: `Scheduler`'s constructor is private, and the sole way to build one
+is a `detail::make_scheduler` factory (it returns a `unique_ptr`, the type
+being non-movable) reserved for the global holder — so ad-hoc `Scheduler s{cfg}`
+does not compile. Two things fall out. First, a whole degree of freedom
+disappears: with one pool there is no "which scheduler" question, so the
+former `thread_local current_scheduler` selector is gone and `current_worker_index >= 0`
+is the only worker-vs-external test — which removed a recurring bug class where
+a null selector on a non-worker thread silently mis-attributed work (a
+profiling metric once read 0.0% for exactly this reason). Second, benchmark
+integrity: a second pool with never-parking (`spin`) workers would burn cores
+alongside the pool under test and add noise; one pool means only one pool ever
+spins. Tests and benchmarks that want a specific worker count or idle policy
+reconfigure the global for their scope rather than standing up a rival pool.
+
 **Scheduler as one implementation behind the `Task` API, not a plugin
 zoo.** The intent is at most two or three interchangeable scheduler
 implementations sharing the `Task`/`Guarded`/graph surface — the current
@@ -445,7 +462,7 @@ Every task is one heap allocation: a **fully monomorphic**
 result is type-erased behind a `void*` into a wrapper the handle refcounts
 intrusively; the body is reached through one function pointer. Templating
 the block (the obvious alternative) was rejected because the scheduler is
-runtime-configured and thread-locals like the current-scheduler pointer would
+runtime-configured and thread-locals like the current-worker-index would
 fracture across instantiations — and because a single block type is what
 makes re-arm (`reset()` for `Signal` and the graph's per-run nodes) and
 pooling tractable. `shared_ptr` was systematically replaced with intrusive
