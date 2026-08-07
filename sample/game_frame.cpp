@@ -93,7 +93,7 @@ float time_scale = 1.0f;
 
 // The variant traces run on this many workers -- heavy enough (~35 ms of work)
 // to warrant more than the machine default when starved; retune freely.
-constexpr int variant_workers = 6;
+constexpr int variant_workers = 8;
 
 // Instrumentation counters, reported by the entry points (declared up here
 // because the submit node's body records `drawn`).

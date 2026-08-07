@@ -1041,6 +1041,10 @@ inline bool Graph_trace::write_SVG(const char* path) const
            "<path d=\"M0 6 L6 0\" stroke=\"#f92672\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
            "<path d=\"M6 6 L12 0\" stroke=\"#fd971f\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
            "</pattern></defs>\n";
+    // Glossary affordance: header terms whose names may be unfamiliar carry a dotted underline
+    // and the help cursor, plus a native <title> tooltip (see the `term` helper below). The
+    // underline shows in any renderer; the tooltip resolves when the SVG is viewed as a document.
+    out += "<style>.term{cursor:help;text-decoration:underline dotted;text-underline-offset:2px;}</style>\n";
 
     // Header: title, the dead-time headline, global stats. (The legend sits at the
     // bottom of the picture.)
@@ -1062,14 +1066,30 @@ inline bool Graph_trace::write_SVG(const char* path) const
         double dead_share = makespan_.mean > 0.0 ? dead_us / makespan_.mean : 0.0;
         const char* dead_color = dead_share < dead_time_ok_share ? "#a6e22e"
                                : dead_share <= dead_time_bad_share ? "#e6db74" : "#ff5f45";
+        // Hoverable glossary term: dotted-underline + help-cursor (`.term` style) with a native
+        // <title> tooltip. `colored` emits plain coloured text (numbers, separators).
+        auto term = [&out](const char* name, const char* tip, const char* color)
+        {
+            out += "<tspan class=\"term\" fill=\""; out += color; out += "\"><title>";
+            append_escaped(out, tip);
+            out += "</title>";
+            append_escaped(out, name);
+            out += "</tspan>";
+        };
+        auto colored = [&out](const std::string& s, const char* color)
+        {
+            out += "<tspan fill=\""; out += color; out += "\">";
+            append_escaped(out, s);
+            out += "</tspan>";
+        };
         out += "<text x=\"16\" y=\"48\" font-size=\"12\" font-weight=\"600\">";
-        out += "<tspan fill=\"" + std::string(util_color) + "\">";
-        append_escaped(out, "core utilization: " + fmt_us(100.0 * util) + "%");
-        out += "</tspan><tspan fill=\"#cfcfc2\"> | </tspan>";
-        out += "<tspan fill=\"" + std::string(dead_color) + "\">";
-        append_escaped(out, "critical path dead time: " + fmt_us(dead_us) + " \xC2\xB5s ("
-            + fmt_us(100.0 * dead_share) + "% of frame time)");
-        out += "</tspan>";
+        term("core utilization", "Busy core-time / (workers x frame time): how much of the machine ran tasks.", util_color);
+        colored(": " + fmt_us(100.0 * util) + "%", util_color);
+        out += "<tspan fill=\"#cfcfc2\"> | </tspan>";
+        term("critical path dead time",
+             "Frame time minus the work along the binding dependency chain: time the critical path spent waiting for a core or a predecessor, not working.",
+             dead_color);
+        colored(": " + fmt_us(dead_us) + " \xC2\xB5s (" + fmt_us(100.0 * dead_share) + "% of frame time)", dead_color);
 
         // Cause split: apportion the (globally computed) dead time across causes by the
         // share-weighted gap durations of the classified bands -- each band contributes
@@ -1092,6 +1112,11 @@ inline bool Graph_trace::write_SVG(const char* path) const
             {
                 static constexpr const char* cls_color[3] = { "#f92672", "#e6db74", "#fd971f" };
                 static constexpr const char* cls_word[3] = { "dependency", "mixed", "core-bound" };
+                static constexpr const char* cls_tip[3] = {
+                    "The chain waited for an unfinished predecessor, not a free core: cut edges or shorten the chain.",
+                    "Both causes present across this stretch of the frame.",
+                    "The chain waited because every core was busy with other work: add cores or shorten the chain."
+                };
                 out += "<tspan fill=\"#cfcfc2\"> (</tspan>";
                 bool first_cls = true;
                 for (int c : { 2, 1, 0 })   // core-bound first: the actionable surprise
@@ -1101,10 +1126,8 @@ inline bool Graph_trace::write_SVG(const char* path) const
                         if (!first_cls)
                             out += "<tspan fill=\"#cfcfc2\"> / </tspan>";
                         first_cls = false;
-                        out += "<tspan fill=\"" + std::string(cls_color[c]) + "\">";
-                        append_escaped(out, std::string(cls_word[c]) + " "
-                            + fmt_us(100.0 * dead_share * w_cls[c] / w_all) + "%");
-                        out += "</tspan>";
+                        term(cls_word[c], cls_tip[c], cls_color[c]);
+                        colored(" " + fmt_us(100.0 * dead_share * w_cls[c] / w_all) + "%", cls_color[c]);
                     }
                 }
                 out += "<tspan fill=\"#cfcfc2\">)</tspan>";
@@ -1123,27 +1146,34 @@ inline bool Graph_trace::write_SVG(const char* path) const
             const char* fo_color = fo <= overhead_ok_share ? "#a6e22e"
                                  : fo <= overhead_bad_share ? "#e6db74" : "#ff5f45";
             out += "<text x=\"16\" y=\"68\" font-size=\"12\" font-weight=\"600\">";
-            out += "<tspan fill=\"#cfcfc2\">";
-            append_escaped(out, "core-time: body " + fmt_us(100.0 * four_way_body_share()) + "%  |  ");
-            out += "</tspan><tspan fill=\"" + std::string(fo_color) + "\">";
-            append_escaped(out, "framework overhead " + fmt_us(100.0 * fo) + "%");
-            out += "</tspan><tspan fill=\"#cfcfc2\">";
-            append_escaped(out, "  |  idle " + fmt_us(100.0 * four_way_idle_share()) + "%");
-            out += "</tspan></text>\n";
+            term("core-time", "Total worker-time in the frame: workers x frame time -- the denominator of this split.", "#cfcfc2");
+            colored(": ", "#cfcfc2");
+            term("body", "Core-time spent running your task functors (the real work), summed across all cores.", "#cfcfc2");
+            colored(" " + fmt_us(100.0 * four_way_body_share()) + "%  |  ", "#cfcfc2");
+            term("framework overhead",
+                 "Core-time spent in the scheduler itself -- dispatch, completion, pipe turns -- measured as busy minus body.",
+                 fo_color);
+            colored(" " + fmt_us(100.0 * fo) + "%", fo_color);
+            colored("  |  ", "#cfcfc2");
+            term("idle", "Core-time with no task to run (workers parked or spinning).", "#cfcfc2");
+            colored(" " + fmt_us(100.0 * four_way_idle_share()) + "%", "#cfcfc2");
+            out += "</text>\n";
         }
 
-        // Row 4: raw per-run stats. "critical path" = the CPM critical-path length (the
-        // dependency lower bound on frame time from median durations and edges alone, no
-        // scheduling waits); the measured critical work feeds the dead-time headline above.
-        std::string stats = "runs: " + std::to_string(runs_)
-            + "  |  frame time " + fmt_ms(makespan_.mean) + " ms (min " + fmt_ms(makespan_min_)
-            + " / max " + fmt_ms(makespan_max_) + ")  |  critical path " + fmt_ms(cpm_us)
-            + " ms  |  workers: " + std::to_string(workers_seen)
-            + "  |  tasks ~" + std::to_string(static_cast<long long>(std::llround(tasks_per_run_.mean))) + "/run"
-            + "  |  per run: body " + fmt_ms(body_us_.mean) + " ms / framework " + fmt_ms(machinery_us_.mean)
-            + " ms / orchestration " + fmt_us(four_way_orchestration_us()) + " \xC2\xB5s";
+        // Row 4: raw per-run stats. `body` here is the TOTAL body time (summed across cores);
+        // `critical path` is the CPM lower bound; `orchestration` the off-core per-run setup.
         out += "<text x=\"16\" y=\"86\" font-size=\"11\" fill=\"#cfcfc2\">";
-        append_escaped(out, stats);
+        append_escaped(out, "runs: " + std::to_string(runs_) + "  |  ");
+        term("frame time", "Wall-clock makespan: from the first task starting to the last finishing.", "#cfcfc2");
+        append_escaped(out, " " + fmt_ms(makespan_.mean) + " ms (min " + fmt_ms(makespan_min_)
+            + " / max " + fmt_ms(makespan_max_) + ")  |  ");
+        term("critical path", "CPM lower bound on frame time from task durations and dependencies alone, with zero scheduling waits.", "#cfcfc2");
+        append_escaped(out, " " + fmt_ms(cpm_us) + " ms  |  workers: " + std::to_string(workers_seen)
+            + "  |  tasks ~" + std::to_string(static_cast<long long>(std::llround(tasks_per_run_.mean))) + "/run  |  per run: ");
+        term("body", "Total body time: the sum of every task functor's time across the frame. Divided by workers, this is the perfect-parallel floor on frame time.", "#cfcfc2");
+        append_escaped(out, " " + fmt_ms(body_us_.mean) + " ms / framework " + fmt_ms(machinery_us_.mean) + " ms / ");
+        term("orchestration", "Per-frame graph setup on the calling thread (link binding, node re-arm) -- off the worker cores.", "#cfcfc2");
+        append_escaped(out, " " + fmt_us(four_way_orchestration_us()) + " \xC2\xB5s");
         out += "</text>\n";
     }
 
