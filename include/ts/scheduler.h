@@ -223,9 +223,9 @@ public:
         return sum;
     }
 
-    // Task-system-cost accumulators (ticks, summed over workers; relaxed -- advisory). `body`
-    // = user-functor time, `machinery` = scheduler overhead. The trace takes begin/end deltas
-    // per run; overhead = machinery / (body + machinery). See `Busy_slot`.
+    // Total body ticks B (user-functor time, summed over workers; relaxed -- advisory). `body`
+    // is add-only; machinery is DERIVED, `M = busy - B`, not a separate accumulator. The trace
+    // takes begin/end deltas per run; overhead = M / (B + M). See `Busy_slot`.
     long long body_ticks() const noexcept
     {
         long long sum = 0;
@@ -233,11 +233,11 @@ public:
             sum += slot.body.load(std::memory_order_relaxed);
         return sum;
     }
-    // Total orchestration ticks (the dedicated per-run `execute()` setup accumulator, Phase 1
-    // of the four-way breakdown), summed over workers; relaxed -- advisory. No in-flight
-    // compensation: the setup span is booked whole at `Trace_setup_scope` exit, never a
-    // partially-elapsed in-flight task like a `run_task` body. The trace takes a begin/end
-    // delta per run, exactly like `body_ticks`/`machinery_ticks`.
+    // Total orchestration ticks (the dedicated per-run TOP-LEVEL `execute()` setup accumulator,
+    // the fourth bucket of the four-way breakdown), summed over workers; relaxed -- advisory. No
+    // in-flight compensation: the setup span is booked whole at `Trace_setup_scope` exit, never a
+    // partially-elapsed in-flight task like a `run_task` body. The trace takes a begin/end delta
+    // per run, exactly like `body_ticks`.
     long long orchestration_ticks() const noexcept
     {
         long long sum = 0;
@@ -245,75 +245,21 @@ public:
             sum += slot.orchestration.load(std::memory_order_relaxed);
         return sum;
     }
-    long long machinery_ticks() const noexcept
-    {
-        // Mirror `busy_ticks`' in-flight handling, for the same reason: the reader is often
-        // the settling worker, INSIDE its terminal task. That task's body scope has already
-        // netted its span OUT of machinery (M -= F), but `run_task` has not yet booked the
-        // whole span back IN (M += R happens after `func_` returns) -- so a plain sum reads
-        // low by the settling body. Add each in-flight task's elapsed span (its pending
-        // `run_task` machinery), which compensates the already-subtracted body. Relaxed
-        // snapshot; advisory (a reader interleaving a completion can transiently over/under).
-        long long now = std::chrono::steady_clock::now().time_since_epoch().count();
-        long long sum = 0;
-        for (const Busy_slot& slot : busy_)
-        {
-            sum += slot.machinery.load(std::memory_order_relaxed);
-            long long started = slot.started.load(std::memory_order_relaxed);
-            if (started != 0 && now > started)
-                sum += now - started;
-        }
-        return sum;
-    }
-
-    // Add `dt` ticks of dispatch machinery (a successful `find_work` scan) to `worker_index`'s
-    // slot -- called from the worker loop, armed-only. Single writer (this worker).
-    void add_dispatch_ticks(int worker_index, long long dt) noexcept
-    {
-        Busy_slot& slot = busy_[static_cast<size_t>(worker_index)];
-        slot.machinery.fetch_add(dt, std::memory_order_relaxed);
-    }
-    // Move `dt` ticks of a worker's time from machinery to body (a user functor ran) -- the
-    // `trace_body_add` bridge target. Single writer per slot. A non-worker caller lands in the
-    // overflow lane (the last slot), so an inline body run on the main thread still nets.
+    // Credit `dt` ticks to body (B) -- the `trace_body_add` bridge target (a user functor ran).
+    // B is ADD-ONLY: machinery is derived by pure subtraction (`M = busy - B`) at the fold, so
+    // there is no machinery accumulator to net against. Single writer per slot. A non-worker
+    // caller (worker-less inline drain, an external submit) lands in the overflow lane, so an
+    // inline body on the main thread still credits B (which the worker-less oracle reads).
     void add_body_ticks(int worker_index, long long dt) noexcept
-    {
-        Busy_slot& slot = busy_[busy_slot_index(worker_index)];
-        slot.body.fetch_add(dt, std::memory_order_relaxed);
-        slot.machinery.fetch_add(-dt, std::memory_order_relaxed);
-    }
-    // Credit `dt` ticks to body without netting machinery -- an inline-dispatched body that
-    // did not pass through `run_task` (nothing booked its span as machinery). A non-worker
-    // caller (worker-less mode's inline drain, an external submit) lands in the overflow lane;
-    // this is what feeds body (B) for the worker-less ground-truth overhead.
-    void add_body_only(int worker_index, long long dt) noexcept
     {
         busy_[busy_slot_index(worker_index)].body.fetch_add(dt, std::memory_order_relaxed);
     }
-    // Add `dt` ticks of machinery -- the `trace_machinery_add` bridge target (a graph run's
-    // per-run setup span, folded into M). A non-worker caller lands in the overflow lane.
-    void add_machinery_ticks(int worker_index, long long dt) noexcept
-    {
-        busy_[busy_slot_index(worker_index)].machinery.fetch_add(dt, std::memory_order_relaxed);
-    }
-    // Add `dt` ticks of ORCHESTRATION -- the `trace_orchestration_add` bridge target (Phase 1
-    // of the four-way subtraction breakdown). Same per-run graph-setup span the machinery
-    // bridge sees, booked to a DEDICATED accumulator so the four-way split has a clean
-    // off-worker bucket while summed-M stays whole. A non-worker caller lands in the overflow
-    // lane, exactly like `add_machinery_ticks`.
+    // Add `dt` ticks of ORCHESTRATION -- the `trace_orchestration_add` bridge target (the fourth
+    // bucket of the four-way subtraction split: the per-run TOP-LEVEL graph-setup span, off any
+    // `run_task` span and so absent from `busy`). A non-worker caller lands in the overflow lane.
     void add_orchestration_ticks(int worker_index, long long dt) noexcept
     {
         busy_[busy_slot_index(worker_index)].orchestration.fetch_add(dt, std::memory_order_relaxed);
-    }
-    // Move `dt` ticks of a worker's time from body to machinery (a `submit` ran inside a
-    // functor -- fan-out dispatch is task-system cost, not user work). No-op off-worker.
-    void add_submit_ticks(int worker_index, long long dt) noexcept
-    {
-        if (worker_index < 0)
-            return;
-        Busy_slot& slot = busy_[static_cast<size_t>(worker_index)];
-        slot.machinery.fetch_add(dt, std::memory_order_relaxed);
-        slot.body.fetch_add(-dt, std::memory_order_relaxed);
     }
 
     // Time buckets the utilization background samples each run into.
@@ -411,7 +357,14 @@ private:
             long long t0 = std::chrono::steady_clock::now().time_since_epoch().count();
             bool got = find_work(worker_index, out);
             if (got)
-                add_dispatch_ticks(worker_index, std::chrono::steady_clock::now().time_since_epoch().count() - t0);
+            {
+                long long dt = std::chrono::steady_clock::now().time_since_epoch().count() - t0;
+                // Option 2: a successful scan is on-worker machinery, so fold it into `busy`
+                // (the run_task-span accumulator). Then `M = busy - B` captures it by pure
+                // subtraction -- it is not a separate accumulator. Single writer (this worker).
+                Busy_slot& slot = busy_[static_cast<size_t>(worker_index)];
+                slot.ticks.store(slot.ticks.load(std::memory_order_relaxed) + dt, std::memory_order_relaxed);
+            }
             return got;
         }
 #endif
@@ -468,18 +421,13 @@ private:
             slot.tasks.fetch_add(1, std::memory_order_relaxed);   // task-volume counter (every kind)
             long long t0 = std::chrono::steady_clock::now().time_since_epoch().count();
             slot.started.store(t0, std::memory_order_relaxed);   // in-flight, for busy_ticks
-            // The whole span is booked as machinery below; flag the body it dispatches so its
-            // `Trace_busy_scope` nets its own span back into body (inline bodies clear this).
-            detail::trace_body_under_run_task = true;
             task.func_(task.data_);
-            detail::trace_body_under_run_task = false;
             long long t1 = std::chrono::steady_clock::now().time_since_epoch().count();
+            // The whole span is on-worker busy; the functor bracket inside `func_` already
+            // credited its own part to body (B) via `trace_body_add`. Machinery is derived by
+            // pure subtraction (`M = busy - B`) at the fold, so nothing is booked here.
             slot.ticks.store(slot.ticks.load(std::memory_order_relaxed) + (t1 - t0),
                              std::memory_order_relaxed);
-            // Whole task span defaults to machinery; the functor bracket inside `func_`
-            // already moved its own span to `body` (M -= F, B += F via `trace_body_add`),
-            // so this task's net machinery is (setup + completion + successor submit).
-            slot.machinery.fetch_add(t1 - t0, std::memory_order_relaxed);
             slot.started.store(0, std::memory_order_relaxed);
             // Distribute the task's [t0,t1] busy span across the utilization time buckets it
             // spans (relative to the run origin). Armed-only; most tasks touch one bucket.
@@ -542,16 +490,14 @@ private:
         std::atomic<long long> ticks{ 0 };
         std::atomic<long long> started{ 0 };
         std::atomic<long long> tasks{ 0 };   // count of tasks this worker ran while armed
-        // Task-system-cost split (all single-writer = this worker; read at fold). `body` =
-        // user-functor time (via `trace_body_add`); `machinery` = scheduler overhead:
-        // run_task defaults its whole span here, the functor bracket moves its span out to
-        // `body`, submit-from-within-a-body and successful find_work add back in. So
-        // machinery = dispatch + completion + successor/fan-out submit + successful scans.
+        // Task-system-cost split (single-writer = this worker; read at fold). `body` (B) =
+        // user-functor time, credited via `trace_body_add` (add-only). Machinery is NOT
+        // accumulated: it is derived by pure subtraction at the fold, `M = busy - B` (busy =
+        // `ticks` above: run_task spans + successful find_work scans).
         std::atomic<long long> body{ 0 };
-        std::atomic<long long> machinery{ 0 };
-        // Phase 1 four-way breakdown: the per-run `execute()` setup span, booked here IN
-        // ADDITION to `machinery` (via `add_orchestration_ticks`), so the subtraction split
-        // has a dedicated off-worker bucket without perturbing summed-M. Single writer.
+        // The fourth bucket of the four-way split: the per-run TOP-LEVEL `execute()` setup span,
+        // which runs off any `run_task` span (so absent from `busy`) -- booked via
+        // `add_orchestration_ticks`. Single writer.
         std::atomic<long long> orchestration{ 0 };
     };
     std::vector<Busy_slot> busy_;

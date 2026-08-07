@@ -30,65 +30,22 @@ void (*trace_owner_add)(int, long long) = +[](int owner, long long dt)
 {
     global_scheduler().add_owner_busy(owner, dt);
 };
-// The body/machinery split bridge: a functor's span moves from machinery to body on the
-// worker that ran it (the task-system-cost metric).
+// The body bridge: a functor's span is credited to body (B) on the worker that ran it. B is
+// add-only -- machinery is derived by pure subtraction (`M = busy - B`), not accumulated.
 void (*trace_body_add)(long long) = +[](long long dt)
 {
     global_scheduler().add_body_ticks(current_worker_index, dt);
 };
-// Inline-body variant: credit body only, no machinery netting (no run_task span to net).
-void (*trace_body_only)(long long) = +[](long long dt)
-{
-    global_scheduler().add_body_only(current_worker_index, dt);
-};
-// The per-run graph-setup bridge: `Trace_setup_scope` (in static_task_graph.cpp's execute())
-// routes the setup+initial-dispatch span to machinery on the calling worker -- or the overflow
-// lane when `execute()` runs on a non-worker thread (the common case: the frame loop / a test).
-// This folds the node-count-scaling per-run setup (link binding, node re-arm, indegree init,
-// root dispatch), which lives in no `run_task` span, into the machinery accumulator M.
-void (*trace_machinery_add)(long long) = +[](long long dt)
-{
-    global_scheduler().add_machinery_ticks(current_worker_index, dt);
-};
-// The dedicated orchestration bridge (Phase 1 of the four-way subtraction breakdown): the SAME
-// per-run setup span the machinery bridge above receives, routed additionally to a separate
-// accumulator so the four-way split (body / machinery(M_core) / idle / orchestration) has a
-// clean off-worker bucket.
+// The orchestration bridge (the fourth bucket of the four-way subtraction split): `Trace_setup_scope`
+// (in static_task_graph.cpp's execute()) routes the per-run TOP-LEVEL setup+initial-dispatch span
+// here -- the overflow lane when `execute()` runs on a non-worker thread (the common case: the frame
+// loop / a test). This folds the node-count-scaling per-run setup (link binding, node re-arm, indegree
+// init, root dispatch), which lives in no `run_task` span and so is absent from `busy`, into a clean
+// off-worker bucket. A nested in-body run's setup is NOT booked here (it is inside the enclosing node's
+// span already -- see `Trace_setup_scope`).
 void (*trace_orchestration_add)(long long) = +[](long long dt)
 {
     global_scheduler().add_orchestration_ticks(current_worker_index, dt);
-};
-}
-#endif
-
-#if TS_PROFILING
-namespace
-{
-// Reclassifies a submit issued from inside a user body (e.g. `parallel_for` slice fan-out)
-// from body to machinery: the fan-out submission is task-system cost, not user compute.
-// Times the whole `submit` (both return paths) and, on scope exit, moves the span M += t,
-// B -= t on the submitting worker. Inert unless armed AND in-functor; off-worker no-op.
-struct Submit_cost_scope
-{
-    Scheduler* sched;
-    long long t0 = 0;
-    bool active;
-    explicit Submit_cost_scope(Scheduler& s) noexcept
-        : sched(&s)
-        , active(detail::current_in_functor
-                 && detail::trace_owner_armed.load(std::memory_order_relaxed) != 0
-                 && current_worker_index >= 0)
-    {
-        if (active)
-            t0 = std::chrono::steady_clock::now().time_since_epoch().count();
-    }
-    ~Submit_cost_scope()
-    {
-        if (active)
-            sched->add_submit_ticks(current_worker_index, std::chrono::steady_clock::now().time_since_epoch().count() - t0);
-    }
-    Submit_cost_scope(const Submit_cost_scope&) = delete;
-    Submit_cost_scope& operator=(const Submit_cost_scope&) = delete;
 };
 }
 #endif
@@ -184,9 +141,6 @@ Scheduler::~Scheduler()
 
 void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
 {
-#if TS_PROFILING
-    Submit_cost_scope cost{ *this };   // in-functor submit -> machinery (single gated scope)
-#endif
     // Worker-less mode: no queues, no workers -- the task executes inline, now, on this
     // thread (UE's zero-worker launch shape). `priority` is a no-op here by design.
     if (single_threaded_)
