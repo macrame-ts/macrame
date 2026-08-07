@@ -1840,7 +1840,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
         "  var tp=el.parentNode;tp.parentNode.insertBefore(r,tp);\n"
         "});\n"
         "var tt=document.createElementNS(NS,'g');\n"
-        "tt.setAttribute('visibility','hidden');tt.setAttribute('pointer-events','none');\n"
+        "tt.setAttribute('visibility','hidden');tt.setAttribute('pointer-events','none');tt.setAttribute('opacity','0.8');\n"
         "var bg=document.createElementNS(NS,'rect');\n"
         "bg.setAttribute('fill','#1d1e19');bg.setAttribute('fill-opacity','0.96');\n"
         "bg.setAttribute('stroke','#66d9ef');bg.setAttribute('rx','4');\n"
@@ -1913,14 +1913,20 @@ inline bool Graph_trace::write_SVG(const char* path) const
         "  if(y+h>vb.height-4)y=pt.y-h-10;if(y<4)y=4;\n"
         "  tt.setAttribute('transform','translate('+x+','+y+')');\n"
         "}\n"
-        // Hover-scoped edges: faint by default (set per edge), a node's incident edges
-        // brighten to full on hover, an edge brightens itself; leaving restores all.
+        // Edges sink BEHIND the bars at load (they read as clutter on top otherwise); a node's
+        // incident edges rise to a foreground layer (just under the tooltip) and brighten on
+        // hover, then sink back on leave. An edge hovered directly also rises + brightens.
         "var edges=document.querySelectorAll('.edge');\n"
-        "function hiEdges(id){Array.prototype.forEach.call(edges,function(e){if(e.getAttribute('data-a')===id||e.getAttribute('data-b')===id)e.setAttribute('opacity','1');});}\n"
-        "function loEdges(){Array.prototype.forEach.call(edges,function(e){e.setAttribute('opacity',e.getAttribute('data-op'));});}\n"
+        "var bars=document.querySelectorAll('.hv[data-node]');\n"
+        "var anchor=bars.length?bars[0]:null;\n"
+        "var fg=document.createElementNS(NS,'g');svg.insertBefore(fg,tt);\n"
+        "function sink(e){if(anchor)anchor.parentNode.insertBefore(e,anchor);}\n"
+        "if(anchor)Array.prototype.forEach.call(edges,function(e){sink(e);});\n"
+        "function hiEdges(id){Array.prototype.forEach.call(edges,function(e){if(e.getAttribute('data-a')===id||e.getAttribute('data-b')===id){e.setAttribute('opacity','1');fg.appendChild(e);}});}\n"
+        "function loEdges(){while(fg.firstChild){fg.firstChild.setAttribute('opacity',fg.firstChild.getAttribute('data-op'));sink(fg.firstChild);}}\n"
         "Array.prototype.forEach.call(document.querySelectorAll('.hv'),function(el){\n"
         "  el.addEventListener('mouseenter',function(e){show(el,e);var n=el.getAttribute('data-node');\n"
-        "    if(n!==null)hiEdges(n);else if(el.getAttribute('data-a')!==null)el.setAttribute('opacity','1');});\n"
+        "    if(n!==null)hiEdges(n);else if(el.getAttribute('data-a')!==null){el.setAttribute('opacity','1');fg.appendChild(el);}});\n"
         "  el.addEventListener('mousemove',move);\n"
         "  el.addEventListener('mouseleave',function(){tt.setAttribute('visibility','hidden');loEdges();});\n"
         "});\n"
