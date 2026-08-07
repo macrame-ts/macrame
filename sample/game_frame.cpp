@@ -1597,21 +1597,23 @@ void trace_variant(int frames, Frame_variant variant, const char* base_SVG_path,
     std::string path = described_SVG_path(base_SVG_path, description);
     trace.write_SVG(path.c_str());
     std::printf("[game_frame] %s: traced %lld runs -> %s\n", description, trace.run_count(), path.c_str());
-    // Dual print: the multi-worker overhead (machinery M = busy - B, pure subtraction) side by
-    // side with the worker-less serial floor and their gap. The multi-worker figure sits ABOVE
-    // the floor; the gap is the machinery only workers pay (cross-thread dispatch, pipe hand-off,
+    // Framework overhead as a share of core-time (T = workers x makespan): the scheduler's own
+    // cost, derived by subtraction (busy - body). Shown next to the worker-less serial floor
+    // ((total-B)/total on a single-thread run of the same frame -- equal in either denominator
+    // since a serial run has no idle) and their gap: the multi-worker figure sits ABOVE the floor,
+    // and the gap is the framework cost only workers pay (cross-thread dispatch, pipe hand-off,
     // park/wake) -- the price of the parallelism, not a measurement error.
-    double ov = trace.overhead();
-    std::printf("[game_frame] %s: task-system overhead (M = busy - B) = %.1f%% (body %.1f / machinery %.1f us per run)",
-        description, 100.0 * ov, trace.body_us(), trace.machinery_us());
+    double fo = trace.four_way_machinery_share();
+    std::printf("[game_frame] %s: framework overhead = %.1f%% of core-time (body %.1f / framework %.1f us per run)",
+        description, 100.0 * fo, trace.body_us(), trace.machinery_us());
     if (ground_truth >= 0.0)
-        std::printf("; worker-less serial floor = %.1f%%; gap +%.2f pt (parallelization tax above the floor)",
-            100.0 * ground_truth, 100.0 * (ov - ground_truth));
+        std::printf("; worker-less serial floor = %.1f%%; parallelization +%.2f pt",
+            100.0 * ground_truth, 100.0 * (fo - ground_truth));
     std::printf("\n");
-    // Four-way subtraction breakdown: every worker-moment of core-time T = workers x makespan is
-    // body, machinery (M = busy - B), or idle (T - busy); the per-run top-level execute() setup is
-    // the off-worker orchestration bucket on top.
-    std::printf("[game_frame] %s: four-way (of core-time) body %.1f%% | machinery(M = busy - B) %.1f%% | "
+    // Core-time split: every worker-moment of T = workers x makespan is body, framework overhead
+    // (busy - body), or idle (T - busy); the per-run top-level execute() setup is the off-worker
+    // orchestration slice on top.
+    std::printf("[game_frame] %s: core-time split: body %.1f%% | framework overhead %.1f%% | "
                 "idle %.1f%% | orchestration %.1f%% (%.1f us/frame)\n",
         description, 100.0 * trace.four_way_body_share(), 100.0 * trace.four_way_machinery_share(),
         100.0 * trace.four_way_idle_share(), 100.0 * trace.four_way_orchestration_share(),

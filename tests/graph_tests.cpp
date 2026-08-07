@@ -792,7 +792,7 @@ void test_graph_trace_overhead()
         svg.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
     std::remove(path);
-    TS_CHECK(svg.find("task-system overhead:") != std::string::npos);   // the headline figure
+    TS_CHECK(svg.find("framework overhead") != std::string::npos);   // the headline figure
 }
 
 // End-to-end: a real graph on a real pool must fold nonzero body AND machinery, with a

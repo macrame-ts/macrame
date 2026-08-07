@@ -1111,60 +1111,40 @@ inline bool Graph_trace::write_SVG(const char* path) const
             }
         }
 
-        // Third classifier: task-system overhead -- machinery / (body + machinery) compute
-        // (idle excluded), with machinery `M = busy - B` derived by pure subtraction. See the
-        // band constants; reported as an upper bound.
-        double ov = overhead();
-        const char* ov_color = ov <= overhead_ok_share ? "#a6e22e"
-                             : ov <= overhead_bad_share ? "#e6db74" : "#ff5f45";
-        out += "<tspan fill=\"#cfcfc2\"> | </tspan>";
-        out += "<tspan fill=\"" + std::string(ov_color) + "\">";
-        append_escaped(out, "task-system overhead: " + fmt_us(100.0 * ov) + "% (M = busy - B)");
-        out += "</tspan>";
-        // The worker-less ground-truth complement, when attached: the oracle (total-B)/total on
-        // a serial run of the same frame -- the per-op framework floor with no parallelization
-        // tax. The gap (multi-worker overhead minus the floor) is the machinery only the
-        // multi-worker run pays: cross-thread dispatch, pipe hand-off, park/wake. Not fudged.
-        if (ground_truth_overhead_ >= 0.0)
-        {
-            double gt = ground_truth_overhead_;
-            double gap = ov - gt;
-            out += "<tspan fill=\"#cfcfc2\"> | serial floor (worker-less): </tspan>";
-            out += "<tspan fill=\"#a6e22e\">" + fmt_us(100.0 * gt) + "%</tspan>";
-            out += "<tspan fill=\"#cfcfc2\"> | gap +</tspan>";
-            out += "<tspan fill=\"#e6db74\">" + fmt_us(100.0 * gap) + "%</tspan>";
-        }
         out += "</text>\n";
 
-        // "critical path" = the CPM critical-path length: the dependency lower bound on
-        // frame time from median durations and edges alone (no scheduling waits). The
-        // measured `critical_work_` still feeds the dead-time headline above; it is no
-        // longer shown as its own stat -- the critical-work vs critical-path gap is a
-        // signal for automatic perf analysis (see docs/profiler-guided-optimization.md).
+        // Row 3: where the frame's core-time (workers x makespan) went -- body / framework
+        // overhead / idle, a partition that sums to 100%. Framework overhead is the scheduler's
+        // own cost (task setup/completion, dispatch, pipe turns), derived by subtraction
+        // (busy - body); it keeps the good/bad colour bands. Orchestration (the off-worker
+        // top-level execute() setup) is ~0% here, so it is reported as µs in the stats row.
+        {
+            double fo = four_way_machinery_share();
+            const char* fo_color = fo <= overhead_ok_share ? "#a6e22e"
+                                 : fo <= overhead_bad_share ? "#e6db74" : "#ff5f45";
+            out += "<text x=\"16\" y=\"68\" font-size=\"12\" font-weight=\"600\">";
+            out += "<tspan fill=\"#cfcfc2\">";
+            append_escaped(out, "core-time: body " + fmt_us(100.0 * four_way_body_share()) + "%  |  ");
+            out += "</tspan><tspan fill=\"" + std::string(fo_color) + "\">";
+            append_escaped(out, "framework overhead " + fmt_us(100.0 * fo) + "%");
+            out += "</tspan><tspan fill=\"#cfcfc2\">";
+            append_escaped(out, "  |  idle " + fmt_us(100.0 * four_way_idle_share()) + "%");
+            out += "</tspan></text>\n";
+        }
+
+        // Row 4: raw per-run stats. "critical path" = the CPM critical-path length (the
+        // dependency lower bound on frame time from median durations and edges alone, no
+        // scheduling waits); the measured critical work feeds the dead-time headline above.
         std::string stats = "runs: " + std::to_string(runs_)
-            + "  |  frame time mean " + fmt_ms(makespan_.mean) + " ms (min " + fmt_ms(makespan_min_)
-            + ", max " + fmt_ms(makespan_max_) + ")  |  critical path " + fmt_ms(cpm_us)
+            + "  |  frame time " + fmt_ms(makespan_.mean) + " ms (min " + fmt_ms(makespan_min_)
+            + " / max " + fmt_ms(makespan_max_) + ")  |  critical path " + fmt_ms(cpm_us)
             + " ms  |  workers: " + std::to_string(workers_seen)
-            + "  |  tasks: " + std::to_string(tasks_total_)
-            + " (~" + std::to_string(static_cast<long long>(std::llround(tasks_per_run_.mean))) + "/run)"
-            + "  |  body " + fmt_us(body_us_.mean) + " \xC2\xB5s / machinery " + fmt_us(machinery_us_.mean)
-            + " \xC2\xB5s per run";
-        out += "<text x=\"16\" y=\"68\" font-size=\"11\" fill=\"#cfcfc2\">";
+            + "  |  tasks ~" + std::to_string(static_cast<long long>(std::llround(tasks_per_run_.mean))) + "/run"
+            + "  |  per run: body " + fmt_ms(body_us_.mean) + " ms / framework " + fmt_ms(machinery_us_.mean)
+            + " ms / orchestration " + fmt_us(four_way_orchestration_us()) + " \xC2\xB5s";
+        out += "<text x=\"16\" y=\"86\" font-size=\"11\" fill=\"#cfcfc2\">";
         append_escaped(out, stats);
         out += "</text>\n";
-
-        // Four-way subtraction breakdown: shares of core-time T = workers x makespan.
-        // body / machinery(M = busy - B) / idle(T - busy) / orchestration (off-worker top-level setup).
-        {
-            out += "<text x=\"16\" y=\"86\" font-size=\"11\" fill=\"#cfcfc2\">";
-            std::string four = "four-way (of core-time): body " + fmt_us(100.0 * four_way_body_share())
-                + "% | machinery(M = busy - B) " + fmt_us(100.0 * four_way_machinery_share())
-                + "% | idle " + fmt_us(100.0 * four_way_idle_share())
-                + "% | orchestration " + fmt_us(100.0 * four_way_orchestration_share()) + "%"
-                + "   |   orchestration " + fmt_us(four_way_orchestration_us()) + " \xC2\xB5s/run";
-            append_escaped(out, four);
-            out += "</text>\n";
-        }
     }
 
     // Time grid + axis labels: a 1/2/5-series step giving at most ~8 ticks.
