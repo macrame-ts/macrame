@@ -1041,10 +1041,10 @@ inline bool Graph_trace::write_SVG(const char* path) const
            "<path d=\"M0 6 L6 0\" stroke=\"#f92672\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
            "<path d=\"M6 6 L12 0\" stroke=\"#fd971f\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
            "</pattern></defs>\n";
-    // Glossary affordance: header terms whose names may be unfamiliar are drawn on a rounded pill
-    // (fill #3e3d32, a shade of the monokai background; see `render_line`) and carry the help
-    // cursor + a native <title> tooltip. The pill shows in any renderer; the tooltip resolves
-    // when the SVG is viewed as a document.
+    // Glossary affordance: header terms whose names may be unfamiliar carry the help cursor and a
+    // native <title> tooltip. The header text flows naturally (no manual layout); the overlay
+    // script draws a rounded pill behind each `.term` at load time (getBBox), so the pills resolve
+    // wherever the script runs (browser tab, <object>, <iframe>) -- inert under <img>, text intact.
     out += "<style>.term{cursor:help;}</style>\n";
 
     // Header: title, the dead-time headline, global stats. (The legend sits at the
@@ -1067,64 +1067,22 @@ inline bool Graph_trace::write_SVG(const char* path) const
         double dead_share = makespan_.mean > 0.0 ? dead_us / makespan_.mean : 0.0;
         const char* dead_color = dead_share < dead_time_ok_share ? "#a6e22e"
                                : dead_share <= dead_time_bad_share ? "#e6db74" : "#ff5f45";
-        // Header glossary: unfamiliar terms are drawn on a rounded pill with a native <title>
-        // tooltip. Everything is positioned by an explicit x-cursor using a glyph-width model +
-        // textLength, so the pills align with the text in any renderer regardless of font metrics.
-        auto glyph_w = [](unsigned char c, double F) -> double
-        {
-            switch (c)
-            {
-                case ' ': case '.': case ',': case ':': case ';': case '\'': case '!':
-                case '|': case '(': case ')': case '/': case 'i': case 'l': case 'I':
-                case 'j': case 't': case 'f': case 'r':
-                    return 0.30 * F;
-                case 'm': case 'w': case 'M': case 'W':
-                    return 0.86 * F;
-                default:
-                    if (c >= 'A' && c <= 'Z') return 0.66 * F;
-                    if (c >= '0' && c <= '9') return 0.56 * F;
-                    return 0.52 * F;
-            }
-        };
-        auto text_w = [&glyph_w](const std::string& s, double F)
-        {
-            double w = 0.0;
-            for (unsigned char c : s)
-                w += glyph_w(c, F);
-            return w;
-        };
         struct Seg { std::string text; const char* color; bool term; const char* tip; };
-        // Render one header line: pill rects behind the terms (pass 1), then the text over them
-        // (pass 2). Both passes advance the cursor identically, so rects and text stay aligned.
+        // Render one header line as a single <text> with flowing <tspan>s -- the browser lays it
+        // out, so there is no manual x-cursor, no textLength, and no glyph distortion. xml:space
+        // keeps the "  |  " separators intact. Term tspans carry `class="term"` + a <title>; the
+        // overlay script draws their pills at load time via getBBox.
         auto render_line = [&](double y, double F, const char* weight, const std::vector<Seg>& segs)
         {
-            const double pad = 5.0, gap = 3.0, asc = 0.80 * F, h = 1.12 * F, rr = 4.0;
-            char buf[512];
-            double cx = 16.0;
+            char buf[128];
+            std::snprintf(buf, sizeof buf, "<text x=\"16\" y=\"%.0f\" font-size=\"%.0f\"%s xml:space=\"preserve\">",
+                y, F, weight ? " font-weight=\"600\"" : "");
+            out += buf;
             for (const Seg& s : segs)
             {
-                double w = text_w(s.text, F);
-                if (s.term)
-                {
-                    std::snprintf(buf, sizeof buf,
-                        "<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" rx=\"%.1f\" fill=\"#3e3d32\"/>\n",
-                        cx, y - asc, w + 2.0 * pad, h, rr);
-                    out += buf;
-                    cx += w + 2.0 * pad + gap;
-                }
-                else
-                    cx += w;
-            }
-            std::string wattr = weight ? std::string(" font-weight=\"") + weight + "\"" : std::string();
-            cx = 16.0;
-            for (const Seg& s : segs)
-            {
-                double w = text_w(s.text, F);
-                double tx = s.term ? cx + pad : cx;
-                std::snprintf(buf, sizeof buf,
-                    "<text x=\"%.1f\" y=\"%.1f\" font-size=\"%.0f\"%s fill=\"%s\" textLength=\"%.1f\" lengthAdjust=\"spacingAndGlyphs\"%s>",
-                    tx, y, F, wattr.c_str(), s.color, w, s.term ? " class=\"term\"" : "");
-                out += buf;
+                out += "<tspan fill=\"";
+                out += s.color;
+                out += s.term ? "\" class=\"term\">" : "\">";
                 if (s.term)
                 {
                     out += "<title>";
@@ -1132,22 +1090,23 @@ inline bool Graph_trace::write_SVG(const char* path) const
                     out += "</title>";
                 }
                 append_escaped(out, s.text);
-                out += "</text>\n";
-                cx += s.term ? (w + 2.0 * pad + gap) : w;
+                out += "</tspan>";
             }
+            out += "</text>\n";
         };
 
-        // Glossary tooltips.
-        static constexpr const char* TIP_UTIL = "Share of the machine's time that ran tasks: busy / (workers x frame time). Low means cores sat idle.";
-        static constexpr const char* TIP_DEAD = "Frame time minus the work along the longest dependency chain: how long that chain sat waiting instead of working.";
-        static constexpr const char* TIP_CORETIME = "Total worker-time available in a frame: workers x frame time. This is the 100% the split below divides up.";
-        static constexpr const char* TIP_BODY = "Core-time spent running your task functors (the actual work), summed over all cores.";
-        static constexpr const char* TIP_FO = "Core-time the scheduler spent on itself: dispatch, completion, pipe turns. Computed as busy minus body; high means tasks are too fine-grained.";
-        static constexpr const char* TIP_IDLE = "Core-time with no task to run (workers parked or spinning). High means the frame can't keep the cores fed.";
-        static constexpr const char* TIP_FRAMETIME = "Wall-clock length of the frame: the first task starting to the last finishing (the makespan).";
-        static constexpr const char* TIP_CRITPATH = "The fastest the frame could finish given only task durations and dependencies, with a core always free. The gap to frame time is scheduling loss.";
-        static constexpr const char* TIP_BODY_TOTAL = "Total work in the frame: every task functor's time added up across all cores. Divide by worker count for the perfect-parallel frame-time floor.";
-        static constexpr const char* TIP_ORCH = "Time the calling thread spends building the run each frame (binding links, re-arming nodes), off the worker cores.";
+        // Glossary tooltips. Wording is reflowed into 2-3 short lines (embedded newlines) for
+        // readability in the native <title> tooltip.
+        static constexpr const char* TIP_UTIL = "Share of the machine's time that ran tasks:\nbusy / (workers x frame time).\nLow means cores sat idle.";
+        static constexpr const char* TIP_DEAD = "Frame time minus the work along the longest\ndependency chain: how long that chain sat\nwaiting instead of working.";
+        static constexpr const char* TIP_CORETIME = "Total worker-time available in a frame:\nworkers x frame time. This is the 100%\nthe split below divides up.";
+        static constexpr const char* TIP_BODY = "Core-time spent running your task functors\n(the actual work), summed over all cores.";
+        static constexpr const char* TIP_FO = "Core-time the scheduler spent on itself:\ndispatch, completion, pipe turns. Computed as\nbusy minus body; high means tasks are too fine-grained.";
+        static constexpr const char* TIP_IDLE = "Core-time with no task to run (workers parked\nor spinning). High means the frame can't\nkeep the cores fed.";
+        static constexpr const char* TIP_FRAMETIME = "Wall-clock length of the frame: the first task\nstarting to the last finishing (the makespan).";
+        static constexpr const char* TIP_CRITPATH = "The fastest the frame could finish given only task\ndurations and dependencies, with a core always free.\nThe gap to frame time is scheduling loss.";
+        static constexpr const char* TIP_BODY_TOTAL = "Total work in the frame: every task functor's time\nadded up across all cores. Divide by worker count\nfor the perfect-parallel frame-time floor.";
+        static constexpr const char* TIP_ORCH = "Time the calling thread spends building the run\neach frame (binding links, re-arming nodes),\noff the worker cores.";
 
         // Row 2: core utilization + critical path dead time (+ its cause split). The cause split
         // apportions the globally-computed dead time across causes by the share-weighted gap
@@ -1174,9 +1133,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
                 static constexpr const char* cls_color[3] = { "#f92672", "#e6db74", "#fd971f" };
                 static constexpr const char* cls_word[3] = { "dependency", "mixed", "core-bound" };
                 static constexpr const char* cls_tip[3] = {
-                    "Dead time where the chain waited on an unfinished predecessor, not a busy core. Cut edges or shorten the chain.",
-                    "A stretch of dead time with both causes present: some cores free, some work still blocked.",
-                    "Dead time where the chain waited for a free core (every core was busy). Add workers or shorten the chain."
+                    "Dead time where the chain waited on an unfinished\npredecessor, not a busy core.\nCut edges or shorten the chain.",
+                    "A stretch of dead time with both causes present:\nsome cores free, some work still blocked.",
+                    "Dead time where the chain waited for a free core\n(every core was busy).\nAdd workers or shorten the chain."
                 };
                 segs.push_back({ " (", "#cfcfc2", false, nullptr });
                 bool first_cls = true;
@@ -1775,6 +1734,16 @@ inline bool Graph_trace::write_SVG(const char* path) const
         "(function(){\n"
         "var svg=document.documentElement;\n"
         "var NS='http://www.w3.org/2000/svg';\n"
+        // Glossary pills: draw a rounded rect behind each header term at load time. getBBox gives
+        // the term's exact box in the header text's coordinate space (a direct root child, no group
+        // transform); inserting the rect before its parent <text> paints it behind the text.
+        "Array.prototype.forEach.call(document.querySelectorAll('.term'),function(el){\n"
+        "  var b=el.getBBox();var r=document.createElementNS(NS,'rect');\n"
+        "  r.setAttribute('x',(b.x-4).toFixed(1));r.setAttribute('y',(b.y-2).toFixed(1));\n"
+        "  r.setAttribute('width',(b.width+8).toFixed(1));r.setAttribute('height',(b.height+4).toFixed(1));\n"
+        "  r.setAttribute('rx','4');r.setAttribute('fill','#4d4436');r.setAttribute('pointer-events','none');\n"
+        "  var tp=el.parentNode;tp.parentNode.insertBefore(r,tp);\n"
+        "});\n"
         "var tt=document.createElementNS(NS,'g');\n"
         "tt.setAttribute('visibility','hidden');tt.setAttribute('pointer-events','none');\n"
         "var bg=document.createElementNS(NS,'rect');\n"
