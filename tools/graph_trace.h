@@ -911,7 +911,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // Ranking table below the legend: title + column header + one row per ranked node
     // + an omission footer when the share cutoff dropped any, 16px row pitch.
     const double table_row_h = 16.0;
-    const double table_h = 26.0
+    const double table_h = 42.0   // title + a one-line caption + a gap before the header row
         + table_row_h * static_cast<double>(1 + ranking.size() + (rank_omitted > 0 ? 1 : 0))
         + 12.0;
     const double px_per_us = plot_w / span_us;
@@ -1408,7 +1408,12 @@ inline bool Graph_trace::write_SVG(const char* path) const
              + "\" font-size=\"12\" font-weight=\"600\" fill=\"#f8f8f2\">";
         append_escaped(out, title_row);
         out += "</text>\n";
-        double ty = tbase + 26.0 + table_row_h;
+        // One-line caption: what the table is.
+        out += "<text x=\"16\" y=\"" + std::to_string(tbase + 32.0) + "\" font-size=\"11\" fill=\"#cfcfc2\">";
+        append_escaped(out, "Nodes ranked by expected contribution to the binding critical chain "
+                            "(mean \xC3\x97 chain%) \xE2\x80\x94 where optimising the frame helps most.");
+        out += "</text>\n";
+        double ty = tbase + 42.0 + table_row_h;
         auto cell = [&](double cx, const char* anchor, const std::string& fill, const std::string& text)
         {
             out += "<text x=\"" + std::to_string(cx) + "\" y=\"" + std::to_string(ty)
@@ -1417,14 +1422,50 @@ inline bool Graph_trace::write_SVG(const char* path) const
             append_escaped(out, text);
             out += "</text>\n";
         };
+        // A column header carrying a styled hover tooltip (headline + body lines), like the
+        // header glossary terms but WITHOUT the pill (the pill loop targets tspans-in-text, and a
+        // dense table reads cleaner unpilled) -- a help cursor is the affordance. `#`/`node` stay
+        // plain (self-explanatory).
+        auto hcell = [&](double cx, const char* anchor, const std::string& text, std::initializer_list<const char*> tip)
+        {
+            out += "<text x=\"" + std::to_string(cx) + "\" y=\"" + std::to_string(ty)
+                 + "\" font-size=\"11\" font-family=\"" + std::string(mono) + "\" text-anchor=\""
+                 + anchor + "\" fill=\"#75715e\" cursor=\"help\" class=\"hv\" data-hl=\"#66d9ef\" data-tip=\"";
+            bool first = true;
+            for (const char* ln : tip)
+            {
+                if (!first)
+                    out += "&#10;";
+                first = false;
+                append_escaped(out, ln);
+            }
+            out += "\">";
+            append_escaped(out, text);
+            out += "</text>\n";
+        };
         cell(cx_rank, "end", "#75715e", "#");
         cell(cx_name, "start", "#75715e", "node");
-        cell(cx_share, "end", "#75715e", "chain%");
-        cell(cx_mean, "end", "#75715e", "mean");
-        cell(cx_key, "end", "#75715e", "x share");
-        cell(cx_dead, "end", "#75715e", "dead-in");
-        cell(cx_slack, "end", "#75715e", "slack");
-        cell(cx_p95, "end", "#75715e", "P95");
+        hcell(cx_share, "end", "chain%", { "chain %",
+            "How often this node was on the frame's binding",
+            "critical chain, across the runs.",
+            "High = it usually decides frame time." });
+        hcell(cx_mean, "end", "mean", { "mean",
+            "Mean wall-clock duration of this node's bar",
+            "over the runs." });
+        hcell(cx_key, "end", "x share", { "mean \xC3\x97 chain%",
+            "The ranking key: mean duration times chain share",
+            "= this node's expected contribution to frame time.",
+            "The table sorts by this." });
+        hcell(cx_dead, "end", "dead-in", { "dead-in",
+            "Incoming critical dead time: how long this node sat",
+            "ready but waiting (for a core or a predecessor)",
+            "before it ran, on runs where it bound the chain." });
+        hcell(cx_slack, "end", "slack", { "slack",
+            "How far this node could slip without extending the",
+            "frame (CPM float). 0 = on the critical path, no room." });
+        hcell(cx_p95, "end", "P95", { "P95",
+            "95th-percentile duration: the node's near-worst-case",
+            "time, vs its mean." });
         const std::string us = " \xC2\xB5s";
         for (size_t r = 0; r < ranking.size(); ++r)
         {
