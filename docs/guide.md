@@ -847,25 +847,27 @@ headline carries three frame classifiers: **core utilization** — the share
 of the run window the scheduler's workers spent executing tasks (green ≥ 75%,
 red < 50%; work run inline on non-worker threads is not counted) —
 **critical path dead time** (green < 5% of frame time, red > 10%), and
-**task-system overhead** — the share of the frame's *compute* (body + machinery,
-excluding idle) spent in the scheduler's own machinery rather than your functors
+**task-system overhead** — the share of the frame's *compute* (body + framework
+overhead, excluding idle) spent in the scheduler's own framework overhead rather
+than your functors
 (green ≤ 5%, red > 15%). Utilization says how much of the machine the frame used;
 dead time says whether the critical chain itself had to wait; overhead says
 whether your tasks are coarse enough that scheduling them is cheap relative to
 running them (a high figure means the graph is too fine-grained — the tasks cost
-less than the machinery that dispatches them). Machinery is *derived* by pure
-subtraction, `M = busy − body`: every on-worker moment that is not user-functor
-time (task setup and completion, successful work-finding scans) is machinery,
+less than the framework overhead of dispatching them). Framework overhead is
+*derived* by pure subtraction, `busy − body`: every on-worker moment that is not
+user-functor time (task setup and completion, successful work-finding scans) is
+framework overhead,
 with no separate accumulator to keep in step. The per-run graph setup — link
 binding, node re-arm, indegree init and root dispatch, which run on the calling
 thread outside any task and scale with node count — is a distinct fourth bucket,
 **orchestration**, shown alongside so a large, cheap-bodied graph's setup cost is
-visible without inflating the machinery figure. Alongside it the headline prints
+visible without inflating the framework-overhead figure. Alongside it the headline prints
 a **serial floor**: the same frame traced once worker-less (single-threaded),
 where the whole frame runs serially with no idle to confound it, so
 `(total − body) / total` is the *complete* framework cost by pure subtraction —
 every phase, no blind spot. The **gap** between the
-multi-worker overhead and the serial floor is the machinery only workers pay —
+multi-worker overhead and the serial floor is the framework overhead only workers pay —
 cross-thread dispatch, pipe hand-off, park/wake — i.e. the price of the
 parallelism, not a measurement error. Overhead is an upper bound: it is
 measured with tracing on, which adds a per-task clock bracket, so cross-check
@@ -884,7 +886,7 @@ shows the global numbers: run count, frame time mean/min/max (ms),
 durations, no scheduling waits) — worker count, **tasks** (total across
 the trace and mean per run: every task the scheduler ran — nodes plus
 `parallel_for` slices, async jobs, and continuations — so it far exceeds the
-node count and shows the real fan-out volume), and the **body / machinery** split
+node count and shows the real fan-out volume), and the **body / framework overhead** split
 in µs per run that backs the overhead headline (summed across workers). An edge's tooltip names the ordering it enforces: for a derived edge,
 the conflicting resource and the two nodes' modes (`physics RW -> propagation
 RO`); for an explicit one, "explicit ordering" (plus any coinciding conflict).
@@ -916,7 +918,7 @@ not, and nothing at all with `TS_PROFILING=0`. Cancelled runs are not folded;
 a recompile re-pushes the structure and resets the aggregates.
 
 The sample wires this up as `task_system --trace [frames]`, tracing two
-variants of the same ~34-system frame on a 6-worker scheduler — a `baseline`
+variants of the same ~34-system frame on an 8-worker scheduler — a `baseline`
 and an `optimised` version tuned by reading the baseline's own trace —
 writing `sample_game_frame_avg_baseline.svg` and
 `sample_game_frame_avg_optimised.svg` plus `sample_game_frame.dot`; a

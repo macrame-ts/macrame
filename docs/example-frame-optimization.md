@@ -1,12 +1,23 @@
 # Worked example: reading a frame trace and optimising it
 
-> **Numbers stale (2026-07):** the absolute figures below predate the
-> `parallel_for`-fans-out-on-the-current-scheduler fix. Before it, the sample's
-> `parallel_for` work leaked to the global default pool, so these traces
-> secretly used the dedicated 6 workers *plus* a full default pool — the frame
-> times are ~2× too fast (honest optimised ≈ 6.8 ms, baseline ≈ 7.6 ms on 6
-> workers). The *shape* of the exercise (which levers help, and why) still
-> holds; the magnitudes need a re-run. See
+> **Absolute figures corrected (2026-08).** The old µs figures in this doc
+> (baseline 4793 µs → optimised 3120 µs, "on 6 workers") were a **profiler
+> artifact, not a bigger workload**. Before the
+> `parallel_for`-fans-out-on-the-current-scheduler fix, the sample's
+> `parallel_for` work leaked to the global default pool, so a "6-worker" trace
+> secretly ran on the dedicated 6 workers *plus* a full default pool (~12 cores):
+> the frame times read ~2× too fast **and** utilization undercounted the leaked
+> work. The serial workload never grew — it has been a constant **~36.6 ms**
+> since the 30-system frame landed (2026-07-24). The fixes that made the trace
+> honest: `parallel_for`-on-the-current-(now single-global-)scheduler routing,
+> owner attribution, time-bucketed utilization, and the body / framework-overhead
+> split. The sample now runs **8 workers** (`variant_workers = 8`); the honest
+> current picture is **baseline ≈ 85 % util / ≈ 12 % dead / ≈ 6.5 ms → optimised
+> ≈ 95 % util / ≈ 10 % dead / ≈ 5.6 ms** (util and dead time are the portable
+> numbers; frame time is machine-dependent). The headline figures in the body
+> below are updated to these; the lever-by-lever µs deltas in §4 were measured on
+> the pre-fix config and are kept as **relative magnitudes only (re-measure
+> pending)** — which levers help, and why, is unchanged. See
 > [profiler-guided-optimization.md](profiler-guided-optimization.md).
 
 This walks through the `game_frame` sample as an optimisation exercise. It has
@@ -17,7 +28,7 @@ two variants of the same ~30-system frame, built from the *same* system bodies:
 - **optimised** — the same frame after reading its own trace, with the levers
   the visualization makes obvious applied in an `optimise()` section.
 
-Generate both traces (on a 6-worker scheduler) plus the structure dump with:
+Generate both traces (on an 8-worker scheduler) plus the structure dump with:
 
 ```
 task_system --trace 200
@@ -27,15 +38,15 @@ show_graph.bat            # renders the DOT and opens both average-run SVGs
 producing `sample_game_frame_avg_baseline.svg`,
 `sample_game_frame_avg_optimised.svg`, and `sample_game_frame.dot`.
 
-The point of the exercise is not the 35 % it ends up saving; it is *which*
-optimisations the trace tells you are worth trying, and — just as valuable —
+The point of the exercise is not the exact percentage it ends up saving; it is
+*which* optimisations the trace tells you are worth trying, and — just as valuable —
 which ones it tells you not to bother with. It ends by showing what a *finished*
 optimisation looks like: the frame stops being limited by its dependency chain
 and starts being limited by its core count, and the picture says so at a glance.
 
 ## 1. The frame
 
-The frame models a heavy 30 fps-class scene, ~35 ms of work single-threaded:
+The frame models a heavy 30 fps-class scene, ~36.6 ms of work single-threaded:
 
 - a **frame head** (input → camera / networking / scripting VM);
 - a **gameplay trio** (combat, economy, quests) reading the head + last frame's
@@ -59,27 +70,31 @@ them as a stable previous version — the lever in §4 that does the most work.
 
 ## 2. Reading the baseline trace
 
-The baseline on 6 workers:
+The baseline on 8 workers:
 
-> **core utilization: 60 %** · **critical path dead time: ~6 %** · frame time **~4.87 ms**
+> **core utilization: ≈ 85 %** · **critical path dead time: ≈ 12 %** · frame time **≈ 6.5 ms**
 
 Two things jump out of the picture:
 
-1. **It is critical-path bound, not utilization bound.** Dead time is low (~6 %,
-   green) — the critical chain rarely waits for a worker — but utilization is
-   only 60 %. The frame is limited by the *length of its dependency chain*, not
-   by running out of cores. The chain is the sim spine: `input → networking →
-   scripting → combat → AI → anim_graph → ik_post → propagation → flip → cloth`.
+1. **It is bound by the length of its dependency chain.** The critical chain is
+   the sim spine: `input → networking → scripting → combat → AI → anim_graph →
+   ik_post → propagation → flip → cloth`. Utilization is high but not saturated,
+   and the frame finishes no sooner than that longest path however many cores are
+   free — so every gain has to come from *shortening the chain*, not from filling
+   cores. (On the pre-fix leaked-pool trace this read as a starker 60 % util /
+   ~40 % idle contrast; the secret ~12 cores exaggerated the idle share. The
+   structural reading is the same on honest 8 cores.)
 
 2. **The fat bars on that chain are serial nodes.** `combat` (~0.86 ms),
    `ik_post` (~0.82 ms) and `UI` (~1.5 ms) are the widest bars, and they are
-   modelled single-threaded — they don't use the idle 40 % of core time. `cloth`
-   sits alone on the **post-flip tail**: it reads the fresh transforms, so it is
-   the last thing in the frame, adding its whole cost to the makespan.
+   modelled single-threaded — a single core carries each while the rest of the
+   chain waits on it. `cloth` sits alone on the **post-flip tail**: it reads the
+   fresh transforms, so it is the last thing in the frame, adding its whole cost
+   to the makespan.
 
-That reading dictates the strategy. On a critical-path-bound frame, **only
-shortening the critical chain reduces the makespan.** Anything that merely fills
-idle cores raises utilization without making the frame finish sooner.
+That reading dictates the strategy. On a chain-bound frame, **only shortening the
+critical chain reduces the makespan.** Anything that merely fills idle cores
+raises utilization without making the frame finish sooner.
 
 ## 3. The levers the trace tells you *not* to bother with
 
@@ -127,28 +142,46 @@ the exercise.
 | + split `combat`, `ik_post`, `UI` | per-entity / character / widget `parallel_for` on the fattest critical bars | 3941 µs (−18 %) |
 | + AI reads last frame's gameplay (`Versioned`) | deletes the `trio → AI` edges; AI starts on its paths, not the trio | **3120 µs (−35 %)** |
 
+> *These absolute µs and their per-lever percentages were measured on the pre-fix
+> (leaked-pool) config and are kept as **relative magnitudes only — re-measure
+> pending**. Read them for ordering, not as absolute times: the split of the
+> fattest critical bars helps, and the `Versioned` cut helps more. On the honest
+> 8-worker config the whole exercise saves roughly 6.5 → 5.6 ms (see the note at
+> the top and §5).*
+
 The `Versioned` cut is worth more than all the splits combined, and it costs
 almost nothing to model — a snapshot node that stages the trio's results and a
 flip node, both off the critical path. It is the same mechanism the render pipeline
 already uses to read last frame's transforms; here it is turned on the gameplay
 dependency instead.
 
-## 5. The result: dependency-bound → core-bound
+## 5. The result: chain-bound → core-bound
 
 | | baseline | optimised |
 |---|---|---|
-| frame time | 4793 µs | **3120 µs** (−35 %) |
-| core utilization | 60 % (yellow) | **85 % (green)** |
-| critical path dead time | 5 % (green) | 19 % (red) |
+| frame time | ≈ 6.5 ms | **≈ 5.6 ms** |
+| core utilization | ≈ 85 % | **≈ 95 % (green)** |
+| critical path dead time | ≈ 12 % | ≈ 10 % |
 
-The two headline colours flip in opposite directions, and that is the whole story.
-The baseline is **dependency-bound**: cores half-idle (60 %), but the critical
-chain almost never waits (5 % dead time) — the frame is limited by the *length* of
-its chain. The optimised frame is **core-bound**: cores nearly full (85 %), and now
-the critical path *does* wait (19 % dead time) — not for a missing dependency, but
-for a free core. In the picture the single long critical spine has fragmented: no
-node is critical in more than ~60 % of runs, because the binding path now bounces
-between whichever ready node is waiting on a core.
+(Utilization and dead time are the portable numbers; frame time is
+machine-dependent, and the per-lever µs deltas in §4 were measured on the pre-fix
+config — see the note at the top.)
+
+The baseline is already busy but **chain-bound**: utilization is high, yet the
+frame is limited by the *length* of its critical chain, so the headroom that is
+left can only be recovered by shortening that chain — not by filling cores. The
+levers do exactly that, and utilization climbs toward saturation: the optimised
+frame is **core-bound**, cores nearly full (≈ 95 %), and what waiting remains is
+the critical path waiting for a *free core* rather than a missing dependency. In
+the picture the single long critical spine has fragmented — no node is critical
+in a large majority of runs, because the binding path now bounces between
+whichever ready node is waiting on a core.
+
+(On the pre-fix leaked-pool trace this flip looked far more dramatic — baseline
+60 % util / 5 % dead → optimised 85 % util / 19 % dead — because the secret ~12
+cores made the baseline read half-idle and pushed the optimised chain into heavy
+core contention. The honest 8-core picture is a milder version of the same
+transition: utilization up, the frame moving from chain-bound toward core-bound.)
 
 That transition is the signal that the optimisation is *done*. On a core-bound
 frame, rearranging has nothing left to exploit — every core is busy. From here,

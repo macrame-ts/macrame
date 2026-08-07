@@ -171,11 +171,11 @@ scheduler ran — nodes + `parallel_for` slices + async + continuations — so i
 far exceeds the node count and exposes the real fan-out (game_frame: ~135/run
 baseline, ~153/run optimised, over 30 nodes).
 
-Done (2026-07): **task-system cost (% of frame on machinery).** Each worker's
+Done (2026-07): **task-system cost (% of frame on framework overhead).** Each worker's
 frame time decomposes into **B** (user functor, minus its internal submits) / **M**
 (machinery) / **I** (idle, in neither bucket). Headline **`M / (B + M)`** = overhead
 per unit of useful compute, a third classifier on the SVG (bands `overhead_ok_share`
-0.05 / `overhead_bad_share` 0.15); the stats line shows `body … µs / machinery … µs
+0.05 / `overhead_bad_share` 0.15); the stats line shows `body … µs / framework overhead … µs
 per run`. Mechanism, all gated on `TS_PROFILING` and armed-only (disarmed = one
 relaxed load + branch, unmeasurable on the spin throughput series — bench held at
 ~194 ns/op):
@@ -256,7 +256,7 @@ side-by-side oracle.
     `TS_PROFILING`-gated and armed-only (disarmed = one relaxed load + branch; the
     throughput series is untouched — it never arms).
 
-Done (2026-08): **Phase 1 (additive): four-way subtraction breakdown.** The summed-M
+Done (2026-08): **Phase 1 (additive): core-time composition (subtraction) breakdown.** The summed-M
 metric answers "how much of compute is machinery" by *accumulation*; this adds the
 complementary *subtraction* view over core-time, and prints both side by side so the two
 can be diffed. Additive and reversible — no existing machinery was removed; a parallel
@@ -266,14 +266,14 @@ computation runs alongside summed-M.
     `P = T − busy` (`busy` = `busy_ticks()`, the `run_task` span sum; `B` = `body_ticks()`).
     Framework work done OFF-worker — the per-run `execute()` setup on the frame-loop thread —
     is absent from `busy`, so it is a separate fourth bucket, **Orchestration**. The headline
-    is a four-way split **body / machinery(M_core) / idle / orchestration** as shares of `T`.
+    is a core-time composition **body / framework overhead (M_core) / idle / orchestration** as shares of `T`.
   - **Mechanism** (all `TS_PROFILING`-gated, armed-only, disarmed = one relaxed load+branch).
     A dedicated per-`Busy_slot` `orchestration` accumulator + `Scheduler::add_orchestration_ticks`
     (overflow-lane aware) + a `trace_orchestration_add` bridge (`trace_owner.h`/`scheduler.cpp`,
     mirroring `trace_machinery_add`). `Trace_setup_scope` now books its span to `trace_orchestration_add`
     IN ADDITION to `trace_machinery_add`, so summed-M is untouched. The fold (`trace_stamps.h` →
-    `Graph_trace::on_run_complete`) snapshots an orchestration delta and computes the per-run four-way
-    (`four_way_*_share()` getters); `--trace` console and the SVG headline print both metrics plus a
+    `Graph_trace::on_run_complete`) snapshots an orchestration delta and computes the per-run core-time
+    composition (`four_way_*_share()` getters); `--trace` console and the SVG headline print both metrics plus a
     reconciliation line.
   - **The reconciliation is the point.** Summed-M already includes the setup span (via the
     unchanged machinery bridge), so summed-M vs `(M_core + Orch)` leaves a residual =
@@ -281,7 +281,7 @@ computation runs alongside summed-M.
     OUTSIDE `busy`, so outside `M_core = busy − B`. It reconciles tightly: game_frame, 6-worker
     trace, 200 frames — **baseline** summed-M 4334 µs vs (M_core 4293 + Orch 18 = 4311) → residual
     **23 µs** (~0.5%); **optimised** summed-M 1825 µs vs (M_core 1788 + Orch 15 = 1804) → residual
-    **21 µs**. Orchestration is ~16–18 µs/frame. The four-way shares: **baseline** body 80.8% /
+    **21 µs**. Orchestration is ~16–18 µs/frame. The core-time composition shares: **baseline** body 80.8% /
     M_core 9.1% / idle 10.2% / orch ~0.0% (of a ~47 ms core-time `T`); **optimised** body 92.4% /
     M_core 4.3% / idle 3.3% / orch ~0.0% — the optimised frame converts idle and M_core into body
     share, matching the summed-M and dead-time stories. A large residual would be data, not a bug
@@ -318,14 +318,16 @@ never booked.
     orchestration. `Trace_setup_scope` now books orchestration ONLY when `!current_in_functor`: a nested
     in-body run's setup falls naturally into the enclosing node's `busy`/`B` accounting, and orchestration
     stays exactly the top-level frame-loop `execute()` setup that runs outside any functor.
-  - **Print.** `--trace` (console + SVG headline) shows the four-way body / machinery(`M = busy - B`) /
+  - **Print.** `--trace` (console + SVG headline) shows the core-time composition body / framework
+    overhead (derived as `busy - B`) /
     idle / orchestration as shares of core-time T, plus the `M/(B+M)` overhead classifier and the
     worker-less serial floor + gap; the Phase 1 reconciliation line is gone (there is no summed-M to
     reconcile). The worker-less ground-truth oracle (`total_wall - B`) is unchanged.
   - **Numbers (game_frame, 6-worker trace, 200 frames).** Retired direct-summed-M -> new derived `M = busy - B`:
     baseline **4359.6 us -> 4318.8 us (10.3% -> 10.2%)**, optimised **1829.0 us -> 1706.4 us (4.6% -> 4.3%)** -
-    the small drop is the dropped `Submit_cost_scope` (fan-out submit now body); the four-way shares are
-    stable (baseline body 80.9 / machinery 9.2 / idle 9.9 / orch 0.0; optimised 92.6 / 4.2 / 3.3 / 0.0).
+    the small drop is the dropped `Submit_cost_scope` (fan-out submit now body); the core-time composition
+    shares are
+    stable (baseline body 80.9 / framework overhead 9.2 / idle 9.9 / orch 0.0; optimised 92.6 / 4.2 / 3.3 / 0.0).
     The metric still discriminates coarser batching; the model is simpler (one accumulator, B, plus a
     derivation) and has no netting subtleties.
 

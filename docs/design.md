@@ -283,7 +283,7 @@ fine grain.
 The coroutine-first graph unified each node's dispatch onto the same
 ownership-carrying block path as every other task, and that was not free: it cost
 roughly **9% more per node** than the pre-transformation block (in frame terms,
-under 1% of wall time — framework machinery is only ~4–10% of a real `game_frame`,
+under 1% of wall time — framework overhead is only ~4–10% of a real `game_frame`,
 §2.4). This section records the *measured* cause, because the intuitive one is
 wrong — and the recovery, which not only erased the regression but took the
 per-node machinery *below* the old block by slimming a completion cost both
