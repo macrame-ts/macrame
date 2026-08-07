@@ -288,6 +288,47 @@ computation runs alongside summed-M.
     (Phase 2 — retiring the direct-M accumulation in favour of pure subtraction — is gated on human
     review of these numbers, not done here).
 
+Done (2026-08): **Phase 2 (pure subtraction): direct-M retired, `M = busy - B`.** Phase 1's
+reconciliation validated the subtraction view against the accumulator; Phase 2 makes the subtraction
+the ONLY view and deletes the machinery accumulator entirely. Machinery is now DERIVED at the fold,
+never booked.
+  - **Option 2 - busy made complete.** The Phase 1 residual (summed-M minus `M_core + Orch`, ~0.5-1.2%)
+    was the successful-`find_work` dispatch scan + inline-body time: counted in summed-M but living
+    OUTSIDE `busy` (the run_task-span sum), so outside `M_core = busy - B`. Phase 2 folds the successful
+    dispatch scan INTO `busy` (`find_work_dispatch` adds its span to the worker's `ticks`, not a separate
+    accumulator), so `M = busy - B` captures it by subtraction. Validation (game_frame, 6-worker, 200
+    frames): with the dispatch scan folded into busy but summed-M still live, the reconciliation residual
+    **collapsed 20.5 us -> 0.1 us (baseline), 17.9 us -> 0.1 us (optimised)** - confirming the dispatch scan
+    WAS the entire residual and inline-body time is negligible on a multi-worker run. Only after this
+    collapse was the direct-M apparatus deleted.
+  - **What was deleted.** The `machinery` `Busy_slot` field and `machinery_ticks()` (with its in-flight
+    compensation - busy already has it); `run_task`'s `machinery.fetch_add(span)` booking and the
+    `trace_body_under_run_task` flag trick (nothing to net an inline body out of - it just credits B);
+    `trace_body_add`'s `M -= dt` half (B is add-only now); `add_dispatch_ticks` (folded into busy); the
+    `trace_machinery_add` bridge (setup books orchestration only); and `Submit_cost_scope` (see below).
+    No NEGATIVE-M hazard survives, because nothing subtracts from an accumulator.
+  - **`Submit_cost_scope` dropped.** In pure subtraction a fan-out submit sits inside a body's
+    `Trace_busy_scope`, so it naturally counts as body; keeping it as machinery would mean subtracting it
+    from B (a one-sided B adjustment). Measured contribution on game_frame: ~109 us/frame on the
+    fan-out-heavy optimised variant (~0.27 pt of the overhead headline, 4.57% -> 4.30%), negligible on
+    baseline - below the ~1 pt materiality bar, so it was dropped for a simpler model. Fan-out submits now
+    read as body.
+  - **The #3 nesting double-count, resolved.** With netting gone, a NESTED traced `execute()` called from
+    inside a node body would otherwise double-count its setup between the enclosing node's body bucket and
+    orchestration. `Trace_setup_scope` now books orchestration ONLY when `!current_in_functor`: a nested
+    in-body run's setup falls naturally into the enclosing node's `busy`/`B` accounting, and orchestration
+    stays exactly the top-level frame-loop `execute()` setup that runs outside any functor.
+  - **Print.** `--trace` (console + SVG headline) shows the four-way body / machinery(`M = busy - B`) /
+    idle / orchestration as shares of core-time T, plus the `M/(B+M)` overhead classifier and the
+    worker-less serial floor + gap; the Phase 1 reconciliation line is gone (there is no summed-M to
+    reconcile). The worker-less ground-truth oracle (`total_wall - B`) is unchanged.
+  - **Numbers (game_frame, 6-worker trace, 200 frames).** Retired direct-summed-M -> new derived `M = busy - B`:
+    baseline **4359.6 us -> 4318.8 us (10.3% -> 10.2%)**, optimised **1829.0 us -> 1706.4 us (4.6% -> 4.3%)** -
+    the small drop is the dropped `Submit_cost_scope` (fan-out submit now body); the four-way shares are
+    stable (baseline body 80.9 / machinery 9.2 / idle 9.9 / orch 0.0; optimised 92.6 / 4.2 / 3.3 / 0.0).
+    The metric still discriminates coarser batching; the model is simpler (one accumulator, B, plus a
+    derivation) and has no netting subtleties.
+
 Remaining:
 - **Per-kind aggregates + scheduling counters.** Per task kind {node, slice,
   async, continuation, nested}: count + Welford duration + total busy. Plus

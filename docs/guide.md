@@ -853,15 +853,18 @@ excluding idle) spent in the scheduler's own machinery rather than your functors
 dead time says whether the critical chain itself had to wait; overhead says
 whether your tasks are coarse enough that scheduling them is cheap relative to
 running them (a high figure means the graph is too fine-grained — the tasks cost
-less than the machinery that dispatches them). Machinery now includes the
-per-run graph setup — link binding, node re-arm, indegree init and root
-dispatch, which run on the calling thread outside any task and scale with node
-count — so the figure no longer under-counts a large, cheap-bodied graph.
-Alongside it the headline prints a **serial floor**: the same frame traced once
-worker-less (single-threaded), where the whole frame runs serially with no idle
-to confound it, so `(total − body) / total` is the *complete* framework cost by
-pure subtraction — every phase, no blind spot (the summed-M accumulator closes to
-it exactly on that serial run, the built-in validation). The **gap** between the
+less than the machinery that dispatches them). Machinery is *derived* by pure
+subtraction, `M = busy − body`: every on-worker moment that is not user-functor
+time (task setup and completion, successful work-finding scans) is machinery,
+with no separate accumulator to keep in step. The per-run graph setup — link
+binding, node re-arm, indegree init and root dispatch, which run on the calling
+thread outside any task and scale with node count — is a distinct fourth bucket,
+**orchestration**, shown alongside so a large, cheap-bodied graph's setup cost is
+visible without inflating the machinery figure. Alongside it the headline prints
+a **serial floor**: the same frame traced once worker-less (single-threaded),
+where the whole frame runs serially with no idle to confound it, so
+`(total − body) / total` is the *complete* framework cost by pure subtraction —
+every phase, no blind spot. The **gap** between the
 multi-worker overhead and the serial floor is the machinery only workers pay —
 cross-thread dispatch, pipe hand-off, park/wake — i.e. the price of the
 parallelism, not a measurement error. Overhead is an upper bound: it is
