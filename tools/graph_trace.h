@@ -1042,9 +1042,11 @@ inline bool Graph_trace::write_SVG(const char* path) const
            "<path d=\"M6 6 L12 0\" stroke=\"#fd971f\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
            "</pattern></defs>\n";
     // Glossary affordance: header terms whose names may be unfamiliar carry the help cursor and a
-    // native <title> tooltip. The header text flows naturally (no manual layout); the overlay
-    // script draws a rounded pill behind each `.term` at load time (getBBox), so the pills resolve
-    // wherever the script runs (browser tab, <object>, <iframe>) -- inert under <img>, text intact.
+    // styled overlay tooltip (the SAME scripted tooltip the graph nodes use -- multi-line, with
+    // individually-coloured words -- reached by tagging each term `.hv` with a `data-tip`, not a
+    // native <title>). The header text flows naturally (no manual layout); the overlay script draws
+    // a rounded pill behind each `.term` at load time (getBBox), so the pills resolve wherever the
+    // script runs (browser tab, <object>, <iframe>) -- inert under <img>, text intact.
     out += "<style>.term{cursor:help;}</style>\n";
 
     // Header: title, the dead-time headline, global stats. (The legend sits at the
@@ -1068,10 +1070,32 @@ inline bool Graph_trace::write_SVG(const char* path) const
         const char* dead_color = dead_share < dead_time_ok_share ? "#a6e22e"
                                : dead_share <= dead_time_bad_share ? "#e6db74" : "#ff5f45";
         struct Seg { std::string text; const char* color; bool term; const char* tip; };
+        // Emit a term's `data-tip` attribute value: the term name as the tooltip headline (line 0),
+        // then the multi-line body. A literal '\n' in an attribute is normalized to a space by the
+        // XML parser, so newlines are written as the `&#10;` character reference (it survives and
+        // reaches the overlay script as '\n'); the other markup-significant characters are escaped.
+        // Backticks pass through untouched -- they delimit the overlay's coloured-run syntax.
+        auto append_term_tip = [&](std::string_view name, const char* body)
+        {
+            append_escaped(out, name);
+            for (const char* p = body; *p; ++p)
+            {
+                switch (*p)
+                {
+                case '\n': out += "&#10;"; break;
+                case '&': out += "&amp;"; break;
+                case '<': out += "&lt;"; break;
+                case '>': out += "&gt;"; break;
+                case '"': out += "&quot;"; break;
+                default: out.push_back(*p);
+                }
+            }
+        };
         // Render one header line as a single <text> with flowing <tspan>s -- the browser lays it
         // out, so there is no manual x-cursor, no textLength, and no glyph distortion. xml:space
-        // keeps the "  |  " separators intact. Term tspans carry `class="term"` + a <title>; the
-        // overlay script draws their pills at load time via getBBox.
+        // keeps the "  |  " separators intact. Term tspans carry `class="term hv"` + a `data-tip`
+        // (the same scripted tooltip the nodes use, `data-hl` = the term's own colour for the
+        // headline + border); the overlay script draws their pills at load time via getBBox.
         auto render_line = [&](double y, double F, const char* weight, const std::vector<Seg>& segs)
         {
             char buf[128];
@@ -1082,12 +1106,17 @@ inline bool Graph_trace::write_SVG(const char* path) const
             {
                 out += "<tspan fill=\"";
                 out += s.color;
-                out += s.term ? "\" class=\"term\">" : "\">";
                 if (s.term)
                 {
-                    out += "<title>";
-                    append_escaped(out, s.tip);
-                    out += "</title>";
+                    out += "\" class=\"term hv\" data-hl=\"";
+                    out += s.color;
+                    out += "\" data-tip=\"";
+                    append_term_tip(s.text, s.tip);   // headline (name) + "\n" body; body starts "\n..."
+                    out += "\">";
+                }
+                else
+                {
+                    out += "\">";
                 }
                 append_escaped(out, s.text);
                 out += "</tspan>";
@@ -1095,18 +1124,73 @@ inline bool Graph_trace::write_SVG(const char* path) const
             out += "</text>\n";
         };
 
-        // Glossary tooltips. Wording is reflowed into 2-3 short lines (embedded newlines) for
-        // readability in the native <title> tooltip.
-        static constexpr const char* TIP_UTIL = "Share of the machine's time that ran tasks:\nbusy / (workers x frame time).\nLow means cores sat idle.";
-        static constexpr const char* TIP_DEAD = "Frame time minus the work along the longest\ndependency chain: how long that chain sat\nwaiting instead of working.";
-        static constexpr const char* TIP_CORETIME = "Total worker-time available in a frame:\nworkers x frame time. This is the 100%\nthe split below divides up.";
-        static constexpr const char* TIP_BODY = "Core-time spent running your task functors\n(the actual work), summed over all cores.";
-        static constexpr const char* TIP_FO = "Core-time the scheduler spent on itself:\ndispatch, completion, pipe turns. Computed as\nbusy minus body; high means tasks are too fine-grained.";
-        static constexpr const char* TIP_IDLE = "Core-time with no task to run (workers parked\nor spinning). High means the frame can't\nkeep the cores fed.";
-        static constexpr const char* TIP_FRAMETIME = "Wall-clock length of the frame: the first task\nstarting to the last finishing (the makespan).";
-        static constexpr const char* TIP_CRITPATH = "The fastest the frame could finish given only task\ndurations and dependencies, with a core always free.\nThe gap to frame time is scheduling loss.";
-        static constexpr const char* TIP_BODY_TOTAL = "Total work in the frame: every task functor's time\nadded up across all cores. Divide by worker count\nfor the perfect-parallel frame-time floor.";
-        static constexpr const char* TIP_ORCH = "Time the calling thread spends building the run\neach frame (binding links, re-arming nodes),\noff the worker cores.";
+        // Glossary tooltips: the term name is the headline (added by `append_term_tip`); each body
+        // below starts with '\n' and is reflowed into short lines. Any ": " lands at a line END so
+        // the overlay's field-bold heuristic does not misfire on prose (a deliberate leading
+        // "Fix:" is the one exception -- bolding it reads as an intended label). The three banded
+        // terms append a blank line then coloured green/yellow/red threshold rows (`RRGGBBtext`).
+        static constexpr const char* TIP_UTIL =
+            "\nShare of the machine's time that ran tasks."
+            "\nLow means CPU cores sat idle."
+            "\nCovers only configured worker threads."
+            "\n"
+            "\n`a6e22egreen`: >=75%"
+            "\n`e6db74yellow`: 50-75%"
+            "\n`ff5f45red`: <50%";
+        static constexpr const char* TIP_DEAD =
+            "\nFrame time minus the work on the longest"
+            "\ndependency chain (critical path):"
+            "\nhow long that chain sat waiting instead"
+            "\nof working. High means optimisation"
+            "\nopportunity by rearranging graph nodes"
+            "\nor profiler-guided optimisation."
+            "\n"
+            "\n`a6e22egreen`: <5%"
+            "\n`e6db74yellow`: 5-10%"
+            "\n`ff5f45red`: >10%";
+        static constexpr const char* TIP_CORETIME =
+            "\nTotal worker-time available in a frame:"
+            "\nworkers x frame time. 100% the split to"
+            "\nthe right divides up.";
+        static constexpr const char* TIP_BODY =
+            "\nCore-time spent running your task functors"
+            "\n(the actual work), summed over all workers.";
+        static constexpr const char* TIP_FO =
+            "\nCore-time the framework spent for internal processing:"
+            "\ngraph execution, launching tasks, scheduling"
+            "\netc. High means tasks are too fine-grained."
+            "\nTry reducing the number of tasks by moving"
+            "\nparallelisation to the higher abstraction"
+            "\nlayer (graph nodes)."
+            "\n"
+            "\n`a6e22egreen`: <=5%"
+            "\n`e6db74yellow`: 5-15%"
+            "\n`ff5f45red`: >15%";
+        static constexpr const char* TIP_IDLE =
+            "\nCore-time with no task to run (workers"
+            "\nparked or spinning). High means the frame"
+            "\ncan't keep the cores fed. Try splitting"
+            "\nlong-running nodes or add internal node"
+            "\nparallelisation.";
+        static constexpr const char* TIP_FRAMETIME =
+            "\nWall-clock length of the frame:"
+            "\nfirst task starting to last task finishing.";
+        static constexpr const char* TIP_CRITPATH =
+            "\nThe fastest the frame could finish given"
+            "\nonly task durations and dependencies, with"
+            "\ninfinite amount of workers and CPU cores."
+            "\nThe lower limit for frame time. Can only be"
+            "\nimproved by loosening dependencies or"
+            "\noptimising graph nodes internally.";
+        static constexpr const char* TIP_BODY_TOTAL =
+            "\nTotal work in the frame:"
+            "\nevery task functor's time added up across"
+            "\nall workers. Divide by workers for the"
+            "\nperfect-parallel floor.";
+        static constexpr const char* TIP_ORCH =
+            "\nTime the calling thread spends building the"
+            "\nrun each frame (binding links, re-arming"
+            "\nnodes), off the worker cores.";
 
         // Row 2: core utilization + critical path dead time (+ its cause split). The cause split
         // apportions the globally-computed dead time across causes by the share-weighted gap
@@ -1133,9 +1217,15 @@ inline bool Graph_trace::write_SVG(const char* path) const
                 static constexpr const char* cls_color[3] = { "#f92672", "#e6db74", "#fd971f" };
                 static constexpr const char* cls_word[3] = { "dependency", "mixed", "core-bound" };
                 static constexpr const char* cls_tip[3] = {
-                    "Dead time where the chain waited on an unfinished\npredecessor, not a busy core.\nCut edges or shorten the chain.",
-                    "A stretch of dead time with both causes present:\nsome cores free, some work still blocked.",
-                    "Dead time where the chain waited for a free core\n(every core was busy).\nAdd workers or shorten the chain."
+                    "\nDead time where the chain waited on an"
+                    "\nunfinished predecessor, not a busy core."
+                    "\nFix: rearrange nodes, profiler-guided"
+                    "\noptimisation or shorten the chain.",
+                    "\nA stretch of dead time with both causes present:"
+                    "\nsome cores free, some work still blocked.",
+                    "\nDead time where the chain waited for a free"
+                    "\ncore (every core was busy)."
+                    "\nFix: add workers or shorten the chain."
                 };
                 segs.push_back({ " (", "#cfcfc2", false, nullptr });
                 bool first_cls = true;
@@ -1729,7 +1819,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // the element's own colour, field names bold). Runs when the SVG is opened as a
     // document (browser tab, <object>, <iframe>); inert when embedded via <img> --
     // acceptable, the picture still stands alone.
-    out += "<style>.hv{cursor:default}</style>\n";
+    out += "<style>.hv{cursor:default}.term{cursor:help}</style>\n";
     out += "<script><![CDATA[\n"
         "(function(){\n"
         "var svg=document.documentElement;\n"
