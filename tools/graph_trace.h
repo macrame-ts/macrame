@@ -1041,10 +1041,11 @@ inline bool Graph_trace::write_SVG(const char* path) const
            "<path d=\"M0 6 L6 0\" stroke=\"#f92672\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
            "<path d=\"M6 6 L12 0\" stroke=\"#fd971f\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
            "</pattern></defs>\n";
-    // Glossary affordance: header terms whose names may be unfamiliar carry a dotted underline
-    // and the help cursor, plus a native <title> tooltip (see the `term` helper below). The
-    // underline shows in any renderer; the tooltip resolves when the SVG is viewed as a document.
-    out += "<style>.term{cursor:help;text-decoration:underline dotted;text-underline-offset:2px;}</style>\n";
+    // Glossary affordance: header terms whose names may be unfamiliar are drawn on a rounded pill
+    // (fill #3e3d32, a shade of the monokai background; see `render_line`) and carry the help
+    // cursor + a native <title> tooltip. The pill shows in any renderer; the tooltip resolves
+    // when the SVG is viewed as a document.
+    out += "<style>.term{cursor:help;}</style>\n";
 
     // Header: title, the dead-time headline, global stats. (The legend sits at the
     // bottom of the picture.)
@@ -1066,115 +1067,171 @@ inline bool Graph_trace::write_SVG(const char* path) const
         double dead_share = makespan_.mean > 0.0 ? dead_us / makespan_.mean : 0.0;
         const char* dead_color = dead_share < dead_time_ok_share ? "#a6e22e"
                                : dead_share <= dead_time_bad_share ? "#e6db74" : "#ff5f45";
-        // Hoverable glossary term: dotted-underline + help-cursor (`.term` style) with a native
-        // <title> tooltip. `colored` emits plain coloured text (numbers, separators).
-        auto term = [&out](const char* name, const char* tip, const char* color)
+        // Header glossary: unfamiliar terms are drawn on a rounded pill with a native <title>
+        // tooltip. Everything is positioned by an explicit x-cursor using a glyph-width model +
+        // textLength, so the pills align with the text in any renderer regardless of font metrics.
+        auto glyph_w = [](unsigned char c, double F) -> double
         {
-            out += "<tspan class=\"term\" fill=\""; out += color; out += "\"><title>";
-            append_escaped(out, tip);
-            out += "</title>";
-            append_escaped(out, name);
-            out += "</tspan>";
+            switch (c)
+            {
+                case ' ': case '.': case ',': case ':': case ';': case '\'': case '!':
+                case '|': case '(': case ')': case '/': case 'i': case 'l': case 'I':
+                case 'j': case 't': case 'f': case 'r':
+                    return 0.30 * F;
+                case 'm': case 'w': case 'M': case 'W':
+                    return 0.86 * F;
+                default:
+                    if (c >= 'A' && c <= 'Z') return 0.66 * F;
+                    if (c >= '0' && c <= '9') return 0.56 * F;
+                    return 0.52 * F;
+            }
         };
-        auto colored = [&out](const std::string& s, const char* color)
+        auto text_w = [&glyph_w](const std::string& s, double F)
         {
-            out += "<tspan fill=\""; out += color; out += "\">";
-            append_escaped(out, s);
-            out += "</tspan>";
+            double w = 0.0;
+            for (unsigned char c : s)
+                w += glyph_w(c, F);
+            return w;
         };
-        out += "<text x=\"16\" y=\"48\" font-size=\"12\" font-weight=\"600\">";
-        term("core utilization", "Busy core-time / (workers x frame time): how much of the machine ran tasks.", util_color);
-        colored(": " + fmt_us(100.0 * util) + "%", util_color);
-        out += "<tspan fill=\"#cfcfc2\"> | </tspan>";
-        term("critical path dead time",
-             "Frame time minus the work along the binding dependency chain: time the critical path spent waiting for a core or a predecessor, not working.",
-             dead_color);
-        colored(": " + fmt_us(dead_us) + " \xC2\xB5s (" + fmt_us(100.0 * dead_share) + "% of frame time)", dead_color);
+        struct Seg { std::string text; const char* color; bool term; const char* tip; };
+        // Render one header line: pill rects behind the terms (pass 1), then the text over them
+        // (pass 2). Both passes advance the cursor identically, so rects and text stay aligned.
+        auto render_line = [&](double y, double F, const char* weight, const std::vector<Seg>& segs)
+        {
+            const double pad = 5.0, gap = 3.0, asc = 0.80 * F, h = 1.12 * F, rr = 4.0;
+            char buf[512];
+            double cx = 16.0;
+            for (const Seg& s : segs)
+            {
+                double w = text_w(s.text, F);
+                if (s.term)
+                {
+                    std::snprintf(buf, sizeof buf,
+                        "<rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\" rx=\"%.1f\" fill=\"#3e3d32\"/>\n",
+                        cx, y - asc, w + 2.0 * pad, h, rr);
+                    out += buf;
+                    cx += w + 2.0 * pad + gap;
+                }
+                else
+                    cx += w;
+            }
+            std::string wattr = weight ? std::string(" font-weight=\"") + weight + "\"" : std::string();
+            cx = 16.0;
+            for (const Seg& s : segs)
+            {
+                double w = text_w(s.text, F);
+                double tx = s.term ? cx + pad : cx;
+                std::snprintf(buf, sizeof buf,
+                    "<text x=\"%.1f\" y=\"%.1f\" font-size=\"%.0f\"%s fill=\"%s\" textLength=\"%.1f\" lengthAdjust=\"spacingAndGlyphs\"%s>",
+                    tx, y, F, wattr.c_str(), s.color, w, s.term ? " class=\"term\"" : "");
+                out += buf;
+                if (s.term)
+                {
+                    out += "<title>";
+                    append_escaped(out, s.tip);
+                    out += "</title>";
+                }
+                append_escaped(out, s.text);
+                out += "</text>\n";
+                cx += s.term ? (w + 2.0 * pad + gap) : w;
+            }
+        };
 
-        // Cause split: apportion the (globally computed) dead time across causes by the
-        // share-weighted gap durations of the classified bands -- each band contributes
-        // `share x gap`, the weights normalize to the global figure, so the split always
-        // sums to the headline total. Bands only localize the >= 10%-share subset, so the
-        // apportioning is approximate; a class with zero weight is omitted.
+        // Glossary tooltips.
+        static constexpr const char* TIP_UTIL = "Share of the machine's time that ran tasks: busy / (workers x frame time). Low means cores sat idle.";
+        static constexpr const char* TIP_DEAD = "Frame time minus the work along the longest dependency chain: how long that chain sat waiting instead of working.";
+        static constexpr const char* TIP_CORETIME = "Total worker-time available in a frame: workers x frame time. This is the 100% the split below divides up.";
+        static constexpr const char* TIP_BODY = "Core-time spent running your task functors (the actual work), summed over all cores.";
+        static constexpr const char* TIP_FO = "Core-time the scheduler spent on itself: dispatch, completion, pipe turns. Computed as busy minus body; high means tasks are too fine-grained.";
+        static constexpr const char* TIP_IDLE = "Core-time with no task to run (workers parked or spinning). High means the frame can't keep the cores fed.";
+        static constexpr const char* TIP_FRAMETIME = "Wall-clock length of the frame: the first task starting to the last finishing (the makespan).";
+        static constexpr const char* TIP_CRITPATH = "The fastest the frame could finish given only task durations and dependencies, with a core always free. The gap to frame time is scheduling loss.";
+        static constexpr const char* TIP_BODY_TOTAL = "Total work in the frame: every task functor's time added up across all cores. Divide by worker count for the perfect-parallel frame-time floor.";
+        static constexpr const char* TIP_ORCH = "Time the calling thread spends building the run each frame (binding links, re-arming nodes), off the worker cores.";
+
+        // Row 2: core utilization + critical path dead time (+ its cause split). The cause split
+        // apportions the globally-computed dead time across causes by the share-weighted gap
+        // durations of the classified bands; a class with zero weight is omitted.
         {
+            std::vector<Seg> segs;
+            segs.push_back({ "core utilization", util_color, true, TIP_UTIL });
+            segs.push_back({ ": " + fmt_us(100.0 * util) + "%", util_color, false, nullptr });
+            segs.push_back({ "  |  ", "#cfcfc2", false, nullptr });
+            segs.push_back({ "critical path dead time", dead_color, true, TIP_DEAD });
+            segs.push_back({ ": " + fmt_us(dead_us) + " \xC2\xB5s (" + fmt_us(100.0 * dead_share) + "% of frame time)", dead_color, false, nullptr });
+
             double w_cls[3] = { 0.0, 0.0, 0.0 };
             double w_all = 0.0;
             for (const Gap_info& g : gaps)
-            {
                 if (g.has_band && g.cls >= 0)
                 {
                     double w = g.share * g.gap_us;
                     w_cls[g.cls] += w;
                     w_all += w;
                 }
-            }
             if (w_all > 0.0 && dead_share > 0.0)
             {
                 static constexpr const char* cls_color[3] = { "#f92672", "#e6db74", "#fd971f" };
                 static constexpr const char* cls_word[3] = { "dependency", "mixed", "core-bound" };
                 static constexpr const char* cls_tip[3] = {
-                    "The chain waited for an unfinished predecessor, not a free core: cut edges or shorten the chain.",
-                    "Both causes present across this stretch of the frame.",
-                    "The chain waited because every core was busy with other work: add cores or shorten the chain."
+                    "Dead time where the chain waited on an unfinished predecessor, not a busy core. Cut edges or shorten the chain.",
+                    "A stretch of dead time with both causes present: some cores free, some work still blocked.",
+                    "Dead time where the chain waited for a free core (every core was busy). Add workers or shorten the chain."
                 };
-                out += "<tspan fill=\"#cfcfc2\"> (</tspan>";
+                segs.push_back({ " (", "#cfcfc2", false, nullptr });
                 bool first_cls = true;
                 for (int c : { 2, 1, 0 })   // core-bound first: the actionable surprise
                 {
                     if (w_cls[c] > 0.0)
                     {
                         if (!first_cls)
-                            out += "<tspan fill=\"#cfcfc2\"> / </tspan>";
+                            segs.push_back({ " / ", "#cfcfc2", false, nullptr });
                         first_cls = false;
-                        term(cls_word[c], cls_tip[c], cls_color[c]);
-                        colored(" " + fmt_us(100.0 * dead_share * w_cls[c] / w_all) + "%", cls_color[c]);
+                        segs.push_back({ cls_word[c], cls_color[c], true, cls_tip[c] });
+                        segs.push_back({ " " + fmt_us(100.0 * dead_share * w_cls[c] / w_all) + "%", cls_color[c], false, nullptr });
                     }
                 }
-                out += "<tspan fill=\"#cfcfc2\">)</tspan>";
+                segs.push_back({ ")", "#cfcfc2", false, nullptr });
             }
+            render_line(48.0, 12.0, "600", segs);
         }
 
-        out += "</text>\n";
-
-        // Row 3: where the frame's core-time (workers x makespan) went -- body / framework
-        // overhead / idle, a partition that sums to 100%. Framework overhead is the scheduler's
-        // own cost (task setup/completion, dispatch, pipe turns), derived by subtraction
-        // (busy - body); it keeps the good/bad colour bands. Orchestration (the off-worker
-        // top-level execute() setup) is ~0% here, so it is reported as µs in the stats row.
+        // Row 3: the core-time split -- body / framework overhead / idle (sums to 100%).
         {
             double fo = four_way_machinery_share();
             const char* fo_color = fo <= overhead_ok_share ? "#a6e22e"
                                  : fo <= overhead_bad_share ? "#e6db74" : "#ff5f45";
-            out += "<text x=\"16\" y=\"68\" font-size=\"12\" font-weight=\"600\">";
-            term("core-time", "Total worker-time in the frame: workers x frame time -- the denominator of this split.", "#cfcfc2");
-            colored(": ", "#cfcfc2");
-            term("body", "Core-time spent running your task functors (the real work), summed across all cores.", "#cfcfc2");
-            colored(" " + fmt_us(100.0 * four_way_body_share()) + "%  |  ", "#cfcfc2");
-            term("framework overhead",
-                 "Core-time spent in the scheduler itself -- dispatch, completion, pipe turns -- measured as busy minus body.",
-                 fo_color);
-            colored(" " + fmt_us(100.0 * fo) + "%", fo_color);
-            colored("  |  ", "#cfcfc2");
-            term("idle", "Core-time with no task to run (workers parked or spinning).", "#cfcfc2");
-            colored(" " + fmt_us(100.0 * four_way_idle_share()) + "%", "#cfcfc2");
-            out += "</text>\n";
+            std::vector<Seg> segs;
+            segs.push_back({ "core-time", "#cfcfc2", true, TIP_CORETIME });
+            segs.push_back({ ": ", "#cfcfc2", false, nullptr });
+            segs.push_back({ "body", "#cfcfc2", true, TIP_BODY });
+            segs.push_back({ " " + fmt_us(100.0 * four_way_body_share()) + "%  |  ", "#cfcfc2", false, nullptr });
+            segs.push_back({ "framework overhead", fo_color, true, TIP_FO });
+            segs.push_back({ " " + fmt_us(100.0 * fo) + "%", fo_color, false, nullptr });
+            segs.push_back({ "  |  ", "#cfcfc2", false, nullptr });
+            segs.push_back({ "idle", "#cfcfc2", true, TIP_IDLE });
+            segs.push_back({ " " + fmt_us(100.0 * four_way_idle_share()) + "%", "#cfcfc2", false, nullptr });
+            render_line(68.0, 12.0, "600", segs);
         }
 
         // Row 4: raw per-run stats. `body` here is the TOTAL body time (summed across cores);
         // `critical path` is the CPM lower bound; `orchestration` the off-core per-run setup.
-        out += "<text x=\"16\" y=\"86\" font-size=\"11\" fill=\"#cfcfc2\">";
-        append_escaped(out, "runs: " + std::to_string(runs_) + "  |  ");
-        term("frame time", "Wall-clock makespan: from the first task starting to the last finishing.", "#cfcfc2");
-        append_escaped(out, " " + fmt_ms(makespan_.mean) + " ms (min " + fmt_ms(makespan_min_)
-            + " / max " + fmt_ms(makespan_max_) + ")  |  ");
-        term("critical path", "CPM lower bound on frame time from task durations and dependencies alone, with zero scheduling waits.", "#cfcfc2");
-        append_escaped(out, " " + fmt_ms(cpm_us) + " ms  |  workers: " + std::to_string(workers_seen)
-            + "  |  tasks ~" + std::to_string(static_cast<long long>(std::llround(tasks_per_run_.mean))) + "/run  |  per run: ");
-        term("body", "Total body time: the sum of every task functor's time across the frame. Divided by workers, this is the perfect-parallel floor on frame time.", "#cfcfc2");
-        append_escaped(out, " " + fmt_ms(body_us_.mean) + " ms / framework " + fmt_ms(machinery_us_.mean) + " ms / ");
-        term("orchestration", "Per-frame graph setup on the calling thread (link binding, node re-arm) -- off the worker cores.", "#cfcfc2");
-        append_escaped(out, " " + fmt_us(four_way_orchestration_us()) + " \xC2\xB5s");
-        out += "</text>\n";
+        {
+            std::vector<Seg> segs;
+            segs.push_back({ "runs: " + std::to_string(runs_) + "  |  ", "#cfcfc2", false, nullptr });
+            segs.push_back({ "frame time", "#cfcfc2", true, TIP_FRAMETIME });
+            segs.push_back({ " " + fmt_ms(makespan_.mean) + " ms (min " + fmt_ms(makespan_min_)
+                + " / max " + fmt_ms(makespan_max_) + ")  |  ", "#cfcfc2", false, nullptr });
+            segs.push_back({ "critical path", "#cfcfc2", true, TIP_CRITPATH });
+            segs.push_back({ " " + fmt_ms(cpm_us) + " ms  |  workers: " + std::to_string(workers_seen)
+                + "  |  tasks ~" + std::to_string(static_cast<long long>(std::llround(tasks_per_run_.mean)))
+                + "/run  |  per run: ", "#cfcfc2", false, nullptr });
+            segs.push_back({ "body", "#cfcfc2", true, TIP_BODY_TOTAL });
+            segs.push_back({ " " + fmt_ms(body_us_.mean) + " ms / framework " + fmt_ms(machinery_us_.mean) + " ms / ", "#cfcfc2", false, nullptr });
+            segs.push_back({ "orchestration", "#cfcfc2", true, TIP_ORCH });
+            segs.push_back({ " " + fmt_us(four_way_orchestration_us()) + " \xC2\xB5s", "#cfcfc2", false, nullptr });
+            render_line(86.0, 11.0, nullptr, segs);
+        }
     }
 
     // Time grid + axis labels: a 1/2/5-series step giving at most ~8 ticks.
