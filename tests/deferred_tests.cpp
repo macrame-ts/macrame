@@ -3,6 +3,7 @@
 #include "ts/versioned.h"
 #include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
+#include "ts/coroutine_support.h"
 #include "harness.h"
 #include "test_util.h"
 
@@ -160,6 +161,32 @@ void test_commit_under_async_write_grant()
         d.commit();
         c.add(1);
     }).sync();
+
+    TS_CHECK(target.async([](const Counter& c) { return c.value(); }).sync() == 7);
+}
+
+void test_commit_under_coroutine_write_grant()
+{
+    ts::Guarded<Counter> target{ ts::Named{} };
+    ts::Deferred<Counter> d{ target };
+
+    auto rec = d.recorder();
+    rec.stage([](Counter& c) { c.add(5); });
+
+    // A `commit()` from inside a `co_await ts::read_write` guard: the guard published this
+    // coroutine (not its launcher) as the target's `writer_owner`, so `commit()` recognises
+    // itself as the grant holder, applies the batch inline under the held write, and returns an
+    // already-settled task - the same fast path `test_commit_under_async_write_grant` takes from
+    // a callback body, reached here through the coroutine guard.
+    [](ts::Guarded<Counter>& tgt, ts::Deferred<Counter>& def) -> ts::Task<void>
+    {
+        auto g = co_await ts::read_write(tgt);
+        g->add(1);
+        ts::Task<void> committed = def.commit();
+        TS_CHECK(committed.is_done());   // the inline held-grant arm returns a settled task
+        g->add(1);
+        TS_CHECK(g->value() == 7);       // batch (+5) applied synchronously, visible under the guard
+    }(target, d).sync();
 
     TS_CHECK(target.async([](const Counter& c) { return c.value(); }).sync() == 7);
 }
@@ -439,6 +466,7 @@ void run_deferred_tests()
     run("deferred: concurrent staging from many threads", test_concurrent_staging);
     run("deferred: readers see none before, all after", test_readers_see_none_then_all);
     run("deferred: commit under an async write grant", test_commit_under_async_write_grant);
+    run("deferred: commit under a coroutine write guard", test_commit_under_coroutine_write_grant);
     run("deferred: commit as a graph node (re-run)", test_commit_in_graph_node);
     run("deferred: straggler rides the next commit", test_straggler_rides_next_commit);
     run("deferred: cancelled commit retains commands", test_cancelled_commit_retains_commands);
