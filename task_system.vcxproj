@@ -39,6 +39,7 @@
     <ClCompile Include="sample\blackboard.cpp" />
     <ClCompile Include="sample\game_frame.cpp" />
     <ClCompile Include="sample\physics.cpp" />
+    <ClCompile Include="sample\scope_access.cpp" />
     <!-- The TSan stress driver builds here purely as an API-drift tripwire: it is the one TU
          a Linux toolchain runs, so without this it silently rots until a WSL TSan run.
          TS_TSAN_NO_MAIN renames its entry point so it does not collide with src\main.cpp. -->

@@ -66,6 +66,9 @@
     <ClCompile Include="sample\physics.cpp">
       <Filter>sample</Filter>
     </ClCompile>
+    <ClCompile Include="sample\scope_access.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
     <ClCompile Include="tests\access_tests.cpp">
       <Filter>tests</Filter>
     </ClCompile>

@@ -16,6 +16,7 @@ void dump_game_frame_dot(const char* path);
 void trace_game_frame(int frames, const char* DOT_path, const char* SVG_path);
 void run_physics_sample(int frames = 60);
 void run_blackboard_sample();
+void run_scope_access_sample();
 }
 
 #include <cstdio>
@@ -131,6 +132,7 @@ int main(int argc, char** argv)
     sample::run_game_frame_sample();
     sample::run_physics_sample();
     sample::run_blackboard_sample();
+    sample::run_scope_access_sample();
     run_benchmarks();
 
     return ts::test::summary();
