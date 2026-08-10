@@ -997,7 +997,7 @@ access context stays the only customer.
 A scope-exit hook that runs an *async* cleanup on every exit path including
 cancellation — release a resource whose release is itself async (flush a GPU
 upload, commit-or-discard a `Deferred`, unregister an IO callback). Our
-`Pipe_guard` is synchronous RAII; a suspended coroutine node can't guarantee async
+`Access_guard` is synchronous RAII; a suspended coroutine node can't guarantee async
 cleanup on the cancel path today. Difficulty: medium — expressible as a guard
 whose teardown schedules a task; `final_suspend` gating on a cleanup child is
 exactly what `add_nested` already does. Tension: a teardown that awaits must run
@@ -1075,7 +1075,7 @@ cancel-already-running compromise).
 If a promise defines `await_transform`, the compiler routes *every* `co_await` in
 that body through it — a hook to (a) enforce the blue boundary structurally
 (`=delete` an await of a `sync()`/`take()`-shaped thing), (b) install the
-"suspension under guard is fatal" check (`pipe_guard_depth`) uniformly instead of
+"suspension under guard is fatal" check (`access_guard_depth`) uniformly instead of
 per-awaiter, or (c) inject the cancellation token (2.4) at every await without a
 trailing param. **Load-bearing caveat:** `await_transform` sees only `co_await`
 operands — it *cannot* police the synchronous prefix of an eager coroutine (that

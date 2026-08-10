@@ -12,7 +12,7 @@ Three candidate answers exist. One is **already shipped** and must frame both ev
 
 - **The circular-wait detector** (TODO 6.5) is implemented — `circular_wait_record` /
   `circular_wait_clear` in `src/guarded.cpp` (lines 372–492), called from
-  `Task_awaiter::await_suspend` and `Pipe_guard_awaiter::await_suspend` in
+  `Task_awaiter::await_suspend` and `Access_awaiter::await_suspend` in
   `include/ts/coroutine_support.h`. It records {held pipe → awaited pipe} edges at a genuine
   suspension, DFS-checks for a cycle on insert, and fatals naming both tasks and both
   objects. `TS_SAFETY_CHECKS`-gated. Its weakness is the known one: an edge exists only while
@@ -165,7 +165,7 @@ p16.cpp:13:21: warning: 'acquired_before' attribute only applies to non-static d
 **(k) Suspension is not a concept.** Holding a capability across a `co_await` draws no
 diagnostic (probe 4, `held_across_suspend` and `scoped_across_suspend` are both silent). The
 analysis therefore cannot enforce the library's "no grant across suspension" rule; the
-existing `pipe_guard_depth` fatal remains the only enforcement.
+existing `access_guard_depth` fatal remains the only enforcement.
 
 **(l) Body-return is not completion.** A coroutine that acquires and reaches `co_return`
 without releasing draws "still held at the end of function" (probe 4, `acquire_and_return`) —
@@ -385,12 +385,12 @@ this shape.
 - A node's declared grants are released only at node completion, by `advance_pipe_links`
   (`src/guarded.cpp:308`) from the settle path. There is no mid-body release API — no
   `release_early`, no revoke; `grep` over `include/` and `src/` finds neither.
-- `Pipe_guard` is deliberately **non-copyable and non-movable** (address stability: it installs
+- `Access_guard` is deliberately **non-copyable and non-movable** (address stability: it installs
   `current_access = &ctx_`, a member — `coroutine_support.h:353–408`). Held grants therefore
   cannot be collected into a `Held_set`. Verified:
   ```
   vector(865,27): error: no matching function for call to 'construct_at'
-    ... std::allocator<ts::detail::Pipe_guard<Cell, ts::Access::read_write>>
+    ... std::allocator<ts::Access_guard<Cell, ts::Access::read_write>>
   ```
 - And revoke is not an open question: [coroutine-first.md](coroutine-first.md) §10.4 already
   evaluated revoke-and-reacquire and **parked** it on four independent costs — the torn node
@@ -413,10 +413,10 @@ before the body started and already mutated through. So the only sound victim is
 inside its own prologue, which pushes the design toward (c) again.
 
 **(f) The two guard-form ABBA shapes are already closed, so the hole is narrower than the
-sketch assumes.** `Pipe_guard_awaiter::await_suspend` fatals on `pipe_guard_depth > 0`
+sketch assumes.** `Access_awaiter::await_suspend` fatals on `access_guard_depth > 0`
 (`coroutine_support.h:454`), and so does `Task_awaiter::await_suspend` (line 175). A body
 holding an RAII guard cannot await anything. The surviving hole is exactly: a **graph node's or
-pipe job's** declared grants (no `Pipe_guard` involved, depth 0) plus a `co_await` on a pipe
+pipe job's** declared grants (no `Access_guard` involved, depth 0) plus a `co_await` on a pipe
 job — which is what the shipped circular-wait detector watches. Worth recording: because that
 fatal lives in `await_suspend`, `hold_then_await` above compiles and *runs fine whenever the
 second pipe happens to be free* — the timing-luck coverage TODO 6.11 is about.

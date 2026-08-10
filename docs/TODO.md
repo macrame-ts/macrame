@@ -735,8 +735,8 @@ IDs — when an item is done, mark it, don't renumber.
        unconditional fatal removes it. `parallel_for` joins stay structurally exempt.
 
    11. `[x]` **(P1, author 2026-08) Same fix for the guard-across-suspension fatal — DONE
-       (2026-08).** The `pipe_guard_depth > 0` check moved from `await_suspend` to
-       `await_ready` in all three awaiters (`Task_awaiter`, `Pipe_guard_awaiter`,
+       (2026-08).** The `access_guard_depth > 0` check moved from `await_suspend` to
+       `await_ready` in all three awaiters (`Task_awaiter`, `Access_awaiter`,
        `Join_awaiter`), so an await under a live guard is illegal whether or not it suspends.
        For `Join_awaiter` the check runs BEFORE the settled children are erased -- whether the
        scope happens to be drained at that instant is precisely the timing the rule must not
@@ -757,7 +757,7 @@ IDs — when an item is done, mark it, don't renumber.
        [static-order-checking-and-ww-mutex.md](static-order-checking-and-ww-mutex.md)
        identified as passing undiagnosed; companions `co await under guard, split` and
        `co reentrant access under guard`. Original text follows.
-       The `pipe_guard_depth > 0` check lives in `await_suspend`, so a `co_await` that happens to
+       The `access_guard_depth > 0` check lives in `await_suspend`, so a `co_await` that happens to
        complete synchronously is never examined — the same timing-luck coverage as 6.10, one
        degree less bad (the check is not `TS_SAFETY_CHECKS`-gated, so the latent case aborts in
        shipping rather than silently serializing). Fix: hoist the test to `co_await` *entry*
@@ -987,7 +987,7 @@ IDs — when an item is done, mark it, don't renumber.
        existing checks were rewired onto it: `await_under_guard` and `circular_wait`.
        **The design question the item left open answered itself, against the assumption in
        (a):** the runtime opt-out cannot be uniform. Relaxing `await_under_guard` is not
-       merely permissive but unsound — a `Pipe_guard` installs its own `Access_context` as
+       merely permissive but unsound — a `Access_guard` installs its own `Access_context` as
        the thread's current grant, so a frame suspended under one resumes with the promise's
        snapshot installed over it and then restores a `current_access` pointer captured on a
        different thread. That splits the rules into **advisory** (scoped opt-out +
@@ -1358,7 +1358,7 @@ change after public. Feed the going-public "API-stability pass".
 
 ### D1. Zero-alloc inline `access`
 Today every `access` heap-allocates a `Task_control_block` (~288 B) even when it runs inline;
-the coroutine guard is the proof it needn't (stack-only `Pipe_guard` under a scoped grant).
+the coroutine guard is the proof it needn't (stack-only `Access_guard` under a scoped grant).
 Three tiers: **(1)** `void` `access` on a free grant → run under a stack-scoped grant, return an
 *already-done* `Task<void>` sentinel (no block; ships independently). **(2)** small non-`void` R →
 `Task<R>` becomes a discriminated union *inline-value | block-ptr | done-void*, storing R inline

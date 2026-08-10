@@ -808,7 +808,7 @@ rules that permit it, `ts::Relaxed_scope` (runtime opt-out, scoped).
 
 The interesting result is that the runtime opt-out cannot be uniform. Relaxing
 the guard-across-suspension rule does not merely accept a program we disapprove
-of: a `Pipe_guard` installs its own `Access_context` as the thread's current
+of: a `Access_guard` installs its own `Access_context` as the thread's current
 grant, so a frame that suspended under one would resume with the promise's
 snapshot installed over it and then restore a `current_access` pointer captured
 on a *different* thread. The rule protects an implementation invariant, and no

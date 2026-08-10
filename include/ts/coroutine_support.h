@@ -51,11 +51,11 @@ namespace ts
 namespace detail
 {
 
-// Depth of live `Pipe_guard`s on this thread (the async-lock guards below). A guard is confined
+// Depth of live `Access_guard`s on this thread (the async-lock guards below). A guard is confined
 // to one coroutine segment (the "no co_await under a guard" rule), so a thread-local count is
 // right: any `co_await` that would actually suspend while a guard is held (`> 0`) is the
 // lock-across-suspension anti-pattern and faults - the harness doubling as a suspension
-// detector. Incremented/decremented by `Pipe_guard`; checked in both `await_suspend`s.
+// detector. Incremented/decremented by `Access_guard`; checked in both `await_suspend`s.
 //
 // `Rule::await_under_guard` (ts/rules.h) is a structural rule: it has no scoped opt-out,
 // because a guard that did survive a suspension would leave the resumed segment installing
@@ -64,7 +64,7 @@ namespace detail
 // implementation invariant, not merely a user-level hazard. It can be compiled out
 // wholesale (`TS_ENABLED_RULES`), which also removes the counter.
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-inline thread_local int pipe_guard_depth = 0;
+inline thread_local int access_guard_depth = 0;
 #endif
 
 // The guard-across-suspension check. It lives at `co_await` entry (`await_ready`), not at
@@ -79,7 +79,7 @@ inline thread_local int pipe_guard_depth = 0;
 inline void check_await_under_guard(const char* message)
 {
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-    if (pipe_guard_depth > 0 && rule_enforced(Rule::await_under_guard))
+    if (access_guard_depth > 0 && rule_enforced(Rule::await_under_guard))
         ts::fatal(message);
 #else
     (void)message;
@@ -153,7 +153,7 @@ inline void check_access_rank(const Task_control_block*) noexcept {}
 #endif
 
 inline constexpr const char* await_under_guard_message =
-    "co_await while holding a Guarded access guard: the guard's pipe would be held across the "
+    "co_await while holding a Guarded access guard: the guarded object would be held across the "
     "suspension, and the guard's own access context cannot survive a resume on another thread. "
     "Use the functor form co_await obj.access(fn), or split the scope (release the guard, "
     "await, re-acquire). This rule is structural - it has no runtime opt-out; a build can drop "
@@ -507,43 +507,45 @@ struct Task_promise<void> : Promise_base<Task_promise<void>>
     void return_void() {}   // completion happens in the final awaiter
 };
 
-// RAII async-lock guard over a `Guarded<T>`'s pipe, held for direct `T` access. Returned by
+} // namespace detail
+
+// RAII async-lock guard over a `Guarded<T>`, held for direct `T` access. Returned by
 // `co_await ts::read_only(w)` / `ts::read_write(w)`. non-copyable and non-movable on purpose: it installs
 // `current_access = &ctx_` (a member), so its address must be stable - `await_resume` returns it
 // as a prvalue and `auto g = co_await ...;` constructs it in place via guaranteed copy elision
 // (a move would dangle the installed pointer; non-movable makes a stray copy a compile error).
 // While the guard is alive `current_access` grants `obj_` in `Mode`, so `g->method()` passes the
-// harness; the pipe is held (readers concurrent, writer exclusive) until the guard is destroyed.
+// harness; the access is held (readers concurrent, writer exclusive) until the guard is destroyed.
 template<typename T, Access Mode>
-class Pipe_guard
+class Access_guard
 {
 public:
-    Pipe_guard(Scheduler& scheduler, Pipe& pipe, T* obj)
+    Access_guard(Scheduler& scheduler, detail::Pipe& pipe, T* obj)
         : scheduler_(scheduler)
         , pipe_(pipe)
         , obj_(obj)
     {
-        if (current_access)
-            ctx_ = *current_access;   // extend the coroutine's existing grant, don't replace it
+        if (detail::current_access)
+            ctx_ = *detail::current_access;   // extend the coroutine's existing grant, don't replace it
         ctx_.add(obj_, Mode, detail::pipe_epoch(pipe_), detail::pipe_rank(pipe_));
-        prev_ = current_access;
-        current_access = &ctx_;
+        prev_ = detail::current_access;
+        detail::current_access = &ctx_;
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-        ++pipe_guard_depth;
+        ++detail::access_guard_depth;
 #endif
     }
 
-    ~Pipe_guard()
+    ~Access_guard()
     {
-        current_access = prev_;
+        detail::current_access = prev_;
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-        --pipe_guard_depth;
+        --detail::access_guard_depth;
 #endif
-        pipe_release(scheduler_, pipe_, Mode);   // admit queued entries / the next guard
+        detail::pipe_release(scheduler_, pipe_, Mode);   // admit queued entries / the next guard
     }
 
-    Pipe_guard(const Pipe_guard&) = delete;
-    Pipe_guard& operator=(const Pipe_guard&) = delete;
+    Access_guard(const Access_guard&) = delete;
+    Access_guard& operator=(const Access_guard&) = delete;
 
     decltype(auto) operator*() const
     {
@@ -563,27 +565,30 @@ public:
 
 private:
     Scheduler& scheduler_;
-    Pipe& pipe_;
+    detail::Pipe& pipe_;
     T* obj_;
     Access_context ctx_;
     const Access_context* prev_ = nullptr;
 };
 
-// Awaiter for `co_await ts::read_only(w)` / `ts::read_write(w)`. Acquires the pipe in `Mode` (holding it),
-// then resumes with a `Pipe_guard`. The acquire/resume race (a deferred acquire's `on_acquired`
+namespace detail
+{
+
+// Awaiter for `co_await ts::read_only(w)` / `ts::read_write(w)`. Acquires the access in `Mode` (holding it),
+// then resumes with an `Access_guard`. The acquire/resume race (a deferred acquire's `on_acquired`
 // firing on another thread vs `await_suspend` finishing) uses the same two-state handshake as
 // `Task_awaiter`, with the same segment ordering.
 template<typename T, Access Mode>
-struct Pipe_guard_awaiter
+struct Access_awaiter
 {
-    Pipe_guard_awaiter(Scheduler& scheduler, Pipe& pipe, T* obj) noexcept
+    Access_awaiter(Scheduler& scheduler, Pipe& pipe, T* obj) noexcept
         : scheduler_(scheduler)
         , pipe_(pipe)
         , obj_(obj)
     {}
 
-    Pipe_guard_awaiter(const Pipe_guard_awaiter&) = delete;
-    Pipe_guard_awaiter& operator=(const Pipe_guard_awaiter&) = delete;
+    Access_awaiter(const Access_awaiter&) = delete;
+    Access_awaiter& operator=(const Access_awaiter&) = delete;
 
     // Must attempt the acquire (side effects), so this never reports ready - but it is
     // still where the guard rule is checked, at `co_await` entry. Acquiring a second guard
@@ -594,7 +599,7 @@ struct Pipe_guard_awaiter
     {
         check_await_under_guard(
             "co_await a Guarded access guard while another is live: nested guards hold both "
-            "pipes across any suspension. Take them together with the multi-object form "
+            "objects across any suspension. Take them together with the multi-object form "
             "co_await ts::access(fn, a, b) (one canonically-ordered acquisition), or release "
             "the first guard before acquiring the second");
         check_access_rank(&pipe_, obj_);
@@ -650,7 +655,7 @@ struct Pipe_guard_awaiter
         return true;        // suspended; on_acquired will resume when the pipe grants
     }
 
-    Pipe_guard<T, Mode> await_resume() noexcept
+    Access_guard<T, Mode> await_resume() noexcept
     {
 #if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
         if (recorded_)
@@ -663,7 +668,7 @@ struct Pipe_guard_awaiter
             registered_ = false;
         }
 #endif
-        return Pipe_guard<T, Mode>(scheduler_, pipe_, obj_);   // prvalue -> elided into the local
+        return Access_guard<T, Mode>(scheduler_, pipe_, obj_);   // prvalue -> elided into the local
     }
 
 private:
@@ -708,19 +713,19 @@ detail::Task_awaiter<R> operator co_await(Task<R>&& t)
 
 
 // Async-lock a `Guarded<T>` in a coroutine: `auto g = co_await ts::read_write(w);` suspends
-// until the pipe grants exclusive write access, then resumes with an RAII guard giving direct
+// until exclusive write access is granted, then resumes with an RAII guard giving direct
 // `T&` (released on scope exit); `ts::read_only(w)` is the shared-reader form giving `const T&`.
 // Linear RAII in place of a callback `async(fn, obj)`, and the safe shape as long as you do not
-// `co_await` other work while the guard is alive (that holds the pipe across a suspension -
+// `co_await` other work while the guard is alive (that holds the access across a suspension -
 // faulted by the harness-as-suspension-detector). Deduces nothing; the mode is the verb.
 template<typename T>
-detail::Pipe_guard_awaiter<T, Access::read_write> read_write(Guarded<T>& w)
+detail::Access_awaiter<T, Access::read_write> read_write(Guarded<T>& w)
 {
     return { global_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
 }
 
 template<typename T>
-detail::Pipe_guard_awaiter<T, Access::read_only> read_only(Guarded<T>& w)
+detail::Access_awaiter<T, Access::read_only> read_only(Guarded<T>& w)
 {
     return { global_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
 }

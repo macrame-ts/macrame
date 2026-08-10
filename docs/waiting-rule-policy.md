@@ -14,7 +14,7 @@ paying for. This document settles both, and the obligations a new check inherits
 Every rule check answers two independent questions:
 
 1. **Is it compiled into this build?** — `TS_ENABLED_RULES`, a preprocessor bitmask. When a
-   rule's bit is clear, its code *and its state* vanish (the `Pipe_guard` depth counter, the
+   rule's bit is clear, its code *and its state* vanish (the `Access_guard` depth counter, the
    awaiters' `recorded_` flags, the circular-wait registry).
 2. **Is it enforced at this point?** — `ts::Relaxed_scope`, a scoped RAII opt-out, plus a
    process-wide default for teams that want the rules as advice.
@@ -28,7 +28,7 @@ a false positive". They are genuinely different needs and neither substitutes fo
 | `ts::Rule` | forbids | class | shipping default | `Relaxed_scope` |
 |---|---|---|---|---|
 | `in_task_sync` | `sync()` / `take()` inside a task | advisory | compiled out | yes |
-| `await_under_guard` | `co_await` while a `Pipe_guard` is live | structural | **kept** | no |
+| `await_under_guard` | `co_await` while a `Access_guard` is live | structural | **kept** | no |
 | `access_rank` | awaiting an object out of declared rank order (6.14) | advisory | compiled out | yes |
 | `circular_wait` | a held-grant → awaited-pipe wait cycle (6.5) | advisory | compiled out | yes |
 | `deadlock_net` | quiescence with no possible external wakeup (6.13) | net | compiled out | no (global) |
@@ -49,13 +49,13 @@ everything downstream reads the effective mask.
 counter-example that shows why.
 
 Relaxing that rule does not merely accept a program the library disapproves of. A
-`Pipe_guard` installs `detail::current_access = &ctx_` (a member of the guard) and saves the
+`Access_guard` installs `detail::current_access = &ctx_` (a member of the guard) and saves the
 previous pointer. If the frame suspends under a live guard and resumes on another worker:
 
 - the resume path installs the promise's creation-time access snapshot over the guard's own
   context, so the guard's grant is no longer the installed one — the object the guard
   nominally protects fails the harness;
-- `~Pipe_guard` then restores a `current_access` pointer that was captured on the *original*
+- `~Access_guard` then restores a `current_access` pointer that was captured on the *original*
   thread, writing a foreign stack address into the resuming thread's thread-local.
 
 So the rule protects an invariant the **implementation** relies on, not a hazard the caller
@@ -95,7 +95,7 @@ grants already follow:
   whatever the segment ended with at `exit_segment`. A `Relaxed_scope` opened in a coroutine
   body is therefore still in effect after the body resumes on another worker, and does not
   leak onto that worker. Restoring a saved *value* is thread-agnostic, which is what makes
-  this correct where `Pipe_guard`'s saved *pointer* is not (§3).
+  this correct where `Access_guard`'s saved *pointer* is not (§3).
 - **Into gated sub-work.** `with_inherited_access` captures the launcher's relaxation
   alongside its grant snapshot, so the structurally-gated launches — `ts::nested` and
   `Task_scope` children — run under it. A detached `ts::launch` inherits neither the grant
@@ -235,7 +235,7 @@ site is: test the hazard condition first, and consult the policy only on the bra
 about to fatal.
 
 ```cpp
-if (pipe_guard_depth > 0 && rule_enforced(Rule::await_under_guard))
+if (access_guard_depth > 0 && rule_enforced(Rule::await_under_guard))
     ts::fatal(...);
 ```
 
