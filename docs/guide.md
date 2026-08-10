@@ -1184,6 +1184,10 @@ This rule has no runtime opt-out — it protects an invariant the implementation
 relies on, not a hazard you might know is absent (§8.3). A build can drop the
 check entirely with `TS_ENABLED_RULES`.
 
+A worked example is `sample/scope_access.cpp` — a tiny bank showing all three
+shapes: single-object read-modify-write under a held grant, interest across
+several accounts one-by-one, and a two-account transfer taken together.
+
 ### 8.3 Rule policy: turning a check off
 
 The waiting rules are enforced by runtime checks that abort. Sometimes you uphold a rule by
