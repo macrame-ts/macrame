@@ -41,7 +41,7 @@ void test_stage_publish_read()
 
 void test_stability_before_publish()
 {
-    // The whole point: staged writes are invisible until the publish.
+    // Staged writes are invisible until the publish.
     ts::Versioned<int> v{ ts::Named{} };
     auto rec = v.recorder();
     rec.stage([](int& x) { x = 42; });
@@ -64,7 +64,7 @@ void test_empty_publish_noop()
 
 void test_replay_resync_invariant()
 {
-    // Deltas accumulate across publishes. If the shadow were NOT resynced after
+    // Deltas accumulate across publishes. If the shadow were not resynced after
     // each swap, publish N+1 would apply its delta to a version N-1 shadow and
     // readers would observe dropped history.
     ts::Versioned<int> v{ ts::Named{} };   // Resync::replay
@@ -107,7 +107,7 @@ void test_copy_custom_fn()
     v.publish().sync();
     TS_CHECK(v.read([](const int& x) { return x; }).sync() == 12);
     // `publish().sync()` returns at the swap; the copy runs in the trailing
-    // resync. An EMPTY publish is a resync fence (its phase 1 gates on the
+    // resync. An empty publish is a resync fence (its phase 1 gates on the
     // previous shadow_ready), so sync it before counting.
     v.publish().sync();
     TS_CHECK(copies.load() == 2);
@@ -137,7 +137,7 @@ void test_divergence_check_passes_for_deterministic()
     for (int i = 0; i < 5; ++i)
     {
         rec.stage([i](int& x) { x += i; });
-        v.publish().sync();   // hash compare after every replay resync -- must not fatal
+        v.publish().sync();   // hash compare after every replay resync - must not fatal
     }
     TS_CHECK(v.read([](const int& x) { return x; }).sync() == 0 + 1 + 2 + 3 + 4);
 }
@@ -184,7 +184,7 @@ void test_cancelled_publish_retains_commands()
     rec.stage([](int& x) { x = 7; });
 
     // A cancelled token skips the version step; the returned task is a phase
-    // gate, so it COMPLETES (unlike a cancelled pipe job) and the commands stay
+    // gate, so it completes (unlike a cancelled pipe job) and the commands stay
     // staged for the next publish.
     ts::Task<void> p = v.publish({ .token = src.token() });
     p.sync();
@@ -197,10 +197,10 @@ void test_cancelled_publish_retains_commands()
 
 void test_reader_overlaps_resync()
 {
-    // The phase-split's point: after the swap, the resync runs as a pipe READ
-    // job, so a reader of the new version is admitted WHILE the resync runs.
+    // The phase-split's point: after the swap, the resync runs as a pipe read
+    // job, so a reader of the new version is admitted while the resync runs.
     // The divergence hook doubles as the probe: its first call parks inside the
-    // resync until the reader arrives -- the gate is met only if both were in
+    // resync until the reader arrives - the gate is met only if both were in
     // flight at once.
     tests::Parallel_gate gate{ 2 };
     std::atomic<int> hash_calls{ 0 };
@@ -224,7 +224,7 @@ void test_reader_overlaps_resync()
     }).sync();
 
     TS_CHECK(gate.met());   // reader ran concurrently with the resync
-    TS_CHECK(seen == 5);    // and saw the NEW version
+    TS_CHECK(seen == 5);    // and saw the new version
 }
 
 // --- concurrency -----------------------------------------------------------------
@@ -246,7 +246,7 @@ void test_concurrent_readers_and_publishes()
             while (!stop.load())
             {
                 int x = v.read([](const int& val) { return val; }).sync();
-                // Every observed value must be a PUBLISHED version: 0..publishes.
+                // Every observed value must be a published version: 0..publishes.
                 if (x < 0 || x > publishes)
                     bad.fetch_add(1);
             }
@@ -281,7 +281,7 @@ void test_graph_stale_then_fresh()
     auto producer = g.add_node(ts::Named{}, [rec = v.recorder()](std::vector<int>&) mutable
     {
         rec.stage([](int& x) { x += 1; });
-    }, seen_after);   // touches seen_after only to have SOME declared access
+    }, seen_after);   // touches seen_after only to have some declared access
     auto flip = g.add_node(ts::Named{}, ts::publish_body(v), v.state());
     flip.after(producer);
     auto after = g.add_node(ts::Named{}, [](const int& x, std::vector<int>& log) { log.push_back(x); },
@@ -325,9 +325,9 @@ void test_publish_sync_then_graph_flip()
     TS_CHECK(v.read([](const int& x) { return x; }).sync() == 2 * rounds);
 }
 
-// The LEGAL single-publisher direction (the fatal reverse is versioned_mixed_publish):
+// The legal single-publisher direction (the fatal reverse is versioned_mixed_publish):
 // a dynamic fire-and-forget publish() arriving while a graph flip is still unresolved
-// CHAINS behind the flip -- no fatal -- and its write lands after the flip's version.
+// chains behind the flip - no fatal - and its write lands after the flip's version.
 void test_dynamic_publish_chains_behind_flip()
 {
 #if TS_SAFETY_CHECKS
@@ -338,8 +338,8 @@ void test_dynamic_publish_chains_behind_flip()
     std::atomic<int> apply_count{ 0 };
     std::atomic<bool> release{ false };
 
-    // The flip publishes version "100". The command also blocks its OWN resync (the
-    // second application) so the flip stays unresolved -- chain_ not-done -- giving a
+    // The flip publishes version "100". The command also blocks its own resync (the
+    // second application) so the flip stays unresolved - chain_ not-done - giving a
     // deterministic mid-flip window; phase 1 (first application) does not block.
     {
         auto rec = v.recorder();
@@ -360,7 +360,7 @@ void test_dynamic_publish_chains_behind_flip()
     g.execute().sync();   // flip runs phases 1-2 and installs its shadow_ready; its resync
                           // is now blocked -> chain_ stays not-done
 
-    // In that window a dynamic publish must CHAIN behind the flip, not fatal.
+    // In that window a dynamic publish must chain behind the flip, not fatal.
     ts::Task<void> dyn;
     {
         auto rec = v.recorder();
@@ -440,7 +440,7 @@ void run_versioned_tests()
     run("versioned: cancelled publish retains commands", test_cancelled_publish_retains_commands);
     run_if(with_harness, "TS_SAFETY_CHECKS=0 (the probe is the divergence hook)", "versioned: reader overlaps the resync", test_reader_overlaps_resync);
     run("versioned: concurrent readers during publishes", test_concurrent_readers_and_publishes);
-    run("versioned: graph -- stale before flip, fresh after", test_graph_stale_then_fresh);
+    run("versioned: graph - stale before flip, fresh after", test_graph_stale_then_fresh);
     run("versioned: synced publish then graph flip is legal", test_publish_sync_then_graph_flip);
     run("versioned: dynamic publish chains behind an in-flight flip", test_dynamic_publish_chains_behind_flip);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "versioned: flip catching an unresolved publish is fatal", test_mixed_publish_race_is_fatal);

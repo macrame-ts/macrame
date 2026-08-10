@@ -15,7 +15,7 @@ using tests::wait_until;
 namespace
 {
 
-// Every item runs exactly once, writing its own slot -- no data race, and the sum is right.
+// Every item runs exactly once, writing its own slot - no data race, and the sum is right.
 void check_each_item(ts::Balance balance)
 {
     constexpr int n = 10000;
@@ -146,7 +146,7 @@ void test_parallel_for_priorities()
     TS_CHECK(total.load() == static_cast<long long>(n) * (n - 1) / 2);
 }
 
-// The resolution rule (`detail::resolved_priority` -- the exact value every helper submit
+// The resolution rule (`detail::resolved_priority` - the exact value every helper submit
 // gets): unset inherits the calling task's priority via the `current_task` TLS, `normal`
 // outside a task; an explicit option always wins.
 void test_parallel_for_priority_inheritance()
@@ -202,7 +202,7 @@ void set_flag(void* p)
 // worker, free exactly one and feed it a `low` dummy (popping a low task resets that
 // worker's starvation-valve counter, so the order below is independent of prior suite
 // history), catch it again, queue one single-helper `async_parallel_for` per class, then
-// release it alone -- it drains the global queues sequentially, in strict class order,
+// release it alone - it drains the global queues sequentially, in strict class order,
 // while the other workers stay held (no concurrent pops to interleave).
 void test_parallel_for_priority_order()
 {
@@ -218,7 +218,7 @@ void test_parallel_for_priority_order()
         sched.submit(&hold_worker, holds[static_cast<std::size_t>(i)].get());
     wait_until([&entered, workers] { return entered.load() == workers; });
 
-    // Free one worker; it pops the dummy (via the low path or the valve -- both reset the
+    // Free one worker; it pops the dummy (via the low path or the valve - both reset the
     // valve counter) and idles.
     holds[0]->go.store(true, std::memory_order_release);
     std::atomic<bool> low_ran{ false };
@@ -230,7 +230,7 @@ void test_parallel_for_priority_order()
     wait_until([&entered, workers] { return entered.load() == workers + 1; });
 
     // One single-item, single-helper loop per class. The middle one leaves the priority
-    // unset -- inherited from a non-task caller it must resolve to `normal` and land
+    // unset - inherited from a non-task caller it must resolve to `normal` and land
     // between the explicit `high` and `low` (end-to-end inherit check).
     std::atomic<int> idx{ 0 };
     int order[3] = { -1, -1, -1 };

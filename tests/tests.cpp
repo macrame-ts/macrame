@@ -48,7 +48,7 @@ void run_all_tests()
 }
 
 // Death scenario body: acquire a `Guarded` write guard, then `co_await` other work while
-// still holding it -- the pipe-held-across-suspension anti-pattern. Runs eagerly, so the fatal
+// still holding it - the pipe-held-across-suspension anti-pattern. Runs eagerly, so the fatal
 // fires during the call below, before `sync()`. `never` is never triggered, so `co_await never`
 // always reaches `await_suspend` (the detector) rather than escaping.
 static ts::Task<int> coro_await_under_guard(ts::Guarded<tests::Counter>& w, ts::Signal& never)
@@ -60,7 +60,7 @@ static ts::Task<int> coro_await_under_guard(ts::Guarded<tests::Counter>& w, ts::
 
 // Death scenario body (`stale_inherited_grant`): created inside a node body, so the frame
 // inherits the node's grant; suspended on `go` (a non-nested stray), it resumes only after
-// the node completed and released its hold -- the write then runs under a stale inherited
+// the node completed and released its hold - the write then runs under a stale inherited
 // grant and the harness fatals.
 static ts::Task<void> stale_stray(tests::Counter& k, ts::Signal go)
 {
@@ -69,14 +69,14 @@ static ts::Task<void> stale_stray(tests::Counter& k, ts::Signal go)
 }
 
 // Death scenario body (`circular_wait`): a coroutine graph-node body that touches its
-// declared object, waits until BOTH nodes hold their grants (the flag sync forces the
-// overlap), then awaits the OTHER node's object -- the suspended-ABBA shape. Each deferred
+// declared object, waits until both nodes hold their grants (the flag sync forces the
+// overlap), then awaits the other node's object - the suspended-ABBA shape. Each deferred
 // acquire records a wait edge; whichever inserts second closes the cycle and fatals.
 static std::atomic<int> abba_holding{ 0 };
 static ts::Task<void> abba_body(tests::Counter& own, ts::Guarded<tests::Counter>& other)
 {
-    // The rank rule (6.14) makes this shape UNREPRESENTABLE -- with valid ranks the two
-    // awaits cannot both climb -- so constructing it to test the circular-wait detector means
+    // The rank rule (6.14) makes this shape unrepresentable - with valid ranks the two
+    // awaits cannot both climb - so constructing it to test the circular-wait detector means
     // opting out of the rank rule for the body. That is the honest relationship between the
     // two: rank prevents, the detector is what remains for programs that opted out.
     ts::Relaxed_scope relax{ ts::Rule::access_rank };
@@ -89,8 +89,8 @@ static ts::Task<void> abba_body(tests::Counter& own, ts::Guarded<tests::Counter>
 }
 
 // Death scenario body (`await_settled_under_guard`, TODO 6.11): holds a write guard and
-// awaits a task that is ALREADY SETTLED. Before the check was hoisted to `co_await` entry
-// this ran clean -- `await_ready` was true, so `await_suspend` (where the fatal lived) was
+// awaits a task that is already settled. Before the check was hoisted to `co_await` entry
+// this ran clean - `await_ready` was true, so `await_suspend` (where the fatal lived) was
 // never reached, and the illegal hold-then-await shipped undiagnosed on every run where
 // timing was friendly. Companion: `test_await_under_guard_split` (coroutine_tests).
 static ts::Task<void> await_settled_under_guard(ts::Guarded<tests::Counter>& w, ts::Task<int> settled)
@@ -150,7 +150,7 @@ void run_death_scenario(const char* name)
             // Queues behind this node's own write hold -> never admitted. The sync
             // diagnostic fires the sharp same-object message and aborts on the worker.
             // (The bounded wait below is the pre-6.10 fallback, when the diagnostic was a
-            // report rather than a fatal; it keeps a regression from HANGING the parent.)
+            // report rather than a fatal; it keeps a regression from hanging the parent.)
             a.async([](int& v) { v = 1; }).sync();
         }, a);
         g.compile();
@@ -159,7 +159,7 @@ void run_death_scenario(const char* name)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         if (ts::ensure_failure_count() != 0)
             ts::fatal("sync_own_object_deadlock: sharp diagnostic observed");
-        // Diagnostic never fired: fall through and exit 0 -- the parent's
+        // Diagnostic never fired: fall through and exit 0 - the parent's
         // `expect_death` then fails the test instead of hanging.
     }
 #endif
@@ -206,7 +206,7 @@ void run_death_scenario(const char* name)
     {
         // A detached `ts::launch` inherits no grant (docs/coroutine-first.md §2): a child that
         // touches the launcher's guarded data runs under an empty context, so the harness
-        // faults on the FIRST access -- deterministically, in every checked run. (Contrast the
+        // faults on the first access - deterministically, in every checked run. (Contrast the
         // stale-grant scenario above, where an inherited grant lets an early touch pass and
         // only a late touch faults; a detached child has no such timing window.)
         ts::Guarded<Counter> c{ ts::Named{} };
@@ -219,9 +219,9 @@ void run_death_scenario(const char* name)
     }
     else if (std::strcmp(name, "graph_lend_mode_conflict") == 0)
     {
-        // The outer node declares READ on `x`; the inner graph writes it. A read grant
+        // The outer node declares read on `x`; the inner graph writes it. A read grant
         // cannot be lent to a writer, and upgrading would re-acquire behind the caller's
-        // own hold -- fatal at the nested `execute()`, not a deadlock later.
+        // own hold - fatal at the nested `execute()`, not a deadlock later.
         ts::Guarded<int> x{ ts::Named{}, 0 };
         ts::Static_task_graph inner;
         inner.add_node(ts::Named{}, [](int& v) { v += 1; }, x);
@@ -241,7 +241,7 @@ void run_death_scenario(const char* name)
         // Lending while an earlier un-awaited nested run of the caller is still in flight: that
         // run is executing under the same grant, so it could race the lent-to graph on the lent
         // object. `hold` never releases, so the first run stays live (its node spin-waits rather
-        // than blocking on a `Signal` -- an in-task `sync()` is itself fatal, which would kill it
+        // than blocking on a `Signal` - an in-task `sync()` is itself fatal, which would kill it
         // for the wrong reason); the second run's `execute()` fatals on the non-quiet scope.
         ts::Guarded<int> x{ ts::Named{}, 0 };
         static std::atomic<bool> hold{ true };   // never cleared: the first run stays live
@@ -265,7 +265,7 @@ void run_death_scenario(const char* name)
     }
     else if (std::strcmp(name, "graph_execute_in_flight") == 0)
     {
-        // One run at a time: a node calling `execute()` on its OWN graph re-enters while the
+        // One run at a time: a node calling `execute()` on its own graph re-enters while the
         // first run is still in flight (the shared `Run_state` would be overwritten).
         ts::Guarded<int> x{ ts::Named{}, 0 };
         ts::Static_task_graph g;
@@ -341,7 +341,7 @@ void run_death_scenario(const char* name)
     else if (std::strcmp(name, "await_cancelled_value") == 0)
     {
         // Awaiting a cancelled Task<R> with non-void R: no result to produce, no
-        // exceptions -- a precondition, mirroring sync(). Companion:
+        // exceptions - a precondition, mirroring sync(). Companion:
         // `test_await_cancelled_checked` (coroutine_tests).
         ts::Cancellation_source src;
         src.request_cancel();
@@ -401,7 +401,7 @@ void run_death_scenario(const char* name)
         g.add_node(ts::Named{}, [&d](int&)
         {
             // A detached coroutine inherits the node's write grant (its promise snapshots the
-            // ambient context at creation) but is NOT the grant holder (`writer_owner` is the
+            // ambient context at creation) but is not the grant holder (`writer_owner` is the
             // node, `current_task` is the frame); its commit() would enqueue behind the node's
             // own hold -> the misuse diagnostic fatals at the call (during the eager body).
             [&d]() -> ts::Task<void> { d.commit(); co_return; }();
@@ -481,8 +481,8 @@ void run_death_scenario(const char* name)
     {
         // A dynamic publish whose phase 1 is parked (the staged command spins on
         // a flag) is invisible to the pipe; a graph flip that catches it must
-        // FATAL instead of racing its shadow apply. Pre-enforcement this child
-        // drains and exits normally -- the parent's expect_death then fails.
+        // fatal instead of racing its shadow apply. Pre-enforcement this child
+        // drains and exits normally - the parent's expect_death then fails.
         static std::atomic<bool> phase1_running{ false };
         static std::atomic<bool> release{ false };
         {
@@ -536,7 +536,7 @@ void run_death_scenario(const char* name)
         ts::Guarded<Counter> b{ ts::Named{ "objB" } };
         ts::Static_task_graph graph;
         // Named, so the fatal identifies both participants by node rather than by block
-        // pointer -- the coroutine body's frame inherits its node's identity.
+        // pointer - the coroutine body's frame inherits its node's identity.
         graph.add_node("nodeA", [&b](Counter& own) { return abba_body(own, b); }, a);
         graph.add_node("nodeB", [&a](Counter& own) { return abba_body(own, a); }, b);
         graph.compile();
@@ -547,7 +547,7 @@ void run_death_scenario(const char* name)
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
         // The shape tier 2 structurally cannot see: a node suspends on a plain task await
         // (a Signal nobody triggers) while holding its declared grant. No pipe suspension,
-        // so no wait edge -- only the suspension registry has it. The report should
+        // so no wait edge - only the suspension registry has it. The report should
         // name the node, what it holds, and what it awaits.
         ts::Guarded<int> held{ ts::Named{ "held_object" }, 0 };
         ts::Signal never{ "never_triggered" };
@@ -565,9 +565,9 @@ void run_death_scenario(const char* name)
     else if (std::strcmp(name, "access_rank_descends") == 0)
     {
 #if TS_RULE_ON(TS_RULE_ACCESS_RANK)
-        // A node holds the HIGHER-ranked object and dynamically awaits a lower one: the
+        // A node holds the higher-ranked object and dynamically awaits a lower one: the
         // await descends, which is what makes a wait cycle representable. Rejected on the
-        // first offending await, deterministically -- no second half of a cycle needed.
+        // first offending await, deterministically - no second half of a cycle needed.
         ts::Guarded<Counter> high{ ts::Named{ "high" }, ts::Rank{ 30 } };
         ts::Guarded<Counter> low{ ts::Named{ "low" }, ts::Rank{ 10 } };
         ts::Static_task_graph g;
@@ -584,7 +584,7 @@ void run_death_scenario(const char* name)
     {
 #if TS_RULE_ON(TS_RULE_ACCESS_RANK)
         // The strict default: the held object has no declared rank, so no dynamic await is
-        // permitted while it is held -- there is no order to climb.
+        // permitted while it is held - there is no order to climb.
         ts::Guarded<Counter> held{ ts::Named{ "held" } };
         ts::Guarded<Counter> target{ ts::Named{ "target" }, ts::Rank{ 50 } };
         ts::Static_task_graph g;
@@ -636,7 +636,7 @@ void run_death_scenario(const char* name)
     else if (std::strcmp(name, "signal_reset_awaited") == 0)
     {
         // Re-arming a Signal while a coroutine is suspended on it: the signal has not
-        // settled, so `reset()` hits the not-settled fatal -- the awaited-side variant of
+        // settled, so `reset()` hits the not-settled fatal - the awaited-side variant of
         // `reset_unsettled`. Companion: `test_signal_reset` (settle, then reset).
         ts::Signal s;
         ts::Task<void> t = await_signal(s);   // suspends (never triggered)

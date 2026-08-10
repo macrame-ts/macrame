@@ -1,22 +1,22 @@
 #pragma once
 
 // The deadlock report's third tier (docs/waiting-rule-policy.md §7): a registry of every
-// LIVE suspension -- which task is suspended, what it awaits, and what it holds. The
+// live suspension - which task is suspended, what it awaits, and what it holds. The
 // quiescence net (`Rule::deadlock_net`) can say "nothing can make progress"; this says who
 // was stuck on what, which is the difference between a report and a debugging session.
 //
 // It exists because tier 2 (the circular-wait edge registry) only records suspensions
 // that hold a grant. The shape it misses is the two-hop cycle: task N holds G1 and awaits foreign
-// task T, while T awaits G1 -- T holds nothing, so tier 2 never sees it, and neither
+// task T, while T awaits G1 - T holds nothing, so tier 2 never sees it, and neither
 // suspension is on a pipe from N's side.
 //
 // Cost, and why it is on by default outside shipping. Per suspension: one thread-local read
-// and a doubly-linked insert under a SHARDED mutex, plus the same at resume. Sharding is
-// what keeps it flat -- a single global mutex touched by every suspend and every resume is
+// and a doubly-linked insert under a sharded mutex, plus the same at resume. Sharding is
+// what keeps it flat - a single global mutex touched by every suspend and every resume is
 // a scaling hazard, not a constant one, and this is a library whose whole point is that
 // many workers suspend at once. A record is inserted by the suspending thread and removed by
-// the RESUMING thread (a coroutine resumes wherever its awaited work settled), so the shard
-// mutex is genuinely needed -- the tempting lock-free per-thread list does not apply here.
+// the resuming thread (a coroutine resumes wherever its awaited work settled), so the shard
+// mutex is genuinely needed - the tempting lock-free per-thread list does not apply here.
 // Records live inside the awaiter, which lives inside the coroutine frame, so nothing is
 // allocated.
 //
@@ -49,7 +49,7 @@ struct Suspension_record
     Named awaited_task{ nullptr };    // set when awaiting a task
     const Pipe* awaited_pipe = nullptr;   // set when awaiting an object's turn/guard
 
-    // Held pipe-backed grants, as their epoch sources (the report resolves them to names --
+    // Held pipe-backed grants, as their epoch sources (the report resolves them to names -
     // the pipes outlive the report by construction: we are wedged, nothing is being freed).
     static constexpr int max_held = 4;
     const std::atomic<std::uint64_t>* held[max_held] = {};
@@ -68,9 +68,9 @@ struct alignas(64) Suspension_shard
 
 inline Suspension_shard suspension_shards[suspension_shard_count];
 
-// Shard by the RECORD's address, not by the suspending thread. A record is linked by the
-// suspending thread and unlinked by the RESUMING one -- a coroutine resumes wherever its
-// awaited work settled -- so a per-thread shard would put the two halves of every
+// Shard by the record's address, not by the suspending thread. A record is linked by the
+// suspending thread and unlinked by the resuming one - a coroutine resumes wherever its
+// awaited work settled - so a per-thread shard would put the two halves of every
 // suspension on different threads hammering one mutex and one cache line. Keying on the
 // record makes both halves hit the same shard while distinct suspensions spread out; the
 // record lives in a coroutine frame, so addresses are naturally spread by the allocator.
@@ -112,7 +112,7 @@ inline void suspension_link(Suspension_record& record) noexcept
     shard.head = &record;
 }
 
-// Unlinks on the RESUMING thread, which is generally not the one that linked -- hence the
+// Unlinks on the resuming thread, which is generally not the one that linked - hence the
 // record remembering its shard.
 inline void suspension_unlink(Suspension_record& record) noexcept
 {
@@ -144,7 +144,7 @@ inline int suspension_count() noexcept
 }
 
 // RAII bracket for an awaiter: link on construction, unlink on destruction. The awaiters
-// use the explicit calls instead (their link and unlink live in different functions --
+// use the explicit calls instead (their link and unlink live in different functions -
 // `await_suspend` and `await_resume`), so this is for straight-line uses.
 class Suspension_scope
 {
@@ -161,7 +161,7 @@ private:
     Suspension_record record_;
 };
 
-#else   // TS_SUSPENSION_REGISTRY == 0 -- everything compiles away, including the storage.
+#else   // TS_SUSPENSION_REGISTRY == 0 - everything compiles away, including the storage.
 
 struct Suspension_record
 {

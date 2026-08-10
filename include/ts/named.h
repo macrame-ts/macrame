@@ -1,8 +1,8 @@
 #pragma once
 
-// `ts::Named` -- the one debug-identity type, for graph nodes, guarded objects and tasks.
+// `ts::Named` - the one debug-identity type, for graph nodes, guarded objects and tasks.
 //
-// A name is either a static-storage literal or the CALL SITE that created the entity:
+// A name is either a static-storage literal or the call site that created the entity:
 //
 //   graph.add_node(ts::Named{ "physics" }, &tick_physics, world.bodies);   // or "physics"
 //   ts::Guarded<Physics_world> world{ ts::Named{ "physics" }, entity_count };
@@ -13,14 +13,14 @@
 // defaulted `std::source_location` argument is evaluated at the point of the `Named{}`
 // expression, so the site is the user's, not this header's.
 //
-// THE RULE for library code: a defaulted `source_location` captures the CALLER of the
-// function that declares it, so it must be declared on the OUTERMOST function the user
+// The rule for library code: a defaulted `source_location` captures the caller of the
+// function that declares it, so it must be declared on the outermost function the user
 // calls. Capture once at each public boundary and pass the resulting `Named` explicitly
-// down every internal layer -- an inner helper with its own defaulted parameter captures
+// down every internal layer - an inner helper with its own defaulted parameter captures
 // the library header instead, and the name is worthless. `tests/named_tests.cpp` asserts
 // that captured names point into the test file; that test is the whole guarantee.
 //
-// The literal is referenced, not copied -- pass a literal, or something that outlives the
+// The literal is referenced, not copied - pass a literal, or something that outlives the
 // entity. Only `file` and `line` are kept from the `source_location` (never
 // `function_name`), so a `Named` is three words.
 
@@ -35,7 +35,7 @@ namespace ts
 struct Named
 {
     // From a literal, at the call site. Implicit, so `add_node("physics", ...)` works
-    // bare; the types that REQUIRE a name constrain their parameter to a real `Named` so
+    // bare; the types that require a name constrain their parameter to a real `Named` so
     // an accidental `Guarded<std::string> g{"hello"}` cannot silently become a name.
     Named(const char* name, std::source_location site = std::source_location::current()) noexcept
         : literal(name)

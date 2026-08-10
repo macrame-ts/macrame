@@ -35,7 +35,7 @@ void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closur
 // re-resolve (Opt 1 in docs/graph-regression-callgrind.md §4).
 void submit_ready_on(Scheduler& scheduler, Task_ptr block);
 
-// `submit_borrowed` (task.h) to an explicitly resolved scheduler -- the cached-scheduler
+// `submit_borrowed` (task.h) to an explicitly resolved scheduler - the cached-scheduler
 // borrowed dispatch a graph run uses for its object-free nodes (Opt 1 + Opt 2).
 void submit_borrowed_on(Scheduler& scheduler, Task_control_block* blk);
 
@@ -43,7 +43,7 @@ void submit_borrowed_on(Scheduler& scheduler, Task_control_block* blk);
 // Entries are admitted in FIFO order; consecutive readers run concurrently, a writer runs
 // alone (no readers, no other writer). Different objects have independent pipes and run in
 // parallel. Non-blocking: callers never wait; admission is completion-driven, and an
-// admitted entry's turn fires `release()` on its owner -- the pipe is a prerequisite
+// admitted entry's turn fires `release()` on its owner - the pipe is a prerequisite
 // source for the block machinery, not a dispatcher. The queue is the tasks' own embedded
 // `Pipe_link`s threaded intrusively, so queueing allocates nothing.
 struct Pipe
@@ -59,7 +59,7 @@ struct Pipe
     // `Access_context`). Seqlock-style parity: bumped at every write-grant acquire and
     // release (always under `mutex`), so it is odd while a writer holds and even during
     // reader eras. Reader
-    // acquires/releases do not bump -- a read grant goes stale exactly when a writer
+    // acquires/releases do not bump - a read grant goes stale exactly when a writer
     // acquires after its capture, which is the actual safety condition. Fully compiled
     // out with the harness (the gating convention: safety-only state carries no
     // shipping cost; mixed-config TUs are an ODR violation caught by the link-time
@@ -74,26 +74,26 @@ struct Pipe
 #endif
     // Identity of the owning `Guarded`/`Versioned` (`ts::Named`): a literal or the
     // construction site, referenced not copied. Consumed by the graph's DOT dump (edge
-    // tooltips), the trace, and the access diagnostics; kept in all builds (three words --
+    // tooltips), the trace, and the access diagnostics; kept in all builds (three words -
     // a handful of objects, and the consumers are shipping-capable).
     Named debug_name{ nullptr };
 #if TS_RULE_ON(TS_RULE_ACCESS_RANK)
-    // The object's declared `ts::Rank`; 0 = unranked (the strict default -- see `ts::Rank`).
+    // The object's declared `ts::Rank`; 0 = unranked (the strict default - see `ts::Rank`).
     unsigned rank = 0;
 #endif
 
-    // The block currently holding this pipe's WRITE grant, null outside a write window
+    // The block currently holding this pipe's write grant, null outside a write window
     // (docs/pipe-rebase.md §0.2). Always-on: behavior keys off it (`Deferred::commit`
-    // applies inline when the caller IS the holder), so it cannot live behind
+    // applies inline when the caller is the holder), so it cannot live behind
     // `TS_SAFETY_CHECKS`. Written under `mutex` at write admission/release (plus the
     // graph's direct write handoff, which runs inside an exclusive write window); read
-    // lock-free by the ownership check. Identity only -- never dereferenced.
+    // lock-free by the ownership check. Identity only - never dereferenced.
     std::atomic<Task_control_block*> writer_owner{ nullptr };
 
     // Blocks until the pipe is fully drained and nothing is in flight. Teardown-only
     // (`~Guarded`). Safe against the completing job that signals it: the notify is done
     // under `mutex` (`release_and_redispatch`), so this waiter cannot rewake and destroy
-    // the pipe until it re-acquires `mutex` after the signaler's notify returns -- no
+    // the pipe until it re-acquires `mutex` after the signaler's notify returns - no
     // UE-`FPipe`-class refcounted drain event needed (that race is a lock-free-notify
     // artifact). See `release_and_redispatch`.
     void wait_until_idle()
@@ -108,7 +108,7 @@ struct Pipe
 
 // Grant-epoch source for `Access_context::add`: the pipe's `write_epoch` under
 // `TS_SAFETY_CHECKS`, null with the harness compiled out (the three-argument `add`
-// ignores a null source). Lets the capture sites -- which compile in both configs --
+// ignores a null source). Lets the capture sites - which compile in both configs -
 // name the fully-gated field through one spelling.
 inline const std::atomic<std::uint64_t>* pipe_epoch([[maybe_unused]] const Pipe& pipe) noexcept
 {
@@ -131,17 +131,17 @@ inline unsigned pipe_rank([[maybe_unused]] const Pipe& pipe) noexcept
 }
 
 // Enter a pipe task's first link into its pipe's queue (starting the sequential canonical
-// cascade for a multi-object task -- each admitted turn enters the owner's next link and
+// cascade for a multi-object task - each admitted turn enters the owner's next link and
 // fires `release(owner)`; the last turn's release dispatches through the standard
 // `dispatch_ready`). The block must have its links bound (`bind_pipe_link`) and
-// `num_locks` seeded with `pipe_count`. `record`, when non-null, receives the block WHILE
-// STILL UNDER the first pipe's mutex -- the atomic enqueue-and-record `Deferred::commit`
+// `num_locks` seeded with `pipe_count`. `record`, when non-null, receives the block while
+// still under the first pipe's mutex - the atomic enqueue-and-record `Deferred::commit`
 // needs so its recorded handle can never lag the pipe's FIFO order (the race the deleted
 // `commit_mutex_` used to close).
 void pipe_enter_first(Task_control_block* blk, Task_ptr* record);   // default arg on the task.h declaration
 
 // Advance (release) every entered link of a settled pipe task. The settle-must-advance-
-// links contract: every pipe-task creation site must route its settle through this --
+// links contract: every pipe-task creation site must route its settle through this -
 // `make_piped_executable` installs it as `on_complete`; the graph's `graph_node_completed`
 // calls it first. A missed call wedges the affected pipes.
 void advance_pipe_links(Task_control_block* blk);
@@ -149,13 +149,13 @@ void advance_pipe_links(Task_control_block* blk);
 // `on_complete` hook form of the above, for tasks whose settle needs nothing else.
 void pipe_links_on_complete(Task_control_block* blk);
 
-// Acquire a pipe as a held grant in `mode` (the coroutine guards' primitive -- everything
+// Acquire a pipe as a held grant in `mode` (the coroutine guards' primitive - everything
 // else rides links on its own block): a `read_only` hold joins concurrent readers, a
 // `read_write` hold is exclusive, released only by `pipe_release`. Returns true if
 // acquired in-call (no callback fires); false if deferred, in which case `on_acquired`
 // runs once the pipe drains to it (FIFO), scheduled on `scheduler`. `owner` is the
-// grant-holder block a WRITE hold publishes through `Pipe::writer_owner` (null when no
-// block identity exists). A deferred hold allocates one small queue node -- the one
+// grant-holder block a write hold publishes through `Pipe::writer_owner` (null when no
+// block identity exists). A deferred hold allocates one small queue node - the one
 // allocating pipe path.
 bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_function<void()> on_acquired,
                   Task_control_block* owner = nullptr);
@@ -165,11 +165,11 @@ void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode);
 
 #if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
 // Waits-for cycle detector (docs/coroutine-first.md §2). At a genuine suspension on a
-// pipe -- a deferred coroutine guard acquire, or awaiting a pipe-job task -- the awaiters
+// pipe - a deferred coroutine guard acquire, or awaiting a pipe-job task - the awaiters
 // record one edge per held grant: {pipe the suspending context holds -> pipe it awaits}.
 // Held pipes come from `held`'s epoch sources; a cycle among the recorded edges is the
-// suspended-ABBA deadlock (no thread parks -- both frames are suspended and every worker
-// is free -- so nothing would ever diagnose it at runtime), fatal at the moment the
+// suspended-ABBA deadlock (no thread parks - both frames are suspended and every worker
+// is free - so nothing would ever diagnose it at runtime), fatal at the moment the
 // closing edge is inserted, naming both tasks and both objects. `ticket` identifies this
 // suspension (the awaiter's address); `waiter` is the suspending task's block for the
 // diagnostic (may be null off-task). Returns whether any edge was recorded, so the resume
@@ -177,7 +177,7 @@ void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode);
 // so a true deadlock is always caught by whichever awaiter inserts last. A granted-but-
 // not-yet-cleared edge (the grant fires between record and resume) can in principle close
 // a spurious cycle in that window; the window is a few instructions on the resume path and
-// requires a reader-share interleaving to matter -- accepted for a safety harness.
+// requires a reader-share interleaving to matter - accepted for a safety harness.
 bool circular_wait_record(const Access_context* held, const void* ticket, const Task_control_block* waiter,
                       Pipe* const* awaited, int count);
 void circular_wait_clear(const void* ticket) noexcept;
@@ -210,8 +210,8 @@ constexpr Access async_mode_of()
 }
 
 // SFINAE-friendly introspectability: a class with a single, non-template `operator()` (or a
-// function pointer/reference). A generic lambda's `operator()` is a TEMPLATE -- taking its
-// address without arguments is ill-formed -- so it lands in the `false` case and access modes
+// function pointer/reference). A generic lambda's `operator()` is a template - taking its
+// address without arguments is ill-formed - so it lands in the `false` case and access modes
 // are classified by the rvalue probe below instead of `Function_traits`.
 template<typename Fn, typename = void>
 struct has_introspectable_call : std::false_type {};
@@ -223,14 +223,14 @@ inline constexpr bool introspectable_v =
     has_introspectable_call<std::remove_cvref_t<Fn>>::value
     || std::is_function_v<std::remove_pointer_t<std::remove_cvref_t<Fn>>>;
 
-// Rvalue-bindability probe for GENERIC functors: position `P` gets an rvalue `T&&`, every
+// Rvalue-bindability probe for generic functors: position `P` gets an rvalue `T&&`, every
 // other position an lvalue `T&`. `auto&` cannot bind an rvalue ([temp.deduct.call]) ->
-// `read_write`; `const auto&` / `auto&&` can -> `read_only`. Declaration-level only -- the
+// `read_write`; `const auto&` / `auto&&` can -> `read_only`. Declaration-level only - the
 // body is never instantiated by the probe, so this is exact and SFINAE-safe. (An `auto&&`
 // parameter that mutates is mis-probed as a read, but Part of the same design makes that a
 // compile error: read positions are invoked with `const T&`, so `auto&&` deduces `const T&`
-// and the mutation fails to compile. The one undetectable residual is an `auto` BY-VALUE
-// parameter -- it probes as a read and copies; writes hit the copy. Documented in the guide.)
+// and the mutation fails to compile. The one undetectable residual is an `auto` by-value
+// parameter - it probes as a read and copies; writes hit the copy. Documented in the guide.)
 template<std::size_t P, std::size_t K, typename T>
 using Probe_arg_t = std::conditional_t<P == K, T&&, T&>;
 
@@ -248,7 +248,7 @@ constexpr Access probed_mode()
 }
 
 // Per-position access-corrected reference: a read position hands the body `const T&`, so a
-// mutating body under a read classification fails to COMPILE (structural const-correctness,
+// mutating body under a read classification fails to compile (structural const-correctness,
 // on top of the runtime harness); a write position hands `T&`.
 template<Access M, typename T>
 using Mode_ref_t = std::conditional_t<M == Access::read_only, const T&, T&>;
@@ -258,9 +258,9 @@ constexpr Mode_ref_t<M, T> mode_ref(T* p) { return *p; }
 
 // Deduced access mode of a single-object accessor `Fn` against payload `T`:
 //  - introspectable (non-generic lambda / functor / function pointer): the resource
-//    parameter's const-ness decides -- `const T&` = read_only, `T&` = read_write. A by-value
+//    parameter's const-ness decides - `const T&` = read_only, `T&` = read_write. A by-value
 //    or rvalue-ref resource parameter is rejected outright.
-//  - generic (templated `operator()`): the rvalue probe -- `const auto&`/`auto&&` = read_only,
+//  - generic (templated `operator()`): the rvalue probe - `const auto&`/`auto&&` = read_only,
 //    `auto&` = read_write. Token-arity aware (a trailing `Cancellation_token` is allowed).
 template<typename Fn, typename T>
 constexpr Access accessor_mode()
@@ -295,8 +295,8 @@ constexpr Access accessor_mode()
     }
 }
 
-// An executable pipe task: the `Executable` wrapper plus its embedded per-pipe links --
-// ONE allocation for block + result + body + links (docs/pipe-rebase.md §0.2). `exec` is
+// An executable pipe task: the `Executable` wrapper plus its embedded per-pipe links -
+// one allocation for block + result + body + links (docs/pipe-rebase.md §0.2). `exec` is
 // the first member and `Executable::core` its first, so the intrusive handle aliases the
 // whole wrapper as usual.
 template<typename Body, typename R, std::size_t N>
@@ -311,7 +311,7 @@ struct Piped_executable
 };
 
 // Build a pipe task with capacity for `N` links (bind them with `bind_pipe_link`, then set
-// `num_locks` to the bound count and enter). Installs `pipe_links_on_complete` -- the
+// `num_locks` to the bound count and enter). Installs `pipe_links_on_complete` - the
 // settle-must-advance-links contract's factory half (the graph's node blocks are the other
 // creation site; see `graph_node_completed`).
 template<typename R, std::size_t N, typename Body>
@@ -329,7 +329,7 @@ Task_ptr make_piped_executable(Body&& body, Cancellation_token token)
     return Task_ptr(&core);   // refcount 0 -> 1, owns the wrapper
 }
 
-// Bind the block's next link to (pipe, mode). Canonical order is the CALLER's contract:
+// Bind the block's next link to (pipe, mode). Canonical order is the caller's contract:
 // links must be bound in ascending pipe-address order (single-object trivially; the
 // multi-object builder sorts; the graph's `pipe_indices` are ascending over the
 // address-sorted `distinct_pipes_`).
@@ -343,13 +343,13 @@ inline void bind_pipe_link(Task_control_block* core, std::uint8_t index, Pipe& p
     core->pipe_count = static_cast<std::uint8_t>(index + 1);
 }
 
-// Try to run a job INLINE on the calling thread instead of enqueuing it (the `access` verb's
-// fast path). Admissible only when the pipe is immediately free for this mode -- no queued jobs
+// Try to run a job inline on the calling thread instead of enqueuing it (the `access` verb's
+// fast path). Admissible only when the pipe is immediately free for this mode - no queued jobs
 // (FIFO preserved) and the reader/writer rules allow: `read_only`
 // joins as a concurrent reader, `read_write` as an exclusive writer. On success runs the
 // block's body synchronously (the caller blocks for its duration), then releases,
 // re-dispatches the pipe, and returns true. On failure returns false and the caller
-// enqueues the same block. Caller-blocking + a nested access scope -- see `Guarded::async`.
+// enqueues the same block. Caller-blocking + a nested access scope - see `Guarded::async`.
 bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_ptr& block);
 
 // An `async` accessor functor may, like the bare-task path, opt into cooperative
@@ -360,10 +360,10 @@ bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_p
 template<typename Fn, typename A>
 concept Async_accessor = std::invocable<Fn, A> || std::invocable<Fn, A, const Cancellation_token&>;
 
-// The accessor gates: mode classification FIRST, invocability second -- the order is
+// The accessor gates: mode classification first, invocability second - the order is
 // load-bearing. `accessor_mode` classifies without ever instantiating a body
-// (introspection / the rvalue probe), while `Async_accessor` probes invocability --
-// and probing a GENERIC lambda deduces its return type, which instantiates the BODY;
+// (introspection / the rvalue probe), while `Async_accessor` probes invocability -
+// and probing a generic lambda deduces its return type, which instantiates the body;
 // for a mutating body probed against `const T&` that is a hard error, not a
 // substitution failure. Conjunctions short-circuit, so a failed mode gate rejects
 // cleanly at the caller and the probe is never evaluated for the wrong mode. The one
@@ -387,13 +387,13 @@ template<typename Fn, typename A>
 struct Async_result_sel<Fn, A, false> { using type = std::invoke_result_t<Fn, A>; };
 
 // Result type for the `M`-mode accessor overload, guarded twice. It is `void` (benign) unless
-// the functor is invocable AND actually CLASSIFIES as `M` -- so a rejected overload's trailing
+// the functor is invocable and actually classifies as `M` - so a rejected overload's trailing
 // return type never computes `invoke_result_t`. Two hard errors hide behind an unguarded
 // compute: MSVC evaluates a rejected overload's return type during overload resolution where
-// clang SFINAEs it away (C2794/C2938 on a non-invocable combination), and for a GENERIC lambda
-// a deduced return type requires instantiating the BODY -- instantiating a mutating body
+// clang SFINAEs it away (C2794/C2938 on a non-invocable combination), and for a generic lambda
+// a deduced return type requires instantiating the body - instantiating a mutating body
 // against `const T&` would hard-error inside the overload that was never going to be chosen.
-// LAYERED on purpose (not one `&&` expression): MSVC eagerly satisfies a concept-id in a
+// layered on purpose (not one `&&` expression): MSVC eagerly satisfies a concept-id in a
 // default template argument even when the left operand of `&&` is already false, which would
 // re-trigger the body instantiation the mode gate exists to prevent. Specialization makes the
 // invocability probe structurally unreachable on a mode mismatch.
@@ -415,12 +415,12 @@ using Accessor_result_t = typename Accessor_result<Fn, T, M>::type;
 } // namespace detail
 
 // `Guarded::access`/`async` and the multi-object `ts::access`/`ts::async` take `Access_options`
-// (defined in task.h) = `{token, priority}`. There is deliberately no run-inline knob -- the
+// (defined in task.h) = `{token, priority}`. There is deliberately no run-inline knob - the
 // verb chooses inline vs enqueued (`access` inline-when-free, `async` always enqueued), so the
 // impossible option can't be passed.
 
 // The only sanctioned way to touch a `T` across threads. You never receive a bare `T&`; you
-// hand a functor to `access()` (opportunistic -- inline when free) or `async()` (always
+// hand a functor to `access()` (opportunistic - inline when free) or `async()` (always
 // enqueued) and it runs once access has been granted. Access mode is deduced from the functor's
 // parameter const-ness:
 //   `functor(T&)`       -> `read_write`
@@ -441,13 +441,13 @@ class Guarded
     friend struct detail::Guarded_access;
 
 public:
-    // The ONLY constructor: a leading `ts::Named` -- a literal or `ts::Named{}` for the
-    // construction site -- then `T`'s constructor arguments as usual. Naming is required
+    // The only constructor: a leading `ts::Named` - a literal or `ts::Named{}` for the
+    // construction site - then `T`'s constructor arguments as usual. Naming is required
     // because the name is what every diagnostic, DOT tooltip and trace row about this
     // object prints; `ts::Named{}` is the deliberate "identify me by where I am written"
     // spelling and costs one token.
     //
-    // The first parameter must BE a `Named`, not something convertible to one:
+    // The first parameter must be a `Named`, not something convertible to one:
     // `Named(const char*)` is implicit (so `add_node("physics", ...)` reads well), and
     // without this constraint `Guarded<std::string> g{ "hello" }` would silently mean
     // "named hello, default-constructed string" rather than failing to compile.
@@ -463,7 +463,7 @@ public:
     }
 
     // With a declared lock rank (`ts::Rank`, access.h): required only for objects that are
-    // DYNAMICALLY AWAITED while another grant is held -- batch acquisition needs no rank.
+    // dynamically awaited while another grant is held - batch acquisition needs no rank.
     template<typename N, typename... Args>
         requires std::same_as<std::remove_cvref_t<N>, Named> && std::constructible_from<T, Args...>
     Guarded(N&& name, Rank rank, Args&&... args)
@@ -485,7 +485,7 @@ public:
     // `release_and_redispatch` on `pipe_`. `wait_until_idle` is what makes destroying the
     // object right after that `sync()` defined; without it the trailing release lands on
     // freed (or already recycled) pipe state. The waiter cannot outrun the signaler
-    // either -- the drain notify is done under `Pipe::mutex`, and nothing touches the pipe
+    // either - the drain notify is done under `Pipe::mutex`, and nothing touches the pipe
     // after that unlock.
     ~Guarded()
     {
@@ -508,7 +508,7 @@ public:
     Guarded& operator=(const Guarded&) = delete;
 
     // Two verbs run a functor under this object's access. Both deduce the mode from the
-    // functor's resource parameter -- ONE rule, generic lambdas included:
+    // functor's resource parameter - one rule, generic lambdas included:
     //   `T&` / `auto&`               -> read_write (exclusive)
     //   `const T&` / `const auto&`   -> read_only (concurrent readers)
     //   by value or `T&&`            -> rejected (a copy silently discards writes)
@@ -516,19 +516,19 @@ public:
     //                                  compile (read bodies receive `const T&`)
     // Non-generic functors are introspected (`accessor_mode`); generic ones are classified by
     // the rvalue-bindability probe. Both accept a trailing `Cancellation_token`, and take
-    // `Access_options` = `{token, priority}` (no `run_inline`: the verb IS the mode).
+    // `Access_options` = `{token, priority}` (no `run_inline`: the verb is the mode).
     //
-    //   access(fn) -- opportunistic: runs `fn` on the CALLING thread when the object is free right
+    //   access(fn) - opportunistic: runs `fn` on the calling thread when the object is free right
     //                 now (no scheduling), otherwise enqueues. Best for short functors. Because it
     //                 may run inline it can briefly block the caller and stacks its access scope,
     //                 so prefer `async` for anything non-trivial inside a graph node.
-    //   async(fn)  -- always enqueued off the calling thread. For heavy functors.
+    //   async(fn)  - always enqueued off the calling thread. For heavy functors.
 
-    // All four overloads gate on `Read_only_accessor`/`Read_write_accessor` -- the
+    // All four overloads gate on `Read_only_accessor`/`Read_write_accessor` - the
     // mode-first constraint pair (see the concepts for why the order is load-bearing).
 
     // The trailing `site` on each verb is the naming boundary (ts/named.h): a defaulted
-    // `source_location` captures its CALLER, so it is declared here, on the function the
+    // `source_location` captures its caller, so it is declared here, on the function the
     // user calls, and the resulting `Named` is passed down explicitly.
 
     // access, read_write.
@@ -615,8 +615,8 @@ private:
         core->flags.priority = opts.priority;
         detail::set_task_name(core, name);
         // Reentrant fast path (`access` only, docs/coroutine-first.md §4.2 / waiting rule (b)):
-        // the caller's task already holds this pipe's write grant -- run the body inline
-        // UNDER that grant, touching the pipe not at all (no acquire, no turn; the held
+        // the caller's task already holds this pipe's write grant - run the body inline
+        // under that grant, touching the pipe not at all (no acquire, no turn; the held
         // write is exclusive, so a read or write body is equally legal). Queueing instead
         // would park the access behind the caller's own hold. `Executable::run` overwrites
         // the unused pipe-turn lock when it arms the execution counter.
@@ -633,7 +633,7 @@ private:
         detail::bind_pipe_link(core.get(), 0, pipe_, mode);
         core->num_locks.store(1, std::memory_order_relaxed);   // the one pipe turn
         // Inline fast path (`access`): claim an idle pipe and run on this thread; otherwise
-        // (or for `async`) enqueue -- the admitted turn's release dispatches the body.
+        // (or for `async`) enqueue - the admitted turn's release dispatches the body.
         if (try_inline && detail::pipe_try_inline(global_scheduler(), pipe_, mode, core))
             return Task<R>(core);
         detail::pipe_enter_first(core.get(), record);
@@ -661,7 +661,7 @@ struct Guarded_access
     template<typename T> static Pipe& pipe(Guarded<T>& t) { return t.pipe_; }
 
     // `Deferred::commit`'s enqueue arm: an ordinary write access whose block is recorded
-    // into `record` atomically with the enqueue (under the pipe mutex -- see
+    // into `record` atomically with the enqueue (under the pipe mutex - see
     // `pipe_enqueue`), so the recorded handle can never lag FIFO order.
     template<typename T, typename Fn>
     static Task<void> commit_write(Guarded<T>& t, Fn&& fn, Access_options opts, Named name, Task_ptr* record)
@@ -682,9 +682,9 @@ inline Task_ptr pipe_locked_snapshot(Pipe& pipe, const Task_ptr& slot)
 }
 
 // An access-mode-tagged object argument, produced by `ts::as_read_only(g)` / `ts::as_read_write(g)`. It
-// lets a GENERIC lambda (`[](auto& x){...}`) declare per-object access explicitly: a generic
+// lets a generic lambda (`[](auto& x){...}`) declare per-object access explicitly: a generic
 // lambda's `operator()` is a template with no introspectable parameter const-ness, so
-// `Function_traits` cannot deduce read-vs-write -- the tag supplies it. The mode is a compile-time
+// `Function_traits` cannot deduce read-vs-write - the tag supplies it. The mode is a compile-time
 // template argument, so everything downstream (the `Access_context`, edge derivation, acquire) is
 // identical to the deduced path. Used by the multi-object `ts::access`/`ts::async` and
 // `Static_task_graph::add_node`.
@@ -707,7 +707,7 @@ template<typename A> inline constexpr bool is_guarded_v = is_guarded<std::remove
 // A valid object argument to `add_node` / multi-object `ts::access`/`ts::async`: either a bare
 // `Guarded<T>&` (mode deduced from the functor's parameter const-ness) or an `Access_arg<T, M>`
 // from `ts::as_read_only`/`as_read_write` (mode explicit; for generic lambdas). Per call the two kinds must
-// not be mixed -- see the `static_assert` at each entry point.
+// not be mixed - see the `static_assert` at each entry point.
 template<typename A>
 concept Object_arg = is_guarded_v<A> || is_access_arg_v<A>;
 
@@ -742,7 +742,7 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
     Named name{ nullptr };
     name.literal = opts.name;
     set_task_name(block, name);
-    // Dedup write-wins + insertion-sort by pipe address (canonical order), in place -- the
+    // Dedup write-wins + insertion-sort by pipe address (canonical order), in place - the
     // pack is small, and this replaces the old per-call `std::map`.
     std::size_t n = 0;
     for (std::size_t k = 0; k < sizeof...(Ts); ++k)
@@ -788,7 +788,7 @@ auto async_build(Access_options opts, std::index_sequence<I...> seq, Fn&& fn, Gu
         std::move(opts), seq, std::forward<Fn>(fn), objs...);
 }
 
-// Probed path (bare args, GENERIC functor): modes from the per-position rvalue probe --
+// Probed path (bare args, generic functor): modes from the per-position rvalue probe -
 // `const auto&`/`auto&&` = read, `auto&` = write. No tags needed.
 template<std::size_t... I, typename Fn, typename... Ts>
 auto async_build_probed(Access_options opts, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... objs)
@@ -813,11 +813,11 @@ auto async_build_tagged(Access_options opts, std::index_sequence<I...> seq, Fn&&
 
 } // namespace detail
 
-// Tag an object argument with an EXPLICIT access mode: `graph.add_node([](auto& p, auto& n)
+// Tag an object argument with an explicit access mode: `graph.add_node([](auto& p, auto& n)
 // { n.q(p); }, ts::as_read_write(physics), ts::as_read_only(nav))`, and likewise
-// `ts::access`/`ts::async`. Tags are never required -- modes are deduced from parameter
+// `ts::access`/`ts::async`. Tags are never required - modes are deduced from parameter
 // const-ness for non-generic functors and probed (`const auto&` = read, `auto&` = write) for
-// generic ones -- but remain for those preferring explicit declaration at the call site, and
+// generic ones - but remain for those preferring explicit declaration at the call site, and
 // as the escape hatch for an `auto&&` parameter that must write. The tag wins over the
 // parameter spelling; an over-declared write (write tag, `const T&` parameter) is legal
 // conservative serialization. (Named `as_*` to avoid colliding with the coroutine access guards
@@ -833,9 +833,9 @@ detail::Access_arg<T, Access::read_write> as_read_write(Guarded<T>& g) { return 
 // one (`const auto&`/`auto&&` = read, `auto&` = write), or explicit `ts::as_read_only` /
 // `as_read_write` tags on every argument (don't mix tagged and bare in one call). Read
 // positions receive `const T&`, so a mutating body under a read classification does not
-// compile. Deadlock-free (objects acquired in canonical order). Options come FIRST (a function
+// compile. Deadlock-free (objects acquired in canonical order). Options come first (a function
 // parameter pack can't be followed by a defaulted arg); the no-options overload defaults them.
-// `token`/`priority` apply as usual. Fire-and-forget or consume the `Task<R>` -- but do NOT
+// `token`/`priority` apply as usual. Fire-and-forget or consume the `Task<R>` - but do not
 // block a graph node on it (same rule as single-object async).
 template<typename Fn, typename... Objs>
     requires (sizeof...(Objs) >= 1) && (detail::Object_arg<Objs> && ...)
@@ -846,7 +846,7 @@ auto async(Access_options opts, Fn&& fn, Objs&&... objs)
     {
         static_assert((detail::is_access_arg_v<Objs> && ...),
             "multi-object async: don't mix tagged (ts::as_read_only/as_read_write) and bare Guarded "
-            "arguments -- tag EVERY object argument, or tag none");
+            "arguments - tag EVERY object argument, or tag none");
         return detail::async_build_tagged(std::move(opts), std::index_sequence_for<Objs...>{},
             std::forward<Fn>(fn), std::forward<Objs>(objs)...);
     }
@@ -874,7 +874,7 @@ auto async(Fn&& fn, Objs&&... objs)
 
 // Multi-object `access`: the opportunistic sibling of `ts::async(fn, objs...)`. NOTE: the
 // multi-object inline fast path is unimplemented, so `access` here currently behaves exactly
-// like `async` (always enqueued) -- unlike single-object `access`, which runs inline when the
+// like `async` (always enqueued) - unlike single-object `access`, which runs inline when the
 // queue is free. Tracked in docs/TODO.md (Guarded/access). Documented so the difference is not
 // a silent surprise. Accepts the same bare-or-tagged arguments as `ts::async`.
 template<typename Fn, typename... Objs>
@@ -891,7 +891,7 @@ auto access(Fn&& fn, Objs&&... objs)
     return async(std::forward<Fn>(fn), std::forward<Objs>(objs)...);
 }
 
-// `ts::launch` (bare scheduler task) lives in task.h now — it dispatches
+// `ts::launch` (bare scheduler task) lives in task.h now - it dispatches
 // through the `submit_ready` bridge and touch no `Guarded`, so they belong with the task core.
 
 } // namespace ts

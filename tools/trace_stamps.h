@@ -14,7 +14,7 @@ namespace ts::tools
 {
 
 // The capture side of the graph's profiling seam (consumed by `static_task_graph.cpp`).
-// Per-run trace stamps -- raw `steady_clock` ticks + executing worker per node, written
+// Per-run trace stamps - raw `steady_clock` ticks + executing worker per node, written
 // only while a trace is attached (each node writes its own slot; the settle's acq_rel
 // chain publishes them to the folding thread; sized once, no per-run allocation).
 // `mark_ready` is the data-ready instant (dependency counter hit zero); the gap to
@@ -42,7 +42,7 @@ public:
             scheduler_ = &scheduler;
             run_begin_ = now();
             // Bucket width comes from the trace's makespan estimate (0 on the first run, which
-            // then goes un-bucketed -- negligible over a long trace); origin = this run's begin.
+            // then goes un-bucketed - negligible over a long trace); origin = this run's begin.
             long long bucket_width = trace->fixed_bucket_width_ticks(Scheduler::util_bucket_count);
             scheduler.arm_busy_tracking(run_begin_, bucket_width, static_cast<int>(start_.size()));
             busy_begin_ = scheduler.busy_ticks();
@@ -75,8 +75,8 @@ public:
 
     // The one containment call: fold the run's stamps into the trace, on the settling
     // thread. Skipped for cancelled runs (their stamps are partial). The busy delta is
-    // every task the run's scheduler executed inside the window -- graph nodes, their
-    // `parallel_for` slices, async pipe jobs, continuations -- which is the point of the
+    // every task the run's scheduler executed inside the window - graph nodes, their
+    // `parallel_for` slices, async pipe jobs, continuations - which is the point of the
     // utilization metric; work run inline on non-worker threads is not counted.
     void fold(Graph_trace* trace, bool cancelled) const
     {

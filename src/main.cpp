@@ -5,7 +5,7 @@
 #include "ts/fatal.h"
 #include "ts/version.h"
 
-// Single-file samples (by design -- no headers): the mock game-engine frame
+// Single-file samples (by design - no headers): the mock game-engine frame
 // (sample/game_frame.cpp), the physics machine/extract decomposition
 // (sample/physics.cpp), and the blackboard pattern recipe of
 // docs/command-buffer-design.md §7.4 (sample/blackboard.cpp).
@@ -26,13 +26,13 @@ namespace
 {
 
 // Non-test entries (bench / stress / samples) have no harness to catch an ensure
-// failure -- fail their exit code instead, so CI cannot pass a run that tripped one.
+// failure - fail their exit code instead, so CI cannot pass a run that tripped one.
 int exit_checking_ensure_failures(int code)
 {
 #if TS_SAFETY_CHECKS
     if (ts::ensure_failure_count() != 0)
     {
-        std::fprintf(stderr, "\n%lld ENSURE failure(s) fired -- failing the run\n",
+        std::fprintf(stderr, "\n%lld ENSURE failure(s) fired - failing the run\n",
             ts::ensure_failure_count());
         return code == 0 ? 1 : code;
     }
@@ -56,7 +56,7 @@ int main(int argc, char** argv)
     if (argc >= 2 && (std::strcmp(argv[1], "--help") == 0 || std::strcmp(argv[1], "-h") == 0))
     {
         std::printf(
-            "task_system %s -- test/benchmark/sample driver\n\n"
+            "task_system %s - test/benchmark/sample driver\n\n"
             "usage: task_system [MODE]\n\n"
             "  (no args)      run the test suite, all samples, and the benchmarks\n"
             "  --tests        run the test suite only; exit code = failure count\n"

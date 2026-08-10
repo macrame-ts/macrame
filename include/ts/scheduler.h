@@ -29,9 +29,9 @@ namespace ts
 {
 
 // How an idle worker (one that found no work) waits for more. Chosen per `Scheduler` instance
-// at construction -- a runtime enum, not a compile-time switch: the only hot-path read is one
+// at construction - a runtime enum, not a compile-time switch: the only hot-path read is one
 // branch on the const `idle_policy_` member in `submit` (perfectly predicted) plus, in
-// `handoff`, one relaxed load -- no measurable cost, so a runtime knob buys per-instance
+// `handoff`, one relaxed load - no measurable cost, so a runtime knob buys per-instance
 // flexibility for free. See `worker_thread.cpp` (consumer side) and `signal_submit` (producer).
 enum class Idle_policy
 {
@@ -44,9 +44,9 @@ enum class Idle_policy
     // wake). `spin_cycles == 0` degenerates to park-immediately.
     spin_then_block,
     // Go-style spinner handoff: at most a few workers spin; a spinner that finds work relinquishes
-    // the spinner role and, if it was the last spinner, wakes a successor to spin BEFORE it runs
-    // -- so the pool keeps discovering work without the producer waking anyone. Producers issue
-    // the wake syscall ONLY when no spinner exists (the fully-parked 0->1 transition); otherwise
+    // the spinner role and, if it was the last spinner, wakes a successor to spin before it runs
+    // - so the pool keeps discovering work without the producer waking anyone. Producers issue
+    // the wake syscall only when no spinner exists (the fully-parked 0->1 transition); otherwise
     // a submit is a cheap epoch bump. Moves the wake cost off the producer onto the consumer.
     handoff,
 };
@@ -59,20 +59,20 @@ struct Scheduler_config
     // parks (UE's `WorkerSpinCycles` is ~53). Ignored by `spin`.
     uint32_t spin_cycles = 64;
     // Worker-less mode (UE's no-multithreading shape): no worker threads exist, and every
-    // submitted task executes INLINE at its submit point, on the submitting thread, via a
+    // submitted task executes inline at its submit point, on the submitting thread, via a
     // bounded FIFO trampoline (a chain of tasks drains iteratively, not recursively). Serves
     // deterministic debugging/tests, thread-less platforms, and low-end fallback. Semantics
-    // to be aware of: a task body runs BEFORE `launch`/`async` returns (reentrancy is
-    // observable -- launching under a user lock runs the body under that lock); priorities
+    // to be aware of: a task body runs before `launch`/`async` returns (reentrancy is
+    // observable - launching under a user lock runs the body under that lock); priorities
     // and the idle policy are no-ops; work triggered from an external thread runs on that
     // thread. `num_threads` is ignored when set.
     bool single_threaded = false;
 };
 
 // The library runs one process-wide scheduler (`global_scheduler()`, declared in guarded.h).
-// It is RECONFIGURABLE: `configure_scheduler` tears the current one down (signals quit, JOINs
+// It is reconfigurable: `configure_scheduler` tears the current one down (signals quit, JOINs
 // its workers, drains) and builds a new one with `config`. This is a coarse lifecycle
-// operation for quiescent points (startup, between frames/phases) -- it is NOT thread-safe
+// operation for quiescent points (startup, between frames/phases) - it is not thread-safe
 // against concurrent use: calling it while tasks are in flight from other threads is
 // undefined. `current_scheduler_config` returns the config currently in effect.
 void configure_scheduler(Scheduler_config config);
@@ -80,7 +80,7 @@ Scheduler_config current_scheduler_config();
 
 // RAII: reconfigure the global scheduler for a scope, restoring the previous config on exit.
 // The single-global way to run a block on a specific pool (e.g. a sample tracing on a fixed
-// worker count) -- there are no ad-hoc `Scheduler` instances to construct. Same coarse
+// worker count) - there are no ad-hoc `Scheduler` instances to construct. Same coarse
 // teardown+recreate semantics as `configure_scheduler`; use at quiescent points only.
 class Scheduler_scope
 {
@@ -104,11 +104,11 @@ using Task_func_ptr = void(*)(void* data);
 namespace detail
 {
 
-// A queued task: the func + its data. Priority is not a field -- it is the queue the
-// task lives in (one lock-free MPMC queue per priority, scanned high->low). MUST stay 16 bytes
+// A queued task: the func + its data. Priority is not a field - it is the queue the
+// task lives in (one lock-free MPMC queue per priority, scanned high->low). must stay 16 bytes
 // (two words): the work-stealing deque stores cells as `std::atomic<Task_entry>`, lock-free only
-// while the element is double-word-CAS-able. A block dispatch fits here as `{trampoline, block}` --
-// the block IS the payload (it carries its own body, priority, and claim), so nothing else rides
+// while the element is double-word-CAS-able. A block dispatch fits here as `{trampoline, block}` -
+// the block is the payload (it carries its own body, priority, and claim), so nothing else rides
 // in this entry.
 struct Task_entry
 {
@@ -126,15 +126,15 @@ inline constexpr std::size_t priority_count = 3;
 class Scheduler;
 
 // The one process-wide scheduler (defined in guarded.cpp, where the reconfigurable holder
-// lives). Declared here so the ambient/global API -- `Scheduler_scope`, `configure_scheduler`,
-// and every caller that reconfigures then submits to the running pool -- is reachable from
+// lives). Declared here so the ambient/global API - `Scheduler_scope`, `configure_scheduler`,
+// and every caller that reconfigures then submits to the running pool - is reachable from
 // `scheduler.h` alone.
 Scheduler& global_scheduler();
 
 namespace detail
 {
-// The ONLY sanctioned way to construct a `Scheduler`. The constructor is private, so ad-hoc
-// `ts::Scheduler s{cfg}` no longer compiles -- construction is reserved to the process-wide
+// The only sanctioned way to construct a `Scheduler`. The constructor is private, so ad-hoc
+// `ts::Scheduler s{cfg}` no longer compiles - construction is reserved to the process-wide
 // holder in guarded.cpp (and any legitimately-isolated, non-competing object-unit test).
 // Returns a `unique_ptr` because `Scheduler` is non-movable. This upholds the single-pool
 // invariant at the type level: you cannot casually stand up a second worker pool.
@@ -161,7 +161,7 @@ public:
     void submit(Task_func_ptr func, void* data, Priority priority = Priority::normal);
 
     // Number of worker threads (the natural default concurrency for `parallel_for`).
-    // Defined in the .cpp -- `Worker_thread` is incomplete here. 0 in worker-less mode.
+    // Defined in the .cpp - `Worker_thread` is incomplete here. 0 in worker-less mode.
     int worker_count() const noexcept;
 
     // Worker-less (single-threaded) scheduler: no workers, tasks execute inline at submit.
@@ -170,7 +170,7 @@ public:
     // Quiescence: every worker is sitting in the idle path and every queue is empty, so this
     // scheduler cannot make progress on its own. Racy by nature (a worker may be between
     // finding work and marking itself busy), which is why the deadlock net requires the
-    // condition to hold CONTINUOUSLY for a window rather than trusting one sample. Feeds
+    // condition to hold continuously for a window rather than trusting one sample. Feeds
     // `detail::scheduler_quiescent`, the seam the task layer reads (`Rule::deadlock_net`).
     //
     // Worker idleness is an explicit transition count, not "parked": under `Idle_policy::spin`
@@ -187,16 +187,16 @@ public:
 
 #if TS_PROFILING
     // Total wall time (raw `steady_clock` ticks) this scheduler's workers have spent
-    // executing tasks -- every task kind (graph nodes, `parallel_for` slices, async pipe
+    // executing tasks - every task kind (graph nodes, `parallel_for` slices, async pipe
     // jobs, continuations). Feeds the trace's core-utilization metric: the busy delta over
     // a run window, divided by `workers * window`. Work run inline on non-worker threads
     // (inline roots on the caller) is not counted. Relaxed sum over per-worker
-    // counters -- a snapshot, exact only at quiescent points.
+    // counters - a snapshot, exact only at quiescent points.
     long long busy_ticks() const noexcept
     {
         // Completed spans plus the elapsed part of each in-flight task: the reader is
-        // often ITSELF inside a task (a graph run's fold happens on the settling worker),
-        // so counting only completed spans would miss the whole current task -- on a
+        // often itself inside a task (a graph run's fold happens on the settling worker),
+        // so counting only completed spans would miss the whole current task - on a
         // one-worker scheduler that is the entire window. Relaxed snapshot; a reader
         // interleaving a task's completion can transiently double-count that one span
         // (advisory metric, not an invariant).
@@ -214,7 +214,7 @@ public:
 
     // Total tasks run across all workers while armed (every kind: graph node bodies,
     // parallel_for slices, async pipe jobs, continuations). Monotonic like `busy_ticks`;
-    // the trace takes a begin/end delta per run. Relaxed sum -- advisory.
+    // the trace takes a begin/end delta per run. Relaxed sum - advisory.
     long long task_count() const noexcept
     {
         long long sum = 0;
@@ -223,8 +223,8 @@ public:
         return sum;
     }
 
-    // Total body ticks B (user-functor time, summed over workers; relaxed -- advisory). `body`
-    // is add-only; machinery is DERIVED, `M = busy - B`, not a separate accumulator. The trace
+    // Total body ticks B (user-functor time, summed over workers; relaxed - advisory). `body`
+    // is add-only; machinery is derived, `M = busy - B`, not a separate accumulator. The trace
     // takes begin/end deltas per run; overhead = M / (B + M). See `Busy_slot`.
     long long body_ticks() const noexcept
     {
@@ -233,8 +233,8 @@ public:
             sum += slot.body.load(std::memory_order_relaxed);
         return sum;
     }
-    // Total orchestration ticks (the dedicated per-run TOP-LEVEL `execute()` setup accumulator,
-    // the fourth bucket of the four-way breakdown), summed over workers; relaxed -- advisory. No
+    // Total orchestration ticks (the dedicated per-run top-level `execute()` setup accumulator,
+    // the fourth bucket of the four-way breakdown), summed over workers; relaxed - advisory. No
     // in-flight compensation: the setup span is booked whole at `Trace_setup_scope` exit, never a
     // partially-elapsed in-flight task like a `run_task` body. The trace takes a begin/end delta
     // per run, exactly like `body_ticks`.
@@ -245,8 +245,8 @@ public:
             sum += slot.orchestration.load(std::memory_order_relaxed);
         return sum;
     }
-    // Credit `dt` ticks to body (B) -- the `trace_body_add` bridge target (a user functor ran).
-    // B is ADD-ONLY: machinery is derived by pure subtraction (`M = busy - B`) at the fold, so
+    // Credit `dt` ticks to body (B) - the `trace_body_add` bridge target (a user functor ran).
+    // B is add-only: machinery is derived by pure subtraction (`M = busy - B`) at the fold, so
     // there is no machinery accumulator to net against. Single writer per slot. A non-worker
     // caller (worker-less inline drain, an external submit) lands in the overflow lane, so an
     // inline body on the main thread still credits B (which the worker-less oracle reads).
@@ -254,8 +254,8 @@ public:
     {
         busy_[busy_slot_index(worker_index)].body.fetch_add(dt, std::memory_order_relaxed);
     }
-    // Add `dt` ticks of ORCHESTRATION -- the `trace_orchestration_add` bridge target (the fourth
-    // bucket of the four-way subtraction split: the per-run TOP-LEVEL graph-setup span, off any
+    // Add `dt` ticks of orchestration - the `trace_orchestration_add` bridge target (the fourth
+    // bucket of the four-way subtraction split: the per-run top-level graph-setup span, off any
     // `run_task` span and so absent from `busy`). A non-worker caller lands in the overflow lane.
     void add_orchestration_ticks(int worker_index, long long dt) noexcept
     {
@@ -265,11 +265,11 @@ public:
     // Time buckets the utilization background samples each run into.
     static constexpr int util_bucket_count = 128;
 
-    // Arm/disarm busy tracking (counted -- concurrent consumers nest). Armed by a traced
+    // Arm/disarm busy tracking (counted - concurrent consumers nest). Armed by a traced
     // graph run for its window; work already in flight when arming is not back-stamped
     // (an under-count of at most one task span at the window edge; advisory metric).
     // `origin` = the run's begin tick, `bucket_width` = the tick width of each utilization
-    // bucket (0 disables per-bucket accumulation for this window -- e.g. the first run,
+    // bucket (0 disables per-bucket accumulation for this window - e.g. the first run,
     // before a makespan estimate exists). Arming clears the per-worker bucket rows.
     void arm_busy_tracking(long long origin, long long bucket_width, int owner_count = 0) noexcept
     {
@@ -324,7 +324,7 @@ public:
 
     // Sum the per-worker bucket busy into `out[0..util_bucket_count)` (ticks). Read at the
     // fold on the settling thread, after the run's completion barrier has published the
-    // workers' writes (relaxed loads -- advisory, like `busy_ticks`).
+    // workers' writes (relaxed loads - advisory, like `busy_ticks`).
     void read_bucket_busy(long long* out) const noexcept
     {
         for (int b = 0; b < util_bucket_count; ++b)
@@ -347,7 +347,7 @@ private:
     // (LIFO, cache-hot) -> global normal -> global low -> steal `normal` from a random victim.
     // High stays strict (checked first). True if a task was found.
     bool find_work(int worker_index, detail::Task_entry& out);
-    // `find_work`, timing a SUCCESSFUL scan into dispatch machinery (armed-only). A scan that
+    // `find_work`, timing a successful scan into dispatch machinery (armed-only). A scan that
     // finds nothing is idle (lack of parallelism), not scheduling cost, so it is not charged.
     bool find_work_dispatch(int worker_index, detail::Task_entry& out)
     {
@@ -361,7 +361,7 @@ private:
                 long long dt = std::chrono::steady_clock::now().time_since_epoch().count() - t0;
                 // Option 2: a successful scan is on-worker machinery, so fold it into `busy`
                 // (the run_task-span accumulator). Then `M = busy - B` captures it by pure
-                // subtraction -- it is not a separate accumulator. Single writer (this worker).
+                // subtraction - it is not a separate accumulator. Single writer (this worker).
                 Busy_slot& slot = busy_[static_cast<size_t>(worker_index)];
                 slot.ticks.store(slot.ticks.load(std::memory_order_relaxed) + dt, std::memory_order_relaxed);
             }
@@ -381,7 +381,7 @@ private:
     }
 #endif
 
-    // Approximate: all global queues AND all local deques empty (racy; shutdown-drain check).
+    // Approximate: all global queues and all local deques empty (racy; shutdown-drain check).
     bool all_empty() const;
 
     // Producer-side signal after a submit, per `idle_policy_` (see the enum).
@@ -407,7 +407,7 @@ private:
     bool handoff_wait(int worker_index, detail::Task_entry& out);
 
     // Execute one task on worker `worker_index`, accumulating its wall time into the
-    // worker's busy counter (single writer per slot, cacheline-padded -- no contention;
+    // worker's busy counter (single writer per slot, cacheline-padded - no contention;
     // relaxed, read by `busy_ticks` cross-thread). A plain call without TS_PROFILING.
     void run_task(int worker_index, const detail::Task_entry& task)
     {
@@ -465,12 +465,12 @@ private:
     // the injector for external (non-worker) submits.
     std::array<detail::Mpmc_queue<detail::Task_entry>, detail::priority_count> queues_;
     // Per-worker Chase-Lev deque for `normal`: a worker's own `normal` submits go here (LIFO,
-    // no shared cache line -- the producer fast path); thieves steal FIFO. One per worker.
+    // no shared cache line - the producer fast path); thieves steal FIFO. One per worker.
     std::vector<std::unique_ptr<detail::Work_stealing_deque<detail::Task_entry>>> local_normal_;
     std::atomic<bool> quit_ = false;
     detail::Event_count events_;   // wakes idle (parking) workers
     // `handoff` policy: advisory count of workers currently spinning. Correctness rides the
-    // always-advanced epoch (see `signal_submit`), so this can be read/written relaxed -- it
+    // always-advanced epoch (see `signal_submit`), so this can be read/written relaxed - it
     // only gates the wake syscall and the successor-promotion decision.
     std::atomic<int> num_spinning_ = 0;
     // Workers currently in the idle path (see `quiescent`). Written only at the
@@ -484,19 +484,19 @@ private:
     // Per-worker busy-time counters, one padded slot each (single writer: the owning
     // worker in `run_task`; `busy_ticks` reads them relaxed). `ticks` = completed task
     // spans; `started` = the in-flight task's start tick (0 = idle). Sized in the ctor
-    // BEFORE the workers start. Declared last: the hot members above keep their layout.
+    // before the workers start. Declared last: the hot members above keep their layout.
     struct alignas(64) Busy_slot
     {
         std::atomic<long long> ticks{ 0 };
         std::atomic<long long> started{ 0 };
         std::atomic<long long> tasks{ 0 };   // count of tasks this worker ran while armed
         // Task-system-cost split (single-writer = this worker; read at fold). `body` (B) =
-        // user-functor time, credited via `trace_body_add` (add-only). Machinery is NOT
+        // user-functor time, credited via `trace_body_add` (add-only). Machinery is not
         // accumulated: it is derived by pure subtraction at the fold, `M = busy - B` (busy =
         // `ticks` above: run_task spans + successful find_work scans).
         std::atomic<long long> body{ 0 };
-        // The fourth bucket of the four-way split: the per-run TOP-LEVEL `execute()` setup span,
-        // which runs off any `run_task` span (so absent from `busy`) -- booked via
+        // The fourth bucket of the four-way split: the per-run top-level `execute()` setup span,
+        // which runs off any `run_task` span (so absent from `busy`) - booked via
         // `add_orchestration_ticks`. Single writer.
         std::atomic<long long> orchestration{ 0 };
     };

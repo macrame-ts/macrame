@@ -33,15 +33,15 @@ struct Static_task_graph::Run_state
 namespace
 {
 
-// A graph node's reusable task block: the monomorphic control block (FIRST member, so a
+// A graph node's reusable task block: the monomorphic control block (first member, so a
 // `Task_control_block*` aliases / `reinterpret_cast`s back to it) plus the back-pointers
 // its execute/on_complete hooks need to reach the node body and the run. Allocated once
-// in compile(), re-armed each execute() -- so a run dispatches nodes with no per-node
-// allocation. The body is NOT stored here (reached via graph->nodes_[index].run), so
+// in compile(), re-armed each execute() - so a run dispatches nodes with no per-node
+// allocation. The body is not stored here (reached via graph->nodes_[index].run), so
 // there is no per-run body closure either.
 struct Graph_node_block
 {
-    detail::Task_control_block core;   // MUST be first
+    detail::Task_control_block core;   // must be first
     Static_task_graph* graph = nullptr;
     int index = -1;
 };
@@ -199,7 +199,7 @@ void Static_task_graph::compile(const char* DOT_path)
 
     // Per distinct pipe: the guarded instance behind it and the strongest mode any node uses
     // on it. Both feed the nested-run lend decision (`bind_links_for_run`), which asks the
-    // caller's `Access_context` -- keyed by instance address, not by pipe -- whether its
+    // caller's `Access_context` - keyed by instance address, not by pipe - whether its
     // grant covers what this graph needs. A node's `pipes[k]` and `access[k]` are parallel.
     pipe_instances_.assign(distinct_pipes_.size(), nullptr);
     pipe_modes_.assign(distinct_pipes_.size(), Access::read_only);
@@ -242,7 +242,7 @@ void Static_task_graph::compile(const char* DOT_path)
     detect_cycles();
 
     // Each node runs as a reusable task block, allocated once here and re-armed per run
-    // (§7.1) -- so a run dispatches every node without allocating. `execute`/`on_complete`
+    // (§7.1) - so a run dispatches every node without allocating. `execute`/`on_complete`
     // are fixed fn-ptrs; graph+index let those hooks reach the node body and the run.
     for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
     {
@@ -253,19 +253,19 @@ void Static_task_graph::compile(const char* DOT_path)
         wrapper->core.execute = &run_graph_node;
         wrapper->core.on_complete = &graph_node_completed;
         // The node block is owned by this graph (its `Task_ptr` below) for the whole run, so
-        // its queued dispatch borrows a raw pointer -- no dispatch-hop refcount (Opt 2). Set
+        // its queued dispatch borrows a raw pointer - no dispatch-hop refcount (Opt 2). Set
         // once here; the per-run re-arm rewrites priority/run_inline but preserves this bit.
         wrapper->core.flags.borrowed = true;
         nodes_[i].block = detail::Task_ptr(&wrapper->core);
         // The node's block carries the node's identity, so every diagnostic that names a
-        // task names the node -- including the pipe entries it takes, which ARE this block.
+        // task names the node - including the pipe entries it takes, which are this block.
         detail::set_task_name(nodes_[i].block, nodes_[i].name);
     }
 
     // Bind every node's pipe links into one slab (tail pipe): the node's `pipe_indices`
     // are ascending over the address-sorted `distinct_pipes_`, so link order is canonical.
     // Bound once here, re-armed each execute(); the blocks' `pipe_links` point into the
-    // slab (stable across a graph move -- the unique_ptr's buffer moves by ownership).
+    // slab (stable across a graph move - the unique_ptr's buffer moves by ownership).
     {
         std::size_t total = 0;
         for (const Node& n : nodes_)
@@ -375,7 +375,7 @@ void Static_task_graph::on_data_ready(Run_state& run, int index)
 // installs `current_task` + the execution-flag self-lock so a coroutine-node body's frame
 // (or a nested graph run) can gate the node's completion via `detail::add_nested`, then
 // completes once the self-lock and any nested completions release. The block carries the
-// run's `token`, so a cancelled node skips its body (settling cancelled) -- `on_complete`
+// run's `token`, so a cancelled node skips its body (settling cancelled) - `on_complete`
 // still fires, keeping the drain going.
 void Static_task_graph::run_graph_node(const detail::Task_ptr& block)
 {
@@ -418,10 +418,10 @@ void Static_task_graph::graph_node_completed(detail::Task_control_block* block)
 {
     auto* self = reinterpret_cast<Graph_node_block*>(block);
     // The settle-must-advance-links contract (the graph is the second pipe-task creation
-    // site next to `make_piped_executable`): retire this node's line entries FIRST, so a
+    // site next to `make_piped_executable`): retire this node's line entries first, so a
     // successor going data-ready below enters lines the node no longer holds. An object-free
     // node entered no pipes (`pipe_count == 0`, its data-ready path dispatched directly), so
-    // it has nothing to advance -- skip the cross-TU call entirely (Opt 3).
+    // it has nothing to advance - skip the cross-TU call entirely (Opt 3).
     if (block->pipe_count != 0)
         detail::advance_pipe_links(block);
     node_complete(*self->graph->run_, self->index);
@@ -436,7 +436,7 @@ void Static_task_graph::node_complete(Run_state& run, int index)
 
     // Phase 1: settle successor data-deps; collect those this node's completion makes ready
     // (it is exclusively their trigger, so this node's thread owns them until we hand off /
-    // dispatch them below -- no race with another prerequisite).
+    // dispatch them below - no race with another prerequisite).
     std::vector<int>& ready = node.ready_buf;
     ready.clear();
     for (int successor : node.successors)
@@ -455,16 +455,16 @@ void Static_task_graph::node_complete(Run_state& run, int index)
     {
         // Keep `done` alive across the settle: completing it notifies its cv, which can
         // wake a waiter (`execute().sync()`) that immediately starts the next run --
-        // overwriting `run.done` and dropping its own handle -- destroying this block
+        // overwriting `run.done` and dropping its own handle - destroying this block
         // mid-notify. The local ref holds it until settle returns.
         detail::Task_ptr done = run.done;
-        // Fold this run's stamps into the trace BEFORE the completion handle settles (a
+        // Fold this run's stamps into the trace before the completion handle settles (a
         // sync()ed caller then reads a consistent trace). A worker-less run is skipped:
         // its per-node starts are cumulative serial offsets, dispatch-wait measures the
         // trampoline, the critical path degenerates to the whole chain, and utilization
-        // has no workers to measure -- folding it would corrupt the parallel profile. (A
-        // separate serial-baseline lane -- clean per-node total_work + serial-vs-parallel
-        // contention deltas -- is a planned trace feature, not a fold into these
+        // has no workers to measure - folding it would corrupt the parallel profile. (A
+        // separate serial-baseline lane - clean per-node total_work + serial-vs-parallel
+        // contention deltas - is a planned trace feature, not a fold into these
         // aggregates.)
         run.stamps.fold(run.graph->trace_,
             run.token.is_cancel_requested() || run.scheduler->single_threaded());
@@ -477,17 +477,17 @@ void Static_task_graph::node_complete(Run_state& run, int index)
 
 // Resolve the lend set for the run about to start and bind the node link slab accordingly.
 //
-// A LENT object is one the calling task already holds a covering grant on: the inner nodes
-// then skip their pipe turns on it entirely. That is not an optimization -- taking the turn
+// A lent object is one the calling task already holds a covering grant on: the inner nodes
+// then skip their pipe turns on it entirely. That is not an optimization - taking the turn
 // would queue the inner node behind the very grant its caller holds, and the caller is
 // suspended waiting for the inner run, so the run would never finish. Skipping is safe
 // because the caller's grant is what excludes everyone else for the whole nested run (an
 // awaited inner run is strictly contained in the caller's grant window), and the compiled
-// conflict edges still order the inner nodes among THEMSELVES on that object.
+// conflict edges still order the inner nodes among themselves on that object.
 //
 // Binding is the whole mechanism: a link that is not bound is a turn that is never taken.
 // The slab keeps its per-node offsets, so the surviving links are packed at the front of
-// each node's range with sequential `index` values -- the cascade's only requirement.
+// each node's range with sequential `index` values - the cascade's only requirement.
 void Static_task_graph::bind_links_for_run(bool detach)
 {
     // A detached run structurally receives no lend (and no inherited context): it may outlive
@@ -507,11 +507,11 @@ void Static_task_graph::bind_links_for_run(bool detach)
 #if TS_SAFETY_CHECKS
             else if (pipe_modes_[i] == Access::read_write && ctx->grants(pipe_instances_[i], Access::read_only))
             {
-                // Mode-incompatible overlap: the caller holds a READ grant on an object this
+                // Mode-incompatible overlap: the caller holds a read grant on an object this
                 // graph writes. A read grant cannot cover a write, and upgrading would mean
-                // re-acquiring the pipe -- behind the caller's own read hold, which the
+                // re-acquiring the pipe - behind the caller's own read hold, which the
                 // caller cannot release while it waits. Fatal at the cause.
-                ts::fatal("Static_task_graph::execute -- the calling task holds READ access on an object this "
+                ts::fatal("Static_task_graph::execute - the calling task holds READ access on an object this "
                           "graph writes; a read grant cannot be lent to a writer (declare the write on the "
                           "calling node, or move the writing node out of the nested graph)");
             }
@@ -525,7 +525,7 @@ void Static_task_graph::bind_links_for_run(bool detach)
     if (any && detail::current_scope_children != nullptr)
     {
         // Lending hands the caller's exclusivity to the inner run, but a still-running earlier
-        // nested run is also executing under that same grant -- so both could touch the lent
+        // nested run is also executing under that same grant - so both could touch the lent
         // object at once, each "validly". Conservative rule: no un-awaited nested run may be in
         // flight when another lends. Settled runs are not a hazard, and the scope list only drops
         // them at completion, so filter on `ready` rather than on emptiness (else a fire-and-settle
@@ -534,7 +534,7 @@ void Static_task_graph::bind_links_for_run(bool detach)
         {
             if (!child->ready.load(std::memory_order_acquire))
             {
-                ts::fatal("Static_task_graph::execute -- lending an object to a nested run while an earlier "
+                ts::fatal("Static_task_graph::execute - lending an object to a nested run while an earlier "
                           "un-awaited nested run of the calling task is still in flight (co_await the previous "
                           "nested run before starting another)");
             }
@@ -583,7 +583,7 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     if (run_ && run_->remaining_nodes.load(std::memory_order_acquire) != 0)
     {
         ts::fatal("Static_task_graph::execute called while a run of this graph is still in flight "
-                  "(one run at a time -- await the previous run, or use a separate graph instance)");
+                  "(one run at a time - await the previous run, or use a separate graph instance)");
     }
 #endif
 
@@ -592,7 +592,7 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     Scheduler& scheduler = global_scheduler();
 
     // Reuse the run state built at compile() (one run at a time; a full get() barrier
-    // between runs guarantees the previous run is quiescent -- see docs §7.1). Only the
+    // between runs guarantees the previous run is quiescent - see docs §7.1). Only the
     // completion handle is freshly allocated, since a prior run's handle may still be
     // held by the caller.
     Run_state& run = *run_;
@@ -601,13 +601,13 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     run.token = token;
     run.done = detail::make_bare_block();
 
-    // Arm the trace and snapshot the machinery/body counters BEFORE the per-run setup below,
+    // Arm the trace and snapshot the machinery/body counters before the per-run setup below,
     // so the setup span the `Trace_setup_scope` books folds into this run's machinery delta.
     run.stamps.begin_run(trace_, scheduler);
 
 #if TS_PROFILING
     // Fold the per-run setup + initial dispatch (link binding, node re-arm, indegree init,
-    // root dispatch) into machinery M -- that work runs here on the calling thread in no
+    // root dispatch) into machinery M - that work runs here on the calling thread in no
     // `run_task` span, scales with node count, and previously escaped the overhead metric
     // entirely. Function-scope, so it also covers the early empty-graph return. In worker-less
     // mode the initial dispatch drains the whole frame inline within this span; the scope flags
@@ -616,7 +616,7 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     detail::Trace_setup_scope setup_cost;
 #endif
 
-    // Resolve lending and bind the links BEFORE the per-node re-arm below, which seeds each
+    // Resolve lending and bind the links before the per-node re-arm below, which seeds each
     // block's lock counter from its (possibly reduced) `pipe_count`.
     bind_links_for_run(opts.detach);
 
@@ -625,8 +625,8 @@ Task<void> Static_task_graph::execute(Execution_options opts)
         run.remaining_deps[i].store(nodes_[i].indegree, std::memory_order_relaxed);
 
         // Re-arm the node's task block for this run (its successors/prerequisites/
-        // continuations are never populated -- graph edges use remaining_deps, completion
-        // uses on_complete -- so nothing there needs clearing).
+        // continuations are never populated - graph edges use remaining_deps, completion
+        // uses on_complete - so nothing there needs clearing).
         auto* w = reinterpret_cast<Graph_node_block*>(nodes_[i].block.get());
         w->graph = this;   // refresh back pointer too (see above)
         detail::Task_control_block& b = w->core;
@@ -636,7 +636,7 @@ Task<void> Static_task_graph::execute(Execution_options opts)
         b.prereq_cancelled.store(false, std::memory_order_relaxed);
         b.ready.store(false, std::memory_order_relaxed);
         // The node's pipe turns are its pre-execution locks (entered at data-ready): seed
-        // the counter with the link count. The links themselves need no re-arm -- their
+        // the counter with the link count. The links themselves need no re-arm - their
         // bind-time fields are stable, and `next` is queue state owned by the pipe mutex
         // (an entry leaves the queue before its turn fires, every run).
         b.num_locks.store(b.pipe_count, std::memory_order_relaxed);
@@ -651,7 +651,7 @@ Task<void> Static_task_graph::execute(Execution_options opts)
 
     // A nested run joins the calling task's implicit scope by default, so an un-awaited inner
     // run cannot float past its launcher: the caller (a node, a coroutine frame) completes --
-    // and a node releases its objects -- only after the run settles. Attached BEFORE kickoff,
+    // and a node releases its objects - only after the run settles. Attached before kickoff,
     // so the run cannot settle in the window. `{.detach = true}` opts out, and a run started
     // outside any task has nothing to join.
     if (!opts.detach && detail::current_task)
@@ -664,7 +664,7 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     }
 
     // Objects are acquired per node (see on_data_ready / acquire_next), mode-aware and only
-    // over each accessor's [acquire, complete] window -- so a graph object is free in the
+    // over each accessor's [acquire, complete] window - so a graph object is free in the
     // gaps (no whole-run reservation). Kick off every root (indegree 0).
     for (size_t i = 0; i < nodes_.size(); ++i)
     {

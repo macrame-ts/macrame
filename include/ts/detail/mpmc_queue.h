@@ -12,14 +12,14 @@ namespace ts::detail
 {
 
 // Bounded lock-free MPMC queue (Vyukov's array + per-cell sequence scheme) with an unbounded
-// mutex-guarded OVERFLOW, so `push` never fails and never blocks the caller. The ring is the
-// lock-free fast path; the overflow is written only when the ring is full (rare -- a
+// mutex-guarded overflow, so `push` never fails and never blocks the caller. The ring is the
+// lock-free fast path; the overflow is written only when the ring is full (rare - a
 // scheduler drains fast) and read only when `overflow_count_ > 0`, so under load both push
 // and pop touch no lock. `T` must be trivially/cheaply movable (we store `Task_entry`).
 //
 // Caveat: once items spill to the overflow they are FIFO among themselves but are
 // only drained after the ring empties, so under *sustained* overflow they are delayed
-// relative to newer ring items (not lost -- every pop path reaches them once the ring
+// relative to newer ring items (not lost - every pop path reaches them once the ring
 // drains). In the full scheduler this is rare: worker-to-worker submits go to per-worker
 // deques, leaving this global queue for external submits, high/low priorities, and overflow.
 template<typename T>
@@ -50,7 +50,7 @@ public:
     }
 
     // True if an item was popped. Ring first (lock-free), then the overflow (only if it has
-    // items -- the count check avoids the lock on the common empty-overflow path).
+    // items - the count check avoids the lock on the common empty-overflow path).
     bool pop(T& out)
     {
         if (ring_dequeue(out))
@@ -66,7 +66,7 @@ public:
         return true;
     }
 
-    // Approximate emptiness (racy under concurrent push/pop) -- for the shutdown-drain check.
+    // Approximate emptiness (racy under concurrent push/pop) - for the shutdown-drain check.
     bool empty() const
     {
         if (overflow_count_.load(std::memory_order_acquire) != 0)

@@ -2,7 +2,7 @@
 
 #include "ts/access.h"   // grant inheritance for launched/parallel_for sub-work (snapshot_access)
 #include "ts/fatal.h"
-#include "ts/named.h"   // ts::Named -- debug identity for tasks (and nodes and objects)
+#include "ts/named.h"   // ts::Named - debug identity for tasks (and nodes and objects)
 #include "ts/priority.h"
 #include "ts/rules.h"   // rule policy: which waiting-rule checks run, and their scoped opt-out
 #include "ts/detail/ref_count.h"   // intrusive Ref_ptr / Ref_counted (preferred over shared_ptr)
@@ -39,14 +39,14 @@ namespace detail
 {
 
 // Defined in scheduler.cpp (a scheduler-free seam, like `submit_ready`): before parking, a
-// blocking wait drains the calling thread's pending worker-less-mode tasks -- the awaited
+// blocking wait drains the calling thread's pending worker-less-mode tasks - the awaited
 // work may sit in the serial trampoline behind the waiter's own frame (a body that admitted
 // work and then waits on it). No-op when nothing is pending (any scheduler mode).
 void drain_serial_pending() noexcept;
 
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
 struct Task_control_block;
-// Defined in guarded.cpp (where the global scheduler holder lives) -- the scheduler-side
+// Defined in guarded.cpp (where the global scheduler holder lives) - the scheduler-side
 // half of the deadlock net, kept behind a plain function seam so this header stays free of
 // the scheduler, exactly like `drain_serial_pending`. True when every worker is idle and
 // every queue is empty; false when no scheduler has been created yet (a blue wait before
@@ -59,7 +59,7 @@ bool scheduler_quiescent() noexcept;
 #if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
 struct Task_control_block;
 // Defined in guarded.cpp (it needs the `Pipe` layout this header deliberately lacks):
-// report a `sync()`/`take()` issued from inside a task -- fatal, with the sharp
+// report a `sync()`/`take()` issued from inside a task - fatal, with the sharp
 // same-object message when the target is an access on an object the current context holds
 // (a certain deadlock), the general message otherwise. Called by `sync_wait` for every
 // in-task call, settled target or not (TODO 6.10).
@@ -67,12 +67,12 @@ struct Task_control_block;
 #endif
 
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
-// Work that only a NON-worker thread can complete, currently outstanding (see
+// Work that only a non-worker thread can complete, currently outstanding (see
 // `ts::External_wait`). The deadlock net's second predicate: quiescence with a nonzero count
 // is a legitimate wait, not a deadlock.
 inline std::atomic<int> outstanding_external_waits{ 0 };
 
-// How long the scheduler must stay CONTINUOUSLY quiescent before a blocked boundary waiter
+// How long the scheduler must stay continuously quiescent before a blocked boundary waiter
 // declares deadlock, and how many samples that window is split into. Long by design: a real
 // deadlock is permanent, so latency is free, while a short window would fire on a legitimate
 // blue-to-blue handoff that happens to be slow.
@@ -130,7 +130,7 @@ public:
     {}
 
     // Request cancellation and fire every registered `Cancel_callback` synchronously, on
-    // this thread. Idempotent — the first call wins; later calls (and callbacks registered
+    // this thread. Idempotent - the first call wins; later calls (and callbacks registered
     // after) are no-ops / fire immediately.
     void request_cancel();
 
@@ -143,7 +143,7 @@ private:
 
 // RAII push notification: registers `fn` on `token`; `request_cancel()` invokes it. If
 // cancellation was already requested at construction, `fn` runs now, in the constructor.
-// The destructor deregisters — and if the callback is mid-invocation on another thread it
+// The destructor deregisters - and if the callback is mid-invocation on another thread it
 // waits for that to finish (so `fn`'s captures stay valid), except when the callback is
 // destroying itself re-entrantly (then it detaches, to avoid deadlock). Non-copyable,
 // non-movable (its address is the registration identity), like `std::stop_callback`.
@@ -227,15 +227,15 @@ namespace detail
 struct Task_control_block;
 
 // Intrusive strong-refcount ownership of a `Task_control_block`. The count + a `destroy`
-// thunk live IN the block (no separate control block), so a handle is ONE pointer (half a
-// `shared_ptr`) -- lighter in the successor/inline vectors and on every copy.
+// thunk live in the block (no separate control block), so a handle is one pointer (half a
+// `shared_ptr`) - lighter in the successor/inline vectors and on every copy.
 // The block's refcount starts at 0; the first `Task_ptr(&block)` brings it to 1. `inc`/`dec`
 // are defined below the block (they touch its members).
 void intrusive_inc(Task_control_block* p) noexcept;
 void intrusive_dec(Task_control_block* p) noexcept;
 
 // Tag for adopting an existing (already-counted) reference into a `Task_ptr` without an
-// extra `inc` -- pairs with `release()` to hand a ref across a raw-pointer boundary (e.g. a
+// extra `inc` - pairs with `release()` to hand a ref across a raw-pointer boundary (e.g. a
 // queued dispatch that carries the block as `void*`).
 struct Adopt_ref {};
 
@@ -267,8 +267,8 @@ public:
     }
     ~Task_ptr() { if (p_) intrusive_dec(p_); }
 
-    // Relinquish ownership: return the raw pointer WITHOUT decrementing (the ref is now the
-    // caller's to manage -- adopt it back with `Task_ptr(p, Adopt_ref{})`).
+    // Relinquish ownership: return the raw pointer without decrementing (the ref is now the
+    // caller's to manage - adopt it back with `Task_ptr(p, Adopt_ref{})`).
     Task_control_block* release() noexcept { auto* p = p_; p_ = nullptr; return p; }
 
     Task_control_block* get() const noexcept { return p_; }
@@ -288,16 +288,16 @@ private:
 // `complete`s it.
 void submit_ready(Task_ptr block);
 
-// Like `submit_ready`, but the block is EXTERNALLY OWNED for its whole dispatch (its
-// `flags.borrowed` is set -- a graph node block, held by `Run_state` for the run), so the
-// queue carries a BORROWED raw pointer with no per-dispatch refcount inc/dec. Only valid
+// Like `submit_ready`, but the block is externally owned for its whole dispatch (its
+// `flags.borrowed` is set - a graph node block, held by `Run_state` for the run), so the
+// queue carries a borrowed raw pointer with no per-dispatch refcount inc/dec. Only valid
 // when the owner provably outlives the dispatch. Defined in the scheduler layer.
 void submit_borrowed(Task_control_block* blk);
 
 // A task's per-pipe queue entry (full definition in ts/detail/pipe_link.h).
 struct Pipe_link;
 
-// Enter the task's first pipe (defined in the pipe layer, like `submit_ready` -- a
+// Enter the task's first pipe (defined in the pipe layer, like `submit_ready` - a
 // scheduler-free seam). Called when the pipe turns are the only unmet locks: by
 // `release()` when the count drops to `pipe_count` (a task with ordinary prerequisites),
 // or directly by a creation site with none (`async`, a data-ready graph node). The
@@ -308,20 +308,20 @@ void pipe_enter_first(Task_control_block* blk, Task_ptr* record = nullptr);
 
 // --- Task control block ----------------------------------------------------
 //
-// The refcounted completion/dependency core behind a `Task<R>` handle. FULLY
-// MONOMORPHIC — parameterized on nothing. The result type is erased behind a
+// The refcounted completion/dependency core behind a `Task<R>` handle. fully
+// monomorphic - parameterized on nothing. The result type is erased behind a
 // `void* result_ptr` (nullptr => no result: `void`/bodyless); a body, when present,
 // hangs off an `Executable<Body,R>` wrapper (or a coroutine promise frame) that has
 // `core` as its first member so a `Task_control_block*` aliases it (see docs/task-internals.md §2).
 // Continuations receive `(result_ptr-or-nullptr, cancelled)` so they propagate a
-// cancellation to their own subsequent. `settle()` is idempotent — the first settle
+// cancellation to their own subsequent. `settle()` is idempotent - the first settle
 // wins (so a bodyless block can be triggered; see `Signal`). Result-consumption contract:
 // `sync()` returns `const R&` (non-consuming), so any number of readers (`sync()` twice,
 // several awaiters, N waiters) share one immutable-after-settle result; `take()` is the
 // single destructive move (ownership handoff / move-only R). At most one mover, and last.
 struct Task_control_block
 {
-    // NOTE: members are ordered for size, not logic -- the sub-8-byte fields are clustered
+    // NOTE: members are ordered for size, not logic - the sub-8-byte fields are clustered
     // (below the 8-byte block) so they share padding instead of each punching a hole between
     // pointers/atomics, and the two 32-bit atomics sit together to fill one 8-byte slot.
     // sizeof shrank 336 -> 320 by this reorder alone, 320 -> 280 when the coroutine-first
@@ -332,8 +332,8 @@ struct Task_control_block
 
     // Intrusive strong refcount (see `Task_ptr`) + `num_locks`. Two 32-bit atomics packed
     // adjacent = one 8-byte slot, no padding. `refcount` starts at 0 (first `Task_ptr` -> 1).
-    // `num_locks`: below `execution_flag` it counts unmet PREREQUISITES (gate execution);
-    // once the body starts the flag is set and it counts pending NESTED tasks (gate
+    // `num_locks`: below `execution_flag` it counts unmet prerequisites (gate execution);
+    // once the body starts the flag is set and it counts pending nested tasks (gate
     // completion). See docs/task-internals.md §4/§7.
     static constexpr std::uint32_t execution_flag = 0x8000'0000u;
     std::atomic<std::uint32_t> refcount{ 0 };
@@ -344,15 +344,15 @@ struct Task_control_block
     void (*destroy)(Task_control_block*) = nullptr;
     void* result_ptr = nullptr;        // -> the wrapper's stored R (set before complete), or null
     void (*execute)(const Task_ptr&) = nullptr;   // run the body (null => bodyless)
-    // Fired once at `settle` (completed OR cancelled), after continuations/successors.
-    // Unlike a continuation it is NOT consumed, so a reused block (e.g. a re-armed graph
-    // node) keeps it across runs -- an alloc-free completion hook. Null for most tasks.
+    // Fired once at `settle` (completed or cancelled), after continuations/successors.
+    // Unlike a continuation it is not consumed, so a reused block (e.g. a re-armed graph
+    // node) keeps it across runs - an alloc-free completion hook. Null for most tasks.
     void (*on_complete)(Task_control_block*) = nullptr;
     // The task's pipe entries (docs/pipe-rebase.md §0.2): an array of `pipe_count` links
     // embedded in the owning allocation (`Piped_executable` or the graph's per-node slab),
     // in canonical (ascending pipe-address) order. Null / 0 for a non-pipe task.
     // `pipe_count` doubles as the `release()` trigger threshold (pipes are entered when it
-    // is the only remaining lock count -- pipes-entered-last); `pipes_entered` is the
+    // is the only remaining lock count - pipes-entered-last); `pipes_entered` is the
     // cascade's progress, and settle advances exactly links `[0, pipes_entered)`. Both
     // byte fields are written single-threaded (creation / the sequential cascade) and
     // published by the atomics around them.
@@ -362,20 +362,20 @@ struct Task_control_block
     // --- one-byte cluster --------------------------------------------------------------
     // Each field is its own byte (distinct objects), so the lock-free atomics (`ready`,
     // `prereq_cancelled`) and the mutex-only bools (`completed`, `cancelled`) never share a
-    // word -- no read-modify-write straddles the lock/lock-free boundary. Clustered here so
+    // word - no read-modify-write straddles the lock/lock-free boundary. Clustered here so
     // they share trailing padding rather than each punching a hole between 8-byte members.
-    // (Fusing `completed`+`cancelled` into a bitfield was measured to save 0 bytes -- the
-    // cluster's padding absorbs it -- so they stay plain bools; simpler, no under-lock RMW.)
+    // (Fusing `completed`+`cancelled` into a bitfield was measured to save 0 bytes - the
+    // cluster's padding absorbs it - so they stay plain bools; simpler, no under-lock RMW.)
     std::atomic<bool> ready{ false };
-    // Set when a PREREQUISITE settled cancelled (`release` propagates the settle's cancel
+    // Set when a prerequisite settled cancelled (`release` propagates the settle's cancel
     // state): a dependent (a graph successor) inherits the cancellation, so
     // `Executable::run` cancels instead of running the body. Harmless if set on a task
     // already executing (a cancelled nested child): the flag is only read at execution
     // start. Reset by `reset()` / graph re-arm.
     std::atomic<bool> prereq_cancelled{ false };
     // One-runner claim: set by the sole dispatch of a run before the body runs (`claim()`).
-    // Every run has exactly ONE dispatch (`fetch_sub` values are unique, so one releaser
-    // crosses zero), consumed before the run settles, and `reset` requires a settled run --
+    // Every run has exactly one dispatch (`fetch_sub` values are unique, so one releaser
+    // crosses zero), consumed before the run settles, and `reset` requires a settled run -
     // so a claim can never legitimately fail; the CAS is a machinery-bug detector (fatal
     // under `TS_SAFETY_CHECKS`, skip in shipping) across the inline / queue / node dispatch
     // routes, not a dedup mechanism. Cleared by `reset()` / graph re-arm.
@@ -392,9 +392,9 @@ struct Task_control_block
     {
         Priority priority : 2 = Priority::normal;   // queue position when dispatched
         bool run_inline : 1 = false;                // dispatch on the settling thread, not the queue
-        // The block is EXTERNALLY OWNED for its whole dispatch lifetime (a graph node block,
-        // held by `Run_state` for the run), so the queued dispatch carries a BORROWED raw
-        // pointer -- no per-dispatch refcount inc/dec (`submit_borrowed`). Set once at
+        // The block is externally owned for its whole dispatch lifetime (a graph node block,
+        // held by `Run_state` for the run), so the queued dispatch carries a borrowed raw
+        // pointer - no per-dispatch refcount inc/dec (`submit_borrowed`). Set once at
         // compile(); never true for async/coroutine blocks, which the queue must own.
         bool borrowed : 1 = false;
     };
@@ -404,26 +404,26 @@ struct Task_control_block
     std::mutex mutex;
     std::condition_variable done_cv;   // wakes N waiters (a `Signal` is a barrier)
 
-    // The one block whose completion lock this block holds -- i.e. the parent a nested child
+    // The one block whose completion lock this block holds - i.e. the parent a nested child
     // releases when it settles. A single slot, not a vector: `add_nested` is the sole producer
     // and it runs once per child (a coroutine node's frame and a nested graph run are each
     // attached once), so the fan-out here is structurally 0 or 1. A vector cost 24 bytes plus
     // a heap allocation on the first push for a link that is
     // always a single pointer. Double-nesting is rejected under safety checks rather than
-    // silently dropped -- see `add_nested`.
+    // silently dropped - see `add_nested`.
     Task_ptr nested_parent;
     std::vector<std::move_only_function<void(void*, bool)>> continuations;
 
 #if TS_DEBUG_NAMES
     // Debug identity (`ts::Named`): the literal from the launching verb's options, else the
     // creation call site, else empty (a coroutine frame, whose promise sees no call site).
-    // Diagnostics only -- the circular-wait fatal, the quiescence dump -- so it is fully gated
+    // Diagnostics only - the circular-wait fatal, the quiescence dump - so it is fully gated
     // and shipping carries no bytes for it (the block is deliberately small; see TODO 4.7).
     // Cold tail placement: the hot clusters above keep their layout.
     Named name{ nullptr };
 #endif
 
-    // The block's identity, or the empty `Named` when names are compiled out -- so callers
+    // The block's identity, or the empty `Named` when names are compiled out - so callers
     // need no `#if` of their own.
     Named name_or_empty() const noexcept
     {
@@ -436,7 +436,7 @@ struct Task_control_block
 
     // Claim the body to run; true if this caller should run it. One dispatch per run and
     // re-arm only after settle mean failure is impossible in a correct program (see
-    // `body_claimed`) -- a failed CAS here is a duplicate or stale dispatch, i.e. a
+    // `body_claimed`) - a failed CAS here is a duplicate or stale dispatch, i.e. a
     // machinery bug: fatal under `TS_SAFETY_CHECKS`, degrade to a skip in shipping.
     bool claim() noexcept
     {
@@ -445,7 +445,7 @@ struct Task_control_block
             expected, true, std::memory_order_acq_rel, std::memory_order_relaxed);
 #if TS_SAFETY_CHECKS
         if (!ok)
-            ts::fatal("Task_control_block::claim failed -- duplicate or stale dispatch (machinery bug)");
+            ts::fatal("Task_control_block::claim failed - duplicate or stale dispatch (machinery bug)");
 #endif
         return ok;
     }
@@ -478,7 +478,7 @@ struct Task_control_block
         // far from any `pipe_count`.
     }
 
-    // Per-thread FIFO trampoline for inline tasks: a ready inline task runs on THIS thread
+    // Per-thread FIFO trampoline for inline tasks: a ready inline task runs on this thread
     // (the one that settled its last prerequisite), driven iteratively so a chain of inline
     // tasks doesn't recurse (settle -> release -> execute -> settle -> ...) and blow the
     // stack. The first inline dispatch on a thread starts the drain; inline tasks made
@@ -517,18 +517,18 @@ struct Task_control_block
 
     void settle(bool cancel_)
     {
-        // Graph node fast path (Opt 5): a node block has NO external `sync()`/`co_await`
-        // waiter (a node exposes no `Task<>` handle -- `execute()` returns the run's `done`
-        // handle, never a node), NO continuations (`attach` only ever targets awaited `Task`
-        // cores), and is NEVER a nested child (`add_nested` attaches the coroutine frame / a
-        // nested run as the child, with the node as parent -- so `nested_parent` here stays
+        // Graph node fast path (Opt 5): a node block has no external `sync()`/`co_await`
+        // waiter (a node exposes no `Task<>` handle - `execute()` returns the run's `done`
+        // handle, never a node), no continuations (`attach` only ever targets awaited `Task`
+        // cores), and is never a nested child (`add_nested` attaches the coroutine frame / a
+        // nested run as the child, with the node as parent - so `nested_parent` here stays
         // empty). So its completion needs none of the generic primitive: skip the mutex, the
         // `done_cv.notify_all()` that wakes nobody, and the always-empty continuations drain,
         // and fire `on_complete` directly under the atomic flags. The `num_locks` gating that
-        // decides WHEN a node settles is unchanged (in `run_graph_node` / `release`, before
+        // decides when a node settles is unchanged (in `run_graph_node` / `release`, before
         // this call), and exactly one settle occurs per run (`claim()` + a single threshold
         // crossing), so no idempotency lock is needed. The real cross-thread happens-before
-        // for a dispatched successor is the scheduler queue / `remaining_deps` / the pipe --
+        // for a dispatched successor is the scheduler queue / `remaining_deps` / the pipe -
         // never this block's mutex, which synchronized no one.
         if (flags.borrowed)
         {
@@ -554,7 +554,7 @@ struct Task_control_block
                 return;
             completed = true;
             cancelled = cancel_;
-            // `ready` MUST be set under the same lock as `completed`: a `sync()` waits on
+            // `ready` must be set under the same lock as `completed`: a `sync()` waits on
             // `completed` (acquiring this lock), then `reset()` checks `ready` lock-free. If
             // `ready` were stored after the lock, a sync() could observe `completed` and return
             // in the gap before `ready` was set, and the following `reset()` would wrongly
@@ -563,7 +563,7 @@ struct Task_control_block
             ready.store(true, std::memory_order_release);
             conts = std::move(continuations);
             parent = std::move(nested_parent);
-            // Read `result_ptr` for the continuations HERE, under the lock -- not after the
+            // Read `result_ptr` for the continuations here, under the lock - not after the
             // notify below. Otherwise a re-armable block's waiter (woken by the notify) can
             // `reset()` + re-run and the new run overwrites `result_ptr` while this settle
             // tail still reads it (a data race under TSan). The moved-out `conts`/`parent`
@@ -571,12 +571,12 @@ struct Task_control_block
             r = cancel_ ? nullptr : result_ptr;
         }
         done_cv.notify_all();   // `completed` set under the lock above: no lost wakeup
-        // Waiters are woken BEFORE the settle tail runs, deliberately: the tail can be
+        // Waiters are woken before the settle tail runs, deliberately: the tail can be
         // unbounded (a continuation resumes a frame, `on_complete` releases the task's pipes
         // and thereby dispatches successors), and none of it is work the waiter is waiting
         // for. The consequence is a contract, not a bug: a returned `sync()` says this task
         // settled, never that its downstream work ran or that its pipe grants are released.
-        // Teardown must therefore not infer pipe state from completion -- `~Guarded` drains
+        // Teardown must therefore not infer pipe state from completion - `~Guarded` drains
         // the pipe itself (`Pipe::wait_until_idle`), which is what makes destroying an object
         // immediately after `sync()`ing its last access defined.
         for (auto& c : conts)
@@ -604,16 +604,16 @@ struct Task_control_block
     {
         std::unique_lock lock(mutex);
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
-        // `Rule::deadlock_net` (TODO 6.13) -- Go's "all goroutines are asleep" check, with
+        // `Rule::deadlock_net` (TODO 6.13) - Go's "all goroutines are asleep" check, with
         // the predicate Go lacks. A boundary waiter is the natural observer: it is already
         // blocked, so it costs nothing to have it look around. If, while it waits, the
-        // scheduler is quiescent (every worker idle, every queue empty) AND nothing is
+        // scheduler is quiescent (every worker idle, every queue empty) and nothing is
         // registered as completable from outside the pool, then no thread and no queue can
-        // ever settle what it is waiting for -- progress is impossible.
+        // ever settle what it is waiting for - progress is impossible.
         //
         // Sampling, not bookkeeping: no per-task counter, nothing on the hot path. One
         // sample would be worthless (a worker can sit between finding work and marking
-        // itself busy), so the condition must hold CONTINUOUSLY for the whole window.
+        // itself busy), so the condition must hold continuously for the whole window.
         std::chrono::milliseconds window = deadlock_net_window();
         if (window.count() > 0)
         {
@@ -640,7 +640,7 @@ struct Task_control_block
     // and the result storage is overwritten by the next run's body, so only the
     // completion scalars reset here (`nested_parent` likewise moved out at settle). Leaves
     // `num_locks` at 0 (the caller re-applies
-    // any launch lock). Precondition: settled and quiescent — one run in flight, prior
+    // any launch lock). Precondition: settled and quiescent - one run in flight, prior
     // result consumed; the `ready` gate rejects re-arming a task that has not settled.
     void reset()
     {
@@ -666,14 +666,14 @@ inline void intrusive_inc(Task_control_block* p) noexcept
 }
 // Bounded destruction trampoline. A block's destruction can release references to other
 // blocks (a fused coroutine frame owns its `Task` parameters and promise state), so a
-// deep chain destroyed recursively --
-// dec -> destroy -> member dec -> destroy -> ... -- overflows the stack (a 50k-deep await
+// deep chain destroyed recursively -
+// dec -> destroy -> member dec -> destroy -> ... - overflows the stack (a 50k-deep await
 // cascade did, under TSan). The last release pushes instead, and the outermost drain
 // destroys iteratively (O(1) stack); the vector retains capacity, so the steady state
 // allocates nothing.
 // Trivially-destructible on purpose: releases can run during thread/process teardown
 // (scheduler drain, TLS destructors), after a non-trivial thread-local's destructor would
-// already have run -- a `std::vector` here crashed at exit under TSan. The small buffer is
+// already have run - a `std::vector` here crashed at exit under TSan. The small buffer is
 // deliberately leaked at thread exit.
 struct Destroy_queue
 {
@@ -701,7 +701,7 @@ inline void intrusive_dec(Task_control_block* p) noexcept
     }
     q.items[q.size++] = p;
     if (q.draining)
-        return;   // the active drain on this thread destroys it -- don't recurse
+        return;   // the active drain on this thread destroys it - don't recurse
     q.draining = true;
     for (std::size_t head = 0; head < q.size; ++head)
         q.items[head]->destroy(q.items[head]);   // may push more
@@ -709,7 +709,7 @@ inline void intrusive_dec(Task_control_block* p) noexcept
     q.draining = false;
 }
 
-// A bare block (no result, no body -- `Signal`): one allocation, destroyed as a plain
+// A bare block (no result, no body - `Signal`): one allocation, destroyed as a plain
 // `Task_control_block` when its refcount hits 0.
 inline Task_ptr make_bare_block()
 {
@@ -722,7 +722,7 @@ inline Task_ptr make_bare_block()
 // (`Deferred::commit` applying inline under a held grant): one static block per outcome,
 // allocated once and never freed, so returning a `Task<void>` costs no allocation.
 // Ordering contract: a pre-settled task provides no happens-before edge to its observer
-// (it settled before the work it reports on) -- callers that need ordering must go through
+// (it settled before the work it reports on) - callers that need ordering must go through
 // the object's pipe, which orders; the settled handle only answers `is_done`/`sync` truthfully.
 inline const Task_ptr& settled_void_core()
 {
@@ -782,7 +782,7 @@ inline thread_local std::vector<Task_ptr>* current_scope_children = nullptr;
 
 // A coroutine frame has no call site to capture (a promise sees the coroutine's arguments,
 // not where it was called), so it inherits the identity of the task it was created inside
-// -- typically the graph node whose body it is. That is the identity a diagnostic wants
+// - typically the graph node whose body it is. That is the identity a diagnostic wants
 // anyway: the participant the user declared. Frames created outside any task stay unnamed.
 inline void inherit_task_name(Task_control_block& core) noexcept
 {
@@ -797,17 +797,17 @@ inline void inherit_task_name(Task_control_block& core) noexcept
 inline void Task_control_block::sync_wait(const Task_ptr& blk)
 {
     // Worker-less mode: the awaited work (an async access, a released successor) may be
-    // queued on THIS thread's serial trampoline behind the current frame -- run it
+    // queued on this thread's serial trampoline behind the current frame - run it
     // before parking, or nothing ever would. No-op otherwise.
     drain_serial_pending();
 #if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
     // `Rule::in_task_sync` (docs/coroutine-first.md §4.1, TODO 6.10): `sync()`/`take()`
-    // inside a task is illegal WHETHER OR NOT the target has already settled. The check
+    // inside a task is illegal whether or not the target has already settled. The check
     // used to fire only when the wait would genuinely park, which inverted its coverage:
     // a call whose target is usually settled never tripped in development, then parked a
     // worker on the one frame a prerequisite ran long, and in shipping it was compiled out
-    // entirely. A check whose trigger is the hazard's TIMING inherits the hazard's
-    // nondeterminism -- so it triggers on the rule instead, deterministically on the first
+    // entirely. A check whose trigger is the hazard's timing inherits the hazard's
+    // nondeterminism - so it triggers on the rule instead, deterministically on the first
     // execution of the path. `parallel_for` joins are structurally exempt (they wait on
     // group state directly, on provably running helpers, and never route here).
     if (current_task && rule_enforced(Rule::in_task_sync))
@@ -820,7 +820,7 @@ inline void Task_control_block::sync_wait(const Task_ptr& blk)
 template<typename R> struct Result_storage { std::optional<R> result; };
 template<> struct Result_storage<void> {};
 
-// An executable task: the monomorphic block (FIRST member, so a `Task_control_block*`
+// An executable task: the monomorphic block (first member, so a `Task_control_block*`
 // aliases / `reinterpret_cast`s back to it) + result storage + the body + a token.
 // `run` is wired into `core.execute`; the scheduler/pipe invokes it via
 // `block->execute(block)`. The body lives here, its type erased behind the `execute`
@@ -830,11 +830,11 @@ struct Executable
 {
     Task_control_block core;   // MUST be first
     Result_storage<R> storage;   // empty for void
-    // The body lives in a union so `~Executable` does NOT auto-destroy it (TODO 7.3). The block
-    // outlives the task's settle -- its last ref is dropped on a worker, so a plain member would
+    // The body lives in a union so `~Executable` does not auto-destroy it (TODO 7.3). The block
+    // outlives the task's settle - its last ref is dropped on a worker, so a plain member would
     // keep the closure (and everything it captured: a `Recorder` into a journal, an escaped
     // reference) alive until then, past a `sync()` that already returned. `run()` destroys the
-    // body in this TYPED context right after its last use, BEFORE the task settles, so captured
+    // body in this typed context right after its last use, before the task settles, so captured
     // resources die before any waiter is woken.
     union { Body body; };
 #if TS_SAFETY_CHECKS
@@ -849,7 +849,7 @@ struct Executable
     {
 #if TS_SAFETY_CHECKS
         // The union body is destroyed exactly once, in `run()`. Reaching the dtor without that
-        // is a "settled without running" regression that would leak the body -- catch it.
+        // is a "settled without running" regression that would leak the body - catch it.
         if (!body_destroyed_)
             ts::fatal("Executable destroyed without its body being run (TODO 7.3): body leaked");
 #endif
@@ -869,7 +869,7 @@ struct Executable
     {
         if (!c->claim())
             return;   // machinery bug (fatal under TS_SAFETY_CHECKS); skip in shipping
-                      // -- the LOSING dispatch never ran the body, so it must NOT destroy it.
+                      // - the losing dispatch never ran the body, so it must not destroy it.
 
         auto* self = reinterpret_cast<Executable*>(c.get());
         if (c->token.is_cancel_requested() || c->prereq_cancelled.load(std::memory_order_acquire))
@@ -905,8 +905,8 @@ struct Executable
 
         current_task = std::move(prev);
 
-        // Destroy the body (and its captures) now that it has run and any result is emplaced --
-        // BEFORE the task settles, so a captured `Recorder`/reference cannot outlive a `sync()`
+        // Destroy the body (and its captures) now that it has run and any result is emplaced -
+        // before the task settles, so a captured `Recorder`/reference cannot outlive a `sync()`
         // (TODO 7.3). Nested tasks launched during the body do not reference the body member.
         self->destroy_body();
 
@@ -930,12 +930,12 @@ Task_ptr make_executable(Body&& body, Cancellation_token token)
     return Task_ptr(&exec->core);   // refcount 0 -> 1, owns the wrapper
 }
 
-// A task body may opt into COOPERATIVE cancellation by declaring a trailing
+// A task body may opt into cooperative cancellation by declaring a trailing
 // `Cancellation_token` parameter (`[](Cancellation_token t){...}` or, for `async`,
 // `[](T& v, Cancellation_token t){...}`): `Executable::run` then passes the task's token
 // so the body can poll `is_cancel_requested()` and early-out mid-execution. This is
-// distinct from the pre-run skip (a token cancelled BEFORE the body starts skips it
-// entirely); the parameter matters for cancellation that arrives WHILE the body runs.
+// distinct from the pre-run skip (a token cancelled before the body starts skips it
+// entirely); the parameter matters for cancellation that arrives while the body runs.
 template<typename Fn>
 inline constexpr bool takes_token_v = std::is_invocable_v<Fn&, const Cancellation_token&>;
 
@@ -956,7 +956,7 @@ template<typename...> inline constexpr bool always_false = false;
 // `Cancellation_token` (cooperative cancellation, see `takes_token_v`). Gated at the
 // entry points so a wrong shape rejects at the call site naming this concept instead
 // of hard-erroring inside `Task_result`. (For a *generic* wrong body the token-arity
-// probe still instantiates the body -- same rendering as before the gate; only
+// probe still instantiates the body - same rendering as before the gate; only
 // introspectable functors gain the clean rejection.)
 template<typename Fn>
 concept Task_body = std::invocable<std::decay_t<Fn>&>
@@ -973,7 +973,7 @@ template<typename R>
 Task<R> task_from_core(Task_ptr core) noexcept;
 
 // What `Task<R>::as_optional()` returns: a marker carrying the block, made awaitable by an
-// `operator co_await` in coroutine_support.h that resolves to `std::optional<R>` -- empty
+// `operator co_await` in coroutine_support.h that resolves to `std::optional<R>` - empty
 // when the task settled cancelled. Declared here so `Task` can name it without dragging the
 // coroutine layer into this header.
 template<typename R>
@@ -985,7 +985,7 @@ struct Optional_awaitable
 } // namespace detail
 
 // Options for a `Guarded` access (`access` / `async`, single- and multi-object). Deliberately
-// WITHOUT a run-inline knob: the verb chooses inline-vs-enqueued (`access` runs inline when the
+// without a run-inline knob: the verb chooses inline-vs-enqueued (`access` runs inline when the
 // queue is free via `pipe_try_inline`; `async` always enqueues). `token` makes the body skippable
 // before it runs (and is forwarded to a trailing-`Cancellation_token` body for a mid-run
 // early-out); `priority` sets the queue position when enqueued.
@@ -993,20 +993,20 @@ struct Access_options
 {
     Cancellation_token token = {};
     Priority priority = Priority::normal;
-    // Optional debug identity for the access task. A literal only: the call SITE is
+    // Optional debug identity for the access task. A literal only: the call site is
     // captured by the verb itself (its own defaulted `std::source_location`), so an
     // unnamed access is still identified in diagnostics.
     const char* name = nullptr;
 };
 
 // Declares that something the task system is waiting on will be completed by a thread the
-// scheduler does not own -- an OS I/O completion, a GPU fence, a `Signal` triggered from a
+// scheduler does not own - an OS I/O completion, a GPU fence, a `Signal` triggered from a
 // dedicated engine thread, a `Frame_gate`'s next `open()`. Hold one for as long as that
 // wakeup is outstanding.
 //
 // This is the deadlock net's escape (`Rule::deadlock_net`, docs/waiting-rule-policy.md §7).
-// The net fires when the scheduler is quiescent and nothing is registered here -- so a
-// FORGOTTEN registration produces a false deadlock report, which is why the report names
+// The net fires when the scheduler is quiescent and nothing is registered here - so a
+// forgotten registration produces a false deadlock report, which is why the report names
 // this type. It is not suppressible by scope: the net observes the whole process, so there
 // is no call site to attribute a relaxation to; a build drops it with `TS_ENABLED_RULES`.
 class External_wait
@@ -1045,7 +1045,7 @@ inline void set_deadlock_net_window(std::chrono::milliseconds window) noexcept
 
 // Dispatch options for launching a standalone task (`ts::launch`). `token` makes it
 // skippable before it runs; `priority` sets its queue
-// position; `name` gives it a debug identity (a literal -- the launch SITE is captured by
+// position; `name` gives it a debug identity (a literal - the launch site is captured by
 // the verb, so an unnamed task is still identified).
 struct Launch_options
 {
@@ -1055,7 +1055,7 @@ struct Launch_options
 };
 
 // Handle to an async result. `co_await` it from a coroutine task (the sanctioned
-// composition — see coroutine_support.h); `sync()` blocks for the result from a blue
+// composition - see coroutine_support.h); `sync()` blocks for the result from a blue
 // (non-task) thread.
 template<typename R>
 class Task
@@ -1084,10 +1084,10 @@ public:
     // `void` for a void one). The reference is valid while a handle (this `Task` or
     // another copy) keeps the block alive; `T r = t.sync()` copies within the
     // full-expression and is always safe. To *move* the result out (ownership handoff, or a
-    // move-only `R`) use `take()`. For a value task, fatal if it was cancelled (no result) —
+    // move-only `R`) use `take()`. For a value task, fatal if it was cancelled (no result) -
     // check `is_cancelled()` first; a cancelled `void` sync() simply returns.
-    // NOTE: `sync()` waits for THIS task to settle, not for work attached downstream —
-    // `settle()` fires internal continuations AFTER waking waiters (`notify_all`), so an
+    // NOTE: `sync()` waits for this task to settle, not for work attached downstream -
+    // `settle()` fires internal continuations after waking waiters (`notify_all`), so an
     // attached callback may still be running (or not yet started) when `sync()` returns.
     decltype(auto) sync()
     {
@@ -1104,7 +1104,7 @@ public:
         }
     }
 
-    // Blocks, then **moves** the result out — the single destructive consume (for ownership
+    // Blocks, then **moves** the result out - the single destructive consume (for ownership
     // handoff or a move-only `R`). Leaves the stored result moved-from, so it must be the last
     // consume (see the block's result-consumption contract). Fatal if the task was cancelled.
     R take() requires (!std::is_void_v<R>)
@@ -1117,17 +1117,17 @@ public:
 
     // The two cancellation-tolerant consumes. `sync()`/`take()` assert "this cannot be
     // cancelled" and fatal when it was, which is right for the common case (no token in
-    // play) but punishes a caller for a state the callee chose -- and there is no
+    // play) but punishes a caller for a state the callee chose - and there is no
     // check-then-take that is not a race. These two branch instead:
     //
-    //   try_take()   -- NEVER blocks. Empty when the task is unsettled OR cancelled, so it
+    //   try_take()   - never blocks. Empty when the task is unsettled or cancelled, so it
     //                   is also legal inside a task (the non-blocking spelling of
     //                   `if (t.is_done()) v = t.sync();`).
     //   as_optional()-- `co_await t.as_optional()` waits, then yields empty on cancellation
     //                   instead of the fatal that `co_await t` raises.
     //
-    // Both MOVE the result out, like `take()`: the stored result is left moved-from, so
-    // either must be the last consume. Neither exists for `void` -- a void task has no
+    // Both move the result out, like `take()`: the stored result is left moved-from, so
+    // either must be the last consume. Neither exists for `void` - a void task has no
     // result to be missing, `is_done()` answers the first and awaiting a cancelled void task
     // already resumes normally, so `is_cancelled()` answers the second.
     std::optional<R> try_take() requires (!std::is_void_v<R>)
@@ -1192,21 +1192,21 @@ auto build_bare_task(Fn&& fn, Launch_options opts, std::source_location site)
 
 } // namespace detail
 
-// Launch a standalone task on the scheduler — a bare functor with no access target (the
+// Launch a standalone task on the scheduler - a bare functor with no access target (the
 // primitive `async` for work that touches no guarded object). Returns a `Task<R>`; a
 // `Launch_options{token, priority}` makes it skippable before it runs and sets its queue
 // position. Dispatches through the `submit_ready` bridge (so this stays scheduler-
-// independent). The launched task inherits NOTHING from the launcher — its handle may be
+// independent). The launched task inherits nothing from the launcher - its handle may be
 // dropped (the detached case), so the launcher's grant cannot be guaranteed to outlive the
 // child; a body that touches the launcher's guarded data faults as undeclared access. To
 // touch the launcher's data, use `ts::parallel_for` (its helpers inherit the caller's grant)
 // or acquire fresh via `obj.async(...)` / `co_await obj.access(...)`.
-// (Deduced return -- `Task<Task_result_t<Fn>>` -- rather than a trailing return type:
-// the trailing form substitutes during overload resolution, BEFORE the constraint is
+// (Deduced return - `Task<Task_result_t<Fn>>` - rather than a trailing return type:
+// the trailing form substitutes during overload resolution, before the constraint is
 // checked, so a wrong body shape would hard-error inside `Task_result` instead of
 // failing the `Task_body` gate.)
 // `site` is the naming boundary (ts/named.h): a defaulted `source_location` captures the
-// CALLER, so it must sit on the outermost function the user calls -- `launch` -- and the
+// caller, so it must sit on the outermost function the user calls - `launch` - and the
 // resulting `Named` is passed down explicitly, never re-defaulted in a helper.
 template<typename Fn>
     requires detail::Task_body<Fn>
@@ -1219,9 +1219,9 @@ auto launch(Fn&& fn, Launch_options opts = {},
 namespace detail
 {
 
-// Attach `child` as a NESTED task of the currently-executing task: that task will not
+// Attach `child` as a nested task of the currently-executing task: that task will not
 // complete until `child` settles (completed or cancelled). Fatal if there is no running
-// task. Detail-level graph plumbing -- the callers are the coroutine graph node's frame
+// task. Detail-level graph plumbing - the callers are the coroutine graph node's frame
 // gating (static_task_graph.h) and a nested graph run (`add_nested(run.done)`,
 // static_task_graph.cpp); nesting is a completion dependency, orthogonal to how the child runs.
 inline void add_nested(Task_ptr child_core)
@@ -1261,7 +1261,7 @@ inline void add_nested(Task_ptr child_core)
 
 // A manually-completed synchronization point: a bodyless `Task<void>` (no work is
 // scheduled or executed) that you `trigger()` by hand. It is both producer and
-// consumer in one handle — the consumer side is inherited from `Task<void>`
+// consumer in one handle - the consumer side is inherited from `Task<void>`
 // (`co_await` / `sync`, `is_done`), the producer side is `trigger()`. Copyable;
 // copies share one control block. Used as a done-signal, a barrier / pipeline-phase
 // gate, or an inter-task signal (the integrated equivalent of a manual-reset event
@@ -1271,7 +1271,7 @@ class Signal : public Task<void>
 {
 public:
     // Identified like any other task: by an explicit literal, else by its construction site
-    // (`site` is the naming boundary -- a defaulted `source_location` captures the caller).
+    // (`site` is the naming boundary - a defaulted `source_location` captures the caller).
     explicit Signal(const char* name = nullptr,
                     std::source_location site = std::source_location::current())
         : Task<void>(detail::make_bare_block())
@@ -1284,7 +1284,7 @@ public:
         control()->complete();
     }
 
-    // Re-arm so it can be triggered again — a reusable barrier / phase gate. Precondition:
+    // Re-arm so it can be triggered again - a reusable barrier / phase gate. Precondition:
     // previously triggered and all waiters released (one use in flight).
     void reset()
     {

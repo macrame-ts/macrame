@@ -24,7 +24,7 @@ namespace
 void test_compiled_in_set()
 {
     // The runtime predicate must agree with the preprocessor mask the build was compiled
-    // with -- that agreement is what makes `TS_RULE_ON` guards and `rule_compiled_in` two
+    // with - that agreement is what makes `TS_RULE_ON` guards and `rule_compiled_in` two
     // spellings of one policy.
     TS_CHECK(ts::rule_compiled_in(Rule::await_under_guard) == (TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)));
     TS_CHECK(ts::rule_compiled_in(Rule::in_task_sync) == (TS_RULE_ON(TS_RULE_IN_TASK_SYNC)));
@@ -73,14 +73,14 @@ void test_relaxed_scope_refuses_structural()
 #endif
 }
 
-// 4. Reach, part 1: a relaxation opened in a task body does NOT leak into a DETACHED
+// 4. Reach, part 1: a relaxation opened in a task body does not leak into a detached
 // `ts::launch`. A detached child's handle may outlive the launcher's scope, so it runs as a
 // fresh context on its own worker and sees no relaxation (docs/coroutine-first.md §2). The
-// grant-inheriting form that DOES carry the relaxation is a coroutine segment -- part 2 below.
+// grant-inheriting form that does carry the relaxation is a coroutine segment - part 2 below.
 void test_relaxed_scope_inherited_by_child()
 {
 #if TS_RULES_ANY
-    std::atomic<bool> seen_in_detached{ true };   // detached must NOT inherit -> ends false
+    std::atomic<bool> seen_in_detached{ true };   // detached must not inherit -> ends false
     ts::Signal detached_done;
     ts::launch([&]
     {
@@ -92,7 +92,7 @@ void test_relaxed_scope_inherited_by_child()
             detached_done.trigger();
         });
     }).sync();
-    detached_done.sync();             // the detached child is not gated -- wait for it explicitly
+    detached_done.sync();             // the detached child is not gated - wait for it explicitly
     TS_CHECK(!seen_in_detached.load(std::memory_order_relaxed));   // detached -> fresh context
     TS_CHECK(!ts::rule_relaxed(Rule::in_task_sync));               // the test thread is unaffected
 #endif
@@ -118,7 +118,7 @@ void test_relaxed_scope_across_suspension()
     std::thread resumer([&gate, &leaked_on_resumer, &left_behind]
     {
         // The frame resumes inside `trigger()`, on this thread; record whether the
-        // relaxation was visible here BEFORE the frame installed its own.
+        // relaxation was visible here before the frame installed its own.
         leaked_on_resumer.store(ts::rule_relaxed(Rule::in_task_sync), std::memory_order_relaxed);
         gate.trigger();
         // And the frame's relaxation must not have been left behind on this thread.
@@ -155,7 +155,7 @@ ts::Task<void> climb(ts::Guarded<int>& higher, std::atomic<int>& seen)
 }
 #endif
 
-// Sanctioned form 1: the awaited object outranks everything held, so the await CLIMBS and
+// Sanctioned form 1: the awaited object outranks everything held, so the await climbs and
 // Havender's argument makes a cycle through these objects unrepresentable.
 void test_access_rank_climb()
 {
@@ -177,7 +177,7 @@ void test_access_rank_climb()
 
 // Sanctioned form 2: the per-scope opt-out, for a program that upholds the order by means
 // the library cannot see. Note it is advisory, so a `Relaxed_scope` really does suppress it
-// -- unlike the structural guard rule.
+// - unlike the structural guard rule.
 void test_access_rank_relaxed()
 {
 #if TS_RULE_ON(TS_RULE_ACCESS_RANK)
@@ -207,7 +207,7 @@ void test_death_access_rank()
 
 // 7. The deadlock net (`Rule::deadlock_net`). It fires from a blocked boundary waiter when
 // the scheduler has been continuously quiescent with nothing registered as externally
-// completable -- see the `deadlock_net` death scenario. Here: the escape.
+// completable - see the `deadlock_net` death scenario. Here: the escape.
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
 // Restores the process-wide window whatever the test does.
 struct Net_window
@@ -217,7 +217,7 @@ struct Net_window
 };
 #endif
 
-// A wait that only a NON-worker thread can complete is legitimate, not a deadlock -- as long
+// A wait that only a non-worker thread can complete is legitimate, not a deadlock - as long
 // as it is declared. `ts::External_wait` is that declaration, and the net's fatal names it
 // because a forgotten one reports a correct program as deadlocked.
 void test_external_wait_suppresses_net()
@@ -267,13 +267,13 @@ void test_death_deadlock_net()
     TS_CHECK(ts::test::expect_death("deadlock_net"));
     // The shape only tier 3 can see: a task suspended on a plain task await while holding a
     // grant, so no wait edge exists. The child's report names it (verified by eye; the
-    // harness has no fatal-output capture) -- what this asserts is that the net still fires.
+    // harness has no fatal-output capture) - what this asserts is that the net still fires.
     TS_CHECK(ts::test::expect_death("deadlock_net_suspended"));
 #endif
 }
 
 // 8. The suspension registry itself (tier 3): a live suspension is registered, and the entry
-// is retired when the frame resumes -- the property the whole report depends on.
+// is retired when the frame resumes - the property the whole report depends on.
 #if TS_SUSPENSION_REGISTRY
 ts::Task<void> park_on(ts::Signal gate)
 {

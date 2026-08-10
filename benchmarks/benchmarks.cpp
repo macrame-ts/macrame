@@ -30,7 +30,7 @@ namespace
 
 using Clock = std::chrono::steady_clock;
 
-// ~1 s per benchmark (warmup + reps measured rounds), median reported -- the
+// ~1 s per benchmark (warmup + reps measured rounds), median reported - the
 // numbers are stable enough to track for regression monitoring.
 constexpr auto target = std::chrono::milliseconds(200);
 constexpr int reps = 4;
@@ -70,7 +70,7 @@ void report(const char* name, std::vector<double> ops)
         name, md / 1e6, mn / 1e6, mx / 1e6, 1e9 / md);
 }
 
-// task bodies operate on a shared atomic passed as `void*` — no per-task allocation
+// task bodies operate on a shared atomic passed as `void*` - no per-task allocation
 void count_down(void* p) { static_cast<std::atomic<uint64_t>*>(p)->fetch_sub(1, std::memory_order_release); }
 void count_up(void* p)   { static_cast<std::atomic<uint64_t>*>(p)->fetch_add(1, std::memory_order_release); }
 
@@ -163,8 +163,8 @@ std::vector<double> bench_contention(ts::Idle_policy policy, unsigned producers)
 }
 
 // Fork-join / worker-submit throughput: tasks that spawn tasks. Unlike `contention` (which
-// is EXTERNAL producers, all hitting the global queue), here the child submits come from
-// WORKER bodies -- so with per-worker deques (M2 stage 3) they push to the worker's own local
+// is external producers, all hitting the global queue), here the child submits come from
+// worker bodies - so with per-worker deques (M2 stage 3) they push to the worker's own local
 // deque (no shared cache line) and idle workers steal. Raw scheduler API (no task-block alloc)
 // to isolate scheduler throughput.
 struct Fj_ctx
@@ -239,10 +239,10 @@ std::vector<double> bench_ts_read()
     });
 }
 
-// Pipe contention: N producer threads hammer ONE object's reader/writer pipe with a
+// Pipe contention: N producer threads hammer one object's reader/writer pipe with a
 // read-heavy async mix (`read_pct`% reads). This is the fixture the pipe rebase must be
 // validated non-regressive against (docs/pipe-rebase.md R10): it stresses the current
-// `Pipe::mutex` on every enqueue/admission -- the cost the lock-free tail is meant to
+// `Pipe::mutex` on every enqueue/admission - the cost the lock-free tail is meant to
 // remove without hurting the uncontended path. 100% reads isolates admission throughput
 // (readers never serialize); mixing writes adds serialization + the writer/reader handoff.
 std::vector<double> bench_pipe_contention(unsigned producers, int read_pct)
@@ -321,7 +321,7 @@ std::vector<double> bench_coro_sync()
     });
 }
 
-// Coroutine composition: await a chain of K eagerly-launched stages -- the coroutine-first
+// Coroutine composition: await a chain of K eagerly-launched stages - the coroutine-first
 // equivalent of the `then` chain benchmark below (the number to beat, §5.5).
 static ts::Task<int> chain_coro(int chain)
 {
@@ -341,13 +341,13 @@ std::vector<double> bench_coro_chain()
     });
 }
 
-// The decomposition partner of `coro chn`. Same shape -- K awaited stages, one op per stage
-// -- but each stage is a plain coroutine call instead of a launched task. Tasks are eager,
+// The decomposition partner of `coro chn`. Same shape - K awaited stages, one op per stage
+// - but each stage is a plain coroutine call instead of a launched task. Tasks are eager,
 // so the callee runs to completion on this thread and the await takes the `await_ready` fast
-// path: this measures the per-stage COROUTINE cost (frame allocation + promise setup +
+// path: this measures the per-stage coroutine cost (frame allocation + promise setup +
 // settled-await + destruction) with no scheduler in the picture. `coro chn` minus this is
 // the round-trip (submit, worker wake, cross-thread resume), which is what that benchmark is
-// actually dominated by -- see docs/pipe-rebase.md §0.4.
+// actually dominated by - see docs/pipe-rebase.md §0.4.
 static ts::Task<int> add_one_coro(int v) { co_return v + 1; }
 
 static ts::Task<int> nest_coro(int chain)
@@ -370,12 +370,12 @@ std::vector<double> bench_coro_nest()
 
 // The resume round trip, decomposed (TODO 6.8). `coro chn` minus `coro nst` is the per-stage
 // round trip; this grid splits that round trip along its two structural axes by running the
-// SAME chain on a differently-configured global scheduler (`ts::launch` dispatches through
+// same chain on a differently-configured global scheduler (`ts::launch` dispatches through
 // `global_scheduler()`, so `Scheduler_scope` is what redirects it):
-//   idle policy -- `spin` never parks a worker, so a submit issues no wake syscall and a
+//   idle policy - `spin` never parks a worker, so a submit issues no wake syscall and a
 //                  waiting worker never sleeps; the delta against `spin_then_block` is the
 //                  wake+park cost.
-//   worker count -- with ONE worker the stage runs and the awaiting frame resumes on the same
+//   worker count - with one worker the stage runs and the awaiting frame resumes on the same
 //                   thread (the resume trampoline, warm cache, own-deque submit); 2 workers
 //                   adds exactly one possible thief, and the full pool adds the scan
 //                   contention of a large idle pool.
@@ -447,8 +447,8 @@ std::vector<double> bench_harness()
 }
 
 // --- graph vs graph-free frame composition ---------------------------------
-// Both entries run the SAME frame -- same `World`, same tick_* bodies, same worker pool
-// (the global scheduler) -- differing only in how the schedule is produced: a compiled
+// Both entries run the same frame - same `World`, same tick_* bodies, same worker pool
+// (the global scheduler) - differing only in how the schedule is produced: a compiled
 // `Static_task_graph` (edges derived from the access declarations, re-runs allocate only
 // the `done` handle) vs `run_frame_graph_free` (a coroutine per chain, one task block +
 // pipe-link set per system per frame, every edge an explicit `co_await`). The graph's
@@ -513,7 +513,7 @@ void run_benchmarks()
     report("s+block", bench_fork_join(ts::Idle_policy::spin_then_block));
     report("handoff", bench_fork_join(ts::Idle_policy::handoff));
 
-    std::printf("\npipe contention (%u producers, read-heavy mix -- pipe rebase R10 baseline):\n", hw);
+    std::printf("\npipe contention (%u producers, read-heavy mix - pipe rebase R10 baseline):\n", hw);
     report("100% rd", bench_pipe_contention(hw, 100));
     report("90% rd",  bench_pipe_contention(hw, 90));
     report("50% rd",  bench_pipe_contention(hw, 50));

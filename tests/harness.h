@@ -16,9 +16,9 @@ namespace ts::test
 // call site so "which switch does this test need" is one token, and adding a switch does
 // not mean auditing `#if`s scattered through the suite.
 //
-// A DEATH test must name the switch that compiles in the fatal it expects, not merely
+// A death test must name the switch that compiles in the fatal it expects, not merely
 // `with_harness`: when the fatal is absent the child does not abort, and for most of these
-// it does the thing the fatal was preventing -- which is usually a deadlock, so the parent
+// it does the thing the fatal was preventing - which is usually a deadlock, so the parent
 // hangs in `_spawnl(_P_WAIT)` rather than failing. That is how the Shipping suite came to
 // hang after its crash was fixed.
 inline constexpr bool with_harness = TS_SAFETY_CHECKS != 0;      // TS_CHECK_ACCESS + the harness fatals
@@ -30,7 +30,7 @@ inline constexpr bool with_rule_circular_wait = TS_RULE_ON(TS_RULE_CIRCULAR_WAIT
 inline constexpr bool with_rule_deadlock_net = TS_RULE_ON(TS_RULE_DEADLOCK_NET);
 
 // Records a check. On failure: prints location + the call stack and marks the
-// current test failed, but does NOT abort (tests are the one place failures are
+// current test failed, but does not abort (tests are the one place failures are
 // non-fatal). Returns the condition.
 bool record_check(bool passed, const char* expr, const char* file, int line, const char* message);
 
@@ -39,11 +39,11 @@ using Test_fn = void(*)();
 void run(const char* name, Test_fn fn);
 
 // Run `fn` only when the facility it exercises exists in this build; otherwise record it as
-// SKIPPED, with `reason` naming the switch. `summary()` reports the count, so a test that
-// does not apply to a configuration is visible rather than silently absent -- which is how
+// skipped, with `reason` naming the switch. `summary()` reports the count, so a test that
+// does not apply to a configuration is visible rather than silently absent - which is how
 // the Shipping configuration rotted into six failures and a crash without anyone noticing.
 //
-// This is the one sanctioned way to make a test configuration-conditional. Do NOT wrap the
+// This is the one sanctioned way to make a test configuration-conditional. Do not wrap the
 // registration in `#if`: a test that vanishes leaves no trace in the output, and the next
 // compiled-out check repeats the mistake.
 //

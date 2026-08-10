@@ -39,7 +39,7 @@ void Access_context::add(const void* instance, Access mode,
 #if TS_SAFETY_CHECKS
     // Silent truncation is a latent footgun: a task declaring more than `max_entries`
     // objects would lose the overflowing declaration, and a later legitimate access to
-    // that object then faults spuriously in `check` -- a false positive surfacing far
+    // that object then faults spuriously in `check` - a false positive surfacing far
     // from the cause. Fail loud at the declaration instead.
     if (count_ == max_entries)
     {
@@ -78,7 +78,7 @@ Access_context::Grant Access_context::check(const void* instance, Access mode) c
 #if TS_SAFETY_CHECKS
         // Grant-window validity: the pipe's write-epoch moved on -> this entry's window is
         // over (the write holder released, or a writer acquired after a read capture).
-        // Keep scanning -- a duplicate entry for the same object may still be current.
+        // Keep scanning - a duplicate entry for the same object may still be current.
         if (e.epoch && e.epoch->load(std::memory_order_relaxed) != e.captured)
         {
             stale = true;

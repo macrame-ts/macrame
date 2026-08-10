@@ -16,7 +16,7 @@ using ts::test::run;
 namespace
 {
 
-// True if `file` names THIS translation unit -- the whole point of the naming design is
+// True if `file` names this translation unit - the naming design ensures
 // that a defaulted `source_location` captures the caller, so every site captured through a
 // public verb must land here and never in `include/ts/...`.
 bool is_this_file(const char* file)
@@ -70,7 +70,7 @@ void test_named_display()
     TS_CHECK(std::strcmp(ts::named_display(none, buf, sizeof buf, "<none>"), "<none>") == 0);
 }
 
-// 3. THE guarantee: a task launched with no name is identified by its launch site in the
+// 3. the guarantee: a task launched with no name is identified by its launch site in the
 // caller's file. If any internal layer re-defaulted its own `source_location`, this would
 // capture `include/ts/task.h` instead and the feature would be worthless.
 void test_launch_captures_call_site()
@@ -109,7 +109,7 @@ void test_access_verb_captures_call_site()
 }
 
 // 6. A graph node's block carries the node's identity, so a diagnostic that names the
-// task names the node -- including the pipe entries the node takes, which are that block.
+// task names the node - including the pipe entries the node takes, which are that block.
 void test_node_block_carries_name()
 {
 #if TS_SAFETY_CHECKS

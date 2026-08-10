@@ -40,7 +40,7 @@ int read_value(ts::Guarded<int>& d)
     return d.async([](const int& v) { return v; }).sync();
 }
 
-// The graph's completion handle awaited from a coroutine -- the coroutine-first spelling
+// The graph's completion handle awaited from a coroutine - the coroutine-first spelling
 // of the old `then`-off-`execute()` chain.
 void test_await_graph_completion()
 {
@@ -60,7 +60,7 @@ void test_await_graph_completion()
     TS_CHECK(read_value(a) == 5);
 }
 
-// Joining async results into a graph run -- the coroutine-first spelling of the old
+// Joining async results into a graph run - the coroutine-first spelling of the old
 // `when_all(...).then(...)` join: the accesses run concurrently (eager), sequential awaits
 // complete when the last does.
 void test_await_join_into_graph()
@@ -95,7 +95,7 @@ void test_graph_then_dynamic()
 }
 
 // Detects overlapping access: any two touches running at once push `peak` to 2.
-// (The access harness would NOT catch a graph-node vs. async race -- both sides hold
+// (The access harness would not catch a graph-node vs. async race - both sides hold
 // a valid declared context; only the reservation keeps them apart. So we measure
 // concurrency directly.)
 struct Guarded
@@ -116,9 +116,9 @@ struct Guarded
 int peak_of(ts::Guarded<Guarded>& x) { return x.async([](const Guarded& g) { return g.peak.load(); }).sync(); }
 int total_of(ts::Guarded<Guarded>& x) { return x.async([](const Guarded& g) { return g.total.load(); }).sync(); }
 
-// Static node access + dynamic async on the SAME object must not overlap: the run
+// Static node access + dynamic async on the same object must not overlap: the run
 // reserves the object, so the asyncs queue behind the node. (`execute()` reserves
-// synchronously here -- the pipe is idle -- so the asyncs are enqueued behind the
+// synchronously here - the pipe is idle - so the asyncs are enqueued behind the
 // held reservation.)
 void test_graph_async_no_overlap_during()
 {
@@ -216,10 +216,10 @@ void test_early_release_frees_object_mid_run()
     TS_CHECK(ran_during_run.load());   // and mid-run: x was freed early, not held to run end
 }
 
-// Lazy acquire: an object touched only by a LATE node (after a slow predecessor) is
+// Lazy acquire: an object touched only by a late node (after a slow predecessor) is
 // reserved only when that node is dispatched, so async on it runs during the early part
 // of the frame instead of blocking on the whole run. Deterministic the same way: the
-// slow predecessor (which does NOT touch x) records whether x's async already ran.
+// slow predecessor (which does not touch x) records whether x's async already ran.
 void test_lazy_acquire_late_object_free_early()
 {
     ts::Guarded<int> y{ ts::Named{}, 0 }, x{ ts::Named{}, 0 };
@@ -246,9 +246,9 @@ void test_lazy_acquire_late_object_free_early()
     TS_CHECK(ran_during_a.load());   // x was free while the 60ms node ran (reserved only when b dispatched)
 }
 
-// Gap freeing (per-node acquire, not whole-run): an object touched by an EARLY node and a
-// LATE node, with a gap node (on another object) between them, is RELEASED after the early
-// node and re-acquired only at the late node -- so it is FREE during the gap. The old
+// Gap freeing (per-node acquire, not whole-run): an object touched by an early node and a
+// late node, with a gap node (on another object) between them, is released after the early
+// node and re-acquired only at the late node - so it is free during the gap. The old
 // whole-run [first accessor, last accessor] reservation held it continuously across the gap,
 // which would leave `ran_during_gap` false. Deterministic: the gap node (touches only y)
 // sleeps and records whether x's async already ran.
@@ -280,7 +280,7 @@ void test_gap_frees_object_between_accessors()
     TS_CHECK(ran_during_gap.load());   // x released after n1, re-acquired at n3 -> free during n2
 }
 
-// Mode-aware acquire: a READ node holds its object as a reader, so a concurrent async READ
+// Mode-aware acquire: a read node holds its object as a reader, so a concurrent async read
 // on the same object overlaps it (a writer hold is exclusive; a whole-object reservation
 // would block even reads for the whole run). Deterministic: the read node sleeps, then
 // records whether the async read ran.
@@ -296,11 +296,11 @@ void test_reader_node_overlaps_async_read()
         std::this_thread::sleep_for(60ms);
         ran_during_node.store(async_ran.load());
         (void)v;
-    }, x);   // READ node (const ref -> read_only, held as a reader)
+    }, x);   // read node (const ref -> read_only, held as a reader)
     g.compile();
 
     auto run = g.execute();
-    ts::Task<int> as = x.async([&async_ran](const int& v) { async_ran.store(true); return v; });   // READ async
+    ts::Task<int> as = x.async([&async_ran](const int& v) { async_ran.store(true); return v; });   // read async
     run.sync();
     TS_CHECK(as.sync() == 7);
 
@@ -320,7 +320,7 @@ void test_multi_async_basic()
 }
 
 // A multi-object writer holds both objects exclusively, so single-object asyncs on either
-// queue behind it -- never concurrent on either object.
+// queue behind it - never concurrent on either object.
 void test_multi_async_exclusion()
 {
     ts::Guarded<Guarded> x{ ts::Named{ "x" } }, y{ ts::Named{ "y" } };
@@ -337,7 +337,7 @@ void test_multi_async_exclusion()
     TS_CHECK(peak_of(y) == 1);   // never concurrent on y
 }
 
-// Deadlock-freedom: two multi-object asyncs declaring the SAME pair in OPPOSITE order both
+// Deadlock-freedom: two multi-object asyncs declaring the same pair in opposite order both
 // acquire in canonical (pipe-address) order, so no hold-and-wait cycle forms. All complete.
 void test_multi_async_no_deadlock()
 {
@@ -368,7 +368,7 @@ void test_multi_async_options()
     TS_CHECK(t.is_cancelled());   // skipped before running; don't get() a cancelled value
 }
 
-// Multi-object async with a GENERIC lambda: `[](auto&...)` can't be introspected for const-ness,
+// Multi-object async with a generic lambda: `[](auto&...)` can't be introspected for const-ness,
 // so mode is declared with `ts::as_read_only`/`as_read_write` tags. Same effect as the non-generic
 // `test_multi_async_basic` (write one, read the other).
 void test_multi_async_generic_lambda()
@@ -386,7 +386,7 @@ void test_multi_async_generic_lambda()
     TS_CHECK(r2 == 50);
 }
 
-// BARE generic lambda (no tags): per-position modes come from the rvalue probe --
+// bare generic lambda (no tags): per-position modes come from the rvalue probe --
 // `const auto&` = read, `auto&` = write. Same effect as the tagged and non-generic forms.
 void test_multi_async_probed_generic()
 {
@@ -402,7 +402,7 @@ void test_multi_async_probed_generic()
     TS_CHECK(read_value(b) == 6);  // read position untouched
 }
 
-// A write tag over a functor that only READS (a `const T&` parameter) is a legal conservative
+// A write tag over a functor that only reads (a `const T&` parameter) is a legal conservative
 // over-declaration: the object is held exclusively, and `T&` binds the `const T&` parameter.
 void test_multi_async_overdeclared_write()
 {
@@ -432,8 +432,8 @@ void test_multi_async_generic_exclusion()
 }
 
 // Object handoff: a write chain (each node writes the same object) hands the exclusive hold
-// node-to-node instead of releasing + re-acquiring it. Correctness -- the value threads
-// through the chain -- and re-runnability confirm the hold is preserved across the handoffs.
+// node-to-node instead of releasing + re-acquiring it. Correctness - the value threads
+// through the chain - and re-runnability confirm the hold is preserved across the handoffs.
 void test_handoff_write_chain()
 {
     ts::Guarded<int> x{ ts::Named{}, 0 };
@@ -446,14 +446,14 @@ void test_handoff_write_chain()
     g.compile();
 
     g.execute().sync();
-    TS_CHECK(read_value(x) == 15);         // ((0 + 1) * 10) + 5 -- each handed the hold in order
+    TS_CHECK(read_value(x) == 15);         // ((0 + 1) * 10) + 5 - each handed the hold in order
 
     g.execute().sync();
     TS_CHECK(read_value(x) == 165);        // re-run: ((15 + 1) * 10) + 5
 }
 
-// Mixed mode across an edge does NOT hand off: a writer node then a reader node on the same
-// object -- different modes, so the writer releases and the reader acquires its own hold.
+// Mixed mode across an edge does not hand off: a writer node then a reader node on the same
+// object - different modes, so the writer releases and the reader acquires its own hold.
 // Correctness (the read sees the write) confirms the release/re-acquire path still works.
 void test_handoff_skips_mode_change()
 {
@@ -491,8 +491,8 @@ void test_repeat_stress()
 
 // Drive the whole mock game-engine frame (graph + Versioned transforms +
 // internal parallelism + Guarded::async + awaited streaming) and assert frame-level
-// invariants. Reaching the assertions at all proves no deadlock and -- since
-// the access harness is live -- zero access violations (a violation would have
+// invariants. Reaching the assertions at all proves no deadlock and - since
+// the access harness is live - zero access violations (a violation would have
 // aborted the process).
 void test_engine_frame()
 {
@@ -514,9 +514,9 @@ void test_engine_determinism()
 
 // The same frame composed without a `Static_task_graph` (sample's `run_frame_graph_free`):
 // the same systems as multi-object `ts::async` calls with every derived edge written out as
-// a `co_await`. It must produce the same observable result as the graph baseline -- entity
+// a `co_await`. It must produce the same observable result as the graph baseline - entity
 // 0's published transform is local_xf + bodies = 2 + 3, and it only reads 5 if propagation
-// ran after BOTH ik_post and finalize, so a dropped edge shows up here.
+// ran after both ik_post and finalize, so a dropped edge shows up here.
 void test_engine_graph_free()
 {
     double avg_ms = 0.0, serial_ms = 0.0;
@@ -533,16 +533,16 @@ void test_engine_graph_free()
     TS_CHECK(free_a == free_b);                // and deterministic across runs
     // The transform invariant cannot see the draw-producer/submit ordering (every mock
     // system writes the same constant every frame, so a one-frame skew is invisible); the
-    // submitted command count can -- `submit` clears the queue, so it counts only what the
+    // submitted command count can - `submit` clears the queue, so it counts only what the
     // producers pushed before it ran.
     TS_CHECK(free_drawn == graph_drawn);
     TS_CHECK(free_drawn == free_drawn_again);
 }
 
 // Awaited fork-join, nested two deep: the coroutine-first shape of the classic
-// oversubscription deadlock. The outer coroutines saturate every worker and each AWAITS
+// oversubscription deadlock. The outer coroutines saturate every worker and each awaits
 // its inner tasks; awaiting suspends (frees the worker) instead of parking it, so the
-// inner tasks always find workers -- the deadlock the old blocking join could only
+// inner tasks always find workers - the deadlock the old blocking join could only
 // survive via retraction is structurally absent. Watchdog'd so a regression fails the
 // test rather than hanging forever.
 ts::Task<void> awaited_fork_join(int n, std::atomic<int>& total)
@@ -589,7 +589,7 @@ void test_oversubscription_no_deadlock()
 }
 
 // Deep awaited dependency chains under oversubscription: each outer coroutine awaits a
-// JOIN coroutine that itself awaits leaf tasks -- two suspension layers deep, workers
+// join coroutine that itself awaits leaf tasks - two suspension layers deep, workers
 // saturated. Every await frees its worker, so the whole tree drains without retraction.
 void test_deep_await_chain_no_deadlock()
 {
@@ -629,7 +629,7 @@ void test_deep_await_chain_no_deadlock()
 } // namespace
 
 // Worker-less global scheduler (`Scheduler_scope{{.single_threaded = true}}`): every layer
-// runs inline on the calling thread -- launch/then, Guarded async, parallel_for, and a
+// runs inline on the calling thread - launch/then, Guarded async, parallel_for, and a
 // graph with conflict-derived edges and a nested task. Everything must complete on the
 // main thread, and a launch/async is already done when the call returns.
 void test_single_threaded_end_to_end()
@@ -638,7 +638,7 @@ void test_single_threaded_end_to_end()
     const std::thread::id main_id = std::this_thread::get_id();
 
     // Bare launch + an awaiting coroutine: inline, done at return, on this thread (the
-    // await never suspends -- the producer is already settled when the coroutine starts).
+    // await never suspends - the producer is already settled when the coroutine starts).
     std::thread::id launch_ran_on{};
     ts::Task<int> t = ts::launch([&launch_ran_on] { launch_ran_on = std::this_thread::get_id(); return 6; });
     TS_CHECK(t.is_done());
@@ -693,12 +693,12 @@ void test_single_threaded_end_to_end()
 }
 
 // The drain-before-park rule: a body that admits pipe work and then blocks on it must not
-// deadlock -- `sync()` drains the thread's serial trampoline (where the admitted job sits,
+// deadlock - `sync()` drains the thread's serial trampoline (where the admitted job sits,
 // behind the running body's frame) before parking.
 //
 // Doubles as the sanctioned use of the `in_task_sync` opt-out: an in-task `sync()` is
-// illegal by rule, and here the caller knows something the library cannot see -- the target
-// is a pipe job admitted onto THIS thread's trampoline, so the drain hook resolves it. That
+// illegal by rule, and here the caller knows something the library cannot see - the target
+// is a pipe job admitted onto this thread's trampoline, so the drain hook resolves it. That
 // claim is exactly what `ts::Relaxed_scope` is for, and it stays scoped to the body making
 // it (the rest of the suite remains checked).
 void test_single_threaded_sync_inside_body()
@@ -740,7 +740,7 @@ void test_single_threaded_deterministic_order()
 
 #if TS_SAFETY_CHECKS
 // Coroutine-first §4.1: a node body that would genuinely park on a pipe job (an object the
-// task does not hold) is FATAL, not a warning -- the park occupies a worker and risks
+// task does not hold) is fatal, not a warning - the park occupies a worker and risks
 // pool-exhaustion deadlock. The sanctioned form is `co_await` (companion:
 // `test_coro_await_access_in_node`, coroutine_tests).
 void test_blocking_sync_in_task_is_fatal()
@@ -749,7 +749,7 @@ void test_blocking_sync_in_task_is_fatal()
 }
 
 // Sanctioned fork-join inside a node produces zero reports: `parallel_for` joins via the
-// state's own wait (the one blessed in-task wait -- it waits only on running helpers).
+// state's own wait (the one blessed in-task wait - it waits only on running helpers).
 void test_parallel_for_in_node_no_reports()
 {
     long long base = ts::ensure_failure_count();

@@ -167,7 +167,7 @@ namespace detail
 void ensure_failed(const char* message, bool report) noexcept
 {
     // Counting and once-per-site filtering happen out here regardless of the
-    // installed handler -- a host handler only changes presentation, never
+    // installed handler - a host handler only changes presentation, never
     // whether the harness/drivers see the failure.
     g_ensure_failure_count.fetch_add(1, std::memory_order_relaxed);
     if (report)
@@ -183,7 +183,7 @@ void ensure_failed(const char* message, bool report) noexcept
 namespace
 {
 
-// Last-resort handler for a structured exception that no `fatal` produced -- a
+// Last-resort handler for a structured exception that no `fatal` produced - a
 // raw access violation being the case that motivated this (it never routes
 // through `fatal`, so without this the process dies with no message and no
 // stack). Runs on the faulting thread with its stack intact, so both the printed

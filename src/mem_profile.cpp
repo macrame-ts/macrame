@@ -1,8 +1,8 @@
 #include "mem_profile.h"
 
-// The allocation profiler overrides GLOBAL operator new/delete, so it is compiled in only
+// The allocation profiler overrides global operator new/delete, so it is compiled in only
 // when `TS_MEM_PROFILE` is defined (rebuild with that define to profile). The default build
-// gets the stub at the bottom -- zero impact on the normal allocator.
+// gets the stub at the bottom - zero impact on the normal allocator.
 #if defined(TS_MEM_PROFILE)
 
 #include "ts/guarded.h"
@@ -35,7 +35,7 @@ std::atomic<long long> g_bytes{ 0 };
 std::atomic<bool> g_on{ false };
 
 // A/B knob: TS_POOL=1 routes allocs through a per-thread recycling free-list instead of the
-// CRT allocator -- the fastest realistic allocator (thread-local, lock-free, recycles) -- to
+// CRT allocator - the fastest realistic allocator (thread-local, lock-free, recycles) - to
 // compare the allocator's contribution to throughput. Read once before main.
 const bool g_pool = (std::getenv("TS_POOL") != nullptr);
 
@@ -136,9 +136,9 @@ void measure(const char* name, int k, Op&& op)
 
 using Frame_run = void (*)(int, float, double&, double&, float&);
 
-// Per-FRAME cost of a whole game frame, either composition. Each entry point builds its own
+// Per-frame cost of a whole game frame, either composition. Each entry point builds its own
 // `World` (and, for the graph, compiles it), so the per-frame figure is taken as a
-// difference between an n-frame run and a 1-frame run -- the one-time setup cancels.
+// difference between an n-frame run and a 1-frame run - the one-time setup cancels.
 void measure_frame(const char* name, Frame_run run)
 {
     constexpr int frames = 41;   // 40 frames of difference
@@ -173,7 +173,7 @@ void run_mem_profile()
     constexpr int k = 4000;
 
     // Anchor: cost of one malloc+free of a block-sized chunk on this machine (cache-hot,
-    // single-thread, uncontended -> a LOWER bound on the real per-op cost).
+    // single-thread, uncontended -> a lower bound on the real per-op cost).
     {
         constexpr int mk = 2000000;
         constexpr std::size_t sz = 300;

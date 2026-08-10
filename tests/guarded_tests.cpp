@@ -52,7 +52,7 @@ static_assert(Async_on_mutable<int, Generic_write>);
 static_assert(!Async_on_const<int, Generic_write>, "generic write probes read_write");
 static_assert(Async_on_const<int, Generic_read>, "generic const read probes read_only");
 
-#if 0   // Compile-time rejections, kept for documentation -- each of these must NOT compile:
+#if 0   // Compile-time rejections, kept for documentation - each of these must not compile:
 void must_not_compile(ts::Guarded<int>& g)
 {
     g.async([](int v) { ++v; });            // by-value resource param: static_assert (a copy
@@ -113,7 +113,7 @@ void test_destructor_waits()
 
 // A task settles in the order settle -> notify waiters -> `on_complete` -> pipe release
 // (`Task_control_block::settle`), so `sync()` returns while the settling thread still holds
-// the object's pipe grant: the release TRAILS the waiter's wake. Destroying the object right
+// the object's pipe grant: the release trails the waiter's wake. Destroying the object right
 // there is nevertheless defined, because `~Guarded` drains through `Pipe::wait_until_idle` --
 // the destructor cannot pass the drain until `release_and_redispatch` has cleared the grant,
 // and that notify happens under `Pipe::mutex`, so the signaler is done with the pipe before
@@ -136,7 +136,7 @@ void test_sync_then_destroy()
                 {
                     auto* data = new ts::Guarded<int>{ ts::Named{}, 0 };
                     data->async([](int& v) { ++v; });   // fire-and-forget, queued ahead of the target
-                    // Alternate the mode of the LAST access: a writer release clears
+                    // Alternate the mode of the last access: a writer release clears
                     // `writer_active`, a reader release decrements `active_readers`, and both
                     // run the drain notify.
                     int seen = i % 2 == 0
@@ -195,7 +195,7 @@ void test_serial_correctness()
 void test_concurrent_readers()
 {
     // Deterministic concurrency check: two readers each wait (bounded) for the other, so
-    // the gate is met iff the pipe genuinely ran readers concurrently -- rather than the
+    // the gate is met iff the pipe genuinely ran readers concurrently - rather than the
     // old "peak > 1" that merely hoped the timing overlapped.
     tests::Parallel_gate gate{ 2 };
     ts::Guarded<int> data{ ts::Named{}, 7 };
@@ -350,7 +350,7 @@ void test_pipe_stress()
 
 // --- access (inline-when-free) vs async (always enqueued) ----------------
 
-// A write `access` on a free pipe runs synchronously on the CALLING thread; the returned task
+// A write `access` on a free pipe runs synchronously on the calling thread; the returned task
 // is already settled when the call returns.
 void test_access_runs_synchronously()
 {
@@ -413,10 +413,10 @@ void test_access_falls_back_when_busy()
     blocker.sync();
 }
 
-// `async` always enqueues -- even on a free pipe it does NOT run on the calling thread.
+// `async` always enqueues - even on a free pipe it does not run on the calling thread.
 // Asserted via the executing thread id: an inline regression would run the body on the
 // caller (synchronously, before `async` returns), failing the id check deterministically.
-// A `!t.is_done()` probe after `async` returns is NOT sound -- a fast worker can complete
+// A `!t.is_done()` probe after `async` returns is not sound - a fast worker can complete
 // the body before the check runs (it cost a CI flake on a slow runner).
 void test_async_always_schedules()
 {
@@ -442,8 +442,8 @@ void test_async_read_schedules()
 
 // --- B: FIFO group ordering (pipe-rebase regression guard) ----------------
 
-// B2: arrival R1, W, R2 -- the writer between the two reads closes R1's group, so R2 forms
-// a NEW group after the writer. A shared sequence counter stamps execution order; R2 must
+// B2: arrival R1, W, R2 - the writer between the two reads closes R1's group, so R2 forms
+// a new group after the writer. A shared sequence counter stamps execution order; R2 must
 // run after W (never join R1's group) and observe the write.
 void test_rwr_group_separation()
 {
@@ -464,7 +464,7 @@ void test_rwr_group_separation()
     TS_CHECK(r2v == 5);   // R2 ran after it -> did not join R1's group
 }
 
-// B4: writers run in launch order -- an order-sensitive fold composes to one exact value.
+// B4: writers run in launch order - an order-sensitive fold composes to one exact value.
 void test_writer_fifo()
 {
     ts::Guarded<int> d{ ts::Named{}, 0 };

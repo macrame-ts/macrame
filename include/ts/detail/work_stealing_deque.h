@@ -9,14 +9,14 @@ namespace ts::detail
 {
 
 // Chase-Lev bounded work-stealing deque, with the Lê-Pop-Cohen-Nardelli ("Correct and
-// Efficient Work-Stealing for Weak Memory Models") C11 memory orderings. The single OWNER
-// pushes/takes at the bottom -- LIFO, cache-hot: this is the producer fast path (a task
-// launching more work) and touches no shared cache line in the common case. THIEVES steal
-// from the top -- FIFO, so a thief grabs the oldest (largest) subtree. Bounded: `push`
+// Efficient Work-Stealing for Weak Memory Models") C11 memory orderings. The single owner
+// pushes/takes at the bottom - LIFO, cache-hot: this is the producer fast path (a task
+// launching more work) and touches no shared cache line in the common case. thieves steal
+// from the top - FIFO, so a thief grabs the oldest (largest) subtree. Bounded: `push`
 // returns false when full so the caller can overflow to a global queue (avoids the
 // growable-array / safe-reclamation complexity). `T` must be trivially copyable.
 //
-// The two seq_cst fences (one in `take`, one in `steal`) are the crux -- they enforce the
+// The two seq_cst fences (one in `take`, one in `steal`) are the crux - they enforce the
 // StoreLoad ordering between the owner's bottom-store and the thief's top-load that x86 TSO
 // would otherwise reorder. The array cells are atomics (relaxed) so the last-element
 // owner/thief overlap is data-race-free (resolved by the top CAS), not UB.
@@ -35,7 +35,7 @@ public:
     Work_stealing_deque(const Work_stealing_deque&) = delete;
     Work_stealing_deque& operator=(const Work_stealing_deque&) = delete;
 
-    // OWNER only. Push at the bottom; false if full (caller overflows elsewhere).
+    // Owner only. Push at the bottom; false if full (caller overflows elsewhere).
     bool push(T item)
     {
         std::int64_t b = bottom_.load(std::memory_order_relaxed);
@@ -43,16 +43,16 @@ public:
         if (b - t > static_cast<std::int64_t>(mask_))   // capacity == mask_ + 1
             return false;   // full
         buffer_[static_cast<std::size_t>(b) & mask_].store(item, std::memory_order_relaxed);
-        // Release STORE (not a standalone release fence): it still orders the cell store above
+        // Release store (not a standalone release fence): it still orders the cell store above
         // before publishing the new `bottom`, and a thief's acquire load of `bottom` in steal
-        // synchronizes with it -- so the item (and everything the producer wrote before it, e.g.
+        // synchronizes with it - so the item (and everything the producer wrote before it, e.g.
         // a heap closure) is visible to the thief. Variable-based so ThreadSanitizer tracks the
         // happens-before (TSan does not model `atomic_thread_fence`).
         bottom_.store(b + 1, std::memory_order_release);
         return true;
     }
 
-    // OWNER only. Take from the bottom (LIFO). false if empty.
+    // Owner only. Take from the bottom (LIFO). false if empty.
     bool take(T& out)
     {
         std::int64_t b = bottom_.load(std::memory_order_relaxed) - 1;
@@ -81,7 +81,7 @@ public:
         return false;
     }
 
-    // THIEF (any other thread). Steal from the top (FIFO). false if empty / lost the race.
+    // thief (any other thread). Steal from the top (FIFO). false if empty / lost the race.
     bool steal(T& out)
     {
         std::int64_t t = top_.load(std::memory_order_acquire);

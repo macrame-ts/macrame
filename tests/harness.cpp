@@ -41,7 +41,7 @@ bool record_check(bool passed, const char* expr, const char* file, int line, con
 
     std::fprintf(stderr, "  FAIL %s:%d  %s%s%s\n",
         file, line, expr,
-        message ? "  -- " : "",
+        message ? "  - " : "",
         message ? message : "");
 
     std::string trace = std::to_string(std::stacktrace::current());

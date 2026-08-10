@@ -1,13 +1,13 @@
 #pragma once
 
 // The core-side seam for per-node "true busy" attribution (owner attribution), Phase B of
-// the runtime trace. Kept tiny and OUT of the task/graph logic: the core path gets at most
+// the runtime trace. Kept tiny and out of the task/graph logic: the core path gets at most
 // a one-line scoped guard; the accounting lives in the scheduler's armed sink (mirroring
 // the per-worker busy counters) and the folding is tools-side. Every type here no-ops under
 // `TS_PROFILING=0`, so the launch/execute logic carries no `#if`.
 //
-// This header is SCHEDULER-FREE on purpose: `task.h` (the scheduler-independent task core)
-// includes it, so it reaches the scheduler only through a bridge -- the same indirection
+// This header is scheduler-free on purpose: `task.h` (the scheduler-independent task core)
+// includes it, so it reaches the scheduler only through a bridge - the same indirection
 // `submit_ready` uses. The scheduler layer installs `trace_owner_add` and bumps
 // `trace_owner_armed`; nothing here names `Scheduler`.
 //
@@ -15,11 +15,11 @@
 // (-1 = none). A node body sets it (`Trace_owner_scope`); sub-work launched from the body
 // inherits it (the snapshot `ts::launch` already does for the access context), so a
 // `parallel_for` slice or async job on any worker knows which node it belongs to.
-// `Trace_busy_scope` measures its own span and, while armed, attributes it to that node --
+// `Trace_busy_scope` measures its own span and, while armed, attributes it to that node -
 // so a node's true cost = its body + its slices + its async fan-out.
 
 // Canonical default (repeated idempotently by scheduler.h / static_task_graph.h). Must be
-// set BEFORE the `#if` below, since task.h may include this header before either of those.
+// set before the `#if` below, since task.h may include this header before either of those.
 #ifndef TS_PROFILING
 #define TS_PROFILING 1
 #endif
@@ -36,24 +36,24 @@ namespace ts::detail
 
 // Bridge (defined + installed by the scheduler TU): armed != 0 while a traced run is in
 // flight; `trace_owner_add(owner, dt)` adds `dt` ticks to node `owner`'s busy sink.
-// `trace_body_add(dt)` records `dt` ticks of USER-FUNCTOR time on the current worker by adding
-// to the worker's body accumulator (B). B is ADD-ONLY: the overhead metric derives machinery by
-// PURE SUBTRACTION (`M = busy - B`, Phase 2), so there is no machinery accumulator to net a
+// `trace_body_add(dt)` records `dt` ticks of user-functor time on the current worker by adding
+// to the worker's body accumulator (B). B is add-only: the overhead metric derives machinery by
+// pure subtraction (`M = busy - B`, Phase 2), so there is no machinery accumulator to net a
 // body span out of. Scheduler-free here.
 extern std::atomic<int> trace_owner_armed;
 extern void (*trace_owner_add)(int owner, long long dt);
 extern void (*trace_body_add)(long long dt);   // B += dt (user functor; machinery = busy - B is derived)
 // Orchestration accumulator (the off-worker fourth bucket of the four-way subtraction split):
-// `Trace_setup_scope` routes the per-run `execute()` setup span here -- framework work done off
-// any worker's `run_task` span, so absent from `busy`. Booked ONLY for a TOP-LEVEL `execute()`
-// (the frame loop / a test), not a nested one called from inside a node body -- a nested run's
+// `Trace_setup_scope` routes the per-run `execute()` setup span here - framework work done off
+// any worker's `run_task` span, so absent from `busy`. Booked only for a top-level `execute()`
+// (the frame loop / a test), not a nested one called from inside a node body - a nested run's
 // setup runs inside the enclosing node's `run_task` span and is captured by that node's busy/body
 // accounting (see `Trace_setup_scope`). Scheduler-free.
 extern void (*trace_orchestration_add)(long long dt);  // Orch += dt (top-level graph setup, off-worker)
 
 inline thread_local int current_trace_owner = -1;
 // True while this thread is inside a user functor (a `Trace_busy_scope`). `Trace_setup_scope`
-// reads it to book orchestration only for a TOP-LEVEL `execute()` (not one nested inside a body).
+// reads it to book orchestration only for a top-level `execute()` (not one nested inside a body).
 inline thread_local bool current_in_functor = false;
 
 inline int trace_owner() noexcept { return current_trace_owner; }
@@ -81,7 +81,7 @@ private:
 // (2) if the task has an owning node, attributes the span to that node's true-busy sink. It
 // also flags the thread as in-functor for the scope, so a nested `execute()`'s setup is
 // recognized as in-body (and not double-booked as orchestration). Disarmed cost: one relaxed
-// load + branch (no clock read). Placed INSIDE the owner scope so the owner is live when it
+// load + branch (no clock read). Placed inside the owner scope so the owner is live when it
 // attributes.
 class Trace_busy_scope
 {
@@ -120,10 +120,10 @@ private:
 };
 
 // Brackets a graph run's per-run setup + initial dispatch (link binding, node re-arm,
-// indegree init, root dispatch) in `Static_task_graph::execute()`. For a TOP-LEVEL run (the
-// frame loop / a test) that work runs on the calling thread inside NO `run_task` span, so it is
-// absent from `busy` and would escape the four-way split -- this scope books it to the dedicated
-// orchestration bucket. For a NESTED run (an `execute()` called from inside a node body,
+// indegree init, root dispatch) in `Static_task_graph::execute()`. For a top-level run (the
+// frame loop / a test) that work runs on the calling thread inside no `run_task` span, so it is
+// absent from `busy` and would escape the four-way split - this scope books it to the dedicated
+// orchestration bucket. For a nested run (an `execute()` called from inside a node body,
 // `current_in_functor` true) the setup runs inside the enclosing node's `run_task` span and is
 // already captured by that node's busy/body accounting; booking orchestration too would
 // double-count it, so the scope stays silent when in-body. Disarmed cost: one relaxed load +

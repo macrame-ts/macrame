@@ -9,7 +9,7 @@ namespace ts::detail
 // A minimal event count (Vyukov / futex idiom) for parking idle workers: a worker that
 // finds no work snapshots the epoch (`prepare_wait`), re-checks its predicate (is there
 // work / are we shutting down?), and parks (`commit_wait`) only if the epoch is unchanged.
-// A `notify` that races the park is never lost -- it bumped the epoch, so `commit_wait`
+// A `notify` that races the park is never lost - it bumped the epoch, so `commit_wait`
 // returns at once. The re-check between `prepare_wait` and `commit_wait` is essential: it
 // catches work that was enqueued (and notified) just before the snapshot, which would
 // otherwise park against a notify that has already fired.
@@ -34,11 +34,11 @@ public:
         epoch_.wait(key, std::memory_order_acquire);
     }
 
-    // Abandon a prepared wait (the predicate became true) -- nothing to undo.
+    // Abandon a prepared wait (the predicate became true) - nothing to undo.
     void cancel_wait() const noexcept {}
 
-    // Move the epoch forward WITHOUT issuing the (expensive) wake syscall. A parked worker is
-    // not woken by this alone -- but once the epoch has moved, its `commit_wait(key)` sees
+    // Move the epoch forward without issuing the (expensive) wake syscall. A parked worker is
+    // not woken by this alone - but once the epoch has moved, its `commit_wait(key)` sees
     // `epoch_ != key` and returns without parking (or, if already parked, a later `wake_one`
     // releases it). The `handoff` idle policy calls `advance()` on every submit (cheap) and
     // `wake_one()` only when there is no spinner to discover the work.
@@ -47,7 +47,7 @@ public:
         epoch_.fetch_add(1, std::memory_order_release);
     }
 
-    // Wake one parked worker (the futex/WaitOnAddress syscall -- the costly part). Pair with a
+    // Wake one parked worker (the futex/WaitOnAddress syscall - the costly part). Pair with a
     // preceding `advance()` (or `notify_one`): a bare wake is a no-op if the epoch is unchanged,
     // because `std::atomic::wait` re-checks the value and re-parks.
     void wake_one() noexcept

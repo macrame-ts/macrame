@@ -107,7 +107,7 @@ void test_await_join_void_prereq()
 }
 
 // A cancelled producer in a join: the void await resumes (query `is_cancelled`); a value
-// await must check first (awaiting a cancelled value task is fatal -- see coroutine_tests).
+// await must check first (awaiting a cancelled value task is fatal - see coroutine_tests).
 ts::Task<int> join_with_cancelled(ts::Task<int> ok, ts::Task<int> maybe)
 {
     int base = co_await ok;
@@ -336,14 +336,14 @@ void test_launch_void()
 
 // TODO 7.3 regression guard: a task's captured resources must be destroyed before its `sync()`
 // returns. `Executable::run` now destroys the body (its `union { Body }` storage) right after
-// the invoke, before the task settles -- so the closure and everything it captured are gone
+// the invoke, before the task settles - so the closure and everything it captured are gone
 // before a `sync()`/`co_await` is woken, instead of lingering until the block's refcount hits
 // zero (on a worker, after the caller moved on). Before the fix that lag let a captured
 // `Recorder` outlive the `sync()` meant to bound it and race the next frame's `World`.
 //
 // Deterministic, no race detector: `t` is held across the check, so the block's refcount is
-// >= 1 and it CANNOT be freed here. Without the fix nothing else destroys the body, so
-// `destroyed == 0` (guaranteed, not racy -- no path runs `~Executable` while a handle is
+// >= 1 and it cannot be freed here. Without the fix nothing else destroys the body, so
+// `destroyed == 0` (guaranteed, not racy - no path runs `~Executable` while a handle is
 // live). With the fix the body is destroyed in `run()` before settle, so `destroyed == 1`.
 void test_captures_destroyed_before_sync()
 {
@@ -369,7 +369,7 @@ void test_sync_const_ref_multi()
 {
     ts::Task<int> t = ts::launch([] { return 42; });
     const int& a = t.sync();
-    const int& b = t.sync();          // second sync -- still valid (non-consuming)
+    const int& b = t.sync();          // second sync - still valid (non-consuming)
     TS_CHECK(a == 42 && b == 42);
     TS_CHECK(&a == &b);               // same storage: sync() aliased the block's result
 
@@ -381,7 +381,7 @@ void test_sync_const_ref_multi()
     TS_CHECK(t.sync() == 42);         // and it is still there afterwards
 }
 
-// `take()` moves the result out -- works for a move-only `R`, and steals the payload.
+// `take()` moves the result out - works for a move-only `R`, and steals the payload.
 void test_take_moves_move_only()
 {
     ts::Task<std::unique_ptr<int>> t = ts::launch([] { return std::make_unique<int>(7); });
@@ -405,9 +405,9 @@ void test_launch_priority()
 }
 
 // A task body that declares a trailing `Cancellation_token` receives the task's token and
-// can poll it to early-out. Cancellation arrives WHILE the body runs (the pre-run skip
-// does not apply -- the task already started), so this exercises the body parameter, not
-// the dispatch-time skip. A cooperative early-out returns normally, so the task COMPLETES.
+// can poll it to early-out. Cancellation arrives while the body runs (the pre-run skip
+// does not apply - the task already started), so this exercises the body parameter, not
+// the dispatch-time skip. A cooperative early-out returns normally, so the task completes.
 void test_task_body_token_earlyout()
 {
     ts::Cancellation_source src;
@@ -418,7 +418,7 @@ void test_task_body_token_earlyout()
     {
         started.store(true);
         while (!tok.is_cancel_requested())
-            std::this_thread::yield();   // running -- poll the token
+            std::this_thread::yield();   // running - poll the token
         stage.store(1);                  // observed cancellation mid-body -> early out
     }, { .token = src.token() });
 
@@ -426,7 +426,7 @@ void test_task_body_token_earlyout()
     src.request_cancel();
     t.sync();
     TS_CHECK(stage.load() == 1);          // the body received and reacted to the token
-    TS_CHECK(!t.is_cancelled());          // cooperative return -> COMPLETED, not cancelled
+    TS_CHECK(!t.is_cancelled());          // cooperative return -> completed, not cancelled
 }
 
 // An async read accessor may take a trailing token and early-out mid-run.

@@ -38,7 +38,7 @@ int read_int(ts::Guarded<int>& d)
 
 // --- A: reader/writer invariant -------------------------------------------
 
-// A1: a group of readers issued between two writers all run concurrently -- exercises the
+// A1: a group of readers issued between two writers all run concurrently - exercises the
 // reader-group formation. The gate is met only if all `k` were in flight at once (fails,
 // does not hang, if the pipe serialized them).
 void test_readers_overlap_in_group()
@@ -64,7 +64,7 @@ void test_readers_overlap_in_group()
     TS_CHECK(gate.met());   // the reader group ran concurrently
 }
 
-// A2: writer exclusion via the dual oracle -- the explicit invariant plus the
+// A2: writer exclusion via the dual oracle - the explicit invariant plus the
 // unsynchronized payload (the latter is what TSan flags on a true overlap).
 void test_writer_exclusion_probe()
 {
@@ -92,7 +92,7 @@ void test_writer_exclusion_probe()
 
 // A3: many threads issue a randomized read/write x async/access mix on one object. The
 // oracle asserts the reader/writer invariant held; the write count is exact; TSan watches
-// the payload. The cross-thread interleaving is the point -- maximises overlap.
+// the payload. The cross-thread interleaving maximises overlap.
 void test_mixed_interleave()
 {
     ts::Guarded<Rw_probe> probe{ ts::Named{} };
@@ -140,7 +140,7 @@ void test_mixed_interleave()
     TS_CHECK(probe_writes(probe) == total_writes.load());
 }
 
-// A4: reader concurrency at several degrees -- the pipe admits k concurrent readers.
+// A4: reader concurrency at several degrees - the pipe admits k concurrent readers.
 void test_reader_concurrency_degrees()
 {
     for (int k : { 2, 4, 8 })
@@ -183,7 +183,7 @@ void test_group_between_writers()
     TS_CHECK(!probe_violated(probe));   // the closing writer waited for the group to drain
 }
 
-// C3: a reader issued after a writer runs strictly after it (the backout outcome -- a
+// C3: a reader issued after a writer runs strictly after it (the backout outcome - a
 // reader never joins a group a writer has closed). The race-forcing variant is the C2
 // stress; this asserts the ordering guarantee black-box.
 void test_reader_after_writer_ordering()
@@ -196,7 +196,7 @@ void test_reader_after_writer_ordering()
 
 // --- D: lone-reader elision (behavioural half) ----------------------------
 
-// D2: a lone reader in flight, then a second reader joins -- both run concurrently
+// D2: a lone reader in flight, then a second reader joins - both run concurrently
 // (promotion to a group). A following writer waits for both. The white-box "no sentinel
 // allocated for the lone reader" assert (D1) lands with the rewrite.
 void test_promotion_two_readers()
@@ -247,7 +247,7 @@ void test_last_decrement_lifetime()
 }
 
 // G3: a predecessor can complete and free the just-enqueued block before the enqueue
-// returns -- rapid enqueue+immediate-complete churn exercises the push-UAF bracket.
+// returns - rapid enqueue+immediate-complete churn exercises the push-UAF bracket.
 void test_push_uaf_churn()
 {
     ts::Guarded<int> d{ ts::Named{}, 0 };
@@ -257,7 +257,7 @@ void test_push_uaf_churn()
     TS_CHECK(read_int(d) == n);
 }
 
-// G4: a cancelled writer still advances the pipe -- its successor runs and sees the prior
+// G4: a cancelled writer still advances the pipe - its successor runs and sees the prior
 // (unmodified) value; no hang.
 void test_cancelled_writer_advances()
 {
@@ -284,7 +284,7 @@ void test_worker_less_deterministic()
     TS_CHECK(read_int(d) == 200);
 }
 
-// H2: a deep piped write chain worker-less must not overflow the stack -- inline-at-submit
+// H2: a deep piped write chain worker-less must not overflow the stack - inline-at-submit
 // chains ride the bounded trampoline rather than recursing.
 void test_worker_less_deep_chain()
 {
@@ -339,7 +339,7 @@ void test_graph_async_hammer()
             }
         });
     }
-    // Bounded sync: a wedged run must FAIL the suite (exit 3), not hang it -- returning
+    // Bounded sync: a wedged run must fail the suite (exit 3), not hang it - returning
     // with the hammers live would crash, and a silent hang blocks the whole run.
     for (int r = 0; r < 60; ++r)
     {
@@ -364,7 +364,7 @@ void test_graph_async_hammer()
 
 // --- J: priority ----------------------------------------------------------
 
-// J1: pipe order is not reordered by priority -- a low-priority write followed by a
+// J1: pipe order is not reordered by priority - a low-priority write followed by a
 // high-priority read still sees the write (the pipe edge dominates the queue priority).
 void test_priority_does_not_reorder()
 {
@@ -376,7 +376,7 @@ void test_priority_does_not_reorder()
 
 // --- F: grant ownership (`Pipe::writer_owner`) ----------------------------
 //
-// White-box, because `writer_owner` is the one always-on piece of grant state and BEHAVIOR
+// White-box, because `writer_owner` is the one always-on piece of grant state and behavior
 // keys off it: `Deferred::commit()` applies inline exactly when the caller is the holder,
 // and `Guarded::access` takes its reentrant arm on the same test. Those two verbs are
 // covered end-to-end elsewhere; these pin the invariant itself, so a regression is reported
@@ -390,8 +390,8 @@ ts::detail::Task_control_block* owner_of(ts::Guarded<T>& obj)
 }
 
 // Ownership is cleared asynchronously with respect to a waiter: `sync()` returns once the
-// block settles, but the pipe release runs in the block's `on_complete`, at the very END of
-// settle -- after `done_cv.notify_all()` has already woken the waiter. So a `sync()`ing
+// block settles, but the pipe release runs in the block's `on_complete`, at the very end of
+// settle - after `done_cv.notify_all()` has already woken the waiter. So a `sync()`ing
 // thread can legitimately observe the still-set owner, and "the write grant was released"
 // has to be polled rather than read once. (That ordering is itself worth pinning: it is why
 // a caller must not infer pipe state from a task's completion.)
@@ -404,7 +404,7 @@ bool owner_cleared(ts::Guarded<T>& obj)
 }
 
 // F1: a write body sees itself as the owner; outside any write window the owner is null.
-// The read case is the other half of the invariant -- a reader hold must NOT publish an
+// The read case is the other half of the invariant - a reader hold must not publish an
 // owner, or `commit()` would take its inline arm under a read grant.
 void test_writer_owner_set_and_cleared()
 {
@@ -426,9 +426,9 @@ void test_writer_owner_set_and_cleared()
     TS_CHECK(during_read.load() == nullptr);
 }
 
-// F2 (re-scoped for the evolved pipe -- the explicit graph write handoff this originally
+// F2 (re-scoped for the evolved pipe - the explicit graph write handoff this originally
 // tested is deleted): ownership transfers by release-then-admit. Two chained writes must
-// each name their OWN block, never the predecessor's and never null.
+// each name their own block, never the predecessor's and never null.
 void test_writer_owner_transfers_between_writes()
 {
     ts::Guarded<int> x{ ts::Named{}, 0 };
@@ -456,11 +456,11 @@ void test_writer_owner_transfers_between_writes()
     TS_CHECK(owner_cleared(x));
 }
 
-// F3: the inline arms. An `access` on a free pipe runs on the CALLER's thread but is still a
+// F3: the inline arms. An `access` on a free pipe runs on the caller's thread but is still a
 // real admission, so it publishes its own block as the owner for the body's duration. The
 // reentrant arm is the interesting half: an `access` from a task that already holds the
 // write grant runs under that grant and touches the pipe not at all, so the owner must stay
-// the OUTER block -- if it were republished (or cleared on the inner settle) `commit()`
+// the outer block - if it were republished (or cleared on the inner settle) `commit()`
 // would mis-dispatch for the rest of the outer body.
 void test_writer_owner_inline_and_reentrant()
 {
@@ -489,7 +489,7 @@ void test_writer_owner_inline_and_reentrant()
     TS_CHECK(owner_cleared(x));
 }
 
-// F4: a multi-object write holds several pipes at once; each names the SAME block, and each
+// F4: a multi-object write holds several pipes at once; each names the same block, and each
 // is independent (a third object the task never touched stays unowned).
 void test_writer_owner_multi_object()
 {

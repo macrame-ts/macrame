@@ -1,6 +1,6 @@
 // The `Deferred`/`Versioned`/`Guarded` decomposition from the command-buffer
 // design study, executable: a sealed `Guarded<Physics_world>` machine with a
-// single grant holder -- the sim's write; everything else stages external
+// single grant holder - the sim's write; everything else stages external
 // inputs (impulses, spawns) through a `Deferred` or reads the output extract
 // published as a `Versioned<Pose_snapshot>`. Gameplay reads last frame's poses
 // all frame; the flip is the only write conflict on the snapshot. Runs twice
@@ -8,16 +8,16 @@
 //
 // Two ideas this sample is built to show:
 //
-// - The core logic is plainly thread-unsafe, and that's the point.
+// - The core logic is plainly thread-unsafe.
 //   `Physics_world` and the gameplay systems are clean single-threaded
-//   classes -- no atomics, no locks, only domain logic. The library is what
+//   classes - no atomics, no locks, only domain logic. The library is what
 //   turns them into safely parallelisable work; the classes never learn about
 //   threading.
 //
 // - Separating the machine (`Physics_world`) from its published extract
 //   (`Pose_snapshot`) is honest parallelisation work: more code than a
 //   single-threaded sim needs, but the split is what lets readers run against
-//   a stable snapshot while the sim mutates -- it pays off under any
+//   a stable snapshot while the sim mutates - it pays off under any
 //   parallelisation approach. The library's contribution is making the
 //   separation explicit and checkable (declared access, harness-verified)
 //   rather than implicit convention.
@@ -62,7 +62,7 @@ struct Pose
 };
 
 // Grant-free id reservation: gameplay gets a body's identity at stage time even
-// though the body exists only once the sim commits the staged creation -- the
+// though the body exists only once the sim commits the staged creation - the
 // forward-reference pattern (no reserved-handle support needed in `Deferred`).
 struct Body_id_allocator
 {
@@ -73,9 +73,9 @@ struct Body_id_allocator
 // --- the machine ------------------------------------------------------------------
 
 // The heavy internal state: single instance, never replicated, never copied.
-// A single graph accessor -- `sim` (write); everything else stages into the
+// A single graph accessor - `sim` (write); everything else stages into the
 // machine's `Deferred` or reads the published snapshot.
-// Note the class itself is plain single-threaded code -- no atomics, no locks;
+// Note the class itself is plain single-threaded code - no atomics, no locks;
 // the library supplies all the concurrency safety around it.
 class Physics_world
 {
@@ -87,8 +87,8 @@ public:
     }
 
     // Unknown id is a deliberate no-op: staged impulses may target bodies
-    // created later in the same batch or already destroyed, so silence -- not
-    // a fatal -- is the policy.
+    // created later in the same batch or already destroyed, so silence - not
+    // a fatal - is the policy.
     void add_impulse(Body_id id, Vec3 dv)
     {
         TS_CHECK_ACCESS();
@@ -118,7 +118,7 @@ public:
         }
     }
 
-    // The frame's output delta: every body's pose (toy world -- all bodies are
+    // The frame's output delta: every body's pose (toy world - all bodies are
     // active). Pure data; cheap and deterministic to replay twice.
     std::vector<Pose> extract_poses() const
     {
@@ -149,7 +149,7 @@ private:
 
 // --- the game-facing output ---------------------------------------------------------
 
-// Small, flat, POD-valued -- the extract, not the machine. `apply` is idempotent
+// Small, flat, POD-valued - the extract, not the machine. `apply` is idempotent
 // stores keyed by id, so the replay resync is trivially deterministic and bodies
 // inactive in a frame keep their (still correct) old values. Splitting this out
 // of `Physics_world` is deliberate extra work that any parallelisation approach
@@ -210,7 +210,7 @@ public:
         return poses_.size();
     }
 
-    // Bitwise hash (FNV-1a over the pose bytes, deterministic map order) -- the
+    // Bitwise hash (FNV-1a over the pose bytes, deterministic map order) - the
     // divergence-check hook and the sample's determinism fingerprint.
     std::size_t hash() const
     {
@@ -305,7 +305,7 @@ private:
 
 // --- the frame -----------------------------------------------------------------------
 
-// Results of driving the demo for some frames -- for the summary, the TSan
+// Results of driving the demo for some frames - for the summary, the TSan
 // driver's fingerprint, and the determinism self-check.
 struct Physics_stats
 {
@@ -346,9 +346,9 @@ Physics_stats run_physics_frames(int frames)
         // recorders; its staged `create_body` survives the slot release
         // (journal contract). Correctness hinges on apply order == recorder
         // creation order, FIFO within a slot, a reused slot keeping its
-        // position -- so gameplay's frame-1 `add_impulse(player_body)` always
+        // position - so gameplay's frame-1 `add_impulse(player_body)` always
         // applies after this create. If that ordering ever broke, the impulse
-        // would silently no-op (see `add_impulse`) -- deterministic but wrong.
+        // would silently no-op (see `add_impulse`) - deterministic but wrong.
         auto boot = world_in.recorder();
         boot.stage([player_body](Physics_world& w)
         {
@@ -368,9 +368,9 @@ Physics_stats run_physics_frames(int frames)
     // stages this frame's inputs. No grant on `world` anywhere in this node.
     // The drag loop stages in parallel through a per-worker recorder: placement
     // order is nondeterministic, but each body gets exactly one drag command and
-    // distinct bodies commute at the world level -- and the player's thrust
+    // distinct bodies commute at the world level - and the player's thrust
     // (recorder created before the parallel slots) always applies before its
-    // drag -- so the frame stays bit-deterministic across runs.
+    // drag - so the frame stays bit-deterministic across runs.
     auto gameplay = g.add_node(ts::Named{},
         [rec = world_in.recorder(), drag = world_in.parallel_recorder()](const Pose_snapshot& p, const Player& pl) mutable
         {
@@ -403,14 +403,14 @@ Physics_stats run_physics_frames(int frames)
         spawns);
 
     // Scene query off the snapshot, not the machine. A machine read here bought
-    // nothing: declared before `sim`, it saw last frame's post-step world -- the
-    // exact vintage the snapshot publishes -- while paying a scheduling squeeze
+    // nothing: declared before `sim`, it saw last frame's post-step world - the
+    // exact vintage the snapshot publishes - while paying a scheduling squeeze
     // against the sim's exclusive window. On the snapshot the query overlaps the
     // sim and every other reader, and the machine's single grant holder is the
-    // sim's write -- fully sealed. Real engines grow the extract into a "query
-    // snapshot" (poses + a light spatial index -- cf. PhysX buffered scene reads,
+    // sim's write - fully sealed. Real engines grow the extract into a "query
+    // snapshot" (poses + a light spatial index - cf. PhysX buffered scene reads,
     // Jolt query interfaces, UE Chaos's game-thread mirror), reserving direct
-    // machine reads for what the extract can't carry -- that serialization a
+    // machine reads for what the extract can't carry - that serialization a
     // visible graph edge you accept knowingly.
     g.add_node(ts::Named{},
         [](const Pose_snapshot& p, AI_system& a)
@@ -466,13 +466,13 @@ Physics_stats run_physics_frames(int frames)
 // --- entry points -----------------------------------------------------------------
 
 // Drives the demo for `frames` frames and returns the final published snapshot
-// hash -- the determinism fingerprint the TSan driver compares across runs.
+// hash - the determinism fingerprint the TSan driver compares across runs.
 std::size_t physics_pose_hash(int frames)
 {
     return run_physics_frames(frames).pose_hash;
 }
 
-// Runs the demo (twice -- the second run proves run-to-run determinism) and
+// Runs the demo (twice - the second run proves run-to-run determinism) and
 // prints a summary.
 void run_physics_sample(int frames)
 {

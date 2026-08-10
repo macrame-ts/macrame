@@ -2,7 +2,7 @@
 
 // The single tools include for `static_task_graph.cpp`: the capture class
 // (`Trace_stamps`, both configurations) plus the structure consumers below. All
-// `TS_PROFILING` gating happens in here -- the graph calls the consumers
+// `TS_PROFILING` gating happens in here - the graph calls the consumers
 // unconditionally, and under `TS_PROFILING=0` they are empty stubs.
 
 #include "trace_stamps.h"
@@ -35,7 +35,7 @@ namespace ts::tools
 // `pipes` (parallel to `access`), and `priority`.
 
 // Display form of a `ts::Named`: its literal, else the captured site (`file:line`,
-// basename only), else empty (an entity nothing named -- the ordinal fallbacks below).
+// basename only), else empty (an entity nothing named - the ordinal fallbacks below).
 inline std::string named_string(const Named& name)
 {
     if (name.literal != nullptr)
@@ -46,7 +46,7 @@ inline std::string named_string(const Named& name)
 }
 
 // A node's display label. Every node has a `ts::Named` (`add_node` requires one), so there
-// is no ordinal fallback -- the old `node<N>` and `objN` placeholders are gone with the
+// is no ordinal fallback - the old `node<N>` and `objN` placeholders are gone with the
 // unnamed constructors that produced them.
 template<typename Node>
 std::string node_label(const Node& node, int)
@@ -93,12 +93,12 @@ std::string conflict_detail(const Node& a, const Node& b, std::map<const void*, 
     return detail;
 }
 
-// The one derivation walk. Visits every node -- `node_fn(index, label, accesses,
-// priority)` where `accesses` is (object label, is_write) pairs -- then every deduped
-// edge in compile()'s order -- `edge_fn(from, to, explicit_ordering, conflict_detail)`:
+// The one derivation walk. Visits every node - `node_fn(index, label, accesses,
+// priority)` where `accesses` is (object label, is_write) pairs - then every deduped
+// edge in compile()'s order - `edge_fn(from, to, explicit_ordering, conflict_detail)`:
 // explicit edges first (with the conflict detail of a coinciding conflict, possibly
 // empty), then the remaining conflict-derived pairs (declaration-index order, detail
-// always non-empty). Re-derives conflicts with detail -- an O(nodes^2) scan, paid only
+// always non-empty). Re-derives conflicts with detail - an O(nodes^2) scan, paid only
 // when a consumer runs; the compile path proper is untouched.
 template<typename Nodes, typename NodeFn, typename EdgeFn>
 void visit_structure(const Nodes& nodes, const std::vector<std::pair<int, int>>& explicit_edges,
@@ -131,7 +131,7 @@ void visit_structure(const Nodes& nodes, const std::vector<std::pair<int, int>>&
     }
 }
 
-// Consumer: the Graphviz DOT structure dump. No-op on a null path. (Internal -- the
+// Consumer: the Graphviz DOT structure dump. No-op on a null path. (Internal - the
 // graph calls `export_structure` below.)
 template<typename Nodes>
 void write_DOT_dump(const Nodes& nodes, const std::vector<std::pair<int, int>>& explicit_edges,
@@ -180,8 +180,8 @@ void write_DOT_dump(const Nodes& nodes, const std::vector<std::pair<int, int>>& 
 }
 
 // Consumer: (re-)arm the attached trace with the compiled structure (labels, priorities,
-// declared accesses, edges with provenance) -- resets its aggregates (`begin_structure`).
-// No-op on a null trace. (Internal -- the graph calls `export_structure` below.)
+// declared accesses, edges with provenance) - resets its aggregates (`begin_structure`).
+// No-op on a null trace. (Internal - the graph calls `export_structure` below.)
 template<typename Nodes>
 void arm_trace(Graph_trace* trace, const Nodes& nodes,
                const std::vector<std::pair<int, int>>& explicit_edges)
@@ -205,7 +205,7 @@ void arm_trace(Graph_trace* trace, const Nodes& nodes,
 }
 
 // The graph's one entry point, called at compile() and set_trace(): export the compiled
-// structure to the tooling consumers -- the DOT dump when `DOT_path` is non-null, and a
+// structure to the tooling consumers - the DOT dump when `DOT_path` is non-null, and a
 // (re-)arm of the trace when `trace` is non-null.
 template<typename Nodes>
 void export_structure(const Nodes& nodes, const std::vector<std::pair<int, int>>& explicit_edges,

@@ -13,7 +13,7 @@ void Worker_thread::main(Scheduler& scheduler, int index)
     current_worker_index = index;
 
     // Busy/idle state for the scheduler's quiescence signal (`Scheduler::quiescent`, the
-    // deadlock net). Tracked as a TRANSITION, not as "parked": under `Idle_policy::spin` a
+    // deadlock net). Tracked as a transition, not as "parked": under `Idle_policy::spin` a
     // worker never parks, so it marks itself idle once on running dry and clears that only
     // when it finds work again. Two atomics per busy<->idle crossing, none per task.
     bool idle = false;

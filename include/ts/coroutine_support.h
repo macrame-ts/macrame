@@ -1,12 +1,12 @@
 #pragma once
 
-// Coroutine support -- makes `ts::Task<R>` awaitable and provides a `promise_type`
+// Coroutine support - makes `ts::Task<R>` awaitable and provides a `promise_type`
 // so a coroutine can return `Task<R>` and `co_await` other tasks. Header-only;
 // coroutines are mandatory (docs/coroutine-first.md), so the library assumes a
 // coroutine-capable toolchain.
 //
-// Frame/block fusion (coroutine-first stage 1): the promise EMBEDS the task's
-// `Task_control_block` (+ result storage) -- one allocation per coroutine task (the frame),
+// Frame/block fusion (coroutine-first stage 1): the promise embeds the task's
+// `Task_control_block` (+ result storage) - one allocation per coroutine task (the frame),
 // not frame + block. The block is the promise's first member, so the block pointer doubles
 // as the promise pointer (the `Executable` first-member pattern); the block's `destroy`
 // thunk destroys the whole frame via `coroutine_handle::from_promise`. Lifetime: the
@@ -18,20 +18,20 @@
 // Segment-carried ambient state: a coroutine migrates threads across suspension, but the
 // harness and the nested-task machinery key off thread-locals (`current_access`,
 // `current_task`). The promise snapshots the creator's grant once (`snapshot_access`) and
-// installs `current_task = &core` for every SEGMENT of the body: the initial segment via
+// installs `current_task = &core` for every segment of the body: the initial segment via
 // the promise constructor (eager start runs the body immediately after), resumed segments
 // via the resume trampoline; every genuine suspension restores the previous value before
 // the thread leaves the frame (`exit_segment` in the awaiters, ordered before the
-// suspension handshake publishes the frame for resumption -- no cross-thread overlap on
+// suspension handshake publishes the frame for resumption - no cross-thread overlap on
 // the save slots). A nested graph run started inside any segment therefore attaches to the
-// COROUTINE (via `detail::add_nested`), not to whatever task happened to launch it: the
+// coroutine (via `detail::add_nested`), not to whatever task happened to launch it: the
 // promise arms the block's `execution_flag` + self-lock exactly like `Executable::run`, the
 // body-end drops the self-lock, and the last nested completion completes the task. A gating
-// child holds a ref on the block, which keeps the frame -- and the coroutine's PARAMETERS --
+// child holds a ref on the block, which keeps the frame - and the coroutine's parameters -
 // alive until it settles.
 //
 // Resume scheduling: a resume goes through a bounded coroutine-resume trampoline
-// (`schedule_resume`) on the settling/granting thread -- the eager-task equivalent of
+// (`schedule_resume`) on the settling/granting thread - the eager-task equivalent of
 // symmetric transfer (there is no suspended producer handle to transfer into; the awaited
 // task runs to completion on its own thread, and the waiter's frame is resumed directly,
 // iteratively, O(1) stack).
@@ -51,13 +51,13 @@ namespace ts
 namespace detail
 {
 
-// Depth of live `Pipe_guard`s on THIS thread (the async-lock guards below). A guard is confined
+// Depth of live `Pipe_guard`s on this thread (the async-lock guards below). A guard is confined
 // to one coroutine segment (the "no co_await under a guard" rule), so a thread-local count is
 // right: any `co_await` that would actually suspend while a guard is held (`> 0`) is the
-// lock-across-suspension anti-pattern and faults -- the harness doubling as a suspension
+// lock-across-suspension anti-pattern and faults - the harness doubling as a suspension
 // detector. Incremented/decremented by `Pipe_guard`; checked in both `await_suspend`s.
 //
-// `Rule::await_under_guard` (ts/rules.h) is a STRUCTURAL rule: it has no scoped opt-out,
+// `Rule::await_under_guard` (ts/rules.h) is a structural rule: it has no scoped opt-out,
 // because a guard that did survive a suspension would leave the resumed segment installing
 // the promise's access snapshot over the guard's own context, and the guard's destructor
 // restoring a `current_access` pointer captured on another thread. The rule protects an
@@ -67,13 +67,13 @@ namespace detail
 inline thread_local int pipe_guard_depth = 0;
 #endif
 
-// The guard-across-suspension check. It lives at `co_await` ENTRY (`await_ready`), not at
+// The guard-across-suspension check. It lives at `co_await` entry (`await_ready`), not at
 // the suspension (TODO 6.11): a `co_await` that happens to complete synchronously is just
 // as illegal as one that suspends, and gating on "did it actually suspend" made the check
-// fire only on the runs where timing was unfriendly -- so a hold-then-await shipped
+// fire only on the runs where timing was unfriendly - so a hold-then-await shipped
 // undiagnosed whenever the target pipe was momentarily free.
 //
-// The reentrancy exemption used to be EMERGENT (a reentrant same-object access never
+// The reentrancy exemption used to be emergent (a reentrant same-object access never
 // suspends, so it never reached the check). Hoisting forces it to be stated: see
 // `reentrant_under_held_grant` below. Everything else is illegal, guard depth > 0.
 inline void check_await_under_guard(const char* message)
@@ -87,13 +87,13 @@ inline void check_await_under_guard(const char* message)
 }
 
 // The one stated exemption to the rule above. An access whose every pipe is currently
-// write-owned by THIS task ran inline under that held grant (`Guarded::access`'s reentrant
+// write-owned by this task ran inline under that held grant (`Guarded::access`'s reentrant
 // arm, waiting rule (b)): it never touched the pipe, it is settled before the `co_await`
 // is even evaluated, and it cannot suspend by construction rather than by timing.
 // `writer_owner` is always-on state, so this works in every build.
 //
-// Deliberately narrow. A READ access under a read guard is NOT exempt: it reaches the pipe,
-// and if a writer is queued ahead it enqueues and suspends -- with our own read hold
+// Deliberately narrow. A read access under a read guard is not exempt: it reaches the pipe,
+// and if a writer is queued ahead it enqueues and suspends - with our own read hold
 // blocking that writer. That is the genuine hazard, not a false positive.
 inline bool reentrant_under_held_grant(const Task_control_block* blk) noexcept
 {
@@ -109,12 +109,12 @@ inline bool reentrant_under_held_grant(const Task_control_block* blk) noexcept
 }
 
 #if TS_RULE_ON(TS_RULE_ACCESS_RANK)
-// `Rule::access_rank` (TODO 6.14). Batch acquisition is already deadlock-free -- a node's
+// `Rule::access_rank` (TODO 6.14). Batch acquisition is already deadlock-free - a node's
 // declared set and a multi-object `ts::access` are taken in canonical pipe-address order,
-// all-or-nothing. Nothing orders a grant a task already HOLDS against an object it awaits
-// LATER, and that one missing constraint is the whole suspended-ABBA hole. A declared rank
+// all-or-nothing. Nothing orders a grant a task already holds against an object it awaits
+// later, and that one missing constraint is the whole suspended-ABBA hole. A declared rank
 // closes it: every dynamic await must strictly climb, so a cycle is unrepresentable
-// (Havender). Unlike the circular-wait detector this fires DETERMINISTICALLY on the first
+// (Havender). Unlike the circular-wait detector this fires deterministically on the first
 // offending await, rather than needing both halves of a cycle to be suspended at once.
 //
 // O(1): one scan of the (<= 8 entry) access context against one field, on the cold await
@@ -130,7 +130,7 @@ inline void check_access_rank(const Pipe* pipe, const void* instance) noexcept
     if (pipe == nullptr || current_access == nullptr || !rule_enforced(Rule::access_rank))
         return;
     if (instance != nullptr && current_access->check(instance, Access::read_only) != Access_context::Grant::none)
-        return;   // already held -- not a later acquisition
+        return;   // already held - not a later acquisition
     const Access_context::Rank_state held = current_access->rank_state();
     if (held.held == 0)
         return;   // nothing held: a top-level await orders against nothing
@@ -156,12 +156,12 @@ inline constexpr const char* await_under_guard_message =
     "co_await while holding a Guarded access guard: the guard's pipe would be held across the "
     "suspension, and the guard's own access context cannot survive a resume on another thread. "
     "Use the functor form co_await obj.access(fn), or split the scope (release the guard, "
-    "await, re-acquire). This rule is structural -- it has no runtime opt-out; a build can drop "
+    "await, re-acquire). This rule is structural - it has no runtime opt-out; a build can drop "
     "it wholesale with TS_ENABLED_RULES";
 
 // Segment bracket, resolved per promise type: enter installs the coroutine's `current_task`
 // (and, in the promise, its access snapshot is applied by the resume path); exit restores.
-// A foreign promise (some other library's coroutine awaiting our task) has neither -- both
+// A foreign promise (some other library's coroutine awaiting our task) has neither - both
 // no-op for it.
 template<typename P>
 inline void enter_segment_if_ours(P& promise)
@@ -179,10 +179,10 @@ inline void exit_segment_if_ours(P& promise)
 
 // Resume a coroutine, re-installing its captured access grant and its `current_task`
 // segment state. The async resume runs on the thread that settled the awaited task /
-// granted the pipe -- whose ambient state is NOT the coroutine's. The scope's destructor
+// granted the pipe - whose ambient state is not the coroutine's. The scope's destructor
 // only touches its saved `prev_`, so it stays valid even though `h.resume()` may destroy
 // the frame when the coroutine completes (the segment state is restored by the awaiter /
-// final awaiter BEFORE any destruction).
+// final awaiter before any destruction).
 template<typename P>
 inline void resume_with_access(std::coroutine_handle<P> h)
 {
@@ -201,11 +201,11 @@ inline void resume_with_access(std::coroutine_handle<P> h)
 // Bounded coroutine-resume trampoline. Without it a cascade of coroutine completions recurses
 // and overflows the stack for a deep chain: coroutine A's completion resumes B (which awaited
 // A), whose completion resumes C, ... This mirrors `Task_control_block::inline_pending`
-// (task.h) in spirit -- we can't reuse that vector because it is typed to `Task_ptr` and
+// (task.h) in spirit - we can't reuse that vector because it is typed to `Task_ptr` and
 // drives `block->execute()`, whereas here we drive a `coroutine_handle`. The first resume on a
-// thread starts a drain; a resume requested DURING the drain (the cascade) is pushed and run by
-// the outer loop, so the whole chain runs ITERATIVELY (O(1) stack). Type-erased to a thunk + one
-// pointer -> NO per-resume allocation (the vector retains capacity across drains, like task.h's).
+// thread starts a drain; a resume requested during the drain (the cascade) is pushed and run by
+// the outer loop, so the whole chain runs iteratively (O(1) stack). Type-erased to a thunk + one
+// pointer -> no per-resume allocation (the vector retains capacity across drains, like task.h's).
 // The resume still runs on the settling thread (no queue hop -> lowest latency), just un-nested.
 struct Resume_item
 {
@@ -226,7 +226,7 @@ void schedule_resume(std::coroutine_handle<P> h)
 {
     resume_pending.push_back({ &resume_thunk<P>, h.address() });
     if (resume_draining)
-        return;   // an active drain on this thread will pick it up -- don't recurse
+        return;   // an active drain on this thread will pick it up - don't recurse
     resume_draining = true;
     for (std::size_t head = 0; head < resume_pending.size(); ++head)
     {
@@ -261,25 +261,25 @@ struct Task_awaiter
     }
 
     // Register the resume, resolving the synchronous-fire hazard: `attach` fires the callback
-    // IMMEDIATELY if the block settled in the window since `await_ready` (closing the lost
+    // immediately if the block settled in the window since `await_ready` (closing the lost
     // wakeup). Were we to `h.resume()` inline there, the coroutine could run to completion and
-    // destroy this frame (and this awaiter) while we are still inside `await_suspend` -- a
+    // destroy this frame (and this awaiter) while we are still inside `await_suspend` - a
     // use-after-free. The handshake: whoever reaches `state_` first (the callback via
     // exchange(1), or the tail of `await_suspend` via exchange(2)) loses the resume; the
     // second one performs it.
     //
-    // Segment ordering: `exit_segment` runs BEFORE the handshake publishes the frame for
+    // Segment ordering: `exit_segment` runs before the handshake publishes the frame for
     // resumption (the release-exchange), so a cross-thread resume's `enter_segment` never
     // overlaps this thread's save/restore of the segment slots; on the lost-exchange path
-    // (synchronous fire) the segment is RE-ENTERED and the body continues uninterrupted.
+    // (synchronous fire) the segment is re-entered and the body continues uninterrupted.
     template<typename P>
     bool await_suspend(std::coroutine_handle<P> h)
     {
         // The guard-across-suspension rule was already checked at `co_await` entry
         // (`await_ready`), so reaching here means it passed.
 #if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
-        // Waits-for edges (docs/coroutine-first.md §2): suspending on a PIPE JOB while this
-        // context holds grants -- the job's turn cannot arrive until its pipes drain, so a
+        // Waits-for edges (docs/coroutine-first.md §2): suspending on a pipe job while this
+        // context holds grants - the job's turn cannot arrive until its pipes drain, so a
         // held-grant cycle through them is the suspended-ABBA deadlock. Recorded before the
         // attach (the segment's `current_access` is still installed here); cleared at
         // `await_resume`. Non-pipe tasks record nothing.
@@ -358,7 +358,7 @@ struct Task_awaiter
 #endif
 };
 
-// `co_await t.as_optional()` -- the same wait, resolving to `std::optional<R>` instead of
+// `co_await t.as_optional()` - the same wait, resolving to `std::optional<R>` instead of
 // fatalling when the task settled cancelled. Moves the result out (like `take()`), so it
 // must be the last consume.
 template<typename R>
@@ -383,12 +383,12 @@ Optional_awaiter<R> operator co_await(Optional_awaitable<R> awaitable)
     return Optional_awaiter<R>(std::move(awaitable.core));
 }
 
-// The shared (result-agnostic) half of the fused promise. The block is the FIRST member,
+// The shared (result-agnostic) half of the fused promise. The block is the first member,
 // so `Task_control_block* == promise*` (the `Executable` pattern) and the block's `destroy`
 // destroys the whole coroutine frame. `num_locks` is armed to `execution_flag + 1`
 // (executing + the body self-lock) in the constructor, so `detail::add_nested` can attach a
 // gating child (a nested graph run) to this coroutine across all its segments; the final
-// awaiter drops the self-lock -- the task completes at `co_return` when no children are
+// awaiter drops the self-lock - the task completes at `co_return` when no children are
 // pending, else when the last child settles.
 template<typename Derived>
 struct Promise_base
@@ -453,7 +453,7 @@ struct Promise_base
     std::suspend_never initial_suspend() const noexcept { return {}; }
 
     // Final awaiter: restore the segment, drop the body self-lock (completing the task if no
-    // nested children are pending -- otherwise the last child completes it), then release the
+    // nested children are pending - otherwise the last child completes it), then release the
     // running self-reference. The frame is destroyed here iff nothing else holds a ref; with
     // children or handles outstanding it lives until the last of them drops (so the result and
     // the coroutine's parameters stay valid for them).
@@ -482,7 +482,7 @@ struct Promise_base
     }
 };
 
-// Promise for a coroutine returning `Task<R>` -- the fused frame+block (see header comment).
+// Promise for a coroutine returning `Task<R>` - the fused frame+block (see header comment).
 template<typename R>
 struct Task_promise : Promise_base<Task_promise<R>>
 {
@@ -508,8 +508,8 @@ struct Task_promise<void> : Promise_base<Task_promise<void>>
 };
 
 // RAII async-lock guard over a `Guarded<T>`'s pipe, held for direct `T` access. Returned by
-// `co_await ts::read_only(w)` / `ts::read_write(w)`. NON-COPYABLE AND NON-MOVABLE on purpose: it installs
-// `current_access = &ctx_` (a member), so its address must be stable -- `await_resume` returns it
+// `co_await ts::read_only(w)` / `ts::read_write(w)`. non-copyable and non-movable on purpose: it installs
+// `current_access = &ctx_` (a member), so its address must be stable - `await_resume` returns it
 // as a prvalue and `auto g = co_await ...;` constructs it in place via guaranteed copy elision
 // (a move would dangle the installed pointer; non-movable makes a stray copy a compile error).
 // While the guard is alive `current_access` grants `obj_` in `Mode`, so `g->method()` passes the
@@ -585,11 +585,11 @@ struct Pipe_guard_awaiter
     Pipe_guard_awaiter(const Pipe_guard_awaiter&) = delete;
     Pipe_guard_awaiter& operator=(const Pipe_guard_awaiter&) = delete;
 
-    // Must attempt the acquire (side effects), so this never reports ready -- but it is
+    // Must attempt the acquire (side effects), so this never reports ready - but it is
     // still where the guard rule is checked, at `co_await` entry. Acquiring a second guard
     // while one is live is illegal whether or not the pipe happens to be free right now:
     // if it is not, the frame suspends holding the first guard, which is the ABBA shape.
-    // No exemption -- re-acquiring the SAME object would queue behind the caller's own hold.
+    // No exemption - re-acquiring the same object would queue behind the caller's own hold.
     bool await_ready() const noexcept
     {
         check_await_under_guard(
@@ -614,7 +614,7 @@ struct Pipe_guard_awaiter
                 schedule_resume(h);   // re-install ambient state + resume
         };
         // A write hold publishes the awaiting coroutine's task as the grant holder (null on
-        // a non-task thread) -- so `Deferred::commit` under a coroutine write guard can take
+        // a non-task thread) - so `Deferred::commit` under a coroutine write guard can take
         // its held-grant fast path. `current_task` was restored by `exit_segment` above, so
         // name the coroutine's own core explicitly.
         Task_control_block* owner = owner_of(h);
@@ -710,8 +710,8 @@ detail::Task_awaiter<R> operator co_await(Task<R>&& t)
 // Async-lock a `Guarded<T>` in a coroutine: `auto g = co_await ts::read_write(w);` suspends
 // until the pipe grants exclusive write access, then resumes with an RAII guard giving direct
 // `T&` (released on scope exit); `ts::read_only(w)` is the shared-reader form giving `const T&`.
-// Linear RAII in place of a callback `async(fn, obj)`, and the safe shape as long as you do NOT
-// `co_await` other work while the guard is alive (that holds the pipe across a suspension --
+// Linear RAII in place of a callback `async(fn, obj)`, and the safe shape as long as you do not
+// `co_await` other work while the guard is alive (that holds the pipe across a suspension -
 // faulted by the harness-as-suspension-detector). Deduces nothing; the mode is the verb.
 template<typename T>
 detail::Pipe_guard_awaiter<T, Access::read_write> read_write(Guarded<T>& w)

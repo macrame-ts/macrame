@@ -1,6 +1,6 @@
 #pragma once
 
-// Rule policy -- which waiting-rule checks exist in this build, and how a program opts out
+// Rule policy - which waiting-rule checks exist in this build, and how a program opts out
 // of one for a scope. Design of record: docs/waiting-rule-policy.md.
 //
 // The waiting rules (docs/coroutine-first.md §2) are enforced by runtime checks that fatal.
@@ -8,15 +8,15 @@
 // (an external lock discipline, a phase invariant, a platform guarantee), so every check
 // answers two questions, decided per rule and stated in the table below:
 //
-//   1. is it compiled into this build?  -- `TS_ENABLED_RULES`, a bitmask of `TS_RULE_*`
-//   2. is it enforced at this point?    -- `ts::Relaxed_scope`, for the rules that permit it
+//   1. is it compiled into this build?  - `TS_ENABLED_RULES`, a bitmask of `TS_RULE_*`
+//   2. is it enforced at this point?    - `ts::Relaxed_scope`, for the rules that permit it
 //
 // Question 2 is deliberately not universal. A rule that protects an invariant the
-// IMPLEMENTATION relies on (currently `await_under_guard`) has no sound runtime opt-out --
+// implementation relies on (currently `await_under_guard`) has no sound runtime opt-out -
 // relaxing it does not accept a program the library merely disapproves of, it produces one
 // the library cannot execute correctly. Such rules are compile-out-only. See the doc's §3.
 //
-// Cost discipline: consult `rule_enforced` only AFTER the cheap hazard condition is already
+// Cost discipline: consult `rule_enforced` only after the cheap hazard condition is already
 // true. The relaxation lookup (one thread-local load, one relaxed atomic load) belongs on
 // the branch that is about to fatal, never on the path every call takes.
 
@@ -40,7 +40,7 @@
 // The default policy. Checked builds enforce everything. A shipping build keeps only
 // `await_under_guard`: it is the one rule whose absence corrupts rather than merely permits
 // (see above), and it is what shipping already did before the policy existed. Override by
-// defining `TS_ENABLED_RULES` to any OR of the bits -- one value per binary (below).
+// defining `TS_ENABLED_RULES` to any or of the bits - one value per binary (below).
 #ifndef TS_ENABLED_RULES
 #if TS_SAFETY_CHECKS
 #define TS_ENABLED_RULES TS_RULE_ALL
@@ -52,7 +52,7 @@
 // Not every rule can be honoured in every configuration: `circular_wait` and `access_rank`
 // both read grant bookkeeping (`Access_context` entry epochs and ranks, `Pipe::write_epoch`)
 // that exists only under `TS_SAFETY_CHECKS`, so neither can outlive it whatever the policy
-// asks for -- the *held* side of a rank comparison is the access context itself. The EFFECTIVE
+// asks for - the *held* side of a rank comparison is the access context itself. The effective
 // mask is the policy intersected with what the build can support; everything downstream
 // (including `rule_compiled_in`) reads the effective mask.
 #if TS_SAFETY_CHECKS
@@ -66,12 +66,12 @@
 #define TS_RULES_ANY ((TS_RULES_EFFECTIVE) != 0)
 
 // The deadlock report's third tier (docs/waiting-rule-policy.md §7): a registry of every
-// live suspension -- who is suspended, what they await, what they hold. Tiers 1 and 2 come
+// live suspension - who is suspended, what they await, what they hold. Tiers 1 and 2 come
 // free; this one costs a linked-list insert/remove per suspension, so it is a switch.
 //
-// Default ON in DEBUG builds only (author, 2026-08). Measured cost is ~30 ns per suspension
+// Default on in debug builds only (author, 2026-08). Measured cost is ~30 ns per suspension
 // with no scaling cliff and nothing measurable on any real frame fixture, but ~8% on the
-// suspend/resume microbenchmarks -- and a per-suspension linked-list insert/remove is not
+// suspend/resume microbenchmarks - and a per-suspension linked-list insert/remove is not
 // something a release build should carry for a diagnostic that only pays off after a
 // deadlock has already happened. The escalation path is the design: tiers 1 and 2 are free
 // and always present, and the deadlock report tells the user to rebuild with
@@ -88,7 +88,7 @@
 #endif
 
 // Debug identity on every task (`ts::Named` on the control block). Follows the harness by
-// default; forced on by the suspension registry, which is worthless without names -- a list
+// default; forced on by the suspension registry, which is worthless without names - a list
 // of block pointers is not a diagnostic.
 #ifndef TS_DEBUG_NAMES
 #if TS_SAFETY_CHECKS || TS_SUSPENSION_REGISTRY
@@ -103,7 +103,7 @@
 #endif
 
 // Same ODR hazard as `TS_SAFETY_CHECKS` (the macro changes inline bodies and the coroutine
-// promise's layout), and the same best-effort tripwire. Note it compares the TOKEN TEXT, so
+// promise's layout), and the same best-effort tripwire. Note it compares the token text, so
 // two spellings of one value (`TS_RULE_ALL` vs `0x1F`) trip it: define the macro in exactly
 // one place, as a build system does.
 // `TS_SUSPENSION_REGISTRY` and `TS_DEBUG_NAMES` carry the same hazard and get the same
@@ -126,7 +126,7 @@ namespace ts
 // | rule                | what it forbids                              | ship | Relaxed_scope |
 // |---------------------|----------------------------------------------|------|---------------|
 // | `in_task_sync`      | `sync()`/`take()` inside a task              | out  | yes           |
-// | `await_under_guard` | `co_await` while a `Pipe_guard` is live      | KEPT | no            |
+// | `await_under_guard` | `co_await` while a `Pipe_guard` is live      | kept | no            |
 // | `access_rank`       | awaiting an object out of declared rank order| out  | yes           |
 // | `circular_wait`     | a held-grant -> awaited-pipe wait cycle      | out  | yes           |
 // | `deadlock_net`      | quiescence with no possible external wakeup  | out  | no (global)   |
@@ -167,7 +167,7 @@ constexpr Rule operator~(Rule a) noexcept
 
 constexpr bool any(Rule r) noexcept { return r != Rule::none; }
 
-// Whether `rule` is compiled into this build at all (policy AND what the build supports).
+// Whether `rule` is compiled into this build at all (policy and what the build supports).
 constexpr bool rule_compiled_in(Rule rule) noexcept
 {
     return any(rule & static_cast<Rule>(TS_RULES_EFFECTIVE));
@@ -181,13 +181,13 @@ namespace detail
 // rather than with the thread: a coroutine's segments re-install it (`Relaxed_carrier`),
 // exactly as grants propagate.
 inline thread_local unsigned relaxed_rules = 0;
-// Process-wide baseline, OR-ed into every lookup ("the rules as advice" setting).
+// Process-wide baseline, or-ed into every lookup ("the rules as advice" setting).
 inline std::atomic<unsigned> default_relaxed_rules_bits{ 0 };
 #endif
 
 } // namespace detail
 
-// True if `rule` is currently opted out of -- by an enclosing `Relaxed_scope` or by the
+// True if `rule` is currently opted out of - by an enclosing `Relaxed_scope` or by the
 // process-wide default. Non-advisory rules never report relaxed.
 inline bool rule_relaxed(Rule rule) noexcept
 {
@@ -201,7 +201,7 @@ inline bool rule_relaxed(Rule rule) noexcept
 #endif
 }
 
-// The one predicate a rule check calls: is this rule compiled in AND not relaxed here?
+// The one predicate a rule check calls: is this rule compiled in and not relaxed here?
 // Call it only once the hazard condition itself is known true (see the header comment).
 inline bool rule_enforced(Rule rule) noexcept
 {
@@ -230,10 +230,10 @@ inline Rule default_relaxed_rules() noexcept
 #endif
 }
 
-// Opt out of one or more ADVISORY rules for a scope -- "I uphold this rule by means the
+// Opt out of one or more advisory rules for a scope - "I uphold this rule by means the
 // library cannot see". Documents the claim at the site and leaves the rest of the program
 // checked. The opt-out follows the ambient task state, not the thread: it is re-installed
-// around every segment of a coroutine that entered it -- wider than the lexical scope, and
+// around every segment of a coroutine that entered it - wider than the lexical scope, and
 // deliberately so, since a resumed segment inherits the grant and therefore the hazard.
 //
 // Passing a non-advisory rule is a diagnosed no-op for those bits (`TS_ENSURE`): the escape
@@ -275,7 +275,7 @@ namespace detail
 // Segment carriage for a coroutine promise. A `Relaxed_scope` entered in a coroutine body
 // must survive the body's suspensions, and must not leak onto whatever thread resumes it:
 // the promise holds the frame's relaxation, `enter` installs it and `exit` writes back
-// whatever the segment ended with. Restoring a saved VALUE is thread-agnostic, so a segment
+// whatever the segment ended with. Restoring a saved value is thread-agnostic, so a segment
 // resumed on another worker restores correctly.
 struct Relaxed_carrier
 {

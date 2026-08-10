@@ -53,9 +53,9 @@ void test_chained()
     TS_CHECK(co_chained().sync() == 42);
 }
 
-// 3. The killer example: read a `Guarded` (const accessor), compute, then write it
-// (mutable accessor). No access is held across the `co_await` -- each `async` acquires and
-// releases its own pipe -- so it is the *safe* shape.
+// 3. Read a `Guarded` (const accessor), compute, then write it
+// (mutable accessor). No access is held across the `co_await` - each `async` acquires and
+// releases its own pipe - so it is the *safe* shape.
 Task<void> co_thread_safe(ts::Guarded<int>& obj, int* seen_out)
 {
     int seen = co_await obj.async([](const int& v) { return v; });        // read
@@ -86,7 +86,7 @@ void test_join()
     TS_CHECK(co_join().sync() == 12);
 }
 
-// 5. A `co_await` loop -- the case continuations cannot express without recursion.
+// 5. A `co_await` loop - the case continuations cannot express without recursion.
 Task<int> co_loop()
 {
     int m = 1;
@@ -120,14 +120,14 @@ void test_cancel()
 }
 
 // 7. Access-context threading: a coroutine created under a grant re-installs it on every
-// resumed segment, so a body touching guarded data AFTER a suspension does not fault the
+// resumed segment, so a body touching guarded data after a suspension does not fault the
 // harness. The `Signal` gate makes the suspension + resume deterministic and, crucially,
-// resumes OUTSIDE the original `Access_scope` (below) -- so `current_access` is null at resume
+// resumes outside the original `Access_scope` (below) - so `current_access` is null at resume
 // and only the promise's re-installed snapshot lets `increment()`/`value()` pass.
 Task<int> co_touch_after_await(tests::Counter& c, ts::Signal& gate)
 {
     co_await gate;        // suspends until triggered
-    c.increment();        // guarded -- faults the harness without the re-installed grant
+    c.increment();        // guarded - faults the harness without the re-installed grant
     co_return c.value();
 }
 
@@ -142,7 +142,7 @@ void test_access_context()
     {
         ts::Access_scope scope(ctx);
         t = co_touch_after_await(c, gate);   // snapshots the grant; suspends on `gate`
-    }   // grant scope ends -- the coroutine keeps its snapshot copy
+    }   // grant scope ends - the coroutine keeps its snapshot copy
 
     gate.trigger();               // resume runs here (no ambient grant) under the re-installed one
     TS_CHECK(t.sync() == 1);
@@ -157,7 +157,7 @@ Task<int> co_write_guard(ts::Guarded<tests::Counter>& w)
         auto g = co_await ts::read_write(w);   // exclusive; guard grants `Counter&`
         g->increment();
         g->add(5);
-    }   // guard released -- pipe free again
+    }   // guard released - pipe free again
     auto r = co_await ts::read_only(w);        // shared reader; `const Counter&`
     co_return r->value();
 }
@@ -168,7 +168,7 @@ void test_write_guard()
     TS_CHECK(co_write_guard(w).sync() == 6);   // 1 + 5
 }
 
-// 9. Read guard: shared access, `const` view -- the harness passes for a const method inside it.
+// 9. Read guard: shared access, `const` view - the harness passes for a const method inside it.
 Task<int> co_read_guard(ts::Guarded<tests::Counter>& w)
 {
     auto g = co_await ts::read_only(w);
@@ -182,7 +182,7 @@ void test_read_guard()
     TS_CHECK(co_read_guard(w).sync() == 9);
 }
 
-// 10. Guard + control flow: a loop inside ONE write-guard scope -- the ergonomic win over an
+// 10. Guard + control flow: a loop inside one write-guard scope - the ergonomic win over an
 // `async` lambda (no `co_await` in the loop, so the pipe is held for the whole critical section).
 Task<int> co_guard_loop(ts::Guarded<tests::Counter>& w, int n)
 {
@@ -199,7 +199,7 @@ void test_guard_loop()
 }
 
 // 11. Contention: many threads each drive a coroutine that repeatedly acquires the write guard
-// on the SAME object. The pipe serializes the writers (deferred acquire -> suspend -> resume on
+// on the same object. The pipe serializes the writers (deferred acquire -> suspend -> resume on
 // the releasing thread), so the total is exact. The concurrency test.
 Task<void> co_bump(ts::Guarded<tests::Counter>& w, int times)
 {
@@ -207,7 +207,7 @@ Task<void> co_bump(ts::Guarded<tests::Counter>& w, int times)
     {
         auto g = co_await ts::read_write(w);   // may defer + resume cross-thread under contention
         g->increment();
-    }   // released each iteration -- no guard held across the next co_await
+    }   // released each iteration - no guard held across the next co_await
 }
 
 void test_guard_contention()
@@ -223,7 +223,7 @@ void test_guard_contention()
 }
 
 // 12. The suspension detector: `co_await` other work while holding a guard faults. Subprocess
-// death test (the fatal aborts) -- the scenario lives in `run_death_scenario` (tests.cpp).
+// death test (the fatal aborts) - the scenario lives in `run_death_scenario` (tests.cpp).
 void test_death_await_under_guard()
 {
     TS_CHECK(ts::test::expect_death("coro_await_under_guard"));
@@ -297,21 +297,21 @@ void test_showcase()
 }
 
 // 14. Pool-exhaustion proof: a recursive fork-join, expressed with `co_await`, that a
-// BLOCKING wait could not complete on a worker pool smaller than the join's depth/width --
+// blocking wait could not complete on a worker pool smaller than the join's depth/width --
 // the exact deadlock class that retraction used to break by running the not-yet-started
 // child inline on the blocked waiter. Coroutine-first eliminates that class structurally:
-// a `co_await` on unfinished sub-work SUSPENDS (freeing the worker) instead of blocking, so
+// a `co_await` on unfinished sub-work suspends (freeing the worker) instead of blocking, so
 // a waiting frame never occupies a worker while its children need one.
 //
 // Each frame first hops onto a worker with `co_await ts::launch([]{})`, so every recursive
 // call is an eager coroutine that immediately suspends on its own hop, becoming a queued
 // unit a worker must pick up; when a frame later `co_await`s its two children it is itself
-// running ON a worker. On ONE worker a blocking wait would be an instant classic deadlock
+// running ON a worker. On one worker a blocking wait would be an instant classic deadlock
 // (the sole worker runs a frame, the frame blocks on a child, the child can't run because
 // the worker is occupied); with suspension the frame yields the worker, the worker runs the
 // queued child, and its completion resumes the parent. (A blocking variant is deliberately
-// NOT implemented: an in-task sync()/take() on unfinished work is fatal by design.)
-constexpr int fork_join_leaves = 96;   // tree depth ~7, ~190 nodes -- far exceeds 1-2 workers
+// not implemented: an in-task sync()/take() on unfinished work is fatal by design.)
+constexpr int fork_join_leaves = 96;   // tree depth ~7, ~190 nodes - far exceeds 1-2 workers
 
 Task<long long> co_sum_range(const int* values, int lo, int hi)
 {
@@ -330,7 +330,7 @@ void run_fork_join_on_pool(int workers)
     long long expected = 0;
     for (int i = 0; i < fork_join_leaves; ++i) { values[i] = i; expected += i; }
 
-    // Run on a helper thread so a HANG cannot wedge the suite: wait on the future with a
+    // Run on a helper thread so a hang cannot wedge the suite: wait on the future with a
     // deadline and report a failure instead of blocking forever.
     std::promise<long long> prom;
     std::future<long long> fut = prom.get_future();
@@ -408,7 +408,7 @@ void test_death_await_cancelled_value()
 }
 #endif
 
-// TODO 6.10/6.11 -- the two structural entry checks and their sanctioned forms.
+// TODO 6.10/6.11 - the two structural entry checks and their sanctioned forms.
 
 #if TS_SAFETY_CHECKS
 void test_death_sync_settled_in_task()
@@ -423,8 +423,8 @@ void test_death_await_settled_under_guard()
 #endif
 
 // Companion to `await_settled_under_guard`: split the scope. The guard is released before
-// the await and re-acquired after -- the object is free while the frame is suspended, which
-// is the whole point of the rule.
+// the await and re-acquired after - the object is free while the frame is suspended, which
+// is what the rule enforces.
 Task<int> await_under_guard_split(ts::Guarded<tests::Counter>& w, ts::Task<int> other)
 {
     {
@@ -448,7 +448,7 @@ void test_await_under_guard_split()
 }
 
 // Companion to `sync_settled_in_task`, and the stated exemption to the guard rule: a
-// reentrant same-object access runs INLINE under the held grant (waiting rule (b)), so its
+// reentrant same-object access runs inline under the held grant (waiting rule (b)), so its
 // task is settled before the `co_await` is evaluated and cannot suspend by construction.
 // That is the one shape `await_ready` lets through with a guard live.
 Task<int> reentrant_access_under_guard(ts::Guarded<tests::Counter>& w)
@@ -487,7 +487,7 @@ void test_await_as_optional()
     TS_CHECK(await_optional(std::move(completed)).sync() == 5);
 }
 
-// `try_take()` never blocks, so it is legal inside a task -- the non-blocking spelling of
+// `try_take()` never blocks, so it is legal inside a task - the non-blocking spelling of
 // "consume it if it happens to be ready".
 void test_try_take()
 {
@@ -537,7 +537,7 @@ void test_access_reentrant_under_own_grant()
         v = 5;
         ts::Task<int> r = a.access([](const int& x) { return x; });   // reentrant: inline, done
         TS_CHECK(r.is_done());
-        // `sync()` inside a task is illegal even on a settled target (TODO 6.10 -- the rule,
+        // `sync()` inside a task is illegal even on a settled target (TODO 6.10 - the rule,
         // not the incident); `try_take()` is the non-blocking read.
         seen.store(r.try_take().value_or(-1));
     }, a);
@@ -548,13 +548,13 @@ void test_access_reentrant_under_own_grant()
 
 // --- stage 2: coroutine nodes ---------------------------------------------
 
-// The §4.4 shape: a coroutine node body -- a data-parallel fan-out under the node's grant,
+// The §4.4 shape: a coroutine node body - a data-parallel fan-out under the node's grant,
 // a foreign read awaits under held grants, and the node completes (releasing grants,
 // unlocking successors) only at frame completion.
 void test_coroutine_graph_node()
 {
     // The node holds `phys` and `result` and dynamically awaits `audio`, so all three carry a
-    // `ts::Rank` and the awaited one is strictly highest -- the waiting-rule (c) residual made
+    // `ts::Rank` and the awaited one is strictly highest - the waiting-rule (c) residual made
     // representable-but-ordered (TODO 6.14). Without ranks the await is refused: an unranked
     // held object cannot be climbed away from safely.
     ts::Guarded<std::vector<int>> phys{ ts::Named{}, ts::Rank{ 10 }, std::vector<int>{ 1, 2, 3 } };
@@ -568,7 +568,7 @@ void test_coroutine_graph_node()
     {
         total.store(0);                                             // re-run-safe
         // Data-parallel fan-out over the node's owned read: the helpers inherit the node's
-        // grant (Access_context snapshot), and the synchronous join gates the body -- the one
+        // grant (Access_context snapshot), and the synchronous join gates the body - the one
         // sanctioned in-task wait (it waits on running work only).
         ts::parallel_for(islands.size(), [&](std::size_t i) { total.fetch_add(islands[i]); });
         TS_CHECK(total.load() == 6);
@@ -591,7 +591,7 @@ void test_coroutine_graph_node()
 }
 
 // Companion for the circular-wait fatal (docs/coroutine-first.md §2 hierarchy, step 1):
-// the same cross-object communication with BOTH objects declared -- compile() derives the
+// the same cross-object communication with both objects declared - compile() derives the
 // conflict edges and orders the nodes, so neither suspends and no cycle can form.
 Task<void> declared_pair_body(tests::Counter& own, tests::Counter& other)
 {
@@ -615,7 +615,7 @@ void test_cross_object_declared()
 
 #if TS_SAFETY_CHECKS
 // The suspended-ABBA deadlock: two coroutine nodes each holding a declared grant and
-// awaiting the other's object. The circular-wait detector fatals on the closing edge -- the
+// awaiting the other's object. The circular-wait detector fatals on the closing edge - the
 // only diagnosis this shape can get (no thread parks; the frames simply never resume).
 void test_death_circular_wait()
 {
@@ -631,7 +631,7 @@ ts::Task<void> gate_waiter(ts::Frame_gate& gate, std::atomic<int>& woke_at, std:
     woke_at.store(frame.load(std::memory_order_acquire), std::memory_order_release);
 }
 
-// A task parked on the gate resumes at the NEXT boundary, not this one and not two later.
+// A task parked on the gate resumes at the next boundary, not this one and not two later.
 void test_frame_gate_releases_at_next_boundary()
 {
     ts::Frame_gate gate;

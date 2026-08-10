@@ -14,7 +14,7 @@
 namespace ts::tools
 {
 
-// Critical dead time -- makespan minus the work on the measured binding chain -- as a
+// Critical dead time - makespan minus the work on the measured binding chain - as a
 // share of makespan classifies the frame. Below `dead_time_ok_share` the chain's next
 // node almost never waits: the frame is dependency-bound, and only restructuring edges
 // or shrinking critical nodes makes it faster (green). Above `dead_time_bad_share` the
@@ -25,13 +25,13 @@ namespace ts::tools
 inline constexpr double dead_time_ok_share = 0.05;    // below: green (dependency-bound)
 inline constexpr double dead_time_bad_share = 0.10;   // above: red (scheduling-bound)
 
-// Core utilization -- the share of the run window the scheduler's workers spent executing
+// Core utilization - the share of the run window the scheduler's workers spent executing
 // tasks (busy delta / (workers x window); every task kind on the run's scheduler counts,
 // work run inline on non-worker threads does not). What "good" means is bounded by the
-// frame's critical path -- max(serial/workers, chain) caps the achievable share -- so the
+// frame's critical path - max(serial/workers, chain) caps the achievable share - so the
 // bands are deliberately forgiving: a frame using at least three quarters of its cores is
 // green; under half, most core time is idle and the frame likely has parallelism (or
-// worker-count) headroom -- red; between is the caution band (yellow). Colours the
+// worker-count) headroom - red; between is the caution band (yellow). Colours the
 // headline utilization figure in `write_SVG`, next to dead time: utilization says how
 // much of the machine the frame used, dead time says whether the critical chain itself
 // had to wait.
@@ -39,22 +39,22 @@ inline constexpr double core_util_good_share = 0.75;   // at/above: green
 inline constexpr double core_util_ok_share = 0.50;     // at/above: yellow; below: red
 
 // Dead-time cause classification (Scalasca-style wait states, from aggregates we already
-// hold): each critical dead-time band is classified by the mean core utilization DURING
+// hold): each critical dead-time band is classified by the mean core utilization during
 // its gap, joined from the time-bucketed utilization. Cores saturated while the chain
-// waited = the chain waited for a CORE (core-bound -- capacity is the lever: add workers,
-// shed off-path work). Cores idle = it waited for a DEPENDENCY or dispatch (dependency-
-// bound -- cut/loosen the edge, overlap the producer, check wake latency). Between the
+// waited = the chain waited for a core (core-bound - capacity is the lever: add workers,
+// shed off-path work). Cores idle = it waited for a dependency or dispatch (dependency-
+// bound - cut/loosen the edge, overlap the producer, check wake latency). Between the
 // two is mixed. The thresholds reuse the utilization bands above: the same figure that
 // colours the utilization headline decides what a gap's utilization means.
 inline constexpr double gap_core_bound_share = core_util_good_share;         // >=: core-bound
 inline constexpr double gap_dependency_bound_share = core_util_ok_share;     // <: dependency-bound
 
-// Task-system overhead -- the share of the frame's COMPUTE (body + machinery, excluding
+// Task-system overhead - the share of the frame's compute (body + machinery, excluding
 // idle) spent in the scheduler's own machinery: task setup/completion, successful
 // find_work scans, and submit fan-out issued from inside a body. M / (B + M). Low is the
 // expected regime for realistic node granularity (bodies dwarf the ~sub-microsecond
-// per-task machinery); a high figure means the graph is too fine-grained -- the tasks are
-// smaller than the cost of scheduling them. Reported as an UPPER bound (the coarse per-task
+// per-task machinery); a high figure means the graph is too fine-grained - the tasks are
+// smaller than the cost of scheduling them. Reported as an upper bound (the coarse per-task
 // clock brackets charge their own read latency to machinery); cross-check vs the microbench
 // ns/op. Colours the overhead headline figure in `write_SVG`.
 inline constexpr double overhead_ok_share = 0.05;      // at/below: green (bodies dominate)
@@ -67,7 +67,7 @@ inline constexpr double rank_min_share = 0.05;
 
 // Aggregated runtime trace for a `Static_task_graph`: attach with
 // `graph.set_trace(&trace)` (after `compile()`), run any number of times, then
-// `write_SVG(path)` renders the AVERAGE run -- node bars packed into anonymous
+// `write_SVG(path)` renders the average run - node bars packed into anonymous
 // concurrency rows (row occupancy over time = the average frame's concurrency; workers
 // are interchangeable, so rows carry no worker identity), dependency edges between them,
 // per-node stats in hover tooltips.
@@ -80,8 +80,8 @@ inline constexpr double rank_min_share = 0.05;
 //
 // The drawn bars are median-based ([P50 start, P50 start + P50 duration]); medians are
 // not linear, so an edge's bars can cross in the aggregate even though no real run had
-// them overlap -- such an edge is resolved by clamping both bars to the streamed mean
-// MEET POINT of the edge (the average of predecessor-end and successor-start). Bars that
+// them overlap - such an edge is resolved by clamping both bars to the streamed mean
+// meet point of the edge (the average of predecessor-end and successor-start). Bars that
 // overlap in time land on different rows by construction (greedy interval packing).
 class Graph_trace
 {
@@ -124,12 +124,12 @@ public:
     // per node) plus the run's begin/end ticks. `readys` is the data-ready instant (the
     // dependency counter's zero transition); ready-to-start is acquire + queue latency.
     // `busy_ticks` is the scheduler's executed-task wall time inside the window and
-    // `worker_count` its pool size -- together the run's core utilization. Called by the
+    // `worker_count` its pool size - together the run's core utilization. Called by the
     // graph once per run, single-threaded; every duration/offset converts to microseconds
     // here.
     // The utilization background samples each run into `n` fixed time buckets; the width is
     // set once from the first available makespan estimate (ticks), and 0 until one exists (the
-    // first run goes un-bucketed -- negligible over a long trace). Fixing it keeps the buckets
+    // first run goes un-bucketed - negligible over a long trace). Fixing it keeps the buckets
     // comparable across runs for the per-bucket Welford.
     long long fixed_bucket_width_ticks(int n) const
     {
@@ -153,7 +153,7 @@ public:
                          long long body_ticks = 0, long long orchestration_ticks = 0)
     {
         if (node_count != static_cast<int>(nodes_.size()))
-            return;   // structure not pushed (or a stale attach) -- drop the sample
+            return;   // structure not pushed (or a stale attach) - drop the sample
 
         long long window = run_end - run_begin;
         if (worker_count > 0 && window > 0)
@@ -165,7 +165,7 @@ public:
 
         // True per-time utilization: per-bucket busy / (workers x bucket width), Welford per
         // bucket across runs. Counts every task kind (slices, async, ...) at its real time,
-        // so a parallel_for node's core fan-out registers -- unlike the old node-concurrency
+        // so a parallel_for node's core fan-out registers - unlike the old node-concurrency
         // proxy this replaces.
         if (util_bucket_busy && util_bucket_count > 0 && bucket_width_ticks > 0 && worker_count > 0)
         {
@@ -237,18 +237,18 @@ public:
         makespan_.add(mk);
 
         // Task volume: every task the scheduler ran in the window (nodes + parallel_for
-        // slices + async + continuations), so it far exceeds the node count -- the real
+        // slices + async + continuations), so it far exceeds the node count - the real
         // fan-out. Total across the trace + mean per run.
         tasks_total_ += task_count;
         tasks_per_run_.add(static_cast<double>(task_count));
 
-        // Task-system cost, PURE SUBTRACTION (Phase 2): in core-time T = workers x makespan
+        // Task-system cost, pure subtraction (Phase 2): in core-time T = workers x makespan
         // every worker-moment is body, framework-machinery, or idle: T = B + M + P, so machinery
-        // is DERIVED, `M = busy - B` (busy = the run_task span sum + successful find_work scans),
+        // is derived, `M = busy - B` (busy = the run_task span sum + successful find_work scans),
         // and idle `P = T - busy`. There is no machinery accumulator. Framework work done
-        // OFF-worker (the per-run top-level execute() setup on the frame-loop thread) is absent
+        // off-worker (the per-run top-level execute() setup on the frame-loop thread) is absent
         // from busy, so it is a separate fourth bucket, Orchestration, with its own accumulator.
-        // Overhead = M / (B + M) (idle excluded -- a clean compute-cost split). Fed only for a
+        // Overhead = M / (B + M) (idle excluded - a clean compute-cost split). Fed only for a
         // multi-worker run (busy/T are meaningful only then); the worker-less oracle reads B
         // directly off the scheduler, not through this fold.
         if (worker_count > 0 && window > 0)
@@ -317,10 +317,10 @@ public:
     double tasks_per_run() const { return tasks_per_run_.mean; }  // mean tasks per run
 
     // Task-system overhead, [0,1]: mean machinery / (mean body + mean machinery) over the folded
-    // runs, where machinery `M = busy - B` is derived by PURE SUBTRACTION (Phase 2) -- it captures
+    // runs, where machinery `M = busy - B` is derived by pure subtraction (Phase 2) - it captures
     // task setup/completion, successful find_work scans, and on-worker inline machinery, all inside
     // `busy`; the per-run top-level graph setup is the separate off-worker Orchestration bucket. An
-    // UPPER bound on scheduler cost -- the coarse per-task clock brackets charge their own read
+    // upper bound on scheduler cost - the coarse per-task clock brackets charge their own read
     // latency to the body span (and so shrink M). Cross-check against the worker-less ground truth
     // (`set_ground_truth_overhead`) and the microbench ns/op.
     double body_us() const { return body_us_.mean; }
@@ -370,14 +370,14 @@ public:
         double min_us = 0.0, max_us = 0.0;
         double start_p50_us = 0.0;
         int modal_worker = -1;          // -1 = external (non-worker) threads
-        double off_modal = 0.0;         // share of runs NOT on the modal worker
+        double off_modal = 0.0;         // share of runs not on the modal worker
         double critical_share = 0.0;    // share of runs on the measured binding chain
         double dispatch_wait_us = 0.0;  // mean ready-to-start latency (acquire + queue)
         double true_busy_us = 0.0;      // mean body + slices + async fan-out (owner sink)
     };
 
-    // Aggregates for one node. Well-defined for ANY index: an out-of-range one (including
-    // every index on a trace that was never populated -- which is what a `TS_PROFILING=0`
+    // Aggregates for one node. Well-defined for any index: an out-of-range one (including
+    // every index on a trace that was never populated - which is what a `TS_PROFILING=0`
     // build produces, since the structure export compiles to nothing) yields a zeroed
     // `Node_stats`, whose `runs == 0` is the honest "no data". A stubbed-out tool asked for
     // data must answer, not read past the end of a vector; the previous unchecked index was
@@ -415,11 +415,11 @@ public:
     }
 
     // Attach the worker-less ground-truth overhead (the oracle) so `write_SVG` prints it next to
-    // the `M = busy - B` overhead metric. Measured on a serial single-thread run of the SAME frame
-    // as `(total_wall - body) / total_wall` -- the complete framework cost by pure subtraction, no
-    // idle to confound it, so it is the per-op framework FLOOR. The gap `overhead() - this` on a
+    // the `M = busy - B` overhead metric. Measured on a serial single-thread run of the same frame
+    // as `(total_wall - body) / total_wall` - the complete framework cost by pure subtraction, no
+    // idle to confound it, so it is the per-op framework floor. The gap `overhead() - this` on a
     // multi-worker run is the machinery only workers pay (cross-thread dispatch, pipe hand-off,
-    // park/wake) -- not a metric blind spot. Negative = unset. Reported as-is, not matched.
+    // park/wake) - not a metric blind spot. Negative = unset. Reported as-is, not matched.
     void set_ground_truth_overhead(double complement) { ground_truth_overhead_ = complement; }
 
     // Render the average run; returns false (reported to stderr) on I/O failure.
@@ -554,13 +554,13 @@ private:
         1e6 * static_cast<double>(std::chrono::steady_clock::period::num)
             / static_cast<double>(std::chrono::steady_clock::period::den);
 
-    // The run's measured critical path -- the chain that actually bound the makespan.
-    // Walk backward from the latest-finishing node; at each step the BINDING predecessor
+    // The run's measured critical path - the chain that actually bound the makespan.
+    // Walk backward from the latest-finishing node; at each step the binding predecessor
     // is the incoming-edge node that finished last (its completion released this node).
     // One counter per node and edge on the chain; a single run has one chain, but across
-    // runs different chains bind, so the aggregate is a FREQUENCY, not a single path.
+    // runs different chains bind, so the aggregate is a frequency, not a single path.
     // Distinct from the structural (CPM) path in `write_SVG`, which sees only durations
-    // and edges -- the measured chain absorbs queue latency and pipe contention too.
+    // and edges - the measured chain absorbs queue latency and pipe contention too.
     void fold_critical_chain(const long long* starts, const long long* ends, int node_count)
     {
         if (node_count == 0)
@@ -644,7 +644,7 @@ private:
         return buf;
     }
 
-    // Frame-scale value in milliseconds (2 decimals) -- reads more naturally than µs for
+    // Frame-scale value in milliseconds (2 decimals) - reads more naturally than µs for
     // the whole-frame figure.
     static std::string fmt_ms(double us)
     {
@@ -653,8 +653,8 @@ private:
         return buf;
     }
 
-    // Priority display: the node NAME takes the priority colour (high = warm red --
-    // distinct from the critical pink (#f92672) and the critical-node orange (#fd971f) --
+    // Priority display: the node name takes the priority colour (high = warm red -
+    // distinct from the critical pink (#f92672) and the critical-node orange (#fd971f) -
     // normal = green, low = grey). Criticality stays on the bar border and label weight.
     static const char* priority_color(Priority p)
     {
@@ -702,7 +702,7 @@ private:
     Welford tasks_per_run_;       // tasks per run
     Welford body_us_;             // per-run user-functor wall time (B), summed over workers, µs
     Welford machinery_us_;        // per-run scheduler machinery, M = busy - B (derived), µs
-    // Four-way subtraction breakdown: per-run core-time T = workers x makespan and its partition --
+    // Four-way subtraction breakdown: per-run core-time T = workers x makespan and its partition -
     // body (`body_us_`), machinery M = busy - B (`machinery_us_`), idle = T - busy, and the
     // off-worker orchestration slice. Shares taken vs mean T.
     Welford four_T_us_;           // per-run core-time (workers x makespan), µs
@@ -755,7 +755,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
 
     // Structural critical path (CPM) over the average frame: forward/backward pass with
     // the same median durations the bars use, zero edge latency. This is the dependency
-    // lower bound -- unlike the measured binding chain (fold_critical_chain), it cannot
+    // lower bound - unlike the measured binding chain (fold_critical_chain), it cannot
     // see queue latency or pipe contention; the gap between the two classifies the frame
     // as dependency-bound or scheduling-bound. `slack` is how far a node can slip in the
     // average frame before it extends the CPM length.
@@ -791,11 +791,11 @@ inline bool Graph_trace::write_SVG(const char* path) const
     }
 
     // Critical-path ranking (the table below the legend): nodes ranked by expected chain
-    // contribution -- chain share x mean duration, descending -- so a briefly-critical
+    // contribution - chain share x mean duration, descending - so a briefly-critical
     // heavy node outranks an always-critical trivial one. `dead_in` is the node's mean
     // incoming critical dead time: over its in-edges that ever bound the chain, the
     // binding-gap means weighted by how often each edge bound
-    // (sum(gap_mean x edge.critical_runs) / sum(edge.critical_runs)) -- "when this node's
+    // (sum(gap_mean x edge.critical_runs) / sum(edge.critical_runs)) - "when this node's
     // release was the chain's step, how long did it sit ready-but-waiting on average".
     // Negative = the node was never released by a binding edge (a root).
     struct Rank_row
@@ -863,11 +863,11 @@ inline bool Graph_trace::write_SVG(const char* path) const
     }
 
     // Concurrency rows: workers are interchangeable and the node->worker assignment
-    // reshuffles every run, so per-worker lanes misrepresent the aggregate -- a lane can
+    // reshuffles every run, so per-worker lanes misrepresent the aggregate - a lane can
     // look idle while every real run had that worker busy, with its nodes drawn on their
-    // OWN modal lanes. Instead all bars pack greedily into anonymous rows by interval
+    // own modal lanes. Instead all bars pack greedily into anonymous rows by interval
     // overlap (bar-start order; first row whose last bar has ended, else a new row). Row
-    // occupancy over time IS the average frame's concurrency: free vertical space means
+    // occupancy over time is the average frame's concurrency: free vertical space means
     // genuinely unused capacity in the average, not a projection artifact. The per-worker
     // histogram survives for stats (off-modal share, external runs); it no longer drives
     // layout.
@@ -919,7 +919,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // A core-utilization area chart sits between the header and the rows: each time bucket
     // draws a bottom-anchored bar whose height is the utilization (full strip height = every
     // core busy), coloured on the same green->yellow->red ramp as the wash behind the bars.
-    // Height carries the value, colour the verdict -- the shape stays readable where the
+    // Height carries the value, colour the verdict - the shape stays readable where the
     // ramp's mid-tones alone would not discriminate. One row tall: enough vertical span for
     // the height signal without stealing plot space.
     const double util_strip_h = row_h;
@@ -942,8 +942,8 @@ inline bool Graph_trace::write_SVG(const char* path) const
     // Per-edge critical dead-time band, classified by cause (see the gap_* constants):
     // the drawn gap between the predecessor's right edge and the successor's left edge,
     // joined with the time-bucketed utilization covering the same axis. The mean
-    // utilization during the gap is overlap-WEIGHTED (a bucket contributes by the
-    // fraction of the gap it covers -- partial buckets at the ends count partially);
+    // utilization during the gap is overlap-weighted (a bucket contributes by the
+    // fraction of the gap it covers - partial buckets at the ends count partially);
     // min/max are unweighted over the touched buckets. Computed once here; consumed by
     // the headline split, the band rects, and the edge tooltips.
     struct Gap_info
@@ -1023,8 +1023,8 @@ inline bool Graph_trace::write_SVG(const char* path) const
          total_w * view_scale, total_h * view_scale, total_w, total_h);
     line("<rect width=\"%.0f\" height=\"%.0f\" fill=\"#272822\"/>\n", total_w, total_h);
     // Hatch for the critical dead-time bands (and the legend swatch). The tile carries a
-    // faint solid tint UNDER the diagonal stroke: a full-height band must read as "the
-    // frame is losing time in this vertical slice" at a glance on #272822 -- hatch lines
+    // faint solid tint under the diagonal stroke: a full-height band must read as "the
+    // frame is losing time in this vertical slice" at a glance on #272822 - hatch lines
     // alone wash out behind the bars crossing the band.
     // Three variants, one per dead-time cause: pink = dependency-bound (matches the
     // critical-pink chain semantics), amber = core-bound (capacity, distinct from both
@@ -1045,11 +1045,11 @@ inline bool Graph_trace::write_SVG(const char* path) const
            "<path d=\"M6 6 L12 0\" stroke=\"#fd971f\" stroke-width=\"1.4\" opacity=\"0.7\"/>"
            "</pattern></defs>\n";
     // Glossary affordance: header terms whose names may be unfamiliar carry the help cursor and a
-    // styled overlay tooltip (the SAME scripted tooltip the graph nodes use -- multi-line, with
-    // individually-coloured words -- reached by tagging each term `.hv` with a `data-tip`, not a
+    // styled overlay tooltip (the same scripted tooltip the graph nodes use - multi-line, with
+    // individually-coloured words - reached by tagging each term `.hv` with a `data-tip`, not a
     // native <title>). The header text flows naturally (no manual layout); the overlay script draws
     // a rounded pill behind each `.term` at load time (getBBox), so the pills resolve wherever the
-    // script runs (browser tab, <object>, <iframe>) -- inert under <img>, text intact.
+    // script runs (browser tab, <object>, <iframe>) - inert under <img>, text intact.
     out += "<style>.term{cursor:help;}</style>\n";
 
     // Header: title, the dead-time headline, global stats. (The legend sits at the
@@ -1062,8 +1062,8 @@ inline bool Graph_trace::write_SVG(const char* path) const
     out += "</text>\n";
     {
         // The two frame classifiers on one coloured headline (band constants at the top of
-        // this header): core utilization -- how much of the machine the frame used -- then
-        // critical path dead time (frame time minus the binding chain's work) -- whether
+        // this header): core utilization - how much of the machine the frame used - then
+        // critical path dead time (frame time minus the binding chain's work) - whether
         // the chain itself had to wait.
         double util = core_util_.mean;
         const char* util_color = util >= core_util_good_share ? "#a6e22e"
@@ -1077,7 +1077,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
         // then the multi-line body. A literal '\n' in an attribute is normalized to a space by the
         // XML parser, so newlines are written as the `&#10;` character reference (it survives and
         // reaches the overlay script as '\n'); the other markup-significant characters are escaped.
-        // Backticks pass through untouched -- they delimit the overlay's coloured-run syntax.
+        // Backticks pass through untouched - they delimit the overlay's coloured-run syntax.
         auto append_term_tip = [&](std::string_view name, const char* body)
         {
             append_escaped(out, name);
@@ -1094,7 +1094,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
                 }
             }
         };
-        // Render one header line as a single <text> with flowing <tspan>s -- the browser lays it
+        // Render one header line as a single <text> with flowing <tspan>s - the browser lays it
         // out, so there is no manual x-cursor, no textLength, and no glyph distortion. xml:space
         // keeps the "  |  " separators intact. Term tspans carry `class="term hv"` + a `data-tip`
         // (the same scripted tooltip the nodes use, `data-hl` = the term's own colour for the
@@ -1128,9 +1128,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
         };
 
         // Glossary tooltips: the term name is the headline (added by `append_term_tip`); each body
-        // below starts with '\n' and is reflowed into short lines. Any ": " lands at a line END so
+        // below starts with '\n' and is reflowed into short lines. Any ": " lands at a line end so
         // the overlay's field-bold heuristic does not misfire on prose (a deliberate leading
-        // "Fix:" is the one exception -- bolding it reads as an intended label). The three banded
+        // "Fix:" is the one exception - bolding it reads as an intended label). The three banded
         // terms append a blank line then coloured green/yellow/red threshold rows (`RRGGBBtext`).
         static constexpr const char* TIP_UTIL =
             "\nShare of the machine's time that ran tasks."
@@ -1252,7 +1252,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
             render_line(48.0, 12.0, "600", segs);
         }
 
-        // Row 3: the core-time split -- body / framework overhead / idle (sums to 100%).
+        // Row 3: the core-time split - body / framework overhead / idle (sums to 100%).
         {
             double fo = four_way_machinery_share();
             const char* fo_color = fo <= overhead_ok_share ? "#a6e22e"
@@ -1270,7 +1270,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
             render_line(68.0, 12.0, "600", segs);
         }
 
-        // Row 4: raw per-run stats. `body` here is the TOTAL body time (summed across cores);
+        // Row 4: raw per-run stats. `body` here is the total body time (summed across cores);
         // `critical path` is the CPM lower bound; `orchestration` the off-core per-run setup.
         {
             std::vector<Seg> segs;
@@ -1347,9 +1347,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
     }
 
     {
-        // Legend, at the bottom (below the time axis), in THREE columns of up to three
+        // Legend, at the bottom (below the time axis), in three columns of up to three
         // rows (height-optimised): a short sample glyph, then its explanation, inline.
-        // Line STYLE carries provenance (solid = explicit, dashed = derived); colour
+        // Line style carries provenance (solid = explicit, dashed = derived); colour
         // carries criticality (green -> pink by share of binding chains). Column 1 =
         // edges, column 2 = critical node + dead-time causes, column 3 = priorities,
         // welds. The utilization key lives above the strip itself, not here.
@@ -1393,7 +1393,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
     }
 
     // Critical-path ranking table, below the legend: the picture's criticality colouring
-    // as a sorted list -- rank key = chain share x mean duration (expected contribution
+    // as a sorted list - rank key = chain share x mean duration (expected contribution
     // to the binding chain), so the heavy usually-critical nodes top it. Monospace, with
     // per-column x anchors (right-aligned numerics) rather than space padding.
     {
@@ -1503,11 +1503,11 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
     }
 
-    // No row separators or labels: rows are anonymous concurrency slots, not workers --
+    // No row separators or labels: rows are anonymous concurrency slots, not workers -
     // there is nothing true to label them with.
 
     // Multi-line tooltip data: each line escaped, joined with a literal `&#10;` character
-    // reference -- a raw newline in an attribute value would be normalized to a space by
+    // reference - a raw newline in an attribute value would be normalized to a space by
     // the XML parser; the reference survives and reaches the overlay script as '\n'.
     auto append_tip_attr = [&](const std::vector<std::string>& lines_v)
     {
@@ -1519,10 +1519,10 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
     };
 
-    // Core-utilization background: a faint full-height wash coloured by the TRUE per-time core
-    // utilization -- green (all cores busy) -> yellow (half) -> red (idle). Sampled from
+    // Core-utilization background: a faint full-height wash coloured by the true per-time core
+    // utilization - green (all cores busy) -> yellow (half) -> red (idle). Sampled from
     // per-worker busy time bucketed over the run (the scheduler's per-bucket counters via
-    // trace_stamps), so every task kind counts at its real time -- a `parallel_for` node's
+    // trace_stamps), so every task kind counts at its real time - a `parallel_for` node's
     // fan-out across cores registers fully, which the old node-concurrency proxy undercounted.
     // Green stretches saturate the cores; red valleys are idle capacity (where deferred work
     // could go). Drawn first: behind the dead-time bands and bars, inert to hover.
@@ -1550,10 +1550,10 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
 
         // The utilization area chart above the rows: per bucket, a bottom-anchored bar of
-        // height u x strip height in the bucket's ramp colour at full opacity -- an area
+        // height u x strip height in the bucket's ramp colour at full opacity - an area
         // chart in bucket-wide steps. Faint frame lines mark 0% (baseline) and 100% (top)
         // so the height reads against a scale. Each bucket is hoverable over the full strip
-        // height (`.hv`, via a transparent hit rect) -- the tooltip reports the exact
+        // height (`.hv`, via a transparent hit rect) - the tooltip reports the exact
         // core-utilization % and time at the cursor.
         // The 100% line is red: unreached headroom between the bars and the line is the
         // idle-capacity signal, and the contrast makes the shortfall legible at a glance.
@@ -1601,24 +1601,24 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
     }
 
-    // Critical dead-time regions, in the BACKGROUND and FULL HEIGHT: the wait is a
+    // Critical dead-time regions, in the background and full height: the wait is a
     // property of the binding chain, not of any row or worker. For an edge that binds
-    // >= 10% of runs, the region is the VISIBLE gap on screen between the predecessor's
-    // drawn right edge and the successor's drawn left edge -- pure screen coordinates, so
+    // >= 10% of runs, the region is the visible gap on screen between the predecessor's
+    // drawn right edge and the successor's drawn left edge - pure screen coordinates, so
     // it is always the real break between two bars and can never land on a bar (the old
-    // form subtracted a MEAN gap from a MEDIAN bar start, mixing coordinate systems).
-    // Each region's OPACITY scales with its edge's criticality share, so a wait that binds
-    // rarely (say 11%) draws faint and a wait that binds most runs draws strong -- otherwise
+    // form subtracted a mean gap from a median bar start, mixing coordinate systems).
+    // Each region's opacity scales with its edge's criticality share, so a wait that binds
+    // rarely (say 11%) draws faint and a wait that binds most runs draws strong - otherwise
     // an occasional-minority wait, drawn at full strength, paints over the strongly-critical
     // spine running on another row in the same window and reads as if the real critical path
-    // were dead time. Drawn PER EDGE (not unioned): unioning would let one faint region
+    // were dead time. Drawn per edge (not unioned): unioning would let one faint region
     // inherit an overlapping strong sliver's share and defeat the weighting; overlaps just
     // stack, bounded since low-share bands are faint. These localize the headline critical
-    // dead time (frame_time_mean - critical_work_mean, computed globally) -- their >= 10%-share
+    // dead time (frame_time_mean - critical_work_mean, computed globally) - their >= 10%-share
     // visible subset, weighted by frequency, not a sum. Behind the bars, `pointer-events: none`.
-    // The pattern carries the band's CAUSE (see `Gap_info`): pink hatch = dependency-bound,
+    // The pattern carries the band's cause (see `Gap_info`): pink hatch = dependency-bound,
     // amber = core-bound, alternating = mixed; unclassified (no utilization data) stays
-    // pink. Bands remain inert to hover (`pointer-events: none`) -- making them hoverable
+    // pink. Bands remain inert to hover (`pointer-events: none`) - making them hoverable
     // would fight the bars and edges drawn over them; the classification detail lives in
     // the edge's tooltip instead.
     for (size_t ei = 0; ei < edges_.size(); ++ei)
@@ -1634,7 +1634,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
     }
 
     // Colored inline segments for the scripted tooltip: `RRGGBBtext` (backtick-delimited,
-    // 6 hex digits then text) -- the overlay renders that run in that colour. Backtick
+    // 6 hex digits then text) - the overlay renders that run in that colour. Backtick
     // never appears in a label / resource / number, so it is a safe sentinel.
     auto seg = [](const char* hex6, std::string_view text)
     {
@@ -1692,7 +1692,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
              + " (CV " + fmt_us(s.mean_us > 0.0 ? 100.0 * s.stddev_us / s.mean_us : 0.0) + "%)"
              + " | min/max " + fmt_us(s.min_us) + "/" + fmt_us(s.max_us) + " \xC2\xB5s");
         // True busy (body + slices + async fan-out): for a parallel_for node this exceeds the
-        // bar duration -- the bar is wall time, this is core time across the fan-out.
+        // bar duration - the bar is wall time, this is core time across the fan-out.
         if (s.true_busy_us > 0.5)
             tip.push_back("True busy (body+slices+async): mean " + fmt_us(s.true_busy_us) + " \xC2\xB5s");
         // No worker line: workers are interchangeable, and rows carry no worker identity.
@@ -1711,7 +1711,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
             }
             tip.push_back(std::move(acc));
         }
-        // Incoming / outgoing edges (only if any): the OTHER node's name, coloured by that
+        // Incoming / outgoing edges (only if any): the other node's name, coloured by that
         // edge's share of binding chains (green -> pink), so the node's place in the
         // critical structure reads at a glance.
         if (!node_in[static_cast<size_t>(i)].empty())
@@ -1739,9 +1739,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
             tip.push_back(std::move(s2));
         }
 
-        // Two colour channels on a bar: the BORDER blends cyan -> orange with the node's
-        // share of binding chains (`crit_ramp`, label weight follows -- no single-path
-        // pretense; frequency IS the cross-run answer), while the NAME text is filled with
+        // Two colour channels on a bar: the border blends cyan -> orange with the node's
+        // share of binding chains (`crit_ramp`, label weight follows - no single-path
+        // pretense; frequency is the cross-run answer), while the name text is filled with
         // the priority colour (red high / green normal / brightened grey low).
         double hf = crit_ramp(s.critical_share);
         std::string color = blend_hex(0x66, 0xd9, 0xef, 0xfd, 0x97, 0x1f, hf);
@@ -1785,7 +1785,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
     for (size_t edge_i = 0; edge_i < edges_.size(); ++edge_i)
     {
         const Edge_agg& e = edges_[edge_i];
-        // Gantt-style anchors: exit at the source bar's right-edge MIDPOINT, enter at the
+        // Gantt-style anchors: exit at the source bar's right-edge midpoint, enter at the
         // target's left-edge midpoint. The exit uses the drawn right edge (bars have a
         // 3px width floor), so an arrow never starts inside a collapsed bar.
         double x1 = X(bar_start[static_cast<size_t>(e.from)])
@@ -1847,7 +1847,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
                     ? "Lever: add workers or move off-path work out of this window"
                     : g.cls == 0
                     ? "Lever: cut/loosen this edge or overlap the producer"
-                    : "Lever: both apply -- part capacity, part dependency");
+                    : "Lever: both apply - part capacity, part dependency");
             }
             else
             {
@@ -1864,14 +1864,14 @@ inline bool Graph_trace::write_SVG(const char* path) const
 
         // Handoff weld: connected bars back to back on one row (the object-handoff
         // elision often runs a successor immediately on the settling worker) collapse
-        // the curve to nothing -- draw a dot straddling the junction instead. Provenance
+        // the curve to nothing - draw a dot straddling the junction instead. Provenance
         // (solid vs dashed) is tooltip-only for welds; the dot keeps the criticality
         // colour, and marks exactly where the handoff fired.
         bool weld = std::abs(y2 - y1) < 0.5 && x2 - x1 < 5.0;
         if (weld)
             tip.push_back("Handoff: back-to-back with the predecessor");
 
-        // Edges are ALL uniformly faint at rest so the picture reads as bars first --
+        // Edges are all uniformly faint at rest so the picture reads as bars first -
         // including critical ones, which keep their pink colour but not extra opacity
         // (critical structure at rest is carried by the orange node borders/labels).
         // Hovering a node brightens its incident edges to full (see the overlay); nothing
@@ -1913,7 +1913,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
 
     // Hover-tooltip overlay: renders each element's `data-tip` lines styled (headline in
     // the element's own colour, field names bold). Runs when the SVG is opened as a
-    // document (browser tab, <object>, <iframe>); inert when embedded via <img> --
+    // document (browser tab, <object>, <iframe>); inert when embedded via <img> -
     // acceptable, the picture still stands alone.
     out += "<style>.hv{cursor:default}.term{cursor:help}</style>\n";
     out += "<script><![CDATA[\n"
@@ -2005,7 +2005,7 @@ inline bool Graph_trace::write_SVG(const char* path) const
         "  if(y+h>vb.height-4)y=pt.y-h-10;if(y<4)y=4;\n"
         "  tt.setAttribute('transform','translate('+x+','+y+')');\n"
         "}\n"
-        // Edges sink BEHIND the bars at load (they read as clutter on top otherwise); a node's
+        // Edges sink behind the bars at load (they read as clutter on top otherwise); a node's
         // incident edges rise to a foreground layer (just under the tooltip) and brighten on
         // hover, then sink back on leave. An edge hovered directly also rises + brightens.
         "var edges=document.querySelectorAll('.edge');\n"

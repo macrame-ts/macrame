@@ -45,7 +45,7 @@ void test_stage_commit_applies_all()
 
 void test_stage_takes_no_grant()
 {
-    // Staging happens on a thread with NO task context at all -- if it touched the
+    // Staging happens on a thread with NO task context at all - if it touched the
     // target, the harness would fatal. It must not.
     ts::Guarded<Counter> target{ ts::Named{} };
     ts::Deferred<Counter> d{ target };
@@ -81,8 +81,8 @@ void test_intra_recorder_fifo()
 
 void test_recorder_creation_order_not_stage_order()
 {
-    // rec2's commands are staged chronologically FIRST, but rec1 was created first
-    // -- the apply order is keyed by recorder creation, not by stage time.
+    // rec2's commands are staged chronologically first, but rec1 was created first
+    // - the apply order is keyed by recorder creation, not by stage time.
     ts::Guarded<std::vector<int>> target{ ts::Named{} };
     ts::Deferred<std::vector<int>> d{ target };
 
@@ -132,7 +132,7 @@ void test_readers_see_none_then_all()
     auto rec = d.recorder();
     rec.stage([](int& v) { v = 42; });
 
-    // Reader queued BEFORE the commit job: pipe FIFO runs it first -> pre-state.
+    // Reader queued before the commit job: pipe FIFO runs it first -> pre-state.
     ts::Task<int> before = target.async([](const int& v) { return v; });
     ts::Task<void> commit = d.commit();
     ts::Task<int> after = target.async([](const int& v) { return v; });
@@ -220,7 +220,7 @@ void test_cancelled_commit_retains_commands()
     TS_CHECK(commit.is_cancelled());
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 0);
 
-    // The skipped commit never cut -- the commands are still staged.
+    // The skipped commit never cut - the commands are still staged.
     d.commit().sync();
     TS_CHECK(target.async([](const int& v) { return v; }).sync() == 7);
 }
@@ -267,7 +267,7 @@ void test_parallel_recorder_from_parallel_for()
 void test_parallel_recorder_overflow_lane()
 {
     // Non-worker threads (this test thread + an external jthread) route to the
-    // shared overflow slot -- contended but correct.
+    // shared overflow slot - contended but correct.
     ts::Guarded<Counter> target{ ts::Named{} };
     ts::Deferred<Counter> d{ target };
 
@@ -284,7 +284,7 @@ void test_parallel_recorder_on_versioned()
 {
     // Parallel staging into a Versioned: placement is nondeterministic but the
     // batch order is fixed at the cut, so replay resync applies the identical
-    // sequence twice -- the divergence check must stay quiet.
+    // sequence twice - the divergence check must stay quiet.
     constexpr int n = 5000;
     ts::Versioned<int> v{ ts::Named{} };
     v.set_divergence_check([](const int& x) { return static_cast<std::size_t>(x); });
@@ -300,7 +300,7 @@ void test_parallel_recorder_on_versioned()
 void test_released_slot_commands_survive()
 {
     // A recorder destroyed with staged-but-uncommitted commands: the slot is
-    // recycled, the commands drain on the next cut -- nothing is lost.
+    // recycled, the commands drain on the next cut - nothing is lost.
     ts::Guarded<int> target{ ts::Named{}, 0 };
     ts::Deferred<int> d{ target };
     {
@@ -314,7 +314,7 @@ void test_released_slot_commands_survive()
 void test_slot_reuse_inherits_position()
 {
     // r1 released -> r3 reuses r1's slot -> r3's commands apply at slot 0,
-    // BEFORE r2's (slot 1), even though r3 was minted last. The documented
+    // before r2's (slot 1), even though r3 was minted last. The documented
     // reuse-inherits-position semantics, pinned.
     ts::Guarded<std::vector<int>> target{ ts::Named{} };
     ts::Deferred<std::vector<int>> d{ target };
@@ -335,7 +335,7 @@ void test_slot_reuse_inherits_position()
 void test_recorder_churn_does_not_grow_journal()
 {
     // Mint/stage/destroy far past max_slots (4096): the free-list recycles one
-    // slot the whole way -- no threshold fatal, every command applied.
+    // slot the whole way - no threshold fatal, every command applied.
     constexpr int churn = static_cast<int>(ts::detail::Journal<int>::max_slots) + 1000;
     ts::Guarded<int> target{ ts::Named{}, 0 };
     ts::Deferred<int> d{ target };
@@ -410,7 +410,7 @@ void test_dtor_inflight_commit_is_fatal()
 
 #if TS_SAFETY_CHECKS
 // `commit()` from nested sub-work under an inherited write grant: not the holder, and the
-// enqueued write would queue behind the parent's own hold -- diagnosed at the call.
+// enqueued write would queue behind the parent's own hold - diagnosed at the call.
 void test_commit_nested_grant_is_fatal()
 {
     TS_CHECK(ts::test::expect_death("deferred_commit_nested_grant"));

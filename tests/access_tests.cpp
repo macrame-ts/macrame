@@ -64,7 +64,7 @@ void test_harness_allows()
 #if TS_SAFETY_CHECKS
 // Grant-window staleness: an entry declared with an epoch source is valid while the
 // epoch holds its captured value and reports `stale` (a distinct verdict, not `none`)
-// once it moves -- the unit-level contract behind the stale-inherited-grant fatal.
+// once it moves - the unit-level contract behind the stale-inherited-grant fatal.
 void test_epoch_staleness()
 {
     using Grant = ts::Access_context::Grant;
@@ -86,7 +86,7 @@ void test_epoch_staleness()
 }
 
 // A read-grant entry stays valid across other readers (no writer bump) and goes stale
-// exactly when a writer acquires -- and a null epoch source never goes stale.
+// exactly when a writer acquires - and a null epoch source never goes stale.
 void test_epoch_read_era_and_null()
 {
     using Grant = ts::Access_context::Grant;
@@ -114,7 +114,7 @@ bool trigger_ensure_site()
 
 // The ensure facility: a passing expression is silent and yields true; a failing
 // site counts every occurrence but reports once; no abort. (The debugger-break
-// branch is untestable here -- no debugger attached in CI.) `Expected_ensures`
+// branch is untestable here - no debugger attached in CI.) `Expected_ensures`
 // silences the deliberate failures (no F5 break) and consumes them on scope exit.
 void test_ensure_facility()
 {
@@ -167,7 +167,7 @@ void test_death_detached_launch(){ TS_CHECK(ts::test::expect_death("detached_lau
 
 // Companion to the detached-launch death test: the sanctioned form. `ts::parallel_for` helpers
 // inherit the caller's grant (an Access_context snapshot), and the synchronous join keeps them
-// strictly within the node's grant window -- so they may touch the node's guarded data legally.
+// strictly within the node's grant window - so they may touch the node's guarded data legally.
 void test_nested_child_touches_guarded()
 {
     ts::Guarded<tests::Counter> c{ ts::Named{ "c" } };

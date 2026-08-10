@@ -1,56 +1,56 @@
-// A mock game-engine frame -- the breadth sample, and a worked optimization
+// A mock game-engine frame - the breadth sample, and a worked optimization
 // exercise. ~30 systems over ~35 guarded stores; the whole schedule is derived
-// from declared data access. Built in two variants from the SAME system bodies:
+// from declared data access. Built in two variants from the same system bodies:
 //
-//   Frame_variant::baseline  -- a straightforward composition. Every system
+//   Frame_variant::baseline  - a straightforward composition. Every system
 //     declares what it reads and writes; the graph parallelises it with no
-//     hand-tuning. This already runs wide -- the point is that honest
-//     single-writer decomposition gets you most of the way for free.
+//     hand-tuning. This already runs wide: honest
+//     single-writer decomposition gets most of the way with no hand-tuning.
 //
-//   Frame_variant::optimised -- the same frame after reading its own trace. The
+//   Frame_variant::optimised - the same frame after reading its own trace. The
 //     frame is critical-path bound: only shortening the serial sim spine moves
 //     the makespan, and pure scheduling levers (edges, inline) cannot shorten a
 //     genuine dependency chain. The levers, tagged L1-L4 at their branch points:
-//       L1  AI reads LAST frame's gameplay snapshot (`Versioned`) -- deletes the
+//       L1  AI reads last frame's gameplay snapshot (`Versioned`) - deletes the
 //           trio->AI edges, the critical-path cut
 //       L2  parallelise the fattest critical bars (combat, ik_post, UI layout)
-//           -- body-level splits
-//       L3  `Deferred` draw staging -- producers stage grant-free and go wide;
+//           - body-level splits
+//       L3  `Deferred` draw staging - producers stage grant-free and go wide;
 //           submit commits (utilization, not makespan)
-//       L4  cloth reads LAST frame's transforms -- off the post-flip tail, fills
+//       L4  cloth reads last frame's transforms - off the post-flip tail, fills
 //           cores once the spine is short
 //     Choices that change a node's access (L1, L3, L4) branch at construction on
 //     `opt`; the body-level splits (L2) branch inside the system bodies.
 //
-//   Frame_variant::graph_free -- the baseline frame with no `Static_task_graph` at
+//   Frame_variant::graph_free - the baseline frame with no `Static_task_graph` at
 //     all: the same systems as multi-object `ts::async` calls, the same schedule
 //     written out with `co_await` (`run_frame_graph_free`). The measurement behind
-//     "what does the static graph buy me" -- the pipe still gives safety, the graph
+//     "what does the static graph buy me" - the pipe still gives safety, the graph
 //     gives the schedule.
 //
 // What the layers show:
-//   - `Static_task_graph` -- nodes over guarded stores; every edge derived from
+//   - `Static_task_graph` - nodes over guarded stores; every edge derived from
 //     parameter const-ness. A real render frame's worth of nodes: a gameplay
 //     spine, a split physics pipeline (broadphase -> narrowphase -> solver ->
-//     finalize), an animation chain, and a render pipeline that consumes LAST
+//     finalize), an animation chain, and a render pipeline that consumes last
 //     frame's transforms so it overlaps this frame's simulation (the render
 //     thread with one frame of latency, modelled with `Versioned` and nothing
 //     else).
-//   - `Versioned<Transforms>` -- the packaged double-buffer. Simulation stages
+//   - `Versioned<Transforms>` - the packaged double-buffer. Simulation stages
 //     this frame's transforms and flips; render + audio read the previous
 //     version (declared before the flip) and run from t=0; cloth reads the
 //     fresh version (declared after). A second `Versioned` (the gameplay
 //     snapshot) is the optimised variant's biggest lever: AI reads last frame's
 //     trio results, so the trio->AI edge leaves the critical path.
-//   - `Deferred<Draw_lists>` -- the command buffer. In the optimised variant the
+//   - `Deferred<Draw_lists>` - the command buffer. In the optimised variant the
 //     draw producers stage grant-free and go wide; the baseline writes the queue
-//     directly, so the producers serialise -- a real inefficiency the trace
+//     directly, so the producers serialise - a real inefficiency the trace
 //     shows and the exercise removes.
 //   - Dynamic work outside the graph: streaming fires `async` loads a coroutine
 //     awaits and folds; AI fires speculative cancellable nav queries.
 //   - Internal parallelism: heavy systems split their work with `parallel_for`.
 //
-// The core logic is plainly thread-unsafe single-threaded code -- no atomics, no
+// The core logic is plainly thread-unsafe single-threaded code - no atomics, no
 // locks. The library turns it into a safe parallel schedule from the access
 // declarations alone; the systems never learn about threading.
 
@@ -80,7 +80,7 @@ namespace sample
 
 // Baseline = a straightforward composition; optimised = the same frame after the
 // levers the trace makes obvious. `build_frame_graph` takes either. `graph_free` is
-// not a graph at all -- the same baseline frame hand-composed with coroutines and the
+// not a graph at all - the same baseline frame hand-composed with coroutines and the
 // access verbs (`run_frame_graph_free`), the comparison case for what `compile()` buys.
 enum class Frame_variant { baseline, optimised, graph_free };
 
@@ -91,7 +91,7 @@ namespace
 // the stress loop use a small scale so many frames run fast.
 float time_scale = 1.0f;
 
-// The variant traces run on this many workers -- heavy enough (~35 ms of work)
+// The variant traces run on this many workers - heavy enough (~35 ms of work)
 // to warrant more than the machine default when starved; retune freely.
 constexpr int variant_workers = 8;
 
@@ -107,7 +107,7 @@ std::atomic<int> hud_snapshots{ 0 };
 
 // --- the stores -------------------------------------------------------------------
 
-// A component store (one float per entity) -- stands in for an ECS component
+// A component store (one float per entity) - stands in for an ECS component
 // array. Plain single-threaded code; every public method asserts the caller
 // declared access, which is all it has to do to participate in the frame graph.
 class Float_store
@@ -123,7 +123,7 @@ private:
     std::vector<float> data_;
 };
 
-// The published world transforms -- the versioned type. `apply` replaces the
+// The published world transforms - the versioned type. `apply` replaces the
 // whole batch (idempotent), so the replay resync re-applies deterministically.
 class Transforms
 {
@@ -138,13 +138,13 @@ private:
 
 // The gameplay snapshot: the same default-constructible float-batch shape as
 // `Transforms`, double-buffered via `Versioned`. In the optimised variant the
-// trio's results are packed into it and published for NEXT frame's AI to read --
+// trio's results are packed into it and published for next frame's AI to read --
 // one-frame-latent AI perception, a standard engine pattern (a blackboard / AI
 // world snapshot updated at frame end). Reusing `Transforms` also reuses its
 // `read_all` overload; the store is named "gameplay" for the trace.
 using Gameplay = Transforms;
 
-// The render queue -- the `Deferred` target (optimised) or a plain write target
+// The render queue - the `Deferred` target (optimised) or a plain write target
 // (baseline). Producers in the optimised variant stage commands; the submit node
 // applies them. In the baseline the producers push directly under a write grant.
 class Draw_lists
@@ -222,7 +222,7 @@ struct World
     ts::Guarded<Script_events> script_events{ ts::Named{"script_events"}, entity_count };
     ts::Guarded<Assets> assets{ ts::Named{"assets"}, entity_count };
     // Streaming stages loaded assets here as each load completes; the asset_commit node applies
-    // the batch (declared after `assets`, so it destructs before it -- ~Deferred touches the
+    // the batch (declared after `assets`, so it destructs before it - ~Deferred touches the
     // target's pipe).
     ts::Deferred<Assets> assets_stream{ assets };
     // Detached load coroutines in flight; the teardown flush waits on it (see ~World).
@@ -248,8 +248,8 @@ struct World
     ts::Versioned<Transforms> transforms{ ts::Named{"transforms"} };
 
     // the published gameplay snapshot: the optimised variant packs the trio's
-    // results here and publishes them for NEXT frame's AI (one-frame-latent
-    // perception). Unused in the baseline (empty, no stages -- harmless).
+    // results here and publishes them for next frame's AI (one-frame-latent
+    // perception). Unused in the baseline (empty, no stages - harmless).
     ts::Versioned<Gameplay> gameplay{ ts::Named{"gameplay"} };
 
     ts::Guarded<Cloth> cloth{ ts::Named{"cloth"}, entity_count };
@@ -265,13 +265,13 @@ struct World
     // the render queue: baseline producers write it directly, optimised producers
     // stage into `draw_staged` and submit applies the batch
     ts::Guarded<Draw_lists> draw_lists{ ts::Named{"draw_lists"} };
-    ts::Deferred<Draw_lists> draw_staged{ draw_lists };   // references an earlier member -- fine
+    ts::Deferred<Draw_lists> draw_staged{ draw_lists };   // references an earlier member - fine
 
     // Streaming loads run detached and can finish after the frame that launched them, so at
     // teardown some may still be staging into `assets_stream`. Flush on shutdown: wait for the
-    // in-flight loaders to drain, then apply the final batch as one write -- leaving no staged
+    // in-flight loaders to drain, then apply the final batch as one write - leaving no staged
     // commands for `~Deferred` to reject as lost writes. (A user-declared destructor keeps this
-    // an aggregate -- only user-declared constructors would forfeit `World world{ entities }`.)
+    // an aggregate - only user-declared constructors would forfeit `World world{ entities }`.)
     ~World()
     {
         while (streaming_inflight.load(std::memory_order_acquire) != 0)
@@ -308,7 +308,7 @@ constexpr double replication = 0.4, stats = 0.3, gc = 1.0, debug_overlay = 0.2;
 } // namespace budget
 
 // --- the systems: index -----------------------------------------------------------
-// Free functions with typed parameters -- the const-ness IS the access declaration
+// Free functions with typed parameters - the const-ness IS the access declaration
 // the graph reads. Implementations follow `build_frame_graph`; this index is the
 // frame's table of contents.
 
@@ -341,7 +341,7 @@ void tick_solver(const Contacts&, const Combat&, Velocities&);
 void tick_finalize(const Velocities&, Bodies&);
 // transform propagation (stages this frame's transforms; the flip publishes)
 void tick_propagation(const Local_xf&, const Bodies&, const Velocities&, ts::Recorder<Transforms>&);
-// render pipeline (reads LAST frame's transforms)
+// render pipeline (reads last frame's transforms)
 void tick_frustum_cull(const Transforms& prev_xf, const Camera&, const Renderables&, Visibility&);
 void tick_occlusion_cull(const Transforms& prev_xf, const Visibility&, Vis_final&);
 void tick_shadow(const Transforms& prev_xf, const Skeletons&, Shadow_map&);
@@ -372,7 +372,7 @@ ts::Graph_node add_UI(ts::Static_task_graph&, World&, bool opt);
 ts::Graph_node add_submit(ts::Static_task_graph&, World&, bool opt);
 
 // navigation + AI node builders (extracted so build_frame_graph stays a node list). AI
-// picks its inputs on `opt` -- last frame's snapshot (optimised) vs this frame's trio.
+// picks its inputs on `opt` - last frame's snapshot (optimised) vs this frame's trio.
 ts::Graph_node add_navigation(ts::Static_task_graph&, World&);
 ts::Graph_node add_AI(ts::Static_task_graph&, World&, bool opt);
 
@@ -386,8 +386,8 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     const bool opt = variant == Frame_variant::optimised;
     ts::Static_task_graph graph;
 
-    // Priorities model importance, not measured wins, and are IDENTICAL in both
-    // variants -- compilation ignores them (they only order ready tasks in the
+    // Priorities model importance, not measured wins, and are identical in both
+    // variants - compilation ignores them (they only order ready tasks in the
     // scheduler's queues): `low` on the deferrable terminal leaves, `high` on the
     // longest pole and the present deadline.
 
@@ -397,7 +397,7 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     graph.add_node("networking", &tick_networking, world.input, world.net);
     graph.add_node("scripting", &tick_scripting, world.input, world.net, world.script_events);
     // Streaming declares only `input`: it stages loaded assets into `assets_stream` (grant-free)
-    // and reads `asset_source` through its own async loads -- neither is a declared node access.
+    // and reads `asset_source` through its own async loads - neither is a declared node access.
     graph.add_node("streaming",
         [&world](const Input& in)
         { tick_streaming(world.asset_source, world.assets_stream, world.streaming_inflight, in); },
@@ -413,15 +413,15 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     graph.add_node("economy", &tick_economy, world.transforms.state(), world.input, world.net, world.script_events, world.economy);
     graph.add_node("quests", &tick_quests, world.transforms.state(), world.input, world.net, world.script_events, world.quests);
 
-    // Navigation + AI. Baseline AI reads THIS frame's trio (the trio binds AI on the
+    // Navigation + AI. Baseline AI reads this frame's trio (the trio binds AI on the
     // critical path); optimised reads last frame's gameplay snapshot instead, deleting
-    // the trio->AI edges so AI starts as soon as its paths are ready -- the flagship cut.
+    // the trio->AI edges so AI starts as soon as its paths are ready - the critical-path cut.
     add_navigation(graph, world);
     add_AI(graph, world, opt);
 
     // Gameplay snapshot + flip (optimised only): pack this frame's trio into the
-    // versioned gameplay store and publish it for NEXT frame's AI. AI (above) reads
-    // the PREVIOUS version, so the flip orders after it; nothing this frame waits on
+    // versioned gameplay store and publish it for next frame's AI. AI (above) reads
+    // the previous version, so the flip orders after it; nothing this frame waits on
     // the snapshot.
     if (opt)   // L1: publish the snapshot next frame's AI reads
     {
@@ -451,8 +451,8 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
         { tick_propagation(lx, b, v, rec); },
         world.local_xf, world.bodies, world.velocities);
 
-    // Render pipeline -- reads LAST frame's transforms (so it overlaps this frame's
-    // simulation), which means every node here must run BEFORE the flip. That is intent, so
+    // Render pipeline - reads last frame's transforms (so it overlaps this frame's
+    // simulation), which means every node here must run before the flip. That is intent, so
     // it is declared as explicit edges below rather than left to the direction `compile()`
     // happens to give the transforms conflict: a derived edge exists for safety and either
     // direction is race-free, so declaration order is not a specification (guide §6.5).
@@ -464,8 +464,8 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     auto UI_node = add_UI(graph, world, opt);
     auto submit = add_submit(graph, world, opt);
     submit.priority(ts::Priority::high);
-    // Submit consumes what the producers emit -- intent, in both variants. The baseline
-    // ALSO has a `draw_lists` conflict pointing the same way, but relying on that would be
+    // Submit consumes what the producers emit - intent, in both variants. The baseline
+    // also has a `draw_lists` conflict pointing the same way, but relying on that would be
     // relying on the order the nodes happen to be added; the optimised variant stages
     // grant-free, so there is no conflict at all and the edge is the only ordering.
     submit.after(cmd_record, particles, UI_node);
@@ -477,7 +477,7 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     graph.add_node("stats", &tick_stats, world.combat, world.economy, world.bodies, world.visibility, world.stats);
     // The streaming commit slot: applies the assets staged so far as one write. It writes
     // `assets`, so the conflict edge to gc (which reads `assets`) orders it before gc; it has no
-    // edge to streaming (staging is grant-free), so it commits whatever has arrived -- last
+    // edge to streaming (staging is grant-free), so it commits whatever has arrived - last
     // frame's loads are fine.
     graph.add_node("asset_commit", [&world](Assets& a) { (void)a; world.assets_stream.commit(); },
         world.assets).priority(ts::Priority::low);
@@ -487,8 +487,8 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
         world.economy, world.transforms.state()).priority(ts::Priority::low);
 
     // The flip publishes this frame's transforms. Cloth's version is a lever: the
-    // baseline reads the FRESH version (declared after the flip -> the frame's tail
-    // node); the optimised variant reads LAST frame's (declared before, like audio) --
+    // baseline reads the fresh version (declared after the flip -> the frame's tail
+    // node); the optimised variant reads last frame's (declared before, like audio) --
     // one frame of cloth latency is invisible, and cloth fills the idle capacity the
     // shortened spine leaves. Structural (the version is set by declaration order vs
     // the flip).
@@ -497,11 +497,11 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
         cloth = graph.add_node("cloth", &tick_cloth, world.transforms.state(), world.cloth);
     auto flip = graph.add_node("flip", ts::publish_body(world.transforms), world.transforms.state());
     flip.after(propagation);
-    // Which VERSION each transforms reader sees is the point of the whole render pipeline,
+    // Which version each transforms reader sees is the point of the whole render pipeline,
     // so it is declared, not inferred from where the nodes happen to sit in this function.
     // Every reader above must precede the flip to see last frame's transforms; `cloth` in
     // the baseline must follow it to see this frame's. Each of these coincides with a
-    // derived edge in the same direction -- `compile()` dedups them -- but the derived edge
+    // derived edge in the same direction - `compile()` dedups them - but the derived edge
     // is there for safety, and its direction is not a specification (guide §6.5).
     flip.after(frustum_cull, occlusion_cull, shadow, cmd_record, particles, UI_node, submit);
     flip.after(audio, vfx, debug_overlay);
@@ -523,7 +523,7 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
 // Command recording: the heavy render producer (batches draw calls from the visible
 // set + shadows).
 // Navigation: paths for this frame against the nav service + baked tiles, reading last
-// frame's transforms. One node, identical in both variants -- extracted so the builder
+// frame's transforms. One node, identical in both variants - extracted so the builder
 // reads as a flat node list.
 ts::Graph_node add_navigation(ts::Static_task_graph& graph, World& world)
 {
@@ -532,7 +532,7 @@ ts::Graph_node add_navigation(ts::Static_task_graph& graph, World& world)
 
 // AI: nav-query core + intents, reading either this frame's gameplay trio (baseline) or last
 // frame's published gameplay snapshot (optimised). The snapshot read deletes the trio->AI
-// edges -- the flagship critical-path cut -- so AI runs as soon as its paths are ready. Both
+// edges - the critical-path cut - so AI runs as soon as its paths are ready. Both
 // shapes are thin wrappers over tick_AI / tick_AI_prev.
 ts::Graph_node add_AI(ts::Static_task_graph& graph, World& world, bool opt)
 {
@@ -585,8 +585,8 @@ ts::Graph_node add_particles(ts::Static_task_graph& graph, World& world, bool op
         world.transforms.state(), world.particles);
 }
 
-// UI is a double lever: the baseline lays widgets out serially AND writes the queue
-// directly; the optimised variant lays out in parallel AND stages grant-free.
+// UI is a double lever: the baseline lays widgets out serially and writes the queue
+// directly; the optimised variant lays out in parallel and stages grant-free.
 ts::Graph_node add_UI(ts::Static_task_graph& graph, World& world, bool opt)
 {
     if (!opt)
@@ -687,7 +687,7 @@ void read_all(const Transforms& t)
 
 // Internally-parallel systems run their work through `parallel_for`, under the
 // calling node's grant (the node holds exclusive access to its output; slices
-// are disjoint). The manual slicing is an artifact of MOCKING cost with a spin
+// are disjoint). The manual slicing is an artifact of mocking cost with a spin
 // (which can't be divided per trivial item); real per-item work would iterate
 // items directly and let the library balance.
 constexpr int cost_slices = 8;
@@ -745,11 +745,11 @@ void tick_scripting(const Input& input, const Net& net, Script_events& events)
 }
 
 // Streaming: async loads from the read-only source, overlapping the node's own
-// decompression cost. A real streaming system writes each loaded asset into the table WHEN
-// its load completes, not at frame start -- so the loader stages each result into
+// decompression cost. A real streaming system writes each loaded asset into the table when
+// its load completes, not at frame start - so the loader stages each result into
 // `assets_stream` (a `Deferred<Assets>`, grant-free) as it arrives, and the asset_commit node
 // applies the batch at its slot. Next frame is fine: streaming latency is not frame-critical.
-// This is the recommended shape (stage outward writes, apply at a commit slot) -- the loader
+// This is the recommended shape (stage outward writes, apply at a commit slot) - the loader
 // holds no grant across its multi-frame wait, so there is nothing to climb a rank away from.
 void tick_streaming(ts::Guarded<Asset_source>& asset_source, ts::Deferred<Assets>& assets_stream,
     std::atomic<int>& inflight, const Input& input)
@@ -798,7 +798,7 @@ void tick_navmesh_rebuild(const Input& input, Nav_tiles& tiles)
 // Gameplay trio: shares inputs (last frame's transforms, input, net, script
 // events), owns disjoint outputs -> runs in parallel.
 // Combat runs a threat/damage pass per entity. The baseline runs it serially; the
-// optimised variant parallelises it across entities -- the trace shows combat as
+// optimised variant parallelises it across entities - the trace shows combat as
 // one of the two fattest bars on the critical path, so a per-entity split is the
 // obvious cut. `parallel` picks the shape.
 void tick_combat(const Transforms& prev_xf, const Input& input, const Net& net, const Script_events& events,
@@ -850,7 +850,7 @@ void tick_navigation(const Nav_mesh& nav_mesh, const Nav_tiles& tiles, const Tra
 }
 
 // AI's nav-query core, shared by both variants: per-agent path queries against
-// the read-only nav service via async -- concurrent readers on other workers,
+// the read-only nav service via async - concurrent readers on other workers,
 // overlapping AI's own logic. Speculative: each query runs a longer budget than
 // AI needs and AI cancels the batch once done (cooperative early-out via the
 // trailing token). Writes this frame's intents.
@@ -882,7 +882,7 @@ void ai_nav_and_intents(ts::Guarded<Nav_mesh>& nav_service, Intents& intents)
     fill(intents, 1.0f);
 }
 
-// Baseline AI: reads THIS frame's trio outputs -- so the trio binds AI on the
+// Baseline AI: reads this frame's trio outputs - so the trio binds AI on the
 // critical path (the trace shows exactly this). The optimised variant reads last
 // frame's gameplay snapshot instead (tick_AI_prev), deleting the trio->AI edges.
 void tick_AI(ts::Guarded<Nav_mesh>& nav_service, const Transforms& prev_xf, const Paths& paths, const Combat& combat,
@@ -899,7 +899,7 @@ void tick_AI(ts::Guarded<Nav_mesh>& nav_service, const Transforms& prev_xf, cons
 // Optimised AI: reads last frame's gameplay snapshot (a `Versioned` published at
 // the end of the previous frame) in place of this frame's trio. One frame of AI
 // latency is standard, and it lets AI start as soon as its paths are ready
-// instead of waiting for the gameplay trio -- the flagship critical-path cut.
+// instead of waiting for the gameplay trio - the critical-path cut.
 void tick_AI_prev(ts::Guarded<Nav_mesh>& nav_service, const Transforms& prev_xf, const Paths& paths,
     const Gameplay& prev_gameplay, Intents& intents)
 {
@@ -911,7 +911,7 @@ void tick_AI_prev(ts::Guarded<Nav_mesh>& nav_service, const Transforms& prev_xf,
 
 // Gameplay snapshot: packs this frame's trio results into the versioned gameplay
 // store for next frame's AI. Off the critical path (nothing this frame waits on
-// it -- it feeds the NEXT frame via the published version). Optimised only.
+// it - it feeds the next frame via the published version). Optimised only.
 void tick_gameplay_snapshot(const Combat& combat, const Economy& economy, const Quests& quests,
     ts::Recorder<Gameplay>& rec)
 {
@@ -932,7 +932,7 @@ void tick_anim_graph(const Skeletons& skeletons, const Intents& intents, Anim_po
 }
 
 // IK / post: refines the pose into the final local transforms. IK is per
-// character -- embarrassingly parallel across characters -- so the baseline's
+// character - embarrassingly parallel across characters - so the baseline's
 // serial pass is a critical-path bar the optimised variant splits. Writes
 // local_xf = 2.0 (half of the deterministic transform output).
 void tick_ik_post(const Anim_pose& anim_pose, Local_xf& local_xf, bool parallel)
@@ -999,8 +999,8 @@ void tick_propagation(const Local_xf& local_xf, const Bodies& bodies, const Velo
     rec.stage([batch = std::move(out)](Transforms& t) { t.apply(batch); });
 }
 
-// Render pipeline: consumes LAST frame's transforms (declared before the flip),
-// so it overlaps this frame's simulation -- the render thread with one frame of
+// Render pipeline: consumes last frame's transforms (declared before the flip),
+// so it overlaps this frame's simulation - the render thread with one frame of
 // latency. Its own working stores (visibility, shadows) are this-frame.
 void tick_frustum_cull(const Transforms& prev_xf, const Camera& camera, const Renderables& renderables,
     Visibility& visibility)
@@ -1060,7 +1060,7 @@ int tick_UI(const Quests& quests, UI& u, bool parallel)
     return u.size() / 10;
 }
 
-// Post-flip reader of the FRESH version. Cloth simulates on this frame's
+// Post-flip reader of the fresh version. Cloth simulates on this frame's
 // transforms (the baseline; the optimised variant declares it pre-flip).
 void tick_cloth(const Transforms& xf, Cloth& cloth)
 {
@@ -1068,7 +1068,7 @@ void tick_cloth(const Transforms& xf, Cloth& cloth)
     parallel_fill(cloth, 1.0f, budget::cloth);
 }
 
-// Audio mixes off LAST frame's transforms (declared before the flip): one frame
+// Audio mixes off last frame's transforms (declared before the flip): one frame
 // of positional latency is inaudible, and the serial mixer runs from t=0.
 void tick_audio(const Transforms& prev_xf, Audio_out& audio_out)
 {
@@ -1114,7 +1114,7 @@ void tick_stats(const Combat& combat, const Economy& economy, const Bodies& bodi
 // Memory / GC tick: an incremental collector pass. It scans the frame's allocation-heavy
 // resource stores (streamed assets, renderables, spawned particles) to account live memory,
 // then does its own bookkeeping. Reading them makes it a terminal consumer like
-// stats/replication -- off the critical path, but wired into the frame it collects rather
+// stats/replication - off the critical path, but wired into the frame it collects rather
 // than a floating island writing a store no one reads.
 void tick_gc(const Assets& assets, const Renderables& renderables, const Particles& particles, GC& gc)
 {
@@ -1126,7 +1126,7 @@ void tick_gc(const Assets& assets, const Renderables& renderables, const Particl
 
 // Debug overlay: reads a gameplay store and the transforms for an on-screen HUD. The node
 // declares it as a bare generic lambda (`const auto&`), so the graph probes the access mode
-// from rvalue-bindability rather than a typed signature -- the one such node in the frame.
+// from rvalue-bindability rather than a typed signature - the one such node in the frame.
 void tick_debug_overlay(const Economy& economy, const Transforms& xf)
 {
     read_all(economy);
@@ -1134,7 +1134,7 @@ void tick_debug_overlay(const Economy& economy, const Transforms& xf)
     spin(budget::debug_overlay);
 }
 
-// The whole frame run serially -- the baseline node set (the optimised-only
+// The whole frame run serially - the baseline node set (the optimised-only
 // snapshot/flip are excluded). Both variants' spin budgets are identical.
 double serial_budget_ms()
 {
@@ -1167,7 +1167,7 @@ double serial_budget_ms()
 // the baseline node list in declaration order and awaiting the handles at the end is
 // measurably wrong: `frustum_cull` runs before `camera` (its `camera` read lands while
 // `camera` is still queued behind `input`), and `submit` takes the draw queue before
-// `cmd_record` reaches it, so a frame of draw commands is dropped -- with the transform
+// `cmd_record` reaches it, so a frame of draw commands is dropped - with the transform
 // invariant still reading 5 and the harness silent, because every declaration is correct
 // and only the order is wrong.
 //
@@ -1184,7 +1184,7 @@ ts::Task<void> gf_physics_front(World& world)
 }
 
 // Physics back: solver -> finalize. The solver reads this frame's combat, so the chain
-// splits here -- the front half has no gameplay input and starts at t=0.
+// splits here - the front half has no gameplay input and starts at t=0.
 ts::Task<void> gf_physics_back(World& world, ts::Task<void> front, ts::Task<void> combat)
 {
     co_await front;
@@ -1214,7 +1214,7 @@ ts::Task<void> gf_AI(World& world, ts::Task<void> navigation, ts::Task<void> com
 }
 
 // Animation core: anim_graph -> ik_post. Stops at ik_post because propagation waits for
-// exactly that, not for skinning -- a chain handle is coarser than an edge, so every
+// exactly that, not for skinning - a chain handle is coarser than an edge, so every
 // fan-out point in the frame becomes another chain.
 ts::Task<void> gf_anim_core(World& world, ts::Task<void> AI)
 {
@@ -1231,7 +1231,7 @@ ts::Task<void> gf_skinning(World& world, ts::Task<void> anim_core)
 }
 
 // Propagation stages this frame's transforms; the flip publishes them. The recorder is
-// minted per frame here -- the graph mints one at build time and reuses it, which is one
+// minted per frame here - the graph mints one at build time and reuses it, which is one
 // of the composition costs the graph-free frame re-pays every frame.
 ts::Task<void> gf_propagation(World& world, ts::Task<void> anim_core, ts::Task<void> physics_back)
 {
@@ -1333,7 +1333,7 @@ ts::Task<void> gf_debug_overlay(World& world, ts::Task<void> economy)
 }
 
 // The baseline frame with no graph. Reproduces the baseline schedule: same systems, same
-// access sets, same edges -- written out.
+// access sets, same edges - written out.
 ts::Task<void> run_frame_graph_free(World& world)
 {
     // Branches with no dependency on the frame head start at t=0, as the graph would
@@ -1388,7 +1388,7 @@ ts::Task<void> run_frame_graph_free(World& world)
     ts::Task<void> submit = gf_submit(world, cmd_record, particles, UI_widgets);
 
     // The flip. `compile()` derives its predecessors from the explicit `after(propagation)`
-    // plus every pre-flip reader of `transforms.state()` -- thirteen of them. Seven awaits
+    // plus every pre-flip reader of `transforms.state()` - thirteen of them. Seven awaits
     // cover the set here; the other six are transitive, which is a fact about this frame's
     // shape that a reader has to re-derive by hand every time the frame changes.
     co_await propagation;
@@ -1435,7 +1435,7 @@ void frame_stats(int frames, float scale, Frame_variant variant, double& avg_ms,
     for (int f = 0; f < frames; ++f)
     {
         // Multi-object access demo: one HUD snapshot reads two stores in one
-        // atomically-acquired call -- queues behind whichever node holds a store
+        // atomically-acquired call - queues behind whichever node holds a store
         // rather than racing it. Fire-and-forget; World destruction drains pipes.
         ts::async([](const Combat& combat, const Economy& economy)
         {
@@ -1473,7 +1473,7 @@ void game_frame_free_stats(int frames, float scale, double& avg_ms, double& seri
 }
 
 // Draw commands submitted over the last stats run. `submit` clears the queue, so this counts
-// only what the three producers pushed BEFORE it ran -- an observable the producer/submit
+// only what the three producers pushed before it ran - an observable the producer/submit
 // ordering decides. The transform invariant cannot see that ordering (every mock system
 // writes the same constant every frame, so a one-frame skew is invisible), which is why the
 // equivalence test compares this too.
@@ -1521,17 +1521,17 @@ double ticks_to_us(long long ticks)
 
 // The worker-less ground-truth overhead for a variant. On a single-thread serial run the whole
 // frame executes inline on one thread with no idle to confound it, so `total_wall - B` is the
-// COMPLETE framework cost by pure subtraction (setup, dispatch, completion, pipe, trampoline --
+// complete framework cost by pure subtraction (setup, dispatch, completion, pipe, trampoline --
 // everything the summed-M accumulator may still miss on a multi-worker run). This is the oracle
 // the multi-worker summed-M is measured against. Returns the complement `(total - B)/total`,
 // which the caller attaches to the multi-worker trace for the dual print.
 //
 // B comes from the scheduler's body accumulator (fed here by the overflow lane, since a
 // worker-less run has no workers). `total` is the wall of the whole `execute().sync()` frame
-// loop -- not the trace's node-span makespan, which omits the pre-first-node setup and the fold.
+// loop - not the trace's node-span makespan, which omits the pre-first-node setup and the fold.
 // A trace is attached only to arm the body tracking (its fold is skipped for a worker-less run);
 // no SVG is written. B comes from the scheduler's body accumulator (add-only), fed here by the
-// overflow lane since a worker-less run has no workers; machinery is not accumulated -- the whole
+// overflow lane since a worker-less run has no workers; machinery is not accumulated - the whole
 // serial framework cost is the pure subtraction `total - B`, which is what makes this the oracle.
 double serial_ground_truth(int frames, Frame_variant variant, const char* description)
 {
@@ -1599,10 +1599,10 @@ void trace_variant(int frames, Frame_variant variant, const char* base_SVG_path,
     std::printf("[game_frame] %s: traced %lld runs -> %s\n", description, trace.run_count(), path.c_str());
     // Framework overhead as a share of core-time (T = workers x makespan): the scheduler's own
     // cost, derived by subtraction (busy - body). Shown next to the worker-less serial floor
-    // ((total-B)/total on a single-thread run of the same frame -- equal in either denominator
-    // since a serial run has no idle) and their gap: the multi-worker figure sits ABOVE the floor,
+    // ((total-B)/total on a single-thread run of the same frame - equal in either denominator
+    // since a serial run has no idle) and their gap: the multi-worker figure sits above the floor,
     // and the gap is the framework cost only workers pay (cross-thread dispatch, pipe hand-off,
-    // park/wake) -- the price of the parallelism, not a measurement error.
+    // park/wake) - the price of the parallelism, not a measurement error.
     double fo = trace.four_way_machinery_share();
     std::printf("[game_frame] %s: framework overhead = %.1f%% of core-time (body %.1f / framework %.1f us per run)",
         description, 100.0 * fo, trace.body_us(), trace.machinery_us());
@@ -1647,8 +1647,8 @@ void trace_game_frame(int frames, const char* DOT_path, const char* SVG_path)
     trace_variant(frames, Frame_variant::optimised, SVG_path, "optimised", nullptr, gt_optimised);
 }
 
-// Headless run of the OPTIMISED variant on a dedicated `workers`-thread
-// scheduler, at a fast scale -- for the sanitizer driver to exercise the
+// Headless run of the optimised variant on a dedicated `workers`-thread
+// scheduler, at a fast scale - for the sanitizer driver to exercise the
 // concurrent surface unique to that variant: the gameplay `Versioned` publisher
 // (AI reads the previous version while a flip publishes the next), the
 // `Deferred` draw-queue staging, and the explicit submit ordering. The baseline

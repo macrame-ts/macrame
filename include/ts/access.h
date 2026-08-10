@@ -15,7 +15,7 @@
 // One `TS_SAFETY_CHECKS` value per binary: the macro changes inline-function bodies and
 // class layouts (safety-only fields are fully gated, per the convention in CLAUDE.md), so
 // mixing translation units compiled with different values is an ODR violation. Make the
-// mistake a LINK error instead of silent corruption: MSVC-family compilers record the
+// mistake a link error instead of silent corruption: MSVC-family compilers record the
 // value per object file and the linker rejects a mismatch outright; elsewhere every
 // including TU references a symbol whose name encodes the value and only the matching one
 // is defined (src/access.cpp), so a mixed link fails with an unresolved
@@ -64,10 +64,10 @@ inline const char* const config_names_tripwire = &config_debug_names_off;
 
 enum class Access { read_only, read_write };
 
-// A guarded object's LOCK RANK, for `Rule::access_rank` (TODO 6.14). Batch acquisition is
-// already deadlock-free -- a node's declared set and a multi-object `ts::access` are taken
+// A guarded object's lock rank, for `Rule::access_rank` (TODO 6.14). Batch acquisition is
+// already deadlock-free - a node's declared set and a multi-object `ts::access` are taken
 // in canonical pipe-address order, all-or-nothing. What nothing orders is a grant a task
-// already HOLDS against an object it awaits LATER, and that single missing constraint is
+// already holds against an object it awaits later, and that single missing constraint is
 // the whole suspended-ABBA hole. A rank closes it by Havender's argument: every dynamic
 // await must climb, so a cycle is unrepresentable.
 //
@@ -75,8 +75,8 @@ enum class Access { read_only, read_write };
 //
 // Ranks start at 1; **0 means "unranked", and unranked is the strict default**: a task
 // holding an unranked grant may not dynamically await at all, and an unranked object may not
-// be dynamically awaited while anything is held. Rank is deliberately NOT defaulted to
-// address order -- that would make rejection ABI-dependent and irreproducible across builds,
+// be dynamically awaited while anything is held. Rank is deliberately not defaulted to
+// address order - that would make rejection ABI-dependent and irreproducible across builds,
 // so a program that compiled and ran today could be rejected tomorrow for no source change.
 // Only objects that are actually awaited need one.
 struct Rank
@@ -89,16 +89,16 @@ struct Rank
 // design: a task touches a handful of instances, so an inline array + linear
 // scan beats a hash set. Identity of an instance is its address.
 //
-// An entry may carry a GRANT-VALIDITY source: a pointer to the object's
+// An entry may carry a grant-validity source: a pointer to the object's
 // `write_epoch` plus the value captured when the grant was declared. The epoch has
-// seqlock-style parity -- bumped at every write-grant acquire and release (and by +2 on a
-// graph write handoff) -- so "epoch unchanged" means the grant window this entry was
+// seqlock-style parity - bumped at every write-grant acquire and release (and by +2 on a
+// graph write handoff) - so "epoch unchanged" means the grant window this entry was
 // declared under is still the object's current one: a write holder's window is still open,
 // or no writer has acquired since a read grant was captured. A snapshot copy of the
 // context (`snapshot_access`, grant inheritance) carries the captured values with it, so
 // a task that outlives the access scope it inherited from fails the comparison and faults
 // with a stale-grant diagnostic instead of silently racing the next acquirer. Entries
-// without a source (null epoch) never go stale -- hand-built contexts and grant-free
+// without a source (null epoch) never go stale - hand-built contexts and grant-free
 // internal scopes. The epoch pointer is dereferenced only under `TS_SAFETY_CHECKS`; the
 // existing lifetime contract (a `Guarded` outlives its accessors) covers its validity.
 class Access_context
@@ -130,8 +130,8 @@ public:
         return false;
     }
 
-    // As `holds_epoch`, but only a `read_write` entry matches -- "this scope holds the
-    // WRITE grant whose window `epoch` tracks". Distinguishes an inherited/parent write
+    // As `holds_epoch`, but only a `read_write` entry matches - "this scope holds the
+    // write grant whose window `epoch` tracks". Distinguishes an inherited/parent write
     // grant from a mere read grant (`Deferred::commit`'s misuse diagnostic).
     bool holds_write_epoch(const std::atomic<std::uint64_t>* epoch) const noexcept
     {
@@ -143,7 +143,7 @@ public:
         return false;
     }
 
-    // Invoke `fn(epoch)` for every entry that carries a grant-validity source -- i.e. every
+    // Invoke `fn(epoch)` for every entry that carries a grant-validity source - i.e. every
     // pipe-backed grant this context holds. Consumed by the circular-wait detector, which
     // records held-grant -> awaited-pipe edges at suspension (docs/coroutine-first.md §2).
     template<typename Fn>
@@ -158,8 +158,8 @@ public:
 #endif
 
 #if TS_RULE_ON(TS_RULE_ACCESS_RANK)
-    // Held-side input to the rank check (`Rule::access_rank`). Only PIPE-BACKED entries
-    // count -- a grant-free entry (a `Versioned` shadow, a hand-built context) excludes
+    // Held-side input to the rank check (`Rule::access_rank`). Only pipe-backed entries
+    // count - a grant-free entry (a `Versioned` shadow, a hand-built context) excludes
     // nobody, so it constrains no later await. Returns the number of such entries, the
     // highest rank among them, and whether any of them is unranked (rank 0), which by
     // itself forbids a dynamic await: an object nobody gave an order cannot be climbed away
@@ -179,7 +179,7 @@ public:
             if (entries_[i].epoch == nullptr)
                 continue;
             // A grant whose window has closed excludes nobody, so it constrains no later
-            // await -- the same staleness test `check` applies. This is what keeps a
+            // await - the same staleness test `check` applies. This is what keeps a
             // detached coroutine, which carries its launcher's grant snapshot forever, from
             // being treated as a holder after the launcher released.
             if (entries_[i].epoch->load(std::memory_order_relaxed) != entries_[i].captured)
@@ -225,7 +225,7 @@ extern thread_local const Access_context* current_access;
 // Snapshot the calling thread's access grant by value (empty if no task is running).
 // Used to propagate a task's grants to grant-inheriting sub-work (the `parallel_for`
 // helpers, a coroutine frame's promise): the copy has independent lifetime, so the sub-work
-// may run -- possibly on another thread, possibly after the launcher's body unwinds -- still
+// may run - possibly on another thread, possibly after the launcher's body unwinds - still
 // holding the launcher's grant.
 inline std::optional<Access_context> snapshot_access()
 {
@@ -291,7 +291,7 @@ namespace detail
 {
 
 // Installs an inherited grant (a `snapshot_access()` copy) for the duration of a scope,
-// if one was captured; a no-op when empty. `ctx` must outlive the scope -- in practice
+// if one was captured; a no-op when empty. `ctx` must outlive the scope - in practice
 // it is a by-value member of the launched task's body, alive for the whole call.
 class Inherited_access_scope
 {

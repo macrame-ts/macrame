@@ -19,13 +19,13 @@ namespace ts
 {
 
 // How `publish()` brings the shadow replica back in sync after the swap (both
-// replicas must be identical at the start of every publish -- the invariant that
+// replicas must be identical at the start of every publish - the invariant that
 // makes staged deltas equivalent to full state).
 enum class Resync
 {
     // Re-apply the same batch to the new shadow (the old front). Both applications
     // see bit-identical pre-states, so deterministic commands produce bit-identical
-    // replicas -- cost proportional to the delta, not to sizeof(T). Requires
+    // replicas - cost proportional to the delta, not to sizeof(T). Requires
     // commands to be deterministic (capture RNG/time/etc. results at stage time,
     // never read them inside the closure). The default.
     replay,
@@ -37,7 +37,7 @@ enum class Resync
 
     // No resync: the user contract is that every version's staged writes fully
     // overwrite the state (per-frame event lists, cleared and refilled). Partial
-    // writes under this policy read stale data -- that is the user's assertion.
+    // writes under this policy read stale data - that is the user's assertion.
     overwrite,
 };
 
@@ -108,13 +108,13 @@ public:
         ready.trigger();
         chain_ = ready;          // the "previous publish" of the first publish
 #if TS_SAFETY_CHECKS
-        last_publish_ = ready;   // the "last" publish's returned gate -- done for a fresh instance
+        last_publish_ = ready;   // the "last" publish's returned gate - done for a fresh instance
 #endif
     }
 
     // Two destruction contracts, both fatal under TS_SAFETY_CHECKS (same severity as
     // an undeclared access): destroying with staged-but-unpublished commands (lost
-    // writes -- `discard()` is the escape), and destroying while a publish this
+    // writes - `discard()` is the escape), and destroying while a publish this
     // Versioned issued is still in flight (sync the task `publish()` returned first).
     ~Versioned()
     {
@@ -131,12 +131,12 @@ public:
         }
 #if TS_SAFETY_CHECKS
         // The task `publish()` returns settles at the swap; if it has not, a publish is
-        // genuinely mid-flight and the destructor would otherwise block silently --
+        // genuinely mid-flight and the destructor would otherwise block silently -
         // surface it. (The resync tail can still be pending after a correctly-synced
         // publish; the wait below covers that and is not this check's concern.)
         if (!last_publish.is_done())
         {
-            fatal("Versioned destroyed with a publish still in flight -- sync the task "
+            fatal("Versioned destroyed with a publish still in flight - sync the task "
                   "publish() returned before destroying the Versioned");
         }
 #endif
@@ -164,14 +164,14 @@ public:
 
     // Per-worker handle for parallel staging (see `Parallel_recorder` in
     // journal.h). Mint once, reuse; cross-thread placement order is
-    // nondeterministic, so commands should be per-key single or commutative --
+    // nondeterministic, so commands should be per-key single or commutative -
     // the batch order is still fixed at the cut, so `replay` resync stays exact.
     Parallel_recorder<T> parallel_recorder()
     {
         return Parallel_recorder<T>(journal_, global_scheduler());
     }
 
-    // Read the current published version -- an ordinary read access on the front
+    // Read the current published version - an ordinary read access on the front
     // (concurrent readers overlap; a queued publish orders around it, FIFO).
     template<typename Fn>
         requires detail::Read_only_accessor<Fn, T>
@@ -180,17 +180,17 @@ public:
         return std::as_const(front_).async(std::forward<Fn>(fn), opts);
     }
 
-    // The front's `Guarded` -- for static-graph declarations. Declare READ access
+    // The front's `Guarded` - for static-graph declarations. Declare read access
     // only; the one sanctioned writer is the publish node (`publish_body`).
     // Writing it directly bypasses versioning and breaks the replica invariant.
     Guarded<T>& state() { return front_; }
     const Guarded<T>& state() const { return front_; }
 
     // Publish everything staged so far as one atomic version step. The returned
-    // task completes at the swap (phase 2) -- order fresh readers after it; the
+    // task completes at the swap (phase 2) - order fresh readers after it; the
     // resync continues past it, invisibly. An empty journal is a no-op. A
     // cancelled `opts.token` skips the step (commands stay staged for the next
-    // publish); the returned task still COMPLETES -- it is a phase gate, not the
+    // publish); the returned task still completes - it is a phase gate, not the
     // skipped work itself.
     Task<void> publish(Access_options opts = {})
     {
@@ -202,7 +202,7 @@ public:
             std::lock_guard lock(seq_mutex_);
             prev = std::exchange(chain_, shadow_ready);
 #if TS_SAFETY_CHECKS
-            last_publish_ = swapped;   // the returned gate -- the destructor's in-flight check
+            last_publish_ = swapped;   // the returned gate - the destructor's in-flight check
 #endif
         }
 
@@ -227,11 +227,11 @@ public:
             }
             apply_to_shadow(*batch);
 
-            // Phase 2: the only write access -- swap and get out. The resync is
-            // submitted BEFORE the phase gate triggers: anything ordered after the
+            // Phase 2: the only write access - swap and get out. The resync is
+            // submitted before the phase gate triggers: anything ordered after the
             // returned task (a sync(), an .after()) then finds the resync's read
-            // already submitted, so a following writer -- including a graph flip's
-            // acquire -- FIFO-orders behind it. The flip-entry enforcement
+            // already submitted, so a following writer - including a graph flip's
+            // acquire - FIFO-orders behind it. The flip-entry enforcement
             // check relies on exactly this.
             front_.async([this, batch, swapped, shadow_ready](T& front) mutable
             {
@@ -251,7 +251,7 @@ public:
         return swapped;
     }
 
-    // Publish under a write grant the caller already holds -- the graph-node form
+    // Publish under a write grant the caller already holds - the graph-node form
     // (see `publish_body`). `front` must be this Versioned's front instance.
     // Phases 1-2 run inline (the node holds the grant regardless; edges already
     // order readers around it); phase 3 is deferred to the resync read access, admitted
@@ -263,11 +263,11 @@ public:
             fatal("Versioned::publish_into: not this Versioned's front instance");
         access_check(&front);
 #endif
-        // Enforcement + chain handoff, atomically at ENTRY. A dynamic publish
+        // Enforcement + chain handoff, atomically at entry. A dynamic publish
         // whose phase 1 has not been submitted yet is invisible to this node's
-        // acquire -- proceeding would race its shadow apply and orphan its
+        // acquire - proceeding would race its shadow apply and orphan its
         // chain signal. Fatal is the only correct response (a node must never
-        // block). Installing our signal here also makes the OTHER direction
+        // block). Installing our signal here also makes the other direction
         // legal: a dynamic publish arriving mid-flip chains behind us.
         Signal shadow_ready;
         {
@@ -275,7 +275,7 @@ public:
 #if TS_SAFETY_CHECKS
             if (!chain_.is_done())
             {
-                fatal("Versioned: graph/inline publish while a dynamic publish is unresolved -- "
+                fatal("Versioned: graph/inline publish while a dynamic publish is unresolved - "
                       "one publisher at a time; sync() the publish or order it before the run");
             }
 #endif
@@ -303,7 +303,7 @@ public:
 
     // Opt-in replay verification (TS_SAFETY_CHECKS): after every replay resync,
     // hash both replicas and fatal on mismatch. Bitwise equality is the right
-    // check -- replay-twice has no FP drift (same commands, same order, same
+    // check - replay-twice has no FP drift (same commands, same order, same
     // pre-state, same binary). Partial hashes (hot arrays only) are fine.
     void set_divergence_check(std::function<std::size_t(const T&)> hash)
     {
@@ -320,7 +320,7 @@ private:
     using Batch = std::vector<typename detail::Journal<T>::Command>;
 
     // Phase 1 work: the shadow is unobservable, so this needs no grant on the
-    // front -- readers of the current version run concurrently.
+    // front - readers of the current version run concurrently.
     void apply_to_shadow(Batch& batch)
     {
         Access_context ctx;
@@ -336,14 +336,14 @@ private:
     {
         Access_context ctx;
         ctx.add(&front, Access::read_write, detail::pipe_epoch(detail::Guarded_access::pipe(front_)), detail::pipe_rank(detail::Guarded_access::pipe(front_)));
-        ctx.add(&shadow_, Access::read_write);   // shadow: no pipe -- grant-free by design
+        ctx.add(&shadow_, Access::read_write);   // shadow: no pipe - grant-free by design
         Access_scope scope(ctx);
         using std::swap;
         swap(front, shadow_);
     }
 
     // Phase 3: bring the new shadow (old front contents) to the new version, as a
-    // READ job on the front's pipe -- overlapping readers, FIFO-ordered before the
+    // read job on the front's pipe - overlapping readers, FIFO-ordered before the
     // next writer. `overwrite` needs no work (and no job).
     void start_resync(std::shared_ptr<Batch> batch, Signal shadow_ready)
     {
@@ -356,14 +356,14 @@ private:
         {
             {
                 Access_context ctx;
-                ctx.add(&shadow_, Access::read_write);   // shadow: no pipe -- grant-free by design
+                ctx.add(&shadow_, Access::read_write);   // shadow: no pipe - grant-free by design
                 ctx.add(&front, Access::read_only, detail::pipe_epoch(detail::Guarded_access::pipe(front_)), detail::pipe_rank(detail::Guarded_access::pipe(front_)));
                 Access_scope scope(ctx);
                 if (policy_ == Resync::replay)
                 {
                     // Both replicas held version N-1 when the batch was cut, so
                     // this second application sees the same pre-state as the first
-                    // -- deterministic commands land both replicas at bit-identical
+                    // - deterministic commands land both replicas at bit-identical
                     // version N.
                     for (auto& cmd : *batch)
                         cmd(shadow_);
@@ -379,7 +379,7 @@ private:
                 }
 #if TS_SAFETY_CHECKS
                 if (hash_ && policy_ == Resync::replay && hash_(front) != hash_(shadow_))
-                    fatal("Versioned<T>: replica divergence after replay resync -- a staged command is nondeterministic");
+                    fatal("Versioned<T>: replica divergence after replay resync - a staged command is nondeterministic");
 #endif
             }
             shadow_ready.trigger();
@@ -392,16 +392,16 @@ private:
     Resync policy_;
     T* front_ptr_;
     std::mutex seq_mutex_;            // guards `chain_` handoff between publishes
-    Task<void> chain_;                // the latest publish's shadow_ready -- the next phase 1 gates on it
+    Task<void> chain_;                // the latest publish's shadow_ready - the next phase 1 gates on it
 #if TS_SAFETY_CHECKS
-    Task<void> last_publish_;         // the latest publish()'s returned swap-gate -- the destructor's in-flight check (safety-only)
+    Task<void> last_publish_;         // the latest publish()'s returned swap-gate - the destructor's in-flight check (safety-only)
 #endif
     std::function<void(T&, const T&)> copy_;
     std::function<std::size_t(const T&)> hash_;
 };
 
 // The publish step as a graph-node body: declare it with write access on
-// `v.state()` -- conflict derivation then orders it against every reader, and the
+// `v.state()` - conflict derivation then orders it against every reader, and the
 // node's grant is exactly what `publish_into` needs.
 //   auto flip = g.add_node(ts::publish_body(poses), poses.state()).after(sim);
 template<typename T>

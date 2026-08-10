@@ -8,7 +8,7 @@
 
 #include <cstddef>
 
-// Single-file samples (no headers) -- see sample/game_frame.cpp,
+// Single-file samples (no headers) - see sample/game_frame.cpp,
 // sample/physics.cpp, sample/blackboard.cpp.
 namespace sample
 {
@@ -131,9 +131,9 @@ void stress_inline_async()
     assert(final == threads * per / 2);
 }
 
-// The pipe-rebase reader/writer marquee: N threads hammer ONE object with a randomized
+// The pipe-rebase reader/writer stress: N threads hammer one object with a randomized
 // read/write x async/access mix. `Rw_probe`'s unsynchronized payload is the TSan detector
-// -- any reader/writer overlap the pipe fails to prevent shows up as a race on it (the
+// - any reader/writer overlap the pipe fails to prevent shows up as a race on it (the
 // probe's own atomics are synchronized, so they alone would hide it).
 void pipe_rw_producers(ts::Guarded<tests::Rw_probe>& probe, int threads, int per)
 {
@@ -212,7 +212,7 @@ void stress_pipe_lifetime()
 
 // The synced variant of the same drain, which is the sharper ordering: a task settles as
 // settle -> notify waiters -> `on_complete` -> pipe release, so a returned `sync()` says
-// nothing about the grant -- the release is still ahead of the settling thread. Destroying
+// nothing about the grant - the release is still ahead of the settling thread. Destroying
 // the object at exactly that point leaves the drain to catch a release the destroyer has
 // already been woken past. Heap objects (not stack) so the freed pipe is a distinct address
 // TSan/ASan can attribute; both the reader-last and writer-last release paths, plus a
@@ -247,7 +247,7 @@ void stress_pipe_sync_then_destroy()
 }   // join
 
 // Reservation coexistence: a graph run holding shared objects per-node while async hammers
-// the same objects -- the per-node acquire must exclude a writer node from any async and
+// the same objects - the per-node acquire must exclude a writer node from any async and
 // let a reader node overlap an async read (the docs/task-internals.md §10 race). TSan on
 // the payload; the oracle also asserts the invariant.
 void stress_pipe_reservation()
@@ -313,7 +313,7 @@ void stress_signal()
     {
         ts::Signal sig;
         std::atomic<int> fired{ 0 };
-        // An awaiting observer, joined on ITS handle: `sig.sync()` waits for the signal to
+        // An awaiting observer, joined on its handle: `sig.sync()` waits for the signal to
         // settle, not for work the settle resumes, so asserting `fired` right after
         // `sig.sync()` would be an over-assertion.
         ts::Task<void> fired_done = observe_signal(sig, fired);
@@ -344,7 +344,7 @@ void stress_signal()
     }
 }
 
-// Graph with internal parallel bands, re-executed in a loop -- with an aggregating trace
+// Graph with internal parallel bands, re-executed in a loop - with an aggregating trace
 // attached, so the worker-side stamps and the settle-side fold run under TSan (stamps on
 // several workers, fold on the settling one, stats read on the main thread after sync).
 void stress_graph()
@@ -397,9 +397,9 @@ void stress_graph_nested()
 }
 
 // Nested graph runs under the lend protocol (docs/coroutine-first.md §4.8): an outer node
-// holds write grants and awaits an inner graph over the SAME objects, so every inner node
+// holds write grants and awaits an inner graph over the same objects, so every inner node
 // runs on the lent grant with no pipe turn of its own. External asyncs hammer the objects
-// throughout -- they see only the outer node's hold, since the pipe never sees the lend, so
+// throughout - they see only the outer node's hold, since the pipe never sees the lend, so
 // the `Rw_probe` oracle must observe no reader/writer overlap. The re-runs exercise the link
 // slab rebinding both ways (lent subset, then the full set for the standalone inner run).
 void stress_graph_nested_runs()
@@ -459,10 +459,10 @@ void stress_graph_nested_runs()
     assert(!bad);
 }
 
-// Two DIFFERENT graphs over overlapping objects, run concurrently from separate threads,
+// Two different graphs over overlapping objects, run concurrently from separate threads,
 // while asyncs hammer the same objects (task-internals §10 scenario 2). Each graph's nodes
 // take their turns in canonical pipe-address order over the same address-sorted objects, and
-// the pipe serializes across graphs exactly as it does between a node and an async -- so
+// the pipe serializes across graphs exactly as it does between a node and an async - so
 // there should be no wait cycle and no reader/writer overlap. TSan on the probe payload; the
 // oracle asserts the invariant independently.
 void stress_concurrent_graphs()
@@ -550,7 +550,7 @@ void stress_launch()
 }
 
 // Awaited fork-join under oversubscription: outer coroutines saturate the workers and
-// AWAIT their inner tasks -- suspension frees the worker, so the inner tasks always find
+// await their inner tasks - suspension frees the worker, so the inner tasks always find
 // one (the deadlock the old blocking join needed retraction for is structurally absent).
 // Stresses suspension/resume racing worker completion across two nesting levels.
 ts::Task<void> awaited_inner_join(std::atomic<int>& total)
@@ -664,7 +664,7 @@ void stress_token_body()
 
 // Cancel callbacks racing request_cancel: several threads register a Cancel_callback that
 // lives briefly then destroys, while another thread cancels. Stresses the callback-list
-// mutex, the fire-immediately-when-already-requested path, and -- the delicate one -- the
+// mutex, the fire-immediately-when-already-requested path, and - the delicate one - the
 // destructor waiting out a callback that is firing on another thread (no UAF, no hang).
 void stress_cancel_callback()
 {
@@ -689,10 +689,10 @@ void stress_cancel_callback()
 }
 
 // A graph node accessing an object directly while other threads fire async on the
-// SAME object: the per-run pipe reservation must keep them from overlapping.
+// same object: the per-run pipe reservation must keep them from overlapping.
 // Per-node mode-aware acquire/release coexisting with out-of-band async. Multi-object
 // nodes (incremental canonical-order acquire), a gap node (x free between its accessors),
-// and mixed read/write nodes, while async readers AND writers hammer the same objects --
+// and mixed read/write nodes, while async readers and writers hammer the same objects --
 // stresses pipe_acquire/pipe_release (both modes), the acquire callback chain racing async
 // completion, and the gap windows. A writer node must never overlap any async on its object;
 // concurrent reads may overlap (allowed).
@@ -766,7 +766,7 @@ void stress_graph_inline()
     }   // join firers
 }
 
-// Multi-object async under contention: concurrent multi-object asyncs over the SAME pair in
+// Multi-object async under contention: concurrent multi-object asyncs over the same pair in
 // opposite declared orders (canonical-order acquire must keep them deadlock-free), mixed with
 // single-object asyncs on each. Stresses multi_acquire's chain (immediate + deferred), the
 // release-on-completion continuation, and cross-object hold-and-wait (no cycle).
@@ -895,7 +895,7 @@ void stress_coroutine()
 }
 
 // Coroutine async-lock guard under contention: many threads each drive a coroutine that
-// repeatedly `co_await ts::read_write(w)` the SAME object. A contended acquire defers -> the coroutine
+// repeatedly `co_await ts::read_write(w)` the same object. A contended acquire defers -> the coroutine
 // suspends -> resumes on the releasing thread, so this races `pipe_acquire`'s `on_acquired`
 // handshake + the cross-thread resume against `pipe_release`. The pipe serializes writers, so
 // the total must be exact.
@@ -921,9 +921,9 @@ void stress_coroutine_guard()
     assert(final == threads * each);
 }
 
-// Deep coroutine cascade -- proves the bounded resume trampoline. A `depth`-deep chain of
+// Deep coroutine cascade - proves the bounded resume trampoline. A `depth`-deep chain of
 // coroutines each `co_await`s the previous; all are suspended on one `Signal`. Triggering it
-// resumes the innermost, whose completion resumes the next, ... -- a cascade that WITHOUT the
+// resumes the innermost, whose completion resumes the next, ... - a cascade that without the
 // `schedule_resume` trampoline would recurse (settle -> resume -> complete -> settle -> ...) one
 // stack frame per level and overflow at this depth. With it, the cascade runs iteratively. Also
 // checks the result threads correctly through all `depth` awaits.
@@ -943,7 +943,7 @@ void stress_coroutine_deep()
     ts::Task<int> t = co_gate(gate);
     for (int i = 0; i < depth; ++i)
         t = co_add_prev(std::move(t));
-    gate.trigger();   // cascade of `depth` resumes -- must not overflow the stack
+    gate.trigger();   // cascade of `depth` resumes - must not overflow the stack
     assert(t.sync() == depth);
 }
 
@@ -999,7 +999,7 @@ void stress_deferred()
 
 // Versioned: concurrent staging + chained dynamic publishes + readers hammering the
 // front. Stresses the publish chain handoff (seq_mutex_), phase-1 apply racing
-// readers of the current version, the swap, and the resync READ job overlapping
+// readers of the current version, the swap, and the resync read job overlapping
 // readers of the new version (with the divergence hash reading both replicas).
 void stress_versioned()
 {
@@ -1056,7 +1056,7 @@ void stress_physics()
 // The entry point, renamed when this TU is compiled into the Windows binary.
 //
 // Everything above lives in an anonymous namespace, so `main` is the only symbol that would
-// collide with `src/main.cpp` -- and it is also the only thing that REFERENCES those static
+// collide with `src/main.cpp` - and it is also the only thing that references those static
 // functions, so dropping it outright would trade a link error for a wall of
 // unused-function warnings. Renaming keeps the whole TU compiled and referenced while
 // contributing no second `main`. The Windows build never calls it; it is there so an

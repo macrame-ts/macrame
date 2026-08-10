@@ -23,7 +23,7 @@ namespace ts
 {
 
 // `detail::Function_traits` (per-argument type extraction for access-mode deduction) now
-// lives in `guarded.h` -- shared with multi-object `ts::async`.
+// lives in `guarded.h` - shared with multi-object `ts::async`.
 
 class Static_task_graph;
 
@@ -35,7 +35,7 @@ class Graph_trace;
 }
 
 // A node's identity is `ts::Named` (ts/named.h), the same type guarded objects and tasks
-// use: implicit from a literal -- `g.add_node("propagation", fn, objs...)` -- or
+// use: implicit from a literal - `g.add_node("propagation", fn, objs...)` - or
 // `g.add_node({}, fn, objs...)` to identify the node by its `add_node` call site.
 
 // Handle to a node in a `Static_task_graph`, returned by `add_node`. Identifies
@@ -52,8 +52,8 @@ public:
     Graph_node& after(const Graph_node& prerequisite);
     Graph_node& before(const Graph_node& successor);
 
-    // Variadic forms: `this` runs after EVERY listed prerequisite (before every listed
-    // successor) -- independent edges, not a chain among the arguments. So
+    // Variadic forms: `this` runs after every listed prerequisite (before every listed
+    // successor) - independent edges, not a chain among the arguments. So
     // `submit.after(a, b, c)` declares that submit depends on a, b and c together,
     // equivalently to `.after(a).after(b).after(c)` but without reading like a sequence.
     template<typename... Nodes>
@@ -76,9 +76,9 @@ public:
     // Queue priority for this node when it is dispatched each run.
     Graph_node& priority(Priority p);
 
-    // Dispatch this node INLINE: when it becomes ready, run it on the thread that settled
-    // its last prerequisite (and acquired its objects) instead of queueing -- but only if
-    // that thread can acquire ALL its objects synchronously; if any is contended (held by
+    // Dispatch this node inline: when it becomes ready, run it on the thread that settled
+    // its last prerequisite (and acquired its objects) instead of queueing - but only if
+    // that thread can acquire all its objects synchronously; if any is contended (held by
     // async), it defers to the queue. Bounded by the shared inline trampoline. Trade-offs:
     // it runs on a nondeterministic thread and must not block.
     Graph_node& set_inline();
@@ -100,7 +100,7 @@ private:
 // Per-run options for `Static_task_graph::execute` (an aggregate, house style alongside
 // `Launch_options` / `Access_options`; spelled `execute({.token = t})` at call sites).
 // Namespace-scope rather than nested so its default member initializers are usable in the
-// `execute(Execution_options = {})` default argument -- a nested type's initializers are not
+// `execute(Execution_options = {})` default argument - a nested type's initializers are not
 // available while the enclosing class is still being defined. `Static_task_graph` re-exports
 // the name, so `Static_task_graph::Execution_options` keeps working.
 struct Execution_options
@@ -132,14 +132,14 @@ public:
     Static_task_graph& operator=(Static_task_graph&&) noexcept;
 
     // Add a node: a leading `ts::Named`, the functor, and the `Guarded<>` instances it
-    // accesses. The name is required -- a literal, or `{}` to identify the node by this
-    // call site -- because it labels the node in the DOT dump, the trace, and every
+    // accesses. The name is required - a literal, or `{}` to identify the node by this
+    // call site - because it labels the node in the DOT dump, the trace, and every
     // diagnostic that names a task (the node's block carries it).
     //
     // Per-object access mode, one rule (same as `Guarded::access`): parameter const-ness
     // for a non-generic functor
     //   add_node("pose", [](Physics& p, const Nav& n){ ... }, physics, nav);  // p:write, n:read
-    // (by-value / `T&&` resource parameters are rejected); the rvalue probe for a GENERIC one
+    // (by-value / `T&&` resource parameters are rejected); the rvalue probe for a generic one
     //   add_node({}, [](const auto& p, auto& a){ a.pose(p); }, physics, anim);  // p:read, a:write
     // or explicit `ts::as_read_only`/`as_read_write` tags on every object (don't mix tagged and
     // bare in one node). Read positions receive `const T&`, so a mutating body under a read
@@ -191,18 +191,18 @@ public:
     // cancelled, not-yet-started nodes are skipped and the completion is cancelled
     // (query with `Task::is_cancelled()`); in-flight nodes still finish.
     // Runs on the one global scheduler (there are no ad-hoc `Scheduler` instances; use a
-    // `Scheduler_scope` to run on a specific pool for a scope -- including a worker-less
+    // `Scheduler_scope` to run on a specific pool for a scope - including a worker-less
     // `{.single_threaded = true}` one, which runs the whole graph deterministically on the
     // calling thread).
     //
-    // NESTED RUNS (docs/coroutine-first.md §4.8). Calling `execute()` from inside a task --
-    // typically `co_await inner.execute()` in a graph node -- is supported, and two things
+    // nested runs (docs/coroutine-first.md §4.8). Calling `execute()` from inside a task -
+    // typically `co_await inner.execute()` in a graph node - is supported, and two things
     // happen by default:
-    //  - **Lending.** Every object this graph declares that the calling task ALREADY holds a
+    //  - **Lending.** Every object this graph declares that the calling task already holds a
     //    covering grant on (write covers read and write, read covers read) is lent for the
     //    run: the inner nodes skip their pipe turns on it, because the caller's grant already
     //    excludes everyone else. Without this an inner node would queue behind the grant its
-    //    own caller is holding -- a deadlock. The compiled conflict edges still order the
+    //    own caller is holding - a deadlock. The compiled conflict edges still order the
     //    inner nodes among themselves on a lent object, and the inner nodes' access contexts
     //    carry the caller's grant window, so the harness stays live. Recursion works by
     //    construction. External `async`s are unaffected: they queue behind the caller's hold
@@ -212,11 +212,11 @@ public:
     //    still going. An un-awaited inner run therefore cannot float; pass `{.detach = true}`
     //    when you deliberately want one to outlive its launcher, which also forgoes lending.
     // Three misuses are fatal under `TS_SAFETY_CHECKS`: a mode-incompatible overlap (the
-    // caller holds read where the inner graph writes -- restructure so the caller declares
+    // caller holds read where the inner graph writes - restructure so the caller declares
     // the write, or hoist the writer out of the sub-graph); lending while an earlier un-awaited
-    // nested run of the caller is still in flight (`co_await` the previous run first -- it could
+    // nested run of the caller is still in flight (`co_await` the previous run first - it could
     // race the lent-to graph on the same object, both "validly"); and calling `execute()` on a graph
-    // whose previous run is still in flight (one run at a time -- use a second instance, or
+    // whose previous run is still in flight (one run at a time - use a second instance, or
     // order the callers).
     Task<void> execute(Execution_options opts = {});
 
@@ -255,7 +255,7 @@ private:
 
     // The one node builder: access list, pipes, and the body from the per-object
     // (compile-time) `Modes...`. Read positions are invoked with `const T&` (`mode_ref`), so a
-    // mutating body under a read classification fails to compile -- structural, on top of the
+    // mutating body under a read classification fails to compile - structural, on top of the
     // harness. The deduced / probed / tagged wrappers below differ only in the `Modes` source,
     // so `compile()` derives identical edges and exclusion for all three.
     template<Access... Modes, std::size_t... I, typename Fn, typename... Ts>
@@ -283,7 +283,7 @@ private:
             if constexpr (std::is_same_v<Body_result, Task<void>>)
             {
                 // A coroutine node body (docs/coroutine-first.md §4.4): the returned frame's
-                // task gates the node's completion via the nested mechanism -- the node
+                // task gates the node's completion via the nested mechanism - the node
                 // completes (releasing grants and successors) when the frame completes, not
                 // at the first suspension. The frame inherits the node's grant snapshot at
                 // creation, so resumed segments keep the declared accesses.
@@ -309,7 +309,7 @@ private:
             node, seq, std::forward<Fn>(fn), access...);
     }
 
-    // Probed (bare args, GENERIC functor): modes from the per-position rvalue probe --
+    // Probed (bare args, generic functor): modes from the per-position rvalue probe -
     // `const auto&`/`auto&&` = read, `auto&` = write. No tags needed.
     template<std::size_t... I, typename Fn, typename... Ts>
     void fill_node_probed(Node& node, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... access)
@@ -337,20 +337,20 @@ private:
     void detect_cycles() const;
 
     // Per-node acquire: when a node becomes data-ready it acquires the objects it touches,
-    // one at a time in canonical (ascending pipe-index) order, holding each -- mode-aware
+    // one at a time in canonical (ascending pipe-index) order, holding each - mode-aware
     // (a reader joins concurrent readers, a writer is exclusive). Once all are held the node
     // runs; on completion it releases them. So an object is held only over each accessor's
-    // [acquire, complete] window -- free in the gaps for async / other objects (no whole-run
+    // [acquire, complete] window - free in the gaps for async / other objects (no whole-run
     // reservation). See docs §10.
     static void on_data_ready(Run_state& run, int index);
-    // Graph post-logic for a node whose body AND all its nested tasks have settled:
+    // Graph post-logic for a node whose body and all its nested tasks have settled:
     // release the objects it held, release its successors, and settle the run when the
     // last node finishes. Runs via the node block's `on_complete` (see run_graph_node).
     static void node_complete(Run_state& run, int index);
     // A node runs as a real task block. These are wired into the block's `execute`
     // (run_graph_node: sets current_task + the execution-flag lock, runs the body, then
     // completes once nested tasks settle) and `on_complete` (graph_node_completed ->
-    // node_complete). node_trampoline is the raw scheduler entry -- a fn-ptr + Node*,
+    // node_complete). node_trampoline is the raw scheduler entry - a fn-ptr + Node*,
     // so dispatching a node costs no per-run allocation.
     static void run_graph_node(const detail::Task_ptr& block);
     static void graph_node_completed(detail::Task_control_block* block);
@@ -373,7 +373,7 @@ private:
     std::vector<const void*> pipe_instances_;          // the guarded instance behind each distinct pipe
     std::vector<Access> pipe_modes_;                   // strongest mode ANY node uses on each distinct pipe
     // Every node's pipe links, contiguous per node: bound at compile() (`block->pipe_links`
-    // points into this), re-armed each execute() -- runs stay allocation-free.
+    // points into this), re-armed each execute() - runs stay allocation-free.
     std::unique_ptr<detail::Pipe_link[]> node_links_;
     // Nested-run lend state (see `execute`). One flag per `distinct_pipes_` entry, recomputed
     // per run; `links_lent_` records whether the link slab is currently bound to a lent

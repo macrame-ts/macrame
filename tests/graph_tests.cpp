@@ -50,7 +50,7 @@ void test_access_ordering()
 
 // Generic-lambda nodes: `[](auto&...)` has no introspectable parameter const-ness, so mode is
 // declared with `ts::as_read_only`/`as_read_write` tags. Same graph shape as `test_access_ordering`; the
-// tagged modes must derive the SAME edges (write-then-read chain), proven by the propagated
+// tagged modes must derive the same edges (write-then-read chain), proven by the propagated
 // values.
 void test_generic_lambda_node()
 {
@@ -88,7 +88,7 @@ void test_generic_lambda_readers_overlap()
     TS_CHECK(gate.met());                                 // the two readers ran concurrently
 }
 
-// BARE generic-lambda nodes (no tags): modes come from the rvalue probe -- `const auto&` =
+// bare generic-lambda nodes (no tags): modes come from the rvalue probe - `const auto&` =
 // read, `auto&` = write. Same shape as `test_generic_lambda_node`; the probed modes must derive
 // the same write-then-read edges, proven by the propagated values.
 void test_probed_generic_node()
@@ -275,7 +275,7 @@ void test_nested_gates_completion()
     TS_CHECK(done_count.load() == n);   // get() returned only after every helper
 }
 
-// parallel_for sub-work touches the node's OWNED guarded object; the helpers inherit the
+// parallel_for sub-work touches the node's owned guarded object; the helpers inherit the
 // node's access grant (Access_context snapshot), so the harness must accept it.
 void test_nested_inherits_access()
 {
@@ -426,7 +426,7 @@ void test_dot_dump()
     TS_CHECK(dot.find("graph_tests.cpp:") != std::string::npos);
     // a->b: derived from the x conflict (writer -> reader), cyan + tooltip with x's `ts::Named` name
     TS_CHECK(dot.find("n0 -> n1 [color=\"#66d9ef\", penwidth=1.8, tooltip=\"counter: RW->RO\"") != std::string::npos);
-    // b->c: explicit (green), tooltip still carries the y conflict -- y is site-named
+    // b->c: explicit (green), tooltip still carries the y conflict - y is site-named
     TS_CHECK(dot.find("n1 -> n2 [color=\"#a6e22e\", penwidth=2.0, tooltip=\"explicit ordering; graph_tests.cpp:")
              != std::string::npos);
     TS_CHECK(dot.find(": RW->RO\"") != std::string::npos);
@@ -583,7 +583,7 @@ void test_graph_trace_priority()
     TS_CHECK(svg.find("data-prio=\"high-pri\"") != std::string::npos);   // priority tag on the tooltip name line
     TS_CHECK(svg.find("data-prio=\"low-pri\"") != std::string::npos);
     // The name text is filled with the priority colour; the label renders inside the bar
-    // (with a text-anchor) or outside (without), depending on measured widths -- accept
+    // (with a text-anchor) or outside (without), depending on measured widths - accept
     // either form. Low grey is the brightened #bab8ad.
     bool hi_red = svg.find("fill=\"#ff5f45\">hi</text>") != std::string::npos
         || svg.find("fill=\"#ff5f45\" text-anchor=\"middle\">hi</text>") != std::string::npos;
@@ -595,7 +595,7 @@ void test_graph_trace_priority()
     g.set_trace(nullptr);
 }
 
-// Handoff weld + dead-time + utilization rendering, on SYNTHETIC folds: `on_run_complete`
+// Handoff weld + dead-time + utilization rendering, on synthetic folds: `on_run_complete`
 // is the trace's public fold entry, so the test drives it with fabricated tick arrays --
 // the weld geometry (back-to-back on one lane) and the utilization arithmetic become
 // deterministic instead of riding real inline-dispatch timing, which flaked three times
@@ -645,7 +645,7 @@ void test_graph_trace_weld_dead_time()
     TS_CHECK(std::abs(trace.core_utilization() - 770.0 / 1400.0) < 1e-9);  // exact arithmetic
     TS_CHECK(ts::tools::dead_time_ok_share < ts::tools::dead_time_bad_share);   // band order
     TS_CHECK(ts::tools::core_util_ok_share < ts::tools::core_util_good_share);  // band order
-    TS_CHECK(svg.find(">W0<") == std::string::npos);   // rows are anonymous -- no worker labels
+    TS_CHECK(svg.find(">W0<") == std::string::npos);   // rows are anonymous - no worker labels
 }
 
 // Interval packing: two time-overlapping nodes land on different rows regardless of
@@ -692,9 +692,9 @@ void test_graph_trace_row_packing()
 }
 
 // End-to-end plumbing for the busy counters: a real graph on a one-worker scheduler must
-// fold a nonzero utilization (the loose floor guards the arm/stamp/fold chain -- exact
+// fold a nonzero utilization (the loose floor guards the arm/stamp/fold chain - exact
 // figures are the synthetic test's job). Includes the in-flight case: the fold runs
-// INSIDE the settling worker's task, so only in-flight-aware busy accounting sees the
+// inside the settling worker's task, so only in-flight-aware busy accounting sees the
 // window's work at all.
 void test_graph_trace_end_to_end_utilization()
 {
@@ -754,7 +754,7 @@ void test_graph_trace_task_count()
     TS_CHECK(trace.tasks_per_run() > 1.0);
 }
 
-// Task-system overhead metric on SYNTHETIC folds: `on_run_complete` derives machinery by pure
+// Task-system overhead metric on synthetic folds: `on_run_complete` derives machinery by pure
 // subtraction, M = busy - B, and `overhead()` = M / (B + M). Deterministic arithmetic.
 void test_graph_trace_overhead()
 {
@@ -795,7 +795,7 @@ void test_graph_trace_overhead()
     TS_CHECK(svg.find("framework overhead") != std::string::npos);   // the headline figure
 }
 
-// End-to-end: a real graph on a real pool must fold nonzero body AND machinery, with a
+// End-to-end: a real graph on a real pool must fold nonzero body and machinery, with a
 // sane overhead share (bodies dominate at this granularity, so it stays well below 1).
 void test_graph_trace_overhead_end_to_end()
 {
@@ -810,7 +810,7 @@ void test_graph_trace_overhead_end_to_end()
     // Fan out: the in-body `parallel_for` submits many slice tasks. Each slice is a real task
     // with its own run_task span and a successful find_work dispatch scan, so `M = busy - B`
     // (setup/completion + dispatch, everything in busy that is not the slice body) is
-    // deterministically nonzero -- a single coarse body would leave it below the clock tick.
+    // deterministically nonzero - a single coarse body would leave it below the clock tick.
     g.add_node("ov_a", [busy](int& v) { ts::parallel_for(32, [&busy](int) { busy(20); }); ++v; }, x);
     g.add_node("ov_b", [busy](int& v) { ts::parallel_for(32, [&busy](int) { busy(20); }); ++v; }, x);
     g.compile();
@@ -840,7 +840,7 @@ void test_death_graph_mid_run()    { TS_CHECK(ts::test::expect_death("graph_dest
 void test_death_sync_own_object()  { TS_CHECK(ts::test::expect_death("sync_own_object_deadlock")); }
 
 // The pipe-registration counts stay balanced across recompiles, moves, and a move-assign
-// overwrite -- so destroying the graphs and then the objects raises no lifetime fatal, and
+// overwrite - so destroying the graphs and then the objects raises no lifetime fatal, and
 // every configuration still runs correctly.
 void test_lifetime_registration_balance()
 {
@@ -881,7 +881,7 @@ int probe_writes(ts::Guarded<tests::Rw_probe>& p)
     return p.async([](const tests::Rw_probe& r) { return r.writes(); }).sync();
 }
 
-// E1: a serial chain of writer nodes on one object -- each hands the object directly to
+// E1: a serial chain of writer nodes on one object - each hands the object directly to
 // its successor (conflict edges order them; the handoff elides release + re-acquire). The
 // oracle must see no reader/writer overlap and every write applied, across re-runs.
 void test_writer_handoff_chain()
@@ -902,7 +902,7 @@ void test_writer_handoff_chain()
     TS_CHECK(probe_writes(probe) == 6);
 }
 
-// E2: a graph reader node and a concurrent async read on the SAME object overlap -- the
+// E2: a graph reader node and a concurrent async read on the same object overlap - the
 // per-node mode-aware hold joins concurrent readers. The gate is met only if both were in
 // flight at once (the async reader blocks in arrive(), holding its reader slot, while the
 // node acquires the pipe as a second concurrent reader).
@@ -925,10 +925,10 @@ void test_reader_node_overlaps_async()
 
 // --- Nested graph runs (docs/coroutine-first.md §4.8) ----------------------
 
-// The marquee case: an outer node holds a WRITE grant on `x` and awaits an inner graph that
+// An outer node holds a write grant on `x` and awaits an inner graph that
 // also writes `x`. Without lending the inner node's pipe turn queues behind the outer node's
-// own hold -- which the outer cannot release, because it is suspended waiting for the inner
-// run -- so this test hangs rather than fails if the lend regresses. With lending the inner
+// own hold - which the outer cannot release, because it is suspended waiting for the inner
+// run - so this test hangs rather than fails if the lend regresses. With lending the inner
 // node skips the turn and runs under the outer's grant.
 void test_nested_run_lends_write_grant()
 {
@@ -954,7 +954,7 @@ void test_nested_run_lends_write_grant()
     TS_CHECK(read_value(x) == 222);
 }
 
-// A lent object still orders the INNER nodes among themselves: skipping the pipe turn drops
+// A lent object still orders the inner nodes among themselves: skipping the pipe turn drops
 // only the outer world's exclusion, never the compiled conflict edges. Three inner writers
 // on the lent object must apply in declaration order.
 void test_nested_run_inner_edges_survive_lend()
@@ -980,7 +980,7 @@ void test_nested_run_inner_edges_survive_lend()
     TS_CHECK(log.async([](const std::string& s) { return s; }).sync() == "[abc]");
 }
 
-// A nested run over objects the caller does NOT hold takes its turns normally -- lending is
+// A nested run over objects the caller does not hold takes its turns normally - lending is
 // an intersection, not a blanket bypass. The inner graph's write must serialize against a
 // concurrent async on the same object (the oracle would flag an overlap).
 void test_nested_run_without_overlap_takes_turns()
@@ -1009,7 +1009,7 @@ void test_nested_run_without_overlap_takes_turns()
     TS_CHECK(probe_writes(other) == 1);
 }
 
-// An un-awaited inner run joins the caller's scope by default, so the OUTER run's completion
+// An un-awaited inner run joins the caller's scope by default, so the outer run's completion
 // gates on it: after `outer.execute().sync()` the inner work has already happened. (Without
 // the auto-join the inner run would float and the read below would race it.)
 void test_nested_run_auto_joins_scope()
@@ -1035,7 +1035,7 @@ void test_nested_run_auto_joins_scope()
 }
 
 // A detached run opts out of both defaults: it does not gate the caller, and it receives no
-// lend -- so it takes its turns and simply queues behind the caller's hold, finishing after
+// lend - so it takes its turns and simply queues behind the caller's hold, finishing after
 // the outer node releases. Awaited from the blue boundary afterwards.
 void test_nested_run_detached()
 {
@@ -1059,7 +1059,7 @@ void test_nested_run_detached()
     TS_CHECK(read_value(x) == 6);
 }
 
-// Recursion: a grand-inner graph intersects against ITS caller's context, which already
+// Recursion: a grand-inner graph intersects against its caller's context, which already
 // carries the lent entries, so the lend composes without extra machinery.
 void test_nested_run_recursive()
 {
@@ -1090,7 +1090,7 @@ void test_nested_run_recursive()
 }
 
 // Companion to the mode-incompatible fatal: the sanctioned form is for the calling node to
-// declare the WRITE, which then covers the inner graph's writer.
+// declare the write, which then covers the inner graph's writer.
 void test_nested_run_write_covers_inner_write()
 {
     ts::Guarded<int> x{ ts::Named{}, 0 };
@@ -1100,7 +1100,7 @@ void test_nested_run_write_covers_inner_write()
     inner.compile();
 
     ts::Static_task_graph outer;
-    outer.add_node(ts::Named{}, [&inner](int& v) -> ts::Task<void>   // write, not const& -- covers the inner write
+    outer.add_node(ts::Named{}, [&inner](int& v) -> ts::Task<void>   // write, not const& - covers the inner write
     {
         co_await inner.execute();
         v += 1;
@@ -1139,9 +1139,9 @@ void test_nested_run_await_previous_then_lend()
     TS_CHECK(read_value(x) == 101);
 }
 
-// Two DIFFERENT graphs over overlapping objects, running concurrently. task-internals §10
+// Two different graphs over overlapping objects, running concurrently. task-internals §10
 // scenario 2 called this unsupported, but the reason was the per-graph `Run_state` being
-// single-run -- which says nothing about two graphs. Each graph's nodes take their pipe turns
+// single-run - which says nothing about two graphs. Each graph's nodes take their pipe turns
 // in canonical (pipe-address) order over the same address-sorted objects, so no wait cycle
 // can form; the pipe serializes the two graphs' conflicting nodes against each other exactly
 // as it serializes a node against an async. The Rw_probe oracle catches any overlap the

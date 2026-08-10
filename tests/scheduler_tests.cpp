@@ -19,9 +19,9 @@ void inc(void* p)
     static_cast<std::atomic<int>*>(p)->fetch_add(1, std::memory_order_relaxed);
 }
 
-// These exercise the scheduler OBJECT, but through the single process-wide pool: each test
+// These exercise the scheduler object, but through the single process-wide pool: each test
 // reconfigures the global for its scope (`Scheduler_scope`, which tears down + rebuilds the
-// one pool) and drives `global_scheduler()`. There are no ad-hoc `Scheduler` instances -- at
+// one pool) and drives `global_scheduler()`. There are no ad-hoc `Scheduler` instances - at
 // most one worker pool ever runs at a time.
 void test_single_task()
 {
@@ -57,7 +57,7 @@ struct Rec { std::atomic<int>* idx; int* order; int tag; };
 void rec_fn(void* p)
 {
     auto* r = static_cast<Rec*>(p);
-    // Write the slot BEFORE publishing the index, so a reader that observes the
+    // Write the slot before publishing the index, so a reader that observes the
     // new index (with acquire) is guaranteed to see the slot. (Single worker, so
     // the load is unraced.)
     int i = r->idx->load(std::memory_order_relaxed);
@@ -199,7 +199,7 @@ void order_fn(void* p)
 // The starvation valve: under a steady stream of `normal` work, a `low` task still makes
 // progress (served every N high/normal) instead of waiting for normal to drain. One worker,
 // held while we queue 1 low + many normal, so the ordering is deterministic. Without the
-// valve `low` runs LAST (order == normals); with it, it runs mid-stream (well before the end).
+// valve `low` runs last (order == normals); with it, it runs mid-stream (well before the end).
 void test_low_starvation_valve()
 {
     ts::Scheduler_scope scope{ { .num_threads = 1 } };
@@ -222,7 +222,7 @@ void test_low_starvation_valve()
     wait_until([&] { return seq.load() == normals + 1; });
 
     TS_CHECK(low_order.load() >= 0);          // low ran
-    TS_CHECK(low_order.load() < normals);     // and NOT last -- the valve served it mid-stream
+    TS_CHECK(low_order.load() < normals);     // and not last - the valve served it mid-stream
 }
 
 // Worker-less mode: no workers exist, and a submitted task executes inline, on the
@@ -245,7 +245,7 @@ void test_single_threaded_inline()
         pr->ran = true;
     }, &probe);
 
-    TS_CHECK(probe.ran);   // completed before submit returned -- no wait needed
+    TS_CHECK(probe.ran);   // completed before submit returned - no wait needed
     TS_CHECK(probe.ran_on == std::this_thread::get_id());
 }
 

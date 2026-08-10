@@ -14,7 +14,7 @@
 namespace tests
 {
 
-// An array of `Guarded` needs one `ts::Named` per element -- the type has no unnamed
+// An array of `Guarded` needs one `ts::Named` per element - the type has no unnamed
 // constructor and is neither copyable nor movable, so every element is built in place from
 // its own tag. Elements are identified by this helper's site rather than the caller's,
 // which is all an anonymous fixture array needs.
@@ -93,9 +93,9 @@ private:
     int n_;
 };
 
-// A short, deterministic spin used to WIDEN a body's window so overlapping accesses
+// A short, deterministic spin used to widen a body's window so overlapping accesses
 // actually overlap in wall-clock time (raises TSan's chance of catching a
-// reader/writer violation). Seeded per participant by index -- the harness bans
+// reader/writer violation). Seeded per participant by index - the harness bans
 // nondeterministic RNG, and a fixed seed keeps runs reproducible. xorshift, bounded.
 inline void tiny_spin(std::uint32_t seed)
 {
@@ -118,12 +118,12 @@ inline void tiny_spin(std::uint32_t seed)
 //     violation may be raced past and TSan sees nothing from the bookkeeping alone.
 //
 //  2. Unsynchronized payload (the exact TSan detector): a plain, non-atomic `payload_`
-//     array on cache-line-separated words. A writer mutates EVERY word; a reader reads
-//     ONE word on a rotating index, so per-word reader traffic stays low. If the pipe
+//     array on cache-line-separated words. A writer mutates every word; a reader reads
+//     one word on a rotating index, so per-word reader traffic stays low. If the pipe
 //     ever overlaps a writer with a reader/writer, TSan reports the race on `payload_`
-//     directly. The words are separated and reader traffic kept low on purpose -- TSan
+//     directly. The words are separated and reader traffic kept low on purpose - TSan
 //     keeps only ~4 shadow cells per 8-byte word, so a hot word with many concurrent
-//     readers would evict the writer's shadow and MISS the race.
+//     readers would evict the writer's shadow and miss the race.
 class Rw_probe
 {
 public:

@@ -14,14 +14,14 @@
 namespace ts
 {
 
-// How items map to the `concurrency` parallel executors. Only the claim GRAIN differs; the
+// How items map to the `concurrency` parallel executors. Only the claim grain differs; the
 // worker loop is identical. See docs/task-internals.md.
 enum class Balance
 {
-    guided,       // DEFAULT: grain shrinks as work drains (big early -> low overhead; small late
+    guided,       // default: grain shrinks as work drains (big early -> low overhead; small late
                   //          -> a straggler is a small chunk others absorb). Best general default.
     balanced,     // fixed coarse chunks (~N/concurrency). Lowest overhead; assumes uniform cost.
-    unbalanced,   // grain 1 -- every item claimed separately. Max dynamic balance, max overhead.
+    unbalanced,   // grain 1 - every item claimed separately. Max dynamic balance, max overhead.
 };
 
 struct Parallel_options
@@ -31,7 +31,7 @@ struct Parallel_options
     // Queue priority for the helper submissions. Unset (default) = inherit: helpers dispatch
     // at the calling task's priority (`Priority::normal` outside a task), so a high-priority
     // node's slices don't sink to `normal`. Set (`{.priority = Priority::low}`) to override.
-    // The participating caller is unaffected either way -- it runs inline.
+    // The participating caller is unaffected either way - it runs inline.
     std::optional<Priority> priority{};
 };
 
@@ -50,21 +50,21 @@ inline Priority resolved_priority(std::optional<Priority> requested)
     return Priority::normal;
 }
 
-// The shared, refcounted state for one parallel_for. ONE heap allocation per call; `core`
+// The shared, refcounted state for one parallel_for. One heap allocation per call; `core`
 // (first member) is the completion block the async handle aliases, and its refcount also
-// keeps the state alive until every raw helper has exited (so a helper that runs LATE -- a
-// queued one that finally gets a worker -- can't touch freed memory). `body` lives here too,
+// keeps the state alive until every raw helper has exited (so a helper that runs late - a
+// queued one that finally gets a worker - can't touch freed memory). `body` lives here too,
 // so it outlives the helpers. See the "no allocs" note in docs/TODO.md (a later pass pools these).
 template<typename Body>
 struct Parallel_state
 {
-    Task_control_block core;   // MUST be first; completes when `done == n`
+    Task_control_block core;   // must be first; completes when `done == n`
     Body body;
     int n;
     int base_grain;            // ceil(n / concurrency), for `balanced`
     int concurrency;
     Balance balance;
-    // The caller's access grant, snapshotted BY VALUE on the calling thread at creation --
+    // The caller's access grant, snapshotted by value on the calling thread at creation -
     // helpers install it around their loop, so a chunk touching guarded state the caller
     // owns passes the harness on any worker (and, for `async_parallel_for`, even after the
     // caller's own scope unwinds). A by-value grant snapshot, like the coroutine promise's.
@@ -83,7 +83,7 @@ struct Parallel_state
             base_grain = 1;
     }
 
-    // Items to claim on the next fetch_add (approximate for `guided` -- a heuristic, so the
+    // Items to claim on the next fetch_add (approximate for `guided` - a heuristic, so the
     // racy `next` read is fine; the actual claim clamps to n).
     int grain()
     {
@@ -122,7 +122,7 @@ void parallel_loop(Parallel_state<Body>* st)
 // Raw scheduler entry for a helper: install the caller's inherited grant, run the loop, then
 // drop this helper's refcount (may free the state if the loop already completed and the handle
 // is gone). A late-queued helper finds the counter drained, does no work, and just releases
-// its ref -- harmless. (The participating CALLER needs no install -- its context is already
+// its ref - harmless. (The participating caller needs no install - its context is already
 // the live one.)
 template<typename Body>
 void parallel_helper(void* p)
@@ -140,7 +140,7 @@ void parallel_helper(void* p)
 }
 
 // `parallel_for` fans out on the one process-wide `global_scheduler()`. With the single-global
-// collapse there is no separate pool a task could belong to -- the running pool IS the global,
+// collapse there is no separate pool a task could belong to - the running pool is the global,
 // so a graph node's slices and an off-worker caller's slices both land here.
 template<typename Body>
 Parallel_state<Body>* make_parallel_state(int n, Body&& body, Parallel_options opts, int& conc_out)
@@ -159,9 +159,9 @@ Parallel_state<Body>* make_parallel_state(int n, Body&& body, Parallel_options o
 
 } // namespace detail
 
-// Run `body(i)` for each i in [0, n), across `opts.concurrency` executors, and BLOCK until all
+// Run `body(i)` for each i in [0, n), across `opts.concurrency` executors, and block until all
 // items are done. The calling thread participates (runs a share itself) and waits on the
-// completion -- so even nested inside a task / another parallel_for it can't deadlock: the
+// completion - so even nested inside a task / another parallel_for it can't deadlock: the
 // caller drains all the work itself if no helper gets a worker, then waits only for the
 // still-running helpers. `body` must be safe to call concurrently for distinct i. One heap
 // allocation (the shared state). `body` is called inline (templated), so per-item is not a cost.
@@ -185,8 +185,8 @@ void parallel_for(int n, Body&& body, Parallel_options opts = {})
 
     detail::parallel_loop(st);   // caller participates (its ref is `handle`, so no dec here)
     // The one sanctioned in-task wait (docs/coroutine-first.md §4.1): the caller has already
-    // drained every unclaimed chunk itself, so this parks only on helpers that are RUNNING on
-    // workers right now -- bounded, deadlock-free (running work always finishes). It waits on
+    // drained every unclaimed chunk itself, so this parks only on helpers that are running on
+    // workers right now - bounded, deadlock-free (running work always finishes). It waits on
     // the group state directly, never through `sync_wait`, so the in-task blocking fatal
     // does not apply here.
     st->core.wait();             // block until done == n
@@ -196,7 +196,7 @@ void parallel_for(int n, Body&& body, Parallel_options opts = {})
 
 // Non-blocking parallel_for: returns a Task<void> that completes when all items are done.
 // Composable (`co_await` it). One heap allocation (the
-// returned Task's block holds the state). Do NOT block on it inside a graph node.
+// returned Task's block holds the state). Do not block on it inside a graph node.
 template<typename Body>
     requires std::invocable<Body&, int>
 Task<void> async_parallel_for(int n, Body&& body, Parallel_options opts = {})
