@@ -285,9 +285,9 @@ struct Task_awaiter
         // `await_resume`. Non-pipe tasks record nothing.
         if (core_->pipe_count > 0 && current_access != nullptr && rule_enforced(Rule::circular_wait))
         {
-            Pipe* awaited[8];
+            Pipe* awaited[Access_context::max_entries];   // sized to the object cap, so it never truncates
             int n = 0;
-            for (std::uint8_t i = 0; i < core_->pipe_count && n < 8; ++i)
+            for (std::uint8_t i = 0; i < core_->pipe_count && n < Access_context::max_entries; ++i)
                 awaited[n++] = core_->pipe_links[i].pipe;
             recorded_ = circular_wait_record(current_access, this, current_task.get(), awaited, n);
         }
@@ -575,9 +575,11 @@ namespace detail
 {
 
 // Awaiter for `co_await ts::read_only(w)` / `ts::read_write(w)`. Acquires the access in `Mode` (holding it),
-// then resumes with an `Access_guard`. The acquire/resume race (a deferred acquire's `on_acquired`
-// firing on another thread vs `await_suspend` finishing) uses the same two-state handshake as
-// `Task_awaiter`, with the same segment ordering.
+// then resumes with an `Access_guard`. Exposed publicly as `ts::Access_awaiter` (the alias below), so
+// `read_write`/`read_only` name no `detail` type; the definition stays here with the `detail` internals it
+// drives (`pipe_acquire`, the resume trampoline, the waits-for detector). The acquire/resume race (a
+// deferred acquire's `on_acquired` firing on another thread vs `await_suspend` finishing) uses the same
+// two-state handshake as `Task_awaiter`, with the same segment ordering.
 template<typename T, Access Mode>
 struct Access_awaiter
 {
@@ -697,6 +699,11 @@ public:
 
 } // namespace detail
 
+// Public spelling of the access-guard awaiter, so `read_write`/`read_only` return no `detail` type. Users
+// never name it - it is `co_await`ed immediately - but the return type in the header reads `ts::`.
+template<typename T, Access Mode>
+using Access_awaiter = detail::Access_awaiter<T, Mode>;
+
 // `co_await task` -> suspend until `task` settles, then resume with its result (`const R&`,
 // non-consuming; `void` for a void task). ADL finds these in namespace `ts`.
 template<typename R>
@@ -719,13 +726,13 @@ detail::Task_awaiter<R> operator co_await(Task<R>&& t)
 // `co_await` other work while the guard is alive (that holds the access across a suspension -
 // faulted by the harness-as-suspension-detector). Deduces nothing; the mode is the verb.
 template<typename T>
-detail::Access_awaiter<T, Access::read_write> read_write(Guarded<T>& w)
+Access_awaiter<T, Access::read_write> read_write(Guarded<T>& w)
 {
     return { global_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
 }
 
 template<typename T>
-detail::Access_awaiter<T, Access::read_only> read_only(Guarded<T>& w)
+Access_awaiter<T, Access::read_only> read_only(Guarded<T>& w)
 {
     return { global_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
 }

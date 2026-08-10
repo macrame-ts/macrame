@@ -106,6 +106,11 @@ class Access_context
 public:
     enum class Grant { none, granted, stale };
 
+    // Cap on the objects a single task/context declares (the access set is coarse-grained
+    // by design); a 9th `add` is fatal (`access_context_overflow`). Shared with the
+    // circular-wait detector's fixed edge array so the two cannot drift.
+    static constexpr int max_entries = 8;
+
     void add(const void* instance, Access mode) noexcept { add(instance, mode, nullptr); }
     void add(const void* instance, Access mode, const std::atomic<std::uint64_t>* epoch,
              unsigned rank = 0) noexcept;
@@ -195,8 +200,6 @@ public:
 #endif
 
 private:
-    static constexpr int max_entries = 8;
-
     struct Entry
     {
         const void* instance;
