@@ -64,7 +64,10 @@ if(WIN32)
         tests/guarded_tests.cpp
         tests/harness.cpp
         tests/integration_tests.cpp
+        tests/named_tests.cpp
         tests/parallel_tests.cpp
+        tests/pipe_tests.cpp
+        tests/rules_tests.cpp
         tests/scheduler_tests.cpp
         tests/task_tests.cpp
         tests/tests.cpp
