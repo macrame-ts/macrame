@@ -34,6 +34,7 @@ Legend: ✅ approved · ❌ rejected · 🕓 undecided (revisit) · 🔬 design 
 | 2.3 timeout/deadline | 🕓 undecided | Expanded with the partial-result / anytime-algorithm flavor per author. |
 | 2.4 linked / child tokens (+ reason) | 🕓 undecided | Rewritten for clarity per author. |
 | 2.5 structured task-group scope | 🕓 undecided | Terminology fixed (launch, not spawn). |
+| 2.59 delegate/event recipe | ✅ done | Shipped as `sample/events.cpp` (2026-08): four-tier ladder (intra-system / command / event board / batch+edge), determinism-checked. |
 
 **Undecided items to revisit:** 2.3, 2.4, 2.5. *(kept current as we go — the "remind me later" list)*
 
@@ -559,7 +560,9 @@ bounded ring; a slow subscriber is told *how many it missed* (Tokio
 (latest *state*) and `Signal` (one-shot): this is the *stream of transitions* —
 an engine event bus. Lag-as-data fits our "surface hazards, don't hide them"
 style. Difficulty: medium–high (per-consumer cursor + wake `Signal`); default to
-a drop policy given the frame loop. Builds on 2.11.
+a drop policy given the frame loop. Builds on 2.11. The frame-coherent baseline
+it upgrades is the event-board tier of the delegate/event recipe (2.59,
+`sample/events.cpp`).
 
 #### 2.17 Reactive latest-value: `Versioned::changed()` + `collectLatest`
 
@@ -580,7 +583,8 @@ while (true) {
 
 Difficulty: low–medium — a per-`Versioned` `Signal` triggered/reset by `publish()`
 (the `Frame_gate` pattern) + a version counter to close the missed-wakeup window.
-The blackboard sample's per-subscriber diff is the manual version of this.
+The blackboard sample's per-subscriber diff is the manual version of this; the
+delegate/event recipe's board consumers (2.59) are the other client.
 
 #### 2.18 Content-addressed join by key
 
@@ -599,7 +603,8 @@ behind message passing. `Guarded<T>`'s pipe is *already* an actor-without-an-inb
 missing piece is the *live, ordered, backpressured inbox* a producer sends to
 asynchronously while the actor runs — a thin recipe once 2.11 exists (channel + a
 task draining it under a grant). Difficulty: low given 2.11. Mostly a documented
-pattern, not a new type.
+pattern, not a new type. The frame-batched sibling (deferred inbox, applied at
+the flip) is the event board of 2.59.
 
 ### Cluster C — Awaitable sync primitives beyond `Signal`
 
@@ -1017,6 +1022,38 @@ exists — run the block on the waiter if `num_locks==0`); oversubscription medi
 (a standby reserve, touches the parking model). Note: we *deleted* general
 retraction with the coroutine-first transformation; this is the narrow
 boundary-only form, worth weighing against that decision.
+
+#### 2.59 Delegate / event recipe (UE-delegate decomposition) — **shipped as a sample**
+
+**Status: ✅ done — executable in `sample/events.cpp` (2026-08).** Numbered out of
+cluster order (added after 2.58; IDs are stable).
+
+How UE-style delegates map onto the suite. A delegate bundles **notification**
+("X happened") with **reaction** ("do work in response"); the reaction runs at a
+sanctioned point — a graph edge, a dispatch node, an enqueued task — never
+inline under the publisher's grant (a synchronous broadcast into foreign systems
+is the completeness hazard by construction). Four tiers, cheapest ceremony
+first:
+
+| Tier | Use | Firing cost / ceremony |
+|---|---|---|
+| **Intra-system** | parts of one system, under one grant | a plain synchronous delegate — zero; there is no concurrency inside a grant window. One rule (harness-checked): handlers don't touch other guarded state inline — outbound effects go through `async`/`stage` |
+| **Command** (one known target) | "play this sound" | `target.async(fn)` — one line, exists today |
+| **Lightweight notifications** (many types, sparse) | most of UE's delegate zoo | one `Versioned<Event_board>` per *domain* with a typed lane per event kind; **staging is grant-free**, so firing is one line from anywhere — no declaration, no edge, no board contention; flip + readers are fixed per-domain cost, and readers overlap as readers |
+| **Structural / heavyweight flows** | dependencies that should shape the schedule | a dedicated batch object + derived edge — O(events), not O(population); visible in the DOT dump and the trace |
+
+Load-bearing ordering facts the recipe rests on: journal apply order is
+recorder-creation order (a clear-recorder minted first applies before any
+producer's events regardless of when the clear was staged), and grant-free
+staging leaves no derived edges — same-frame delivery needs an explicit
+`flip.after(producers...)` intent edge. Honest costs: board delivery is deferred
+(events land at the flip — immediate reaction is a command or intra-system by
+definition); cross-recorder order is arbitrary (one producer per lane, or sort —
+2.40); closure-tier staging allocs past SBO make this a concrete motivating
+fixture for the typed-POD command tier (`command-buffer-design.md` §7.3).
+Upgrades: 2.16 (event bus with subscriber cursors), 2.17
+(`Versioned::changed()`), 2.19 (mailbox), 2.23/2.40 (skip-on-quiet-frame,
+deterministic playback — this recipe is a motivating fixture for both).
 
 ### Cluster LOW — Named threads / affinity *(low priority — see ranking policy)*
 
