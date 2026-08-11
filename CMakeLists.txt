@@ -36,6 +36,7 @@ set(TS_CORE_SOURCES
 
 set(TS_SAMPLE_SOURCES
     sample/blackboard.cpp
+    sample/events.cpp
     sample/game_frame.cpp
     sample/physics.cpp
     sample/scope_access.cpp
