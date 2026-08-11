@@ -7,8 +7,9 @@
 
 // Single-file samples (by design - no headers): the mock game-engine frame
 // (sample/game_frame.cpp), the physics machine/extract decomposition
-// (sample/physics.cpp), and the blackboard pattern recipe of
-// docs/command-buffer-design.md §7.4 (sample/blackboard.cpp).
+// (sample/physics.cpp), the blackboard pattern recipe of
+// docs/command-buffer-design.md §7.4 (sample/blackboard.cpp), and the
+// delegate/event recipe (sample/events.cpp).
 namespace sample
 {
 void run_game_frame_sample(int frames = 20, float time_scale = 1.0f);
@@ -16,6 +17,7 @@ void dump_game_frame_dot(const char* path);
 void trace_game_frame(int frames, const char* DOT_path, const char* SVG_path);
 void run_physics_sample(int frames = 60);
 void run_blackboard_sample();
+void run_events_sample();
 void run_scope_access_sample();
 }
 
@@ -132,6 +134,7 @@ int main(int argc, char** argv)
     sample::run_game_frame_sample();
     sample::run_physics_sample();
     sample::run_blackboard_sample();
+    sample::run_events_sample();
     sample::run_scope_access_sample();
     run_benchmarks();
 
