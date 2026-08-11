@@ -58,6 +58,17 @@ static ts::Task<int> coro_await_under_guard(ts::Guarded<tests::Counter>& w, ts::
     co_return g->value();
 }
 
+// Death scenario body (`multi_guard_await_under_guard`): holds a multi-object guard over both
+// objects and then awaits - the suspension detector faults, both objects held across the wait.
+static ts::Task<void> multi_await_under_guard(ts::Guarded<tests::Counter>& a,
+                                              ts::Guarded<tests::Counter>& b, ts::Signal& never)
+{
+    auto [x, y] = co_await ts::read_write(a, b);
+    co_await never;              // suspend while both grants are held -> fatal
+    x.add(1);
+    y.add(1);
+}
+
 // Death scenario body (`stale_inherited_grant`): created inside a node body, so the frame
 // inherits the node's grant; suspended on `go` (a non-nested stray), it resumes only after
 // the node completed and released its hold - the write then runs under a stale inherited
@@ -525,6 +536,13 @@ void run_death_scenario(const char* name)
         ts::Guarded<Counter> w{ ts::Named{} };
         ts::Signal never;
         coro_await_under_guard(w, never).sync();   // fatals during the coroutine's eager run
+    }
+    else if (std::strcmp(name, "multi_guard_await_under_guard") == 0)
+    {
+        ts::Guarded<Counter> a{ ts::Named{} };
+        ts::Guarded<Counter> b{ ts::Named{} };
+        ts::Signal never;
+        multi_await_under_guard(a, b, never).sync();   // fatals during the coroutine's eager run
     }
     else if (std::strcmp(name, "circular_wait") == 0)
     {

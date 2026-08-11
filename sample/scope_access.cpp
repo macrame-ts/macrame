@@ -8,10 +8,9 @@
 //                         is released before the next `co_await` - holding two guards across
 //                         a suspension is the ABBA shape the harness faults;
 //   - several at once:    a transfer reads one balance and writes both accounts, so it needs
-//                         them together. That is the multi-object form `ts::access(fn, a, b)`
-//                         (one canonically-ordered acquisition, deadlock-free); there is no
-//                         scope guard over multiple objects, a guard is single-object by
-//                         construction.
+//                         them together. The multi-object guard `co_await ts::read_write(a, b)`
+//                         holds both for the scope, acquired in canonical pipe-address order
+//                         (deadlock-free); structured bindings alias the two accounts.
 // Runs twice: transfers must conserve the total, and both runs must agree.
 
 #include "ts/guarded.h"
@@ -71,19 +70,16 @@ ts::Task<void> accrue_all(Bank bank, int rate_bps)
 }
 
 // Two accounts at once: a transfer withdraws from one and deposits to the other as a single
-// step, so it needs both grants together. The multi-object form acquires them in canonical
-// (pipe-address) order - deadlock-free against any other multi-object access or graph node.
+// step, so it holds both grants together. The multi-object scope guard acquires them in
+// canonical (pipe-address) order - deadlock-free against any other multi-object guard, access,
+// or graph node - and structured bindings give the two accounts by reference for the scope.
 ts::Task<bool> transfer(ts::Guarded<Account>& from, ts::Guarded<Account>& to, long amount)
 {
-    co_return co_await ts::access(
-        [amount](Account& f, Account& t) -> bool
-        {
-            if (!f.withdraw(amount))
-                return false;
-            t.deposit(amount);
-            return true;
-        },
-        from, to);
+    auto [f, t] = co_await ts::read_write(from, to);
+    if (!f.withdraw(amount))
+        co_return false;
+    t.deposit(amount);
+    co_return true;
 }
 
 // Sum every balance through one-by-one read guards (the shared-reader form: `read_only` gives

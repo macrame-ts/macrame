@@ -222,6 +222,127 @@ void test_guard_contention()
     TS_CHECK(co_read_guard(w).sync() == threads * each);
 }
 
+// --- multi-object scope guard: co_await ts::read_write(a, b, ...) -------------------------
+
+// A transfer: read one balance and write both accounts as one indivisible step, holding both
+// grants for the whole body. Structured bindings alias the two objects.
+Task<void> co_transfer(ts::Guarded<tests::Counter>& from, ts::Guarded<tests::Counter>& to, int amount)
+{
+    auto [f, t] = co_await ts::read_write(from, to);
+    if (f.value() >= amount)
+    {
+        f.add(-amount);
+        t.add(amount);
+    }
+}
+
+// M1. Hold two objects, read one + write both atomically; the transfer conserves the total.
+void test_multi_guard_transfer()
+{
+    ts::Guarded<tests::Counter> a{ ts::Named{ "a" } };
+    ts::Guarded<tests::Counter> b{ ts::Named{ "b" } };
+    a.async([](tests::Counter& c) { c.add(100); }).sync();
+
+    co_transfer(a, b, 30).sync();
+
+    int va = a.async([](const tests::Counter& c) { return c.value(); }).sync();
+    int vb = b.async([](const tests::Counter& c) { return c.value(); }).sync();
+    TS_CHECK(va == 70);
+    TS_CHECK(vb == 30);
+    TS_CHECK(va + vb == 100);   // conserved
+}
+
+// M2. Structured bindings: mutations through the bindings persist after the guard's scope.
+void test_multi_guard_structured_bindings()
+{
+    ts::Guarded<tests::Counter> a{ ts::Named{} };
+    ts::Guarded<tests::Counter> b{ ts::Named{} };
+    [](ts::Guarded<tests::Counter>& x, ts::Guarded<tests::Counter>& y) -> Task<void>
+    {
+        auto [p, q] = co_await ts::read_write(x, y);
+        p.add(5);
+        q.add(7);
+        TS_CHECK(p.value() == 5);   // visible under the held grant
+        TS_CHECK(q.value() == 7);
+    }(a, b).sync();
+    TS_CHECK(a.async([](const tests::Counter& c) { return c.value(); }).sync() == 5);
+    TS_CHECK(b.async([](const tests::Counter& c) { return c.value(); }).sync() == 7);
+}
+
+// M3. read_only gives const refs; overlapping read holds coexist (concurrent readers).
+Task<int> co_read_two(ts::Guarded<tests::Counter>& a, ts::Guarded<tests::Counter>& b)
+{
+    auto [x, y] = co_await ts::read_only(a, b);
+    co_return x.value() + y.value();
+}
+
+void test_multi_guard_read_only()
+{
+    ts::Guarded<tests::Counter> a{ ts::Named{} };
+    ts::Guarded<tests::Counter> b{ ts::Named{} };
+    a.async([](tests::Counter& c) { c.add(3); }).sync();
+    b.async([](tests::Counter& c) { c.add(4); }).sync();
+    TS_CHECK(co_read_two(a, b).sync() == 7);
+
+    constexpr int threads = 8;
+    std::atomic<int> ok{ 0 };
+    {
+        std::vector<std::jthread> drivers;
+        for (int i = 0; i < threads; ++i)
+            drivers.emplace_back([&] { if (co_read_two(a, b).sync() == 7) ok.fetch_add(1, std::memory_order_relaxed); });
+    }   // join
+    TS_CHECK(ok.load() == threads);   // all coexisted, none excluded
+}
+
+// M4. Deadlock-freedom: coroutines acquiring {a,b} and {b,a} concurrently all complete -
+// the canonical (pipe-address) order collapses both to the same sequence, so no ABBA.
+void test_multi_guard_canonical_order()
+{
+    ts::Guarded<tests::Counter> a{ ts::Named{ "a" } };
+    ts::Guarded<tests::Counter> b{ ts::Named{ "b" } };
+    a.async([](tests::Counter& c) { c.add(1000000) ; }).sync();
+    b.async([](tests::Counter& c) { c.add(1000000); }).sync();
+    constexpr int iters = 400;
+    {
+        std::vector<std::jthread> drivers;
+        drivers.emplace_back([&] { for (int i = 0; i < iters; ++i) co_transfer(a, b, 1).sync(); });
+        drivers.emplace_back([&] { for (int i = 0; i < iters; ++i) co_transfer(b, a, 1).sync(); });
+    }   // join - hangs here if the two orders could deadlock
+    int va = a.async([](const tests::Counter& c) { return c.value(); }).sync();
+    int vb = b.async([](const tests::Counter& c) { return c.value(); }).sync();
+    TS_CHECK(va + vb == 2000000);   // completed and conserved
+}
+
+// M5. co_await under a live multi-object guard faults (the suspension detector, both objects
+// held across the suspension). Subprocess death test.
+void test_death_multi_guard_await_under_guard()
+{
+    TS_CHECK(ts::test::expect_death("multi_guard_await_under_guard"));
+}
+
+// M6. Ranked objects at top level (nothing held): a multi-object hold orders against nothing,
+// so ranked objects acquire cleanly. The out-of-order fatal shares check_access_rank with the
+// single-object awaiter (rules tests cover the descend case).
+void test_multi_guard_ranked_objects()
+{
+    ts::Guarded<tests::Counter> low{ ts::Named{ "low" }, ts::Rank{ 10 } };
+    ts::Guarded<tests::Counter> high{ ts::Named{ "high" }, ts::Rank{ 20 } };
+    co_transfer(low, high, 0).sync();
+    TS_CHECK(true);   // no rank violation at top level
+}
+
+// M7. Regression: a lone argument still yields the single-object guard (operator-> not get<I>).
+void test_single_guard_still_works()
+{
+    ts::Guarded<tests::Counter> w{ ts::Named{} };
+    [](ts::Guarded<tests::Counter>& x) -> Task<void>
+    {
+        auto g = co_await ts::read_write(x);
+        g->add(5);
+    }(w).sync();
+    TS_CHECK(w.async([](const tests::Counter& c) { return c.value(); }).sync() == 5);
+}
+
 // 12. The suspension detector: `co_await` other work while holding a guard faults. Subprocess
 // death test (the fatal aborts) - the scenario lives in `run_death_scenario` (tests.cpp).
 void test_death_await_under_guard()
@@ -713,6 +834,13 @@ void run_coroutine_tests()
     run("co read guard", test_read_guard);
     run("co guard loop", test_guard_loop);
     run("co guard contention", test_guard_contention);
+    run("co multi-guard transfer", test_multi_guard_transfer);
+    run("co multi-guard structured bindings", test_multi_guard_structured_bindings);
+    run("co multi-guard read_only concurrent", test_multi_guard_read_only);
+    run("co multi-guard canonical order (no deadlock)", test_multi_guard_canonical_order);
+    run("co multi-guard await-under-guard fatal", test_death_multi_guard_await_under_guard);
+    run("co multi-guard ranked objects", test_multi_guard_ranked_objects);
+    run("co single guard still works", test_single_guard_still_works);
     run("co await-under-guard fatal", test_death_await_under_guard);
     run("co await instead of sync", test_coro_await_instead_of_sync);
     run("co await cancelled checked", test_await_cancelled_checked);

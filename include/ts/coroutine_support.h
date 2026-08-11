@@ -43,6 +43,7 @@
 #include <atomic>
 #include <coroutine>
 #include <optional>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -571,6 +572,84 @@ private:
     const Access_context* prev_ = nullptr;
 };
 
+// RAII scope guard holding grants on SEVERAL `Guarded`s at once, returned by the multi-object
+// `co_await ts::read_write(a, b, ...)` / `ts::read_only(a, b, ...)`. Like the single-object
+// `Access_guard` it is non-copyable and non-movable (its `ctx_` is the installed
+// `current_access`), so it is direct-initialized in place by guaranteed copy elision. The
+// guarded objects are reached by index - `guard.get<I>()` - or, more usually, by structured
+// bindings: `auto [a, b] = co_await ts::read_write(x, y);` via the tuple protocol below. All
+// objects share one `Mode` in v1; mixed per-object modes are a follow-up (until then use the
+// callback `ts::access(fn, as_read_only(a), as_read_write(b))` when modes must differ). The
+// awaiter acquires the pipes in canonical (pipe-address) order, deadlock-free; the guard
+// releases each on scope exit.
+template<Access Mode, typename... Ts>
+class Multi_access_guard
+{
+public:
+    static constexpr std::size_t arity = sizeof...(Ts);
+
+    Multi_access_guard(Scheduler& scheduler, std::tuple<Guarded<Ts>*...> objs,
+                       detail::Pipe* const* pipes, std::size_t pipe_count)
+        : scheduler_(scheduler)
+        , objs_(objs)
+        , pipe_count_(pipe_count)
+    {
+        for (std::size_t i = 0; i < pipe_count_; ++i)
+            pipes_[i] = pipes[i];
+        if (detail::current_access)
+            ctx_ = *detail::current_access;   // extend the coroutine's existing grant
+        add_all(std::index_sequence_for<Ts...>{});
+        prev_ = detail::current_access;
+        detail::current_access = &ctx_;
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+        ++detail::access_guard_depth;
+#endif
+    }
+
+    ~Multi_access_guard()
+    {
+        detail::current_access = prev_;
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+        --detail::access_guard_depth;
+#endif
+        for (std::size_t i = 0; i < pipe_count_; ++i)
+            detail::pipe_release(scheduler_, *pipes_[i], Mode);
+    }
+
+    Multi_access_guard(const Multi_access_guard&) = delete;
+    Multi_access_guard& operator=(const Multi_access_guard&) = delete;
+
+    // The I-th object, in declaration order: `T_I&` for write, `const T_I&` for read. Backs
+    // both `guard.get<I>()` and structured bindings (member `get` is found first).
+    template<std::size_t I>
+    decltype(auto) get() const
+    {
+        using T = std::tuple_element_t<I, std::tuple<Ts...>>;
+        auto* obj = detail::Guarded_access::instance(*std::get<I>(objs_));
+        if constexpr (Mode == Access::read_write)
+            return static_cast<T&>(*obj);
+        else
+            return static_cast<const T&>(*obj);
+    }
+
+private:
+    template<std::size_t... I>
+    void add_all(std::index_sequence<I...>)
+    {
+        (ctx_.add(static_cast<const void*>(detail::Guarded_access::instance(*std::get<I>(objs_))), Mode,
+                  detail::pipe_epoch(detail::Guarded_access::pipe(*std::get<I>(objs_))),
+                  detail::pipe_rank(detail::Guarded_access::pipe(*std::get<I>(objs_)))),
+         ...);
+    }
+
+    Scheduler& scheduler_;
+    std::tuple<Guarded<Ts>*...> objs_;
+    detail::Pipe* pipes_[sizeof...(Ts)];
+    std::size_t pipe_count_;
+    Access_context ctx_;
+    const Access_context* prev_ = nullptr;
+};
+
 namespace detail
 {
 
@@ -697,12 +776,179 @@ public:
 #endif
 };
 
+// Awaiter for the multi-object `co_await ts::read_write(a, b, ...)` (exposed as
+// `ts::Multi_access_awaiter` via the alias below). Acquires every object's pipe in canonical
+// (pipe-address) order - the same order a node's declared set and a multi-object `ts::access`
+// take, so it is deadlock-free against them and against another multi-object guard - holding
+// each until all are held, then resumes with a `Multi_access_guard`. Unlike `ts::access` it
+// dispatches no body: the final grant resumes the coroutine with the grants held. The acquire
+// chain is sequential - each `pipe_acquire` grants inline (advance) or defers (its callback
+// continues the chain on the granting worker); the final-grant vs `await_suspend` race uses the
+// same two-state handshake as the single-object `Access_awaiter`.
+template<Access Mode, typename... Ts>
+struct Multi_access_awaiter
+{
+    static constexpr std::size_t N = sizeof...(Ts);
+
+    explicit Multi_access_awaiter(Scheduler& scheduler, Guarded<Ts>&... objs) noexcept
+        : scheduler_(scheduler)
+        , objs_(&objs...)
+    {
+        Pipe* raw[] = { &Guarded_access::pipe(objs)... };
+        // Insertion-sort by pipe address + dedup (uniform mode - a repeated object is simply
+        // dropped), the canonical order `async_build_modes` uses. `pipe_count_` <= N.
+        for (std::size_t k = 0; k < N; ++k)
+        {
+            Pipe* pk = raw[k];
+            std::size_t i = 0;
+            while (i < pipe_count_ && pipes_[i] < pk)
+                ++i;
+            if (i < pipe_count_ && pipes_[i] == pk)
+                continue;
+            for (std::size_t j = pipe_count_; j > i; --j)
+                pipes_[j] = pipes_[j - 1];
+            pipes_[i] = pk;
+            ++pipe_count_;
+        }
+    }
+
+    Multi_access_awaiter(const Multi_access_awaiter&) = delete;
+    Multi_access_awaiter& operator=(const Multi_access_awaiter&) = delete;
+
+    // Never ready (the acquire has side effects), but the guard + rank rules are checked here,
+    // at `co_await` entry, exactly as the single-object awaiter does.
+    bool await_ready() noexcept
+    {
+        check_await_under_guard(
+            "co_await a multi-object access guard while another guard is live: nested guards hold "
+            "every object across any suspension. Take all objects in one co_await "
+            "ts::read_write(a, b, ...), or release the live guard before acquiring the next");
+        for (std::size_t i = 0; i < pipe_count_; ++i)
+            check_access_rank(pipes_[i], nullptr);
+        return false;
+    }
+
+    template<typename P>
+    bool await_suspend(std::coroutine_handle<P> h)
+    {
+        exit_segment_if_ours(h.promise());
+        owner_ = owner_of(h);
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
+        held_ctx_ = current_access;   // the coroutine's grants, captured for the wait record
+#endif
+        drive(0, h, true);
+        if (state_.exchange(2, std::memory_order_acq_rel) == 1)
+        {
+            enter_segment_if_ours(h.promise());
+            return false;   // the whole set was acquired inline
+        }
+        return true;
+    }
+
+    Multi_access_guard<Mode, Ts...> await_resume() noexcept
+    {
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
+        if (recorded_)
+            circular_wait_clear(this);
+#endif
+#if TS_SUSPENSION_REGISTRY
+        if (registered_)
+        {
+            suspension_unlink(suspension_);
+            registered_ = false;
+        }
+#endif
+        return Multi_access_guard<Mode, Ts...>(scheduler_, objs_, pipes_, pipe_count_);
+    }
+
+private:
+    // Acquire pipes_[k..) in order. `record_on_block` is true only for the `drive` call from
+    // `await_suspend`: a deferral there records the waits-for edge + registry entry against the
+    // captured `held_ctx_`. Later deferrals run on the granting worker and pass `false` - not
+    // because the ambient state is wrong (`held_ctx_` is captured precisely so it is not) but to
+    // keep `recorded_`/`registered_` single-writer: a worker-side record would race the awaiter's
+    // record-state against `await_resume`. So only the first-blocked pipe's edge is recorded.
+    //
+    // The consequence is a diagnostic gap, not a correctness one. The multi-guard's own
+    // acquisition is deadlock-free by canonical order regardless. A cross-waiter ABBA through a
+    // later-blocked pipe - possible when the coroutine also holds an enclosing grant that is not an
+    // `Access_guard` (a node's declared set, which `await_under_guard` does not bar) - goes
+    // unrecorded by the circular-wait detector, so `deadlock_net` (the quiescence backstop, tier 2)
+    // reports it instead: a coarser, window-delayed report rather than the immediate named-cycle
+    // one, never a silent hang. Closing the gap would need per-pipe record state and a thread-safe
+    // worker-side record; not worth it given the backstop.
+    template<typename P>
+    void drive(std::size_t k, std::coroutine_handle<P> h, bool record_on_block)
+    {
+        while (k < pipe_count_)
+        {
+            bool got = pipe_acquire(scheduler_, *pipes_[k], Mode,
+                [this, h, k] { this->drive(k + 1, h, false); }, owner_);
+            if (got)
+            {
+                ++k;
+                continue;
+            }
+            if (record_on_block)
+                record_wait(pipes_[k]);
+            return;   // deferred; the callback resumes the chain when this pipe grants
+        }
+        if (state_.exchange(1, std::memory_order_acq_rel) == 2)
+            schedule_resume(h);
+    }
+
+    void record_wait([[maybe_unused]] Pipe* pipe) noexcept
+    {
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
+        if (rule_enforced(Rule::circular_wait))
+        {
+            Pipe* awaited = pipe;
+            recorded_ = circular_wait_record(held_ctx_, this, owner_, &awaited, 1);
+        }
+#endif
+#if TS_SUSPENSION_REGISTRY
+        suspension_.awaited_pipe = pipe;
+        suspension_link(suspension_);
+        registered_ = true;
+#endif
+    }
+
+    template<typename P>
+    static Task_control_block* owner_of(std::coroutine_handle<P> h) noexcept
+    {
+        if constexpr (requires { h.promise().core; })
+            return &h.promise().core;
+        else
+            return current_task.get();
+    }
+
+    Scheduler& scheduler_;
+    std::tuple<Guarded<Ts>*...> objs_;
+    Pipe* pipes_[sizeof...(Ts)];
+    std::size_t pipe_count_ = 0;
+    Task_control_block* owner_ = nullptr;
+    std::atomic<int> state_{ 0 };
+#if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
+    const Access_context* held_ctx_ = nullptr;
+    bool recorded_ = false;
+#endif
+#if TS_SUSPENSION_REGISTRY
+    Suspension_record suspension_;
+    bool registered_ = false;
+#endif
+};
+
 } // namespace detail
 
 // Public spelling of the access-guard awaiter, so `read_write`/`read_only` return no `detail` type. Users
 // never name it - it is `co_await`ed immediately - but the return type in the header reads `ts::`.
 template<typename T, Access Mode>
 using Access_awaiter = detail::Access_awaiter<T, Mode>;
+
+// Public spelling of the multi-object access-guard awaiter (returned by the multi-arg
+// `read_write`/`read_only`); like `Access_awaiter`, users never name it.
+template<Access Mode, typename... Ts>
+using Multi_access_awaiter = detail::Multi_access_awaiter<Mode, Ts...>;
 
 // `co_await task` -> suspend until `task` settles, then resume with its result (`const R&`,
 // non-consuming; `void` for a void task). ADL finds these in namespace `ts`.
@@ -737,7 +983,44 @@ Access_awaiter<T, Access::read_only> read_only(Guarded<T>& w)
     return { global_scheduler(), detail::Guarded_access::pipe(w), detail::Guarded_access::instance(w) };
 }
 
+// Multi-object scope access: hold grants on several `Guarded`s at once for one scope.
+// `auto [x, y] = co_await ts::read_write(a, b);` acquires both in canonical pipe-address order
+// (deadlock-free) and holds them until the guard leaves scope; the bindings give `a`/`b` by
+// `T&` (write) or `const T&` (`read_only`). The two-plus-argument overloads sit beside the
+// single-object ones above; a lone argument still yields the single-object `Access_guard`. v1
+// is uniform-mode - use the callback `ts::access` when the objects need different modes.
+template<typename T1, typename T2, typename... Ts>
+Multi_access_awaiter<Access::read_write, T1, T2, Ts...>
+read_write(Guarded<T1>& a, Guarded<T2>& b, Guarded<Ts>&... rest)
+{
+    return Multi_access_awaiter<Access::read_write, T1, T2, Ts...>(global_scheduler(), a, b, rest...);
+}
+
+template<typename T1, typename T2, typename... Ts>
+Multi_access_awaiter<Access::read_only, T1, T2, Ts...>
+read_only(Guarded<T1>& a, Guarded<T2>& b, Guarded<Ts>&... rest)
+{
+    return Multi_access_awaiter<Access::read_only, T1, T2, Ts...>(global_scheduler(), a, b, rest...);
+}
+
 } // namespace ts
+
+// Tuple protocol for the multi-object guard, so structured bindings work:
+//   auto [x, y] = co_await ts::read_write(a, b);
+// `tuple_element` is the object type (const-qualified for read); the guard's member `get<I>()`
+// returns the matching reference, so the bindings alias the live objects.
+template<ts::Access Mode, typename... Ts>
+struct std::tuple_size<ts::Multi_access_guard<Mode, Ts...>>
+    : std::integral_constant<std::size_t, sizeof...(Ts)>
+{
+};
+
+template<std::size_t I, ts::Access Mode, typename... Ts>
+struct std::tuple_element<I, ts::Multi_access_guard<Mode, Ts...>>
+{
+    using element = std::tuple_element_t<I, std::tuple<Ts...>>;
+    using type = std::conditional_t<Mode == ts::Access::read_write, element, const element>;
+};
 
 // A coroutine whose return type is `ts::Task<R>` uses `ts::detail::Task_promise<R>`.
 template<typename R, typename... Args>

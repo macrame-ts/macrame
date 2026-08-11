@@ -1166,9 +1166,11 @@ let the mistake ship on every run where timing was friendly.
 
 The sanctioned forms are the functor verb (`co_await obj.access(fn)` — the grant
 lives only for `fn`) and splitting the scope: release the guard, await,
-re-acquire. For two objects at once, take them together with
-`co_await ts::access(fn, a, b)`, which acquires in one canonically-ordered step
-rather than nesting guards.
+re-acquire. For two objects at once, take them together — `co_await
+ts::read_write(a, b)` for a held scope guard over both (giving `a`/`b` by
+reference via structured bindings), or the callback `co_await
+ts::access(fn, a, b)` — each acquiring in one canonically-ordered step rather
+than nesting guards.
 
 There is exactly one exemption, and it is stated rather than emergent: an access
 to an object *this task already holds the write grant on* runs inline under that
