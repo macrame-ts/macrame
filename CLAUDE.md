@@ -16,7 +16,7 @@ Experienced engine programmer. Designed and implemented UE Tasks System at Epic 
 
 ## Current State
 
-Four layers, all built and tested (**644 checks** in Release; the harness suite, the sample, and the benchmarks all pass; TSan clean; **Shipping green** — ~481 checks, 0 failures, some skipped as not applicable, and a CI job now runs it, so the claim stays true). Sources: public headers in `include/ts/`, internal headers in `include/ts/detail/`, implementation in `src/`, plus `tests/`, `benchmarks/`, `sample/`.
+Four layers, all built and tested (in Release the harness suite, the sample, and the benchmarks all pass; TSan clean; **Shipping green** — 0 failures, some skipped as not applicable, and a CI job now runs it, so the claim stays true). Sources: public headers in `include/ts/`, internal headers in `include/ts/detail/`, implementation in `src/`, plus `tests/`, `benchmarks/`, `sample/`.
 
 Two transformations landed in 2026-08 and define the current shape: the **evolved pipe** (`docs/pipe-rebase.md` §0 — one mutex per pipe with rebuilt internals, embedded links, pipe turns as prerequisites, a unified multi-object cascade, always-on `writer_owner`, one auto-dispatching `Deferred::commit()`) and **coroutine-first** (`docs/coroutine-first.md` — the static graph keeps high-level parallelization, everything dynamic composes with `co_await`; `then`/`when_all`/the task builder/`after`/retraction/reuse are deleted, coroutines are mandatory, `sync()` is boundary-only).
 
