@@ -454,6 +454,34 @@ IDs — when an item is done, mark it, don't renumber.
        sharper fatal naming "previous run still in flight — sync() it"; or serializing/queueing
        back-to-back runs (which is 2.3 pipelined execution, the general fix). Decide whether this is
        a docs + `[[nodiscard]]` fix now or waits on 2.3.
+   18. `[ ]` **(P3, author 2026-08 — parked until real-life usage data) `compile({.derive = off})`
+       experiment: dynamic (arrival-ordered) conflict edges.** From the static-vs-dynamic scrutiny
+       session: keep the graph for declarations, per-node acquisition, and explicit `after`/`before`
+       edges, but skip conflict-edge derivation — conflicting nodes race to their pipes and the
+       pipes arrival-order them (the cascade's canonical acquisition order keeps it deadlock-free).
+       What it trades: per-pair-per-frame orientation nondeterminism (value jitter, no replay) for
+       serializing only the *actual* accesses instead of the *declared* conflict set — the one real
+       structural perf cost of derived edges (a declared-but-untouched write still serializes every
+       reader). The architecture separates acquisition from ordering cleanly enough that this is a
+       small, falsifiable experiment; `game_frame` gives it a number, but per the author, don't
+       derive significant decisions from toy-sample perf (the graph-free measurement — slower by
+       +1.6%/+28.7% via resume locality — is one frame shape, not a verdict; logically dynamic
+       edges absorb runtime fluctuation better, keep thinking).
+       Two findings from the same session to carry with it:
+       (a) **derived edges can MASK missing intent edges** (the sharpened reading of the graph-free
+       draw-calls bug): the baseline's `cmd_record→submit` order was held by a *coincidental*
+       derived edge; when `Deferred` staging removed the conflict in the optimised variant the
+       edge evaporated and only the explicit `after` saved the order — so the static graph fails
+       *late* (after an unrelated refactor removes the conflict) where the dynamic world fails
+       *fast* (day one). Companion diagnostic candidate: a **compile-baseline edge-set diff** —
+       `compile()` compares against a stored baseline and reports removed derived edges ("no
+       longer derived; if the order was intent, ratify with `after`"), catching the loss at the
+       moment the accidental protection disappears. Relates to 2.2/2.14 (unratified orientation).
+       (b) **How much the profiling/PGO story (2.4/2.5) actually depends on derived-edge
+       determinism is unknown** — average-frame stats over arrival-ordered conflicts are untested;
+       at some point measure whether the trace/critical-path machinery survives `derive = off`.
+       Overall stance (author): most of these decisions need real-life data — defer until there is
+       a real consumer codebase to measure.
 3. **Scheduler**
    0. `[x]` **Single global scheduler — DONE (2026-07, `d173d9a`+`2b48a5b`).** Author chose single-global over the ambient-multi model (3.1). Exactly one scheduler process-wide, reachable via `global_scheduler()` (renamed from `default_scheduler`); reconfigurable by teardown+recreate (`configure_scheduler(config)`, a coarse quiescent-point op, NOT thread-safe against concurrent use) + a scoped `Scheduler_scope(config)` RAII (snapshot→reconfigure→restore) for running a block on a specific pool. `execute()` drops its `Scheduler&` arg (uses the global); `parallel_for` fans out on `current_scheduler` (Phase-1 fix `ea471dd` — a parallel_for inside a task uses that task's pool, not the global default, which had silently oversubscribed the sample's variant traces). Supersedes 3.1's ambient-override idea and its `Launch_options{.scheduler}` (nothing to select among). **Residual (P3): compile-time ban on ad-hoc `ts::Scheduler` — DONE (2026-08).** The `Scheduler` ctor is now PRIVATE; the sole construction path is a `detail::make_scheduler(config)` factory (friend; returns `unique_ptr`, class non-movable) used by the global holder, so `ts::Scheduler s{...}` no longer compiles. Went further than the original plan: rather than migrate the unit tests to the factory (which would still stand up rival pools), every ad-hoc site (`scheduler_tests.cpp`, benchmarks, tsan, `parallel_tests.cpp`) now reconfigures the GLOBAL for its scope (`Scheduler_scope`), so at most one worker pool ever runs. The `thread_local current_scheduler` "which scheduler" selector was retired entirely — `current_worker_index >= 0` is the sole worker-vs-external discriminator (fast path, `parallel_for` fan-out, profiling bridges, `Parallel_recorder::lane`); `current_or_global_scheduler()` collapsed to `global_scheduler()`. Verified: Release 628/0, Shipping 477/0/35, Debug 629/0, bench in-band, --stress deterministic, TSan clean.
    1. `[~]` **(P1, superseded by 3.0) Ambient (overridable) scheduler** — was: `launch`/`task`/`access` resolve to an *ambient* scheduler + `Scheduler_scope` override + `Launch_options{.scheduler}`. The single-global model (3.0) took the simpler road: one reconfigurable global, `Scheduler_scope` reconfigures it rather than overriding among many. Kept for the record. [§D3]

@@ -38,6 +38,16 @@ Legend: ✅ approved · ❌ rejected · 🕓 undecided (revisit) · 🔬 design 
 
 **Undecided items to revisit:** 2.3, 2.4, 2.5. *(kept current as we go — the "remind me later" list)*
 
+**To re-raise when the review resumes** (author, 2026-08-13): (a) the
+blocking-rule split — same-object in-task `sync()` stays fatal (provable
+deadlock), foreign-object becomes `TS_ENSURE` + oversubscription (the 2.55
+promotion) — awaiting verdict; (b) the flip/pump ordering diagnostic (staging
+node with no path to the flip/pump node → once-per-site warning) — awaiting
+verdict; (c) `Event_bus` catalogue status — prototype shipped in
+`sample/events.cpp`, never filed as its own numbered item (2.60) nor sent to a
+design doc — decide; (d) the timer design doc
+([timer-primitive-design.md](timer-primitive-design.md)) — awaiting verdict.
+
 ---
 
 ## Part 0 — Synthesis (read this first)
