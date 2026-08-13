@@ -116,15 +116,29 @@ struct Damage_events
 //    so no raw pointer appears in user code. If the last strong reference dies
 //    elsewhere mid-pump, the owner's destructor runs on the pump's thread when
 //    the pin releases -- the standard `shared_ptr` caveat.
-//  - `Connection` removal and `subscribe` are immediate-effect writes on the
-//    board (`access` + `sync`), so this prototype's sub/unsub contract is
-//    blue-thread-or-setup only. The library version would add the
-//    reentrant-inline arm (sub/unsub from inside a handler, deferred past the
-//    dispatch loop to keep iteration valid) and the checked-fatal arm for
-//    ungranted tasks; here, don't subscribe or disconnect from handlers.
+//  - `subscribe` is staged like a publish (grant-free, any thread or task):
+//    the install applies at the pump's cut, before dispatch, so a subscription
+//    observes every event in the first cut that contains it -- and program
+//    order makes subscribe-then-publish from one thread always delivered
+//    (the install cannot land in a later cut than the publish). A disconnect
+//    racing a not-yet-applied install wins via a tombstone the install checks
+//    at apply, so no zombie entry can appear. `Connection` removal stays an
+//    immediate-effect write on the board (`access` + `sync`) --
+//    blue-thread-or-setup only in this prototype; the library version would
+//    add the reentrant-inline arm (sub/unsub from inside a handler, deferred
+//    past the dispatch loop to keep iteration valid) and the checked-fatal arm
+//    for ungranted tasks. Here, don't subscribe or disconnect from handlers.
 class Event_bus
 {
 private:
+    // Shared between a `Connection` and its (possibly not-yet-applied) staged
+    // install: `disconnect` tombstones it; the install checks it at apply, the
+    // dispatch loop skips and reaps entries it marks.
+    struct Sub_control
+    {
+        std::atomic<bool> dead{ false };
+    };
+
     struct Lane_base
     {
         virtual ~Lane_base() = default;
@@ -141,6 +155,7 @@ private:
             bool pinned = false;
             std::weak_ptr<void> owner;                    // pinned only
             std::function<void(void*, const E&)> invoke;  // void* = the locked owner (null when unpinned)
+            std::shared_ptr<Sub_control> control;
         };
 
         std::vector<E> events;
@@ -152,6 +167,8 @@ private:
             {
                 for (Subscription& s : subs)
                 {
+                    if (s.control->dead.load(std::memory_order_acquire))
+                        continue;
                     if (!s.pinned)
                     {
                         s.invoke(nullptr, e);
@@ -161,7 +178,10 @@ private:
                         s.invoke(pin.get(), e);
                 }
             }
-            std::erase_if(subs, [](const Subscription& s) { return s.pinned && s.owner.expired(); });
+            std::erase_if(subs, [](const Subscription& s)
+            {
+                return s.control->dead.load(std::memory_order_relaxed) || (s.pinned && s.owner.expired());
+            });
             events.clear();
         }
 
@@ -210,7 +230,12 @@ public:
         void dispatch_all()
         {
             TS_CHECK_ACCESS();
-            for (auto& lane : lanes_)   // first-subscription order: fixed at setup, deterministic
+            // Lane order = first-apply order (an install or a publish creating
+            // the lane), stable within a run but cross-producer apply order is
+            // arbitrary, so type dispatch order is not guaranteed across runs.
+            // The sample's handlers only count, so the determinism check is
+            // order-blind by construction.
+            for (auto& lane : lanes_)
                 lane->dispatch_and_clear();
         }
 
@@ -235,7 +260,8 @@ public:
         Connection() = default;
 
         Connection(Connection&& other) noexcept
-            : bus_(std::exchange(other.bus_, nullptr)), type_(other.type_), id_(other.id_)
+            : bus_(std::exchange(other.bus_, nullptr)), type_(other.type_), id_(other.id_),
+              control_(std::move(other.control_))
         {
         }
 
@@ -247,6 +273,7 @@ public:
                 bus_ = std::exchange(other.bus_, nullptr);
                 type_ = other.type_;
                 id_ = other.id_;
+                control_ = std::move(other.control_);
             }
             return *this;
         }
@@ -256,17 +283,32 @@ public:
         void disconnect()
         {
             if (Event_bus* bus = std::exchange(bus_, nullptr))
+            {
+                // Tombstone first: kills a not-yet-applied staged install (it
+                // no-ops at apply) and makes the dispatch loop skip and reap an
+                // installed entry even before the removal below lands.
+                control_->dead.store(true, std::memory_order_release);
+                // Strict removal of an already-installed entry, immediate-effect
+                // under the board's grant -- prototype contract: blue thread or
+                // setup only. Removing an id whose install never applied is a
+                // no-op.
                 bus->board_.access([type = type_, id = id_](Board& b) { b.remove(type, id); }).sync();
+                control_.reset();
+            }
         }
 
     private:
         friend class Event_bus;
 
-        Connection(Event_bus* bus, std::type_index type, std::uint64_t id) : bus_(bus), type_(type), id_(id) {}
+        Connection(Event_bus* bus, std::type_index type, std::uint64_t id, std::shared_ptr<Sub_control> control)
+            : bus_(bus), type_(type), id_(id), control_(std::move(control))
+        {
+        }
 
         Event_bus* bus_ = nullptr;
         std::type_index type_{ typeid(void) };
         std::uint64_t id_ = 0;
+        std::shared_ptr<Sub_control> control_;
     };
 
     explicit Event_bus(ts::Named name)
@@ -328,11 +370,21 @@ private:
     Connection add_subscription(bool pinned, std::weak_ptr<void> owner, std::function<void(void*, const E&)> invoke)
     {
         std::uint64_t id = next_id_++;
-        board_.access([id, pinned, owner = std::move(owner), invoke = std::move(invoke)](Board& b) mutable
+        auto control = std::make_shared<Sub_control>();
+        // Installed like a publish: staged into the journal, applied at the
+        // pump's cut before dispatch -- grant-free, legal from any thread or
+        // task, no join. Program order makes subscribe-then-publish from one
+        // thread always delivered: the install cannot land in a later cut than
+        // the publish. A disconnect that raced ahead already tombstoned
+        // `control`, so the install applies as a no-op instead of resurrecting
+        // a dead subscription.
+        publisher_.stage([id, pinned, owner = std::move(owner), invoke = std::move(invoke), control](Board& b) mutable
         {
-            b.lane<E>().subs.push_back({ id, pinned, std::move(owner), std::move(invoke) });
-        }).sync();
-        return Connection(this, std::type_index(typeid(E)), id);
+            if (control->dead.load(std::memory_order_acquire))
+                return;
+            b.lane<E>().subs.push_back({ id, pinned, std::move(owner), std::move(invoke), std::move(control) });
+        });
+        return Connection(this, std::type_index(typeid(E)), id, std::move(control));
     }
 
     ts::Guarded<Board> board_;
@@ -479,6 +531,8 @@ Events_stats run_events_frames(int frames)
     int events_total = 0;   // written only by pump handlers (serialized); read after the final sync
 
     // Subscriptions: the event type is deduced from the handler's parameter.
+    // Installs are staged like publishes -- active from the first pump's cut
+    // that contains them, which here is frame 0's.
     std::vector<Event_bus::Connection> connections;
     connections.push_back(bus.subscribe(hud, &Hud::on_footstep));            // pinned, member-function form
     connections.push_back(bus.subscribe(hud, &Hud::on_kill));
