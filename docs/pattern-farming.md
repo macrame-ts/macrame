@@ -43,9 +43,11 @@ blocking-rule split — same-object in-task `sync()` stays fatal (provable
 deadlock), foreign-object becomes `TS_ENSURE` + oversubscription (the 2.55
 promotion) — awaiting verdict; (b) the flip/pump ordering diagnostic (staging
 node with no path to the flip/pump node → once-per-site warning) — awaiting
-verdict; (c) `Event_bus` catalogue status — prototype shipped in
-`sample/events.cpp`, never filed as its own numbered item (2.60) nor sent to a
-design doc — decide; (d) the timer design doc
+verdict; (c) ~~`Event_bus` catalogue status~~ — RESOLVED 2026-08-13: promoted to the
+public library (`include/ts/event_bus.h`, in the umbrella; guide §9.4;
+`dispatch_fn()`/`publish_fn()` naming ratified — `_fn` = a functor run later
+under the declared grant); follow-ups: dedicated test group, the typed-lane
+tier it motivates; (d) the timer design doc
 ([timer-primitive-design.md](timer-primitive-design.md)) — awaiting verdict.
 
 ---

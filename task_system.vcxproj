@@ -90,6 +90,7 @@
     <ClInclude Include="include\ts\detail\pipe_link.h" />
     <ClInclude Include="include\ts\deferred.h" />
     <ClInclude Include="include\ts\detail\journal.h" />
+    <ClInclude Include="include\ts\event_bus.h" />
     <ClInclude Include="include\ts\versioned.h" />
     <ClInclude Include="include\ts\detail\work_stealing_deque.h" />
     <ClInclude Include="include\ts\detail\worker_thread.h" />

@@ -13,6 +13,7 @@
 #include "ts/parallel_for.h"       // ts::parallel_for
 #include "ts/deferred.h"           // ts::Deferred<T>
 #include "ts/versioned.h"          // ts::Versioned<T>
+#include "ts/event_bus.h"          // ts::Event_bus - per-domain pub/sub over Deferred
 #include "ts/access.h"             // TS_CHECK_ACCESS, Access_context (for instrumenting guarded types)
 #include "ts/rules.h"              // ts::Rule, Relaxed_scope - the waiting-rule check policy
 

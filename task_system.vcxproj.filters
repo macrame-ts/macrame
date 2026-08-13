@@ -167,6 +167,9 @@
     <ClInclude Include="include\ts\version.h">
       <Filter>include\ts</Filter>
     </ClInclude>
+    <ClInclude Include="include\ts\event_bus.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
     <ClInclude Include="include\ts\versioned.h">
       <Filter>include\ts</Filter>
     </ClInclude>
