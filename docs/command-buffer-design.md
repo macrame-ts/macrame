@@ -613,6 +613,17 @@ version the output extract, not the machine.**
     `Deferred<T>` stays the degenerate case of `Deferred<T, Cmd>`: the closure
     overload is always present; naming a `Cmd` adds the typed overload and the
     hooks. Existing call sites stay valid unchanged.
+  - **`Event_bus` is the tier's first customer and motivating fixture
+    (2026-08).** Every `bus.publish(E{...})` is semantically "append this POD
+    to `lane<E>`", yet v1 stages it as a closure — paying erasure + a
+    per-event allocation past SBO to *describe a vector push*. The bus's typed
+    lanes are already the typed tier's shape (homogeneous PODs per lane,
+    per-worker slots, merge at the cut, replay through one fixed apply per
+    type); building the tier largely builds the bus's endgame storage, and the
+    record stream doubling as a dirty-set gives the blackboard's
+    subscription-diff its planned upgrade for free. The bus's per-event cost
+    target — a plain vector append — is the tier's headline benchmark. Same
+    sequencing constraint as above: after the arena, not before.
 - Arena-backed journal storage (alloc-audit 3.1 #7) and lock-free recorder
   slots (the per-slot mutex exists only for the dynamic stage-vs-cut race; it
   is uncontended in one-producer use and edge-ordered-away in graphs).

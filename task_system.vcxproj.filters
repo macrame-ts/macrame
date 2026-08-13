@@ -81,6 +81,9 @@
     <ClCompile Include="tests\deferred_tests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
+    <ClCompile Include="tests\event_bus_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
     <ClCompile Include="tests\graph_tests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
@@ -210,6 +213,9 @@
       <Filter>tests</Filter>
     </ClInclude>
     <ClInclude Include="tests\deferred_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\event_bus_tests.h">
       <Filter>tests</Filter>
     </ClInclude>
     <ClInclude Include="tests\graph_tests.h">

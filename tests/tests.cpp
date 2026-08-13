@@ -19,6 +19,7 @@
 #include "integration_tests.h"
 #include "deferred_tests.h"
 #include "versioned_tests.h"
+#include "event_bus_tests.h"
 
 #include "ts/deferred.h"
 #include "ts/versioned.h"
@@ -45,6 +46,7 @@ void run_all_tests()
     run_integration_tests();
     run_deferred_tests();
     run_versioned_tests();
+    run_event_bus_tests();
 }
 
 // Death scenario body: acquire a `Guarded` write guard, then `co_await` other work while
