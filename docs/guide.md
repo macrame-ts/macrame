@@ -1324,7 +1324,7 @@ Key properties:
   address never changes, so graph declarations and the harness see one
   ordinary object.
 - In a static graph, publish is a node:
-  `g.add_node(ts::publish_body(poses), poses.state())` — declare **read**
+  `g.add_node(ts::publish_fn(poses), poses.state())` — declare **read**
   access on `poses.state()` everywhere else; the publish node is the one
   writer.
 - **Resync policy** (constructor argument): `replay` (default — re-applies
@@ -1350,6 +1350,43 @@ The physics decomposition (sealed simulation machine, staged inputs,
 versioned pose extract) is implemented end-to-end in `sample/physics.cpp`;
 a blackboard (shared key-value fact board with change notification) recipe is
 in `sample/blackboard.cpp`. Both are deterministic and verify themselves.
+
+### 9.4 `Event_bus` — pub/sub on staged writes
+
+`ts::Event_bus` (`ts/event_bus.h`) packages the staged-write machinery into
+UE-delegate-simple pub/sub: the event struct is the topic, firing is one
+grant-free line from anywhere, delivery is a batch at a per-domain dispatch
+point.
+
+```cpp
+struct Damage { int npc; int amount; };          // the type IS the channel
+
+ts::Event_bus bus{ ts::Named{"gameplay"} };
+bus.publish(Damage{ npc, 12 });                  // fire: any thread or task
+
+auto c = bus.subscribe(hud, &Hud::on_damage);    // pinned: hud kept alive per call
+auto c2 = bus.subscribe([&](const Damage& d) { audio.async(...); });  // unpinned
+
+// delivery point, once per domain — a graph node...
+g.add_node("events", bus.dispatch_fn(), bus.state()).after(producers...);
+// ...or one write access per frame, graph-free:
+bus.state().access(bus.dispatch_fn()).sync();
+```
+
+The event type is deduced from the handler's parameter. *Pinned* subscriptions
+(`subscribe(owner, ...)` with a `shared_ptr` owner) weak-lock the owner around
+each invocation — a dying owner is skipped and reaped, so owner destruction
+needs no unsubscribe call; the handler receives the locked owner as `self`.
+Delivery is deferred by design (handlers see events at the dispatch node);
+something that must happen *immediately* is a command (`target.async`) or an
+intra-system observer, not a bus event. Subscribing is staged like a publish,
+so subscribe-then-publish from one thread is always delivered; `Connection`'s
+explicit removal runs under the board's grant — call it from outside tasks.
+Handlers run under the bus's grant and must not touch other guarded state
+directly — route through `async`/`publish`/`stage` (checked builds fault a
+handler that strays). Heavy flows whose consumers deserve their own nodes
+belong to a dedicated batch object + derived edge (§6), not the bus. Full
+demonstration incl. minimal setup floors: `sample/events.cpp`.
 
 ---
 
@@ -1499,6 +1536,7 @@ result, completion, or cancellation.
 | data-parallel loop | `parallel_for` |
 | many writers, batched visibility | `Deferred` |
 | stable read view + atomic version flips | `Versioned` |
+| lightweight inter-system notifications, many event types | `Event_bus` (§9.4) |
 | ordering gate between phases | `Signal` |
 | reusing a sub-graph inside a frame | `co_await inner.execute()` (§6.3) |
 | realigning cross-frame work to a frame start | `Frame_gate` (§10.4) |

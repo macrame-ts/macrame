@@ -39,7 +39,7 @@ summary + the forward plan.
 |---|---|
 | `journal.h` | `detail::Journal<T>` (slots, cut, free-list, `max_slots`), `Recorder<T>`, `Parallel_recorder<T>`, THE ORDERING CONTRACT comment |
 | `deferred.h` | `Deferred<T>`: `recorder()`, `parallel_recorder()`, `commit(opts)` (auto-dispatching: inline under the caller's held write grant, else one enqueued write; bound object implicit — see contract 7a), `discard()` |
-| `versioned.h` | `Versioned<T>`: `read()`, `recorder()`, `parallel_recorder()`, `publish(opts)`, `publish_into(T&)`, `state()`, `Resync{replay,copy,overwrite}`, `set_copy`, `set_divergence_check`, `discard()`; `ts::publish_body(v)` for graph flip nodes |
+| `versioned.h` | `Versioned<T>`: `read()`, `recorder()`, `parallel_recorder()`, `publish(opts)`, `publish_into(T&)`, `state()`, `Resync{replay,copy,overwrite}`, `set_copy`, `set_divergence_check`, `discard()`; `ts::publish_fn(v)` for graph flip nodes |
 | `sample/physics.{h,cpp}` | machine/extract decomposition fixture (sealed `Guarded<Physics_world>`, `Deferred` inputs, `Versioned` poses, id reservation, batch extract, parallel drag staging); determinism self-check |
 | `sample/blackboard.cpp` | single file (extern'd in main.cpp, no header — by design): blackboard recipe with key-change subscriptions; determinism self-check |
 | `tests/deferred_tests.cpp` | 22 cases incl. churn/reuse/parallel/overflow |

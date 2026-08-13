@@ -64,7 +64,7 @@ enum class Resync
 //   rec.stage([b = std::move(out)](Transforms& t){ t.apply(b); });  // stage next version
 //   tf.publish();                                    // fire-and-forget, or await it
 //   co_await tf.read([](const Transforms& t){ render(t); });        // read the current version
-// Composes with `Static_task_graph`: a `ts::publish_body(tf)` node is the flip; declaring a
+// Composes with `Static_task_graph`: a `ts::publish_fn(tf)` node is the flip; declaring a
 // read on the front before it reads the previous version, after it the fresh one. see
 // game_frame.cpp sample.
 //
@@ -181,7 +181,7 @@ public:
     }
 
     // The front's `Guarded` - for static-graph declarations. Declare read access
-    // only; the one sanctioned writer is the publish node (`publish_body`).
+    // only; the one sanctioned writer is the publish node (`publish_fn`).
     // Writing it directly bypasses versioning and breaks the replica invariant.
     Guarded<T>& state() { return front_; }
     const Guarded<T>& state() const { return front_; }
@@ -252,7 +252,7 @@ public:
     }
 
     // Publish under a write grant the caller already holds - the graph-node form
-    // (see `publish_body`). `front` must be this Versioned's front instance.
+    // (see `publish_fn`). `front` must be this Versioned's front instance.
     // Phases 1-2 run inline (the node holds the grant regardless; edges already
     // order readers around it); phase 3 is deferred to the resync read access, admitted
     // the moment the node releases its objects.
@@ -403,18 +403,18 @@ private:
 // The publish step as a graph-node body: declare it with write access on
 // `v.state()` - conflict derivation then orders it against every reader, and the
 // node's grant is exactly what `publish_into` needs.
-//   auto flip = g.add_node(ts::publish_body(poses), poses.state()).after(sim);
+//   auto flip = g.add_node(ts::publish_fn(poses), poses.state()).after(sim);
 template<typename T>
-struct Publish_body
+struct Publish_fn
 {
     Versioned<T>* versioned;
     void operator()(T& front) const { versioned->publish_into(front); }
 };
 
 template<typename T>
-Publish_body<T> publish_body(Versioned<T>& v)
+Publish_fn<T> publish_fn(Versioned<T>& v)
 {
-    return Publish_body<T>{ &v };
+    return Publish_fn<T>{ &v };
 }
 
 } // namespace ts

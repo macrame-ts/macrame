@@ -279,7 +279,7 @@ Blackboard_stats run_blackboard_frames(int frames)
         ag.observe(b.get<bool>(Key::player_visible, false));
     }, bb.state(), agents);
 
-    auto flip = g.add_node(ts::Named{}, ts::publish_body(bb), bb.state());
+    auto flip = g.add_node(ts::Named{}, ts::publish_fn(bb), bb.state());
     flip.after(sense);
 
     // Notification: after the flip, diff-and-fire off the fresh version.

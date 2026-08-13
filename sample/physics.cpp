@@ -435,7 +435,7 @@ Physics_stats run_physics_frames(int frames)
 
     // The flip: the only write conflict on `poses`. `gameplay` (declared before
     // it) derives an edge in front of it; `camera` opts into freshness after it.
-    auto flip = g.add_node(ts::Named{}, ts::publish_body(poses), poses.state());
+    auto flip = g.add_node(ts::Named{}, ts::publish_fn(poses), poses.state());
     flip.after(sim);
 
     auto cam = g.add_node(ts::Named{},

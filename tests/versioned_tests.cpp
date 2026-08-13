@@ -282,7 +282,7 @@ void test_graph_stale_then_fresh()
     {
         rec.stage([](int& x) { x += 1; });
     }, seen_after);   // touches seen_after only to have some declared access
-    auto flip = g.add_node(ts::Named{}, ts::publish_body(v), v.state());
+    auto flip = g.add_node(ts::Named{}, ts::publish_fn(v), v.state());
     flip.after(producer);
     auto after = g.add_node(ts::Named{}, [](const int& x, std::vector<int>& log) { log.push_back(x); },
                             v.state(), seen_after);
@@ -311,7 +311,7 @@ void test_publish_sync_then_graph_flip()
     auto rec = v.recorder();
 
     ts::Static_task_graph g;
-    g.add_node(ts::Named{}, ts::publish_body(v), v.state());
+    g.add_node(ts::Named{}, ts::publish_fn(v), v.state());
     g.compile();
 
     constexpr int rounds = 200;
@@ -355,7 +355,7 @@ void test_dynamic_publish_chains_behind_flip()
     }
 
     ts::Static_task_graph g;
-    g.add_node(ts::Named{}, ts::publish_body(v), v.state());
+    g.add_node(ts::Named{}, ts::publish_fn(v), v.state());
     g.compile();
     g.execute().sync();   // flip runs phases 1-2 and installs its shadow_ready; its resync
                           // is now blocked -> chain_ stays not-done

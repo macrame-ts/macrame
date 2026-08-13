@@ -513,7 +513,7 @@ void run_death_scenario(const char* name)
             auto rec2 = v.recorder();
             rec2.stage([](int& x) { x += 10; });
             ts::Static_task_graph g;
-            g.add_node(ts::Named{}, ts::publish_body(v), v.state());
+            g.add_node(ts::Named{}, ts::publish_fn(v), v.state());
             g.compile();
             g.execute().sync();                     // flip catches the unresolved publish -> fatal
 

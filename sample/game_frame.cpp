@@ -429,7 +429,7 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
             [rec = world.gameplay.recorder()](const Combat& c, const Economy& e, const Quests& q) mutable
             { tick_gameplay_snapshot(c, e, q, rec); },
             world.combat, world.economy, world.quests);
-        graph.add_node("gameplay_flip", ts::publish_body(world.gameplay), world.gameplay.state()).after(gp_snapshot);
+        graph.add_node("gameplay_flip", ts::publish_fn(world.gameplay), world.gameplay.state()).after(gp_snapshot);
     }
 
     // Animation chain.
@@ -495,7 +495,7 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     ts::Graph_node cloth;
     if (opt)   // L4: cloth on last frame's transforms
         cloth = graph.add_node("cloth", &tick_cloth, world.transforms.state(), world.cloth);
-    auto flip = graph.add_node("flip", ts::publish_body(world.transforms), world.transforms.state());
+    auto flip = graph.add_node("flip", ts::publish_fn(world.transforms), world.transforms.state());
     flip.after(propagation);
     // Which version each transforms reader sees is the point of the whole render pipeline,
     // so it is declared, not inferred from where the nodes happen to sit in this function.
@@ -1398,7 +1398,7 @@ ts::Task<void> run_frame_graph_free(World& world)
     co_await audio;
     co_await vfx;
     co_await debug_overlay;    // covers economy; propagation covers combat/quests/navigation/AI
-    co_await ts::async(ts::publish_body(world.transforms), world.transforms.state());
+    co_await ts::async(ts::publish_fn(world.transforms), world.transforms.state());
 
     // Post-flip: cloth reads the fresh version.
     co_await ts::async(&tick_cloth, world.transforms.state(), world.cloth);

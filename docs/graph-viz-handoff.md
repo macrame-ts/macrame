@@ -77,7 +77,7 @@ The visualization's target and test subject. 18 systems + a publish node over
   documented in-file).
 - `Versioned<Transforms>`: early systems + audio read last frame's version
   (declared before the flip), late systems the fresh one. The flip is
-  `ts::publish_body` + `flip.after(propagation)`.
+  `ts::publish_fn` + `flip.after(propagation)`.
 - `Deferred<Draw_lists>`: culling/particles/UI stage draw batches grant-free;
   `submit.after(culling).after(particles).after(ui)` commits. The explicit
   edges are exactly the grant-free orderings — provenance would render these
