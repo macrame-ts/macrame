@@ -393,6 +393,55 @@ private:
     std::atomic<std::uint64_t> next_id_{ 1 };
 };
 
+// --- minimal setup reference ------------------------------------------------------
+//
+// The entire required ceremony, both flavors. Everything else in this file is
+// demonstration; these two functions are the floor.
+
+struct Ping
+{
+    int n = 0;
+};
+
+// With a static graph: one bus, one pump node ordered after the producers.
+bool minimal_bus_with_graph()
+{
+    Event_bus bus{ ts::Named{} };
+    ts::Guarded<int> ticks{ ts::Named{} };
+
+    int received = 0;
+    auto conn = bus.subscribe([&received](const Ping& p) { received += p.n; });
+
+    ts::Static_task_graph g;
+    auto produce = g.add_node(ts::Named{}, [&bus](int& n) { bus.publish(Ping{ ++n }); }, ticks);
+    auto pump = g.add_node(ts::Named{}, bus.pump_body(), bus.state());
+    pump.after(produce);   // staging derives no edges -- same-frame delivery is explicit intent
+    g.compile();
+
+    for (int frame = 0; frame < 3; ++frame)
+        g.execute().sync();
+
+    return received == 1 + 2 + 3;
+}
+
+// Without a graph: the pump is one write access per frame, from the frame
+// loop. `access` runs it inline when the board is free (the usual case here).
+bool minimal_bus_without_graph()
+{
+    Event_bus bus{ ts::Named{} };
+
+    int received = 0;
+    auto conn = bus.subscribe([&received](const Ping& p) { received += p.n; });
+
+    for (int frame = 1; frame <= 3; ++frame)
+    {
+        bus.publish(Ping{ frame });                   // from anywhere: nodes, tasks, this thread
+        bus.state().access(bus.pump_body()).sync();   // the delivery point, once per frame
+    }
+
+    return received == 1 + 2 + 3;
+}
+
 // --- toy systems ------------------------------------------------------------------
 
 // Movement: many NPCs patrol; a few actually move each frame and report
@@ -631,14 +680,18 @@ Events_stats run_events_frames(int frames)
 
 void run_events_sample()
 {
+    bool minimal_ok = minimal_bus_with_graph() && minimal_bus_without_graph();
+
     constexpr int frames = 90;
     Events_stats a = run_events_frames(frames);
     Events_stats b = run_events_frames(frames);
 
     std::printf("events sample: %d frames, %d hit barks, %d kill stings, %d kills, "
-                "hud %d/%d/%d steps/pickups/kills, commander saw %d, %d events dispatched, %s\n",
+                "hud %d/%d/%d steps/pickups/kills, commander saw %d, %d events dispatched, "
+                "minimal setups %s, %s\n",
         frames, a.hit_barks, a.kill_stings, a.combat_kills,
         a.hud_footsteps, a.hud_pickups, a.hud_kills, a.commander_kills, a.events_total,
+        minimal_ok ? "ok" : "BROKEN",
         a == b ? "deterministic across runs" : "NON-DETERMINISTIC (bug)");
 }
 
