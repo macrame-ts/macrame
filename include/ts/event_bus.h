@@ -1,52 +1,48 @@
 #pragma once
 
-// `Event_bus` - per-domain pub/sub over `Guarded` + `Deferred`, the deferred-batch
-// shape (entt's `enqueue`/`update`, Qt's queued connections): the event struct is
-// the topic - no delegate declaration, no named channel per event kind.
+// `Event_bus` - per-domain pub/sub over `Guarded` + `Deferred`: producers publish events
+// now, one dispatch delivers them later, as a batch. The deferred-batch model of entt's
+// `enqueue`/`update` and Qt's queued connections: the event struct itself is the topic -
+// no delegate declaration, no named channel object per event kind. Handlers see events at
+// the dispatch point, not at the publish; a reaction that must happen immediately is a
+// command to a known target (`target.async`) or a plain observer inside one system, not a
+// bus event.
 //
+// Access control is `Guarded`'s: `publish` and `subscribe` stage into a private journal
+// (grant-free, from any thread or task), and delivery is one ordinary write on the board -
+// run `dispatch_fn()` as a graph node declaring write on `state()`, or through a write
+// access from the frame loop. Handlers run serialized under that grant and must not touch
+// other guarded state directly - route outbound effects through `async`/`publish`/`stage`.
+//
+// Use:
+//   struct Damage { int npc; int amount; };              // the event type is the channel
 //   ts::Event_bus bus{ ts::Named{"gameplay"} };
-//   bus.publish(Damage{ npc, 12 });                     // fire: any thread, grant-free
-//   auto c = bus.subscribe(hud, &Hud::on_kill);         // pinned: owner kept alive per call
-//   auto c2 = bus.subscribe([](const Footstep& f){});   // unpinned: captures must outlive c2
-//   g.add_node("events", bus.dispatch_fn(), bus.state());   // delivery point, once per domain
-//   // graph-free: bus.state().access(bus.dispatch_fn()).sync(); once per frame
+//   bus.publish(Damage{ npc, 12 });                      // fire: any thread, grant-free
+//   auto c = bus.subscribe(hud, &Hud::on_damage);        // pinned: owner kept alive per call
+//   auto c2 = bus.subscribe([](const Damage& d) { });    // unpinned; event type deduced
+//   g.add_node("events", bus.dispatch_fn(), bus.state()).after(producers...);
+// Staging derives no edges, so `after(producers...)` is explicit intent - required for
+// same-frame delivery. Graph-free, the dispatch is one write access per frame:
+// `bus.state().access(bus.dispatch_fn()).sync()`. see events.cpp sample.
 //
-// Delivery is deferred by design: handlers see events at the dispatch node, in
-// batches. Immediate reaction is a command to a known target (`target.async`) or
-// an intra-system observer under one grant - not the bus. Contracts, all
-// instances of the library's existing rules:
+// Contract:
+//  - Delivery is batched: a subscription observes every event in the first cut that
+//    contains its install, so subscribe-then-publish from one thread is always delivered.
+//    Cross-producer order is arbitrary (the journal contract); per-producer order is FIFO.
+//  - Pinned subscriptions (`subscribe(owner, ...)`) weak-lock the owner around each call:
+//    a dying owner is skipped and reaped - no unsubscribe needed. The handler receives the
+//    locked owner as its first parameter. If the pin is the last reference, the owner
+//    destructs on the dispatching thread (the usual `shared_ptr` caveat).
+//  - `Connection` removal is an immediate-effect write on the board: `disconnect()` (or
+//    the destructor) outside tasks only; a disconnect racing a still-staged install wins.
+//    No sub/unsub from inside a handler.
+//  - Each publish stages a closure (heap past the SBO) - sized for sparse notifications,
+//    not per-entity firehoses; the typed-lane plan is in `docs/command-buffer-design.md`.
 //
-//  - `publish` stages into a `Parallel_recorder` (per-worker slots): safe from
-//    any thread or task; cross-producer apply order is arbitrary (the journal
-//    contract), per-producer order is per-worker FIFO. Closure-tier staging
-//    allocates per event past the SBO - the typed-lane command tier is the
-//    planned fix; this v1 documents the cost.
-//  - `subscribe` is staged like a publish (grant-free, any thread or task): the
-//    install applies at the dispatch node's cut, before handlers run, so a
-//    subscription observes every event in the first cut that contains it - and
-//    program order makes subscribe-then-publish from one thread always
-//    delivered. A disconnect racing a not-yet-applied install wins via a
-//    tombstone the install checks at apply.
-//  - the dispatch node runs under the board's write grant: handlers run
-//    serialized, and a handler must not touch other guarded state directly -
-//    route through `async`/`publish`/`stage` (undeclared access faults in
-//    checked builds).
-//  - pinned subscriptions (`subscribe(owner, ...)`) hold a weak handle and lock
-//    it around each invocation: a dying owner is skipped and reaped
-//    (auto-disconnect), so owner destruction needs no unsubscribe ceremony. The
-//    handler receives the locked owner as its first parameter - no raw pointer
-//    in user code. If the last strong reference dies elsewhere mid-dispatch,
-//    the owner's destructor runs on the dispatching thread when the pin
-//    releases - the standard `shared_ptr` caveat.
-//  - `Connection` removal is an immediate-effect write on the board (`access` +
-//    `sync`): call from a blue thread or setup code. Sub/unsub from inside a
-//    handler is not supported in v1 (the reentrant-inline arm, deferred past
-//    the dispatch loop, and the checked-fatal arm for ungranted tasks are the
-//    planned hardening).
-//
-// The bus is for lightweight notification fan-out. A heavy flow whose consumers
-// should be scheduled as their own nodes belongs to a dedicated batch object
-// with a conflict-derived edge - ordinary graph data flow, not events.
+// Not the right tool for heavy flows whose consumers deserve their own schedule - those
+// want a dedicated batch object and a conflict-derived edge (the `Damage_events` tier in
+// the events.cpp sample). The journal and its ordering contract are `Deferred`'s; the
+// board is one `Guarded` object the harness and any `Static_task_graph` treat like any other.
 
 #include "ts/access.h"
 #include "ts/deferred.h"
