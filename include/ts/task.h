@@ -185,7 +185,12 @@ public:
         if (state_->firing == this)            // mid-invocation
         {
             if (state_->firing_thread == std::this_thread::get_id())
-                return;   // re-entrant self-destroy: detach (waiting would deadlock)
+                // Re-entrant self-destroy (the callback deleted its own `Cancel_callback`):
+                // detach, because waiting for `firing` to clear would deadlock on ourselves.
+                // This destroys `fn_` while its own invocation is still on the stack - the
+                // `std::stop_callback` shape - which is sound because `move_only_function`
+                // does not touch the target after it returns.
+                return;
             state_->done.wait(lock, [&] { return state_->firing != this; });
         }
     }
@@ -635,16 +640,20 @@ struct Task_control_block
         done_cv.wait(lock, [this] { return completed; });
     }
 
-    // Re-arm this settled block for another run (`Signal::reset`, the graph's per-run
-    // re-arm). `nested_parent`/`continuations` were drained by `settle`,
-    // and the result storage is overwritten by the next run's body, so only the
-    // completion scalars reset here (`nested_parent` likewise moved out at settle). Leaves
-    // `num_locks` at 0 (the caller re-applies
-    // any launch lock). Precondition: settled and quiescent - one run in flight, prior
-    // result consumed; the `ready` gate rejects re-arming a task that has not settled.
+    // Re-arm this settled `Signal` block so it can be triggered again. The sole caller is
+    // `Signal::reset` - graph nodes re-arm manually in `execute()`, ordered by the run's `done`
+    // handle, never through here (static_task_graph.cpp). Takes the block mutex: `completed`/
+    // `cancelled` are mutex-only, and a `Signal` waiter still returning from `wait()` reads
+    // `completed` under that mutex, so clearing it lock-free is a data race (confirmed under
+    // TSan). `nested_parent`/`continuations` were drained by `settle` and the result storage is
+    // overwritten by the next run, so only the completion scalars reset here; `num_locks` is
+    // left at 0. Precondition: settled, no in-flight run. Locking removes the race but not the
+    // semantic lost-wakeup (a waiter that has not yet observed the trigger when `reset` clears
+    // `completed` misses it) - `Signal::reset` documents that and points at `Frame_gate`.
     void reset()
     {
-        if (!ready.load(std::memory_order_acquire))
+        std::scoped_lock lock(mutex);
+        if (!completed)
             ts::fatal("Task_control_block::reset() on a task that has not settled");
         body_claimed.store(false, std::memory_order_relaxed);   // unclaimed for the next run
         completed = false;
@@ -769,9 +778,9 @@ inline const char* task_name(const Task_control_block* blk, char* buf, std::size
     return "<task>";
 }
 
-// The task currently executing on this thread (for nested-task attachment). A
-// shared_ptr so a nested child can register the parent as its successor and keep it
-// alive until the child completes.
+// The task currently executing on this thread (for nested-task attachment). A `Task_ptr`
+// (intrusive strong ref) so a nested child can register the parent via `nested_parent` and
+// keep it alive until the child completes.
 inline thread_local Task_ptr current_task;
 
 // The running segment's implicit-scope child list: a coroutine frame installs its own
@@ -1285,7 +1294,13 @@ public:
     }
 
     // Re-arm so it can be triggered again - a reusable barrier / phase gate. Precondition:
-    // previously triggered and all waiters released (one use in flight).
+    // previously triggered and every waiter already returned from `sync()`/`co_await`.
+    // `reset()` locks the block, so clearing the completion flag cannot race a waiter's read
+    // (that race is real - it reproduces under TSan). Locking does NOT fix the lost-wakeup
+    // window: a waiter that has not yet observed the trigger when `reset()` runs misses this
+    // cycle and blocks until the next `trigger()`. If the waiters and the controller are not
+    // externally sequenced, prefer `ts::Frame_gate`, which hands each phase a fresh single-use
+    // signal and so has neither the race nor the lost wakeup.
     void reset()
     {
         control()->reset();

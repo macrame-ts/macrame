@@ -329,18 +329,22 @@ void stress_signal()
         assert(fired.load() == 1);
     }
 
-    // A resettable Signal re-armed between rounds, with concurrent waiters/triggerers.
-    for (int r = 0; r < 2000; ++r)
+    // A resettable Signal with a LIVE waiter overlapping reset() - the shape that exposed the
+    // reset()-vs-wait() data race on `completed` (review finding T2). reset() now takes the
+    // block mutex, so this must be TSan-clean; it is the regression guard for that fix. The
+    // prior version joined every waiter before reset(), so reset() never overlapped a live
+    // wait() - which is exactly why the race went unobserved.
     {
         ts::Signal sig;
+        std::atomic<bool> stop{ false };
+        std::jthread waiter([&] { while (!stop.load(std::memory_order_relaxed)) sig.sync(); });
+        for (int r = 0; r < 50000; ++r)
         {
-            std::vector<std::jthread> threads;
-            for (int w = 0; w < 3; ++w)
-                threads.emplace_back([&] { sig.sync(); });
-            sig.trigger();
-        }   // join
-        sig.reset();
-        assert(!sig.is_done());
+            sig.trigger();   // completed = true, under the block mutex
+            sig.reset();     // completed = false, now under the mutex too - no race with wait()
+        }
+        stop.store(true, std::memory_order_relaxed);
+        sig.trigger();       // let the waiter observe `stop` and exit its loop before the join
     }
 }
 
