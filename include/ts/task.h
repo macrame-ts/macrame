@@ -326,14 +326,13 @@ void pipe_enter_first(Task_control_block* blk, Task_ptr* record = nullptr);
 // single destructive move (ownership handoff / move-only R). At most one mover, and last.
 struct Task_control_block
 {
-    // NOTE: members are ordered for size, not logic - the sub-8-byte fields are clustered
-    // (below the 8-byte block) so they share padding instead of each punching a hole between
-    // pointers/atomics, and the two 32-bit atomics sit together to fill one 8-byte slot.
-    // sizeof shrank 336 -> 320 by this reorder alone, 320 -> 280 when the coroutine-first
-    // deletions dropped the `prerequisites` vector, 280 -> 264 when `successors` collapsed
-    // to the single `nested_parent` slot, and 264 -> 248 when the generation/reuse substrate
-    // was retired (`dispatch_arg` deleted, `run_state` reduced to the one-byte `body_claimed`
-    // claim) (clang-cl x64, TS_DEBUG_NAMES off). See docs/task-internals.md §2.
+    // Members are ordered for size: sub-8-byte fields clustered below the pointers (shared
+    // padding), the two 32-bit atomics packed into one 8-byte slot. Cache-wise that concentrates
+    // the whole dispatch-read set (`execute`/`result_ptr`/`pipe_links`/`flags`/`token`/`num_locks`)
+    // in line 0, so starting a task touches one line - good locality - but line 0 also holds the
+    // write-hot atomics (`refcount`, `num_locks`), so a handle copy/drop or an indegree decrement
+    // on another core can false-share it during a parallel graph run. That tradeoff is unmeasured;
+    // see docs/TODO.md 4.8 (cache-line alignment audit). See docs/task-internals.md §2.
 
     // Intrusive strong refcount (see `Task_ptr`) + `num_locks`. Two 32-bit atomics packed
     // adjacent = one 8-byte slot, no padding. `refcount` starts at 0 (first `Task_ptr` -> 1).
