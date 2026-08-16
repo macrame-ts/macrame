@@ -624,6 +624,16 @@ version the output extract, not the machine.**
     subscription-diff its planned upgrade for free. The bus's per-event cost
     target — a plain vector append — is the tier's headline benchmark. Same
     sequencing constraint as above: after the arena, not before.
+    **Measured before-baseline (2026-08, `--bench` "staged commands" group):**
+    stage SBO-fitting 30.3 ns/op, stage heap-spilling 47.3 ns/op (+17 for the
+    malloc/free pair), stage+apply homogeneous 27.7 ns/op and 8-type
+    round-robin 30.3 ns/op — apply is noise next to stage (predicted indirect
+    calls; a fixed rotation is BTB-friendly, so the true mispredict tax needs a
+    shuffled stream), and the uncontended slot mutex is roughly half the stage
+    cost. The `typed flr` series (bare `vector<uint64>` push, 0.3 ns/op) is a
+    compiler-vectorized lower bound, not a realistic tier estimate; the honest
+    tier target is the 1–2 ns unvectorized append — still ~15–30× under the
+    closure tier.
 - Arena-backed journal storage (alloc-audit 3.1 #7) and lock-free recorder
   slots (the per-slot mutex exists only for the dynamic stage-vs-cut race; it
   is uncontended in one-producer use and edge-ordered-away in graphs).
