@@ -1,5 +1,17 @@
 #pragma once
 
+// The access-safety harness: the runtime oracle that catches undeclared access to a `Guarded`
+// object. Every guarded method opens with `TS_CHECK_ACCESS()` (~1 ns), which checks `this`
+// against `Access_context` - the per-task permission set installed thread-locally while a task
+// runs (a small inline array + linear scan; a task touches a handful of objects). An entry may
+// carry a grant-window epoch (the object's `write_epoch` + the value captured at declaration),
+// so an inherited grant that outlived its window faults instead of silently racing, and a lock
+// `Rank` for objects awaited dynamically while another grant is held. Defines the `Access` enum
+// (`read_only`/`read_write`) shared across the library. All of it is gated by `TS_SAFETY_CHECKS`
+// (default on; compiled out for a shipping build) - and because that macro changes class
+// layouts, the header installs the one-value-per-binary link tripwire below, so a mixed-config
+// link fails loudly instead of corrupting silently. See docs/guide.md §3.2.
+
 #include "ts/named.h"
 #include "ts/rules.h"   // TS_RULE_ON: the rank bookkeeping below is `Rule::access_rank`'s
 
