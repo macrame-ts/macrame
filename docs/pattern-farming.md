@@ -860,6 +860,29 @@ split-on-steal and optional cross-frame affinity replay of split points. Also a
 `sample/coloring.cpp` (colored cloth solver, two islands, greedy coloring,
 determinism check).
 
+**Driver design note (2026-08-17, from the "4 bands = 4 sync points" question):**
+the global band barrier is sufficient, not necessary — the true requirement is
+pairwise (a band-k+1 constraint waits only for band-k constraints sharing its
+particles). Three escalation tiers, all preserving bit-determinism (≤1 writer
+per particle per band and the per-particle band order are untouched):
+(A) **persistent fan-out** — helpers launched once per node loop over
+iterations × bands with an atomic-countdown barrier between bands (~100 ns) in
+place of per-band fork/join (~µs + park/wake); the Jolt/PhysX persistent-solver
+shape, and the sample is likely already sync-bound at high worker counts
+(~1 µs of work per worker per band). (B) **island awareness** — islands run
+their band sequences independently (no cross-island sync); small islands are
+not colored at all: one task runs the whole island serially, zero internal
+sync, better convergence (Jolt's actual split). (C) **chunk-level conflict
+DAG** — bucket bands into tiles, precompute band-to-band chunk dependencies at
+coloring time, dispatch on indegree counters so a next-band chunk starts when
+*its* neighbor chunks finish (band tails overlap next-band heads; the global
+drain disappears) — the graph's dispatch mechanism in miniature, inside a
+node. Cost/benefit ranks A > B > C; C pays exactly in the short-band/many-
+worker regime the sample sits in. Driver shape:
+`parallel_for_colored(items, conflicts, body, {.islands, .grain})` — coloring +
+connected-components at setup, Tier A execution, B/C as measured escalations,
+band disjointness validated under `TS_SAFETY_CHECKS`.
+
 For an interacting loop (physics constraints, particle collisions, n-body): color
 the interaction graph so constraints sharing a body get different colors — all
 constraints of one color run in parallel with no write conflicts; independent
