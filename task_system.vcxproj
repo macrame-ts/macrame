@@ -37,6 +37,7 @@
     <ClCompile Include="src\worker_thread.cpp" />
     <ClCompile Include="benchmarks\benchmarks.cpp" />
     <ClCompile Include="sample\blackboard.cpp" />
+    <ClCompile Include="sample\coloring.cpp" />
     <ClCompile Include="sample\events.cpp" />
     <ClCompile Include="sample\game_frame.cpp" />
     <ClCompile Include="sample\physics.cpp" />

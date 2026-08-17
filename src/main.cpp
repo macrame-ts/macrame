@@ -18,6 +18,7 @@ void trace_game_frame(int frames, const char* DOT_path, const char* SVG_path);
 void run_physics_sample(int frames = 60);
 void run_blackboard_sample();
 void run_events_sample();
+void run_coloring_sample();
 void run_scope_access_sample();
 }
 
@@ -135,6 +136,7 @@ int main(int argc, char** argv)
     sample::run_physics_sample();
     sample::run_blackboard_sample();
     sample::run_events_sample();
+    sample::run_coloring_sample();
     sample::run_scope_access_sample();
     run_benchmarks();
 

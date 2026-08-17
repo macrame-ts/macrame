@@ -34,7 +34,8 @@ Legend: ✅ approved · ❌ rejected · 🕓 undecided (revisit) · 🔬 design 
 | 2.3 timeout/deadline | 🕓 undecided | Expanded with the partial-result / anytime-algorithm flavor per author. |
 | 2.4 linked / child tokens (+ reason) | 🕓 undecided | Rewritten for clarity per author. |
 | 2.5 structured task-group scope | 🕓 undecided | Terminology fixed (launch, not spawn). |
-| 2.59 delegate/event recipe | ✅ done | Shipped as `sample/events.cpp` (2026-08): four-tier ladder (intra-system / command / event board / batch+edge), determinism-checked. |
+| 2.59 delegate/event recipe | ✅ done | Shipped as `sample/events.cpp` (2026-08): four-tier ladder (intra-system / command / event board / batch+edge), determinism-checked. Superseded by the `ts::Event_bus` promotion (see re-raise item (c)). |
+| 2.39 colored `parallel_for` | ⭐ important | Author-flagged 2026-08-17; use-case modeled in `sample/coloring.cpp` (colored cloth solver). Library piece (`parallel_for_colored` driver) still open. |
 
 **Undecided items to revisit:** 2.3, 2.4, 2.5. *(kept current as we go — the "remind me later" list)*
 
@@ -854,6 +855,10 @@ split-on-steal and optional cross-frame affinity replay of split points. Also a
 `Parallel_options{.partitioner, .grain}`.
 
 #### 2.39 Islands + graph coloring for conflict-free parallel loops
+
+**Status: ⭐ important (author, 2026-08-17).** Use-case modeled in
+`sample/coloring.cpp` (colored cloth solver, two islands, greedy coloring,
+determinism check).
 
 For an interacting loop (physics constraints, particle collisions, n-body): color
 the interaction graph so constraints sharing a body get different colors — all
