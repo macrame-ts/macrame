@@ -83,7 +83,7 @@ Tests use the harness in `tests/harness.h`: `TS_CHECK(cond)` (non-fatal, prints 
   - `snake_case` for members/locals/functions; trailing `_` for private members.
   - Avoid single-character names except in very short scopes (a loop index, a one-line lambda parameter). A variable that lives across a whole function gets a real name (`graph`, not `g`; `world`, not `w`).
   - Lines up to 120 characters (`.clang-format` `ColumnLimit: 120`). Prefer one line where it fits — don't wrap at the old 100.
-  - Braces on `if`/`else`: a branch whose statement spans multiple lines is always braced; when one branch of an `if`/`else` is braced, brace both. A single-line branch with a single-line counterpart may omit braces.
+  - Braces on control statements (`if`/`else`, `for`, `while`): a branch or loop body whose statement spans multiple lines is always braced — including a nested loop and a call carrying a multi-line lambda (a nested-`for` stack is braced at every level whose body is multi-line). When one branch of an `if`/`else` is braced, brace both. Only a single-line body (with a single-line counterpart, for `if`/`else`) may omit braces.
   - **Acronyms/initialisms stay ALL-CAPS inside any identifier**: `write_DOT_dump`, `write_SVG`, `dur_P50`, `DOT_path`; a type starting with one is all-caps too (`DOT_writer`). Ordinary contractions are not acronyms and stay lowercase (`nav`, `xf`, `dur`, `min`), as do unit suffixes (`_us`, `_ms`). File names remain lower snake_case regardless (`dot_writer.h`).
   - Allman braces (opening `{` always on its own line, including namespaces, class/struct declarations, and lambdas):
     ```
