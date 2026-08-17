@@ -91,8 +91,8 @@ struct Rank
 //
 // An entry may carry a grant-validity source: a pointer to the object's
 // `write_epoch` plus the value captured when the grant was declared. The epoch has
-// seqlock-style parity - bumped at every write-grant acquire and release (and by +2 on a
-// graph write handoff) - so "epoch unchanged" means the grant window this entry was
+// seqlock-style parity - bumped at every write-grant acquire and release - so "epoch
+// unchanged" means the grant window this entry was
 // declared under is still the object's current one: a write holder's window is still open,
 // or no writer has acquired since a read grant was captured. A snapshot copy of the
 // context (`snapshot_access`, grant inheritance) carries the captured values with it, so

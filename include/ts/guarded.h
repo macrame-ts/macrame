@@ -1,5 +1,23 @@
 #pragma once
 
+// `Guarded<T>` - the access-controlled wrapper, the sanctioned way to share a thread-unsafe
+// `T` across threads. `obj.access(fn)` / `obj.async(fn)` run `fn(T&)` (write) or `fn(const T&)`
+// (read) on the object's per-object reader/writer serializer, the `Pipe`: concurrent readers,
+// one exclusive writer, FIFO admission, completion-driven (no caller ever blocks in the pipe).
+// The access mode is deduced from the functor's parameter const-ness (or the `ts::as_read_only`
+// / `as_read_write` tags), so the schedule is derived from what each body declares it touches.
+// The free `ts::access`/`ts::async(fn, a, b, ...)` verbs extend this to several objects at once
+// (one canonically-ordered acquisition, deadlock-free), and the same `Pipe` cascade also serves
+// the static graph's per-node access and the coroutine held-grant guards.
+//
+// Layout of this header: the `detail::` machinery comes first - the `Pipe` struct and its
+// cascade entry points, the compile-time access-mode deduction (`Function_traits`, the
+// rvalue-bindability probe, the accessor gates), and the pipe-task block builders
+// (`Piped_executable`) - then `class Guarded<T>` (the public type, near the middle of the file)
+// and the free verbs below it. User guide: docs/guide.md §5; pipe internals and the evolved
+// cascade: docs/pipe-rebase.md §0; the per-node turn mechanism and its hazards:
+// docs/task-internals.md §10.
+
 #include "ts/access.h"
 #include "ts/detail/pipe_link.h"
 #include "ts/scheduler.h"
@@ -85,9 +103,8 @@ struct Pipe
     // The block currently holding this pipe's write grant, null outside a write window
     // (docs/pipe-rebase.md §0.2). Always-on: behavior keys off it (`Deferred::commit`
     // applies inline when the caller is the holder), so it cannot live behind
-    // `TS_SAFETY_CHECKS`. Written under `mutex` at write admission/release (plus the
-    // graph's direct write handoff, which runs inside an exclusive write window); read
-    // lock-free by the ownership check. Identity only - never dereferenced.
+    // `TS_SAFETY_CHECKS`. Written under `mutex` at write admission/release; read lock-free
+    // by the ownership check. Identity only - never dereferenced.
     std::atomic<Task_control_block*> writer_owner{ nullptr };
 
     // Blocks until the pipe is fully drained and nothing is in flight. Teardown-only
