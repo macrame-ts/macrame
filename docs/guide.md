@@ -726,7 +726,11 @@ nodes with no explicit order run in declaration order, deterministically.
 
 `execute()` returns a `Task<void>` completion handle; runs are sequential
 (one at a time) and re-runnable, and a run allocates almost nothing (node
-state is built at compile time and re-armed per run).
+state is built at compile time and re-armed per run). The handle is
+`[[nodiscard]]`: it is the run's only completion signal, and the one-run rule
+means the next `execute()` is legal only after the previous run was awaited or
+`sync()`ed — a second call while a run is in flight is fatal in checked builds.
+A deliberate fire-and-forget spells its intent with `(void)`.
 
 Node capabilities:
 
