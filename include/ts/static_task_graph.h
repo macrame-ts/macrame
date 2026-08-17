@@ -35,14 +35,8 @@ class Static_task_graph;
 
 namespace tools
 {
-// Aggregated runtime trace (tools/graph_trace.h). Forward-declared so the public header
-// does not depend on the tools folder; only static_task_graph.cpp includes it.
-class Graph_trace;
+class Graph_trace; // Aggregated runtime trace.
 }
-
-// A node's identity is `ts::Named` (ts/named.h), the same type guarded objects and tasks
-// use: implicit from a literal - `g.add_node("propagation", fn, objs...)` - or
-// `g.add_node({}, fn, objs...)` to identify the node by its `add_node` call site.
 
 // Handle to a node in a `Static_task_graph`, returned by `add_node`. Identifies
 // the node for explicit ordering edges (`after`/`before`). It is build-time
@@ -64,20 +58,10 @@ public:
     // equivalently to `.after(a).after(b).after(c)` but without reading like a sequence.
     template<typename... Nodes>
         requires (sizeof...(Nodes) > 0) && (std::is_same_v<Nodes, Graph_node> && ...)
-    Graph_node& after(const Graph_node& prerequisite, const Nodes&... more)
-    {
-        after(prerequisite);
-        (after(more), ...);
-        return *this;
-    }
+    Graph_node& after(const Graph_node& prerequisite, const Nodes&... more);
     template<typename... Nodes>
         requires (sizeof...(Nodes) > 0) && (std::is_same_v<Nodes, Graph_node> && ...)
-    Graph_node& before(const Graph_node& successor, const Nodes&... more)
-    {
-        before(successor);
-        (before(more), ...);
-        return *this;
-    }
+    Graph_node& before(const Graph_node& successor, const Nodes&... more);
 
     // Queue priority for this node when it is dispatched each run.
     Graph_node& priority(Priority p);
@@ -88,8 +72,6 @@ public:
     // async), it defers to the queue. Bounded by the shared inline trampoline. Trade-offs:
     // it runs on a nondeterministic thread and must not block.
     Graph_node& set_inline();
-
-    int index() const noexcept { return index_; }
 
 private:
     friend class Static_task_graph;
@@ -103,17 +85,37 @@ private:
     int index_ = -1;
 };
 
-// Per-run options for `Static_task_graph::execute` (an aggregate, house style alongside
-// `Launch_options` / `Access_options`; spelled `execute({.token = t})` at call sites).
-// Namespace-scope rather than nested so its default member initializers are usable in the
-// `execute(Execution_options = {})` default argument - a nested type's initializers are not
-// available while the enclosing class is still being defined. `Static_task_graph` re-exports
-// the name, so `Static_task_graph::Execution_options` keeps working.
+template<typename... Nodes>
+    requires (sizeof...(Nodes) > 0) && (std::is_same_v<Nodes, Graph_node> && ...)
+Graph_node& Graph_node::after(const Graph_node& prerequisite, const Nodes&... more)
+{
+    after(prerequisite);
+    (after(more), ...);
+    return *this;
+}
+
+template<typename... Nodes>
+    requires (sizeof...(Nodes) > 0) && (std::is_same_v<Nodes, Graph_node> && ...)
+Graph_node& Graph_node::before(const Graph_node& successor, const Nodes&... more)
+{
+    before(successor);
+    (before(more), ...);
+    return *this;
+}
+
+// Per-run options for `Static_task_graph::execute` (spelled `execute({.token = t})` at call sites).
 struct Execution_options
 {
     Cancellation_token token;
-    // Opt out of the nested-run defaults: a detached run neither joins the calling task's
-    // scope nor receives any lend. Ignored outside a task. See `execute`.
+    // Only meaningful for a nested run - `execute()` called from inside a task (see
+    // `execute`). By default such a run is tied to its caller: the caller cannot finish
+    // until the run does, and objects the caller already holds are lent to it. `detach =
+    // true` cuts both ties: the run may outlive its caller, and it takes every object
+    // turn itself, queueing behind the caller's holds like any unrelated work. That makes
+    // it dangerous when the graph touches an object its caller holds: the run cannot start
+    // those nodes until the caller releases, so the caller awaiting the detached run
+    // deadlocks (it waits on work that waits on it). Use it only for fire-and-forget runs
+    // over objects the caller does not hold. Ignored outside a task.
     bool detach = false;
 };
 
@@ -153,46 +155,12 @@ public:
     // classification does not compile. Returns a `Graph_node` ordering handle.
     template<typename Fn, typename... Objs>
         requires (detail::Object_arg<Objs> && ...)
-    Graph_node add_node(Named name, Fn&& fn, Objs&&... objs)
-    {
-        Node node;
-        constexpr bool any_tagged = (detail::is_access_arg_v<Objs> || ...);
-        if constexpr (any_tagged)
-        {
-            static_assert((detail::is_access_arg_v<Objs> && ...),
-                "add_node: don't mix tagged (ts::as_read_only/as_read_write) and bare Guarded arguments "
-                "-- tag EVERY object argument, or tag none");
-            fill_node_tagged(node, std::index_sequence_for<Objs...>{},
-                std::forward<Fn>(fn), std::forward<Objs>(objs)...);
-        }
-        else if constexpr (detail::introspectable_v<Fn>)
-        {
-            using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
-            static_assert(std::tuple_size_v<Args> == sizeof...(Objs),
-                "node functor arity must match the number of Guarded arguments");
-            fill_node<Args>(node, std::index_sequence_for<Objs...>{},
-                std::forward<Fn>(fn), objs...);
-        }
-        else
-        {
-            fill_node_probed(node, std::index_sequence_for<Objs...>{},
-                std::forward<Fn>(fn), objs...);
-        }
-
-        node.name = name;
-        int index = static_cast<int>(nodes_.size());
-        nodes_.push_back(std::move(node));
-        compiled_ = false;
-
-        return Graph_node(this, index);
-    }
+    Graph_node add_node(Named name, Fn&& fn, Objs&&... objs);
 
     // Resolve access conflicts + explicit edges into a DAG; detect cycles. A non-null
     // `DOT_path` also writes the compiled structure as a Graphviz DOT file (see
     // `tools/dot_writer.h` for the style scheme); no-op when `TS_PROFILING` is 0.
     void compile(const char* DOT_path = nullptr);
-
-    using Execution_options = ts::Execution_options;
 
     // Run the compiled graph; returns a completion handle. Re-runnable. If the token is
     // cancelled, not-yet-started nodes are skipped and the completion is cancelled
@@ -246,17 +214,27 @@ public:
 private:
     struct Node
     {
-        std::move_only_function<void()> run;
-        std::vector<std::pair<const void*, Access>> access;
-        std::vector<detail::Pipe*> pipes;   // the pipes of the objects this node accesses
-        std::vector<int> pipe_indices;      // those pipes as indices into distinct_pipes_ (deduped, ASCENDING = canonical acquire order)
-        std::vector<Access> pipe_modes;     // this node's mode per pipe_indices entry (write wins on a dup)
-        std::vector<int> successors;
-        std::vector<int> ready_buf;             // scratch: successors made ready by this node's completion (reused; single completion/run)
-        int indegree = 0;
+        // --- captured from `add_node` (the user's declaration) ---------------------------
         Named name{ nullptr };                  // literal or `add_node` call site; empty if unnamed
-        Priority priority = Priority::normal;   // applied to `block` at compile()
+        std::move_only_function<void()> run;    // the body, wrapped with its access scope
+        // Per declared object, in argument order: (instance, mode). The instance is the
+        // type-erased address of the `Guarded`'s stored `T` - the same identity the harness
+        // (`Access_context`) keys by; `const void*` because the graph is type-erased over `T`.
+        // Drives conflict-edge derivation and the body's access context.
+        std::vector<std::pair<const void*, Access>> access;
+        // The declared objects' pipes, parallel to `access` (argument order, duplicates
+        // possible). The raw input `compile()` derives the canonical form below from; kept
+        // because `compile()` may run again after further `add_node`s.
+        std::vector<detail::Pipe*> pipes;
+        Priority priority = Priority::normal;   // applied to `block` at each run's re-arm
         bool inline_dispatch = false;           // run on the settling thread if its acquires all succeed synchronously
+
+        // --- derived by `compile()` / used by the run machinery --------------------------
+        std::vector<int> pipe_indices;      // `pipes` deduped as indices into distinct_pipes_ (ascending = canonical acquire order)
+        std::vector<Access> pipe_modes;     // this node's effective mode per pipe_indices entry (write wins on a dup)
+        std::vector<int> successors;
+        int indegree = 0;
+        std::vector<int> ready_buf;         // scratch: successors made ready by this node's completion (reused; single completion/run)
         // The node's reusable task block (a `Graph_node_block`, allocated once in
         // compile() and re-armed each run). Its `execute`/`on_complete` are wired so the
         // body may spawn nested tasks and the graph post-logic fires at completion (§7.1).
@@ -271,89 +249,21 @@ private:
     // harness. The deduced / probed / tagged wrappers below differ only in the `Modes` source,
     // so `compile()` derives identical edges and exclusion for all three.
     template<Access... Modes, std::size_t... I, typename Fn, typename... Ts>
-    void fill_node_modes(Node& node, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... access)
-    {
-        auto instances = std::make_tuple(&access.instance_...);
-
-        // A task-returning body must be exactly `Task<void>` - that is the coroutine-node
-        // shape, gated on below via `add_nested` so the node completes when the frame does. A
-        // `Task<R>` body would take the plain branch: the returned task discarded, the node
-        // completing (and releasing its grants) while the eager frame still runs - a stale
-        // inherited grant. Nodes carry no results by design; typed chaining is docs/TODO.md 2.1.
-        using Body_result = decltype(fn(detail::mode_ref<Modes>(std::get<I>(instances))...));
-        static_assert(!detail::is_task_v<Body_result> || std::is_same_v<Body_result, Task<void>>,
-            "a coroutine node body must return ts::Task<void>; a Task<R> result would be "
-            "discarded and the frame would outrun the node's grants (typed node results are "
-            "future work - docs/TODO.md 2.1)");
-
-        node.access = {
-            std::pair<const void*, Access>{
-                static_cast<const void*>(std::get<I>(instances)), Modes
-            }...
-        };
-
-        node.pipes = { (&access.pipe_)... };
-
-        auto epochs = std::make_tuple(detail::pipe_epoch(access.pipe_)...);
-        auto ranks = std::make_tuple(detail::pipe_rank(access.pipe_)...);
-        node.run = [fn = std::forward<Fn>(fn), instances, epochs, ranks]() mutable
-        {
-            Access_context ctx;
-            (ctx.add(static_cast<const void*>(std::get<I>(instances)), Modes,
-                     std::get<I>(epochs), std::get<I>(ranks)), ...);
-            Access_scope scope(ctx);
-            using Body_result = decltype(fn(detail::mode_ref<Modes>(std::get<I>(instances))...));
-            if constexpr (std::is_same_v<Body_result, Task<void>>)
-            {
-                // A coroutine node body (docs/coroutine-first.md §4.4): the returned frame's
-                // task gates the node's completion via the nested mechanism - the node
-                // completes (releasing grants and successors) when the frame completes, not
-                // at the first suspension. The frame inherits the node's grant snapshot at
-                // creation, so resumed segments keep the declared accesses.
-                detail::add_nested(detail::core_of(fn(detail::mode_ref<Modes>(std::get<I>(instances))...)));
-            }
-            else
-            {
-                fn(detail::mode_ref<Modes>(std::get<I>(instances))...);
-            }
-        };
-    }
+    void fill_node_modes(Node& node, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... access);
 
     // Deduced (bare args, introspectable functor): modes from parameter const-ness; by-value /
     // rvalue-ref resource parameters rejected.
     template<typename Args, std::size_t... I, typename Fn, typename... Ts>
-    void fill_node(Node& node, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... access)
-    {
-        static_assert((std::is_lvalue_reference_v<std::tuple_element_t<I, Args>> && ...),
-            "a guarded-resource parameter must be `T&` or `const T&`: taking it by value copies "
-            "the resource (writes hit the copy and are silently discarded), and `T&&` cannot "
-            "bind the stored instance");
-        fill_node_modes<detail::async_mode_of<std::tuple_element_t<I, Args>>()...>(
-            node, seq, std::forward<Fn>(fn), access...);
-    }
+    void fill_node(Node& node, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... access);
 
     // Probed (bare args, generic functor): modes from the per-position rvalue probe -
     // `const auto&`/`auto&&` = read, `auto&` = write. No tags needed.
     template<std::size_t... I, typename Fn, typename... Ts>
-    void fill_node_probed(Node& node, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... access)
-    {
-        static_assert(std::invocable<Fn, Ts&...>,
-            "node functor parameters must match the Guarded arguments "
-            "(same arity, each taken by reference)");
-        // Guard the forward on the same condition: a failed assert does not stop
-        // instantiation, so without it `fill_node_modes` re-errors past the message.
-        if constexpr (std::invocable<Fn, Ts&...>)
-            fill_node_modes<detail::probed_mode<Fn, I, Ts...>()...>(
-                node, seq, std::forward<Fn>(fn), access...);
-    }
+    void fill_node_probed(Node& node, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... access);
 
     // Tagged (`ts::as_read_only`/`as_read_write` on every arg): modes from the tags.
     template<std::size_t... I, typename Fn, typename... Objs>
-    void fill_node_tagged(Node& node, std::index_sequence<I...> seq, Fn&& fn, Objs&&... objs)
-    {
-        fill_node_modes<std::remove_cvref_t<Objs>::mode...>(
-            node, seq, std::forward<Fn>(fn), *objs.obj...);
-    }
+    void fill_node_tagged(Node& node, std::index_sequence<I...> seq, Fn&& fn, Objs&&... objs);
 
     void add_edge(int prerequisite, int successor);
     static bool conflicts(const Node& a, const Node& b);
@@ -392,16 +302,22 @@ private:
 
     std::vector<Node> nodes_;
     std::vector<std::pair<int, int>> explicit_edges_;
-    std::vector<detail::Pipe*> distinct_pipes_;        // every object the graph touches (address-sorted)
-    std::vector<const void*> pipe_instances_;          // the guarded instance behind each distinct pipe
-    std::vector<Access> pipe_modes_;                   // strongest mode ANY node uses on each distinct pipe
+    std::vector<detail::Pipe*> distinct_pipes_;   // every pipe the graph touches (address-sorted; index = canonical id)
+    // Parallel to `distinct_pipes_`: per pipe, the type-erased address of the object's stored
+    // `T` (the identity `Access_context` keys by - the graph is type-erased over `T`, hence
+    // `const void*`) and the strongest mode any node uses on it. Consumed by the nested-run
+    // lend decision (`bind_links_for_run`): a lend requires the caller's grant to cover the
+    // strongest access this graph performs on the object (a read grant cannot cover a writer).
+    std::vector<const void*> pipe_instances_;
+    std::vector<Access> pipe_modes_;
     // Every node's pipe links, contiguous per node: bound at compile() (`block->pipe_links`
     // points into this), re-armed each execute() - runs stay allocation-free.
     std::unique_ptr<detail::Pipe_link[]> node_links_;
     // Nested-run lend state (see `execute`). One flag per `distinct_pipes_` entry, recomputed
-    // per run; `links_lent_` records whether the link slab is currently bound to a lent
-    // subset, so the next plain run knows it must rebind the full set back.
-    std::vector<char> lent_;
+    // per run (`std::uint8_t` because these are boolean flags and `vector<bool>` is a packed
+    // proxy, not addressable bytes); `links_lent_` records whether the link slab is currently
+    // bound to a lent subset, so the next plain run knows it must rebind the full set back.
+    std::vector<std::uint8_t> lent_;
     bool links_lent_ = false;
     std::unique_ptr<Run_state> run_;                   // reused across execute() runs (one run at a time)
     bool compiled_ = false;
@@ -409,5 +325,123 @@ private:
     // needs no `TS_PROFILING` blocks; without profiling it is stored but never read.
     tools::Graph_trace* trace_ = nullptr;
 };
+
+// --- member template definitions ------------------------------------------------------------
+
+template<typename Fn, typename... Objs>
+    requires (detail::Object_arg<Objs> && ...)
+Graph_node Static_task_graph::add_node(Named name, Fn&& fn, Objs&&... objs)
+{
+    Node node;
+    constexpr bool any_tagged = (detail::is_access_arg_v<Objs> || ...);
+    if constexpr (any_tagged)
+    {
+        static_assert((detail::is_access_arg_v<Objs> && ...),
+            "add_node: don't mix tagged (ts::as_read_only/as_read_write) and bare Guarded arguments "
+            "-- tag EVERY object argument, or tag none");
+        fill_node_tagged(node, std::index_sequence_for<Objs...>{},
+            std::forward<Fn>(fn), std::forward<Objs>(objs)...);
+    }
+    else if constexpr (detail::introspectable_v<Fn>)
+    {
+        using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
+        static_assert(std::tuple_size_v<Args> == sizeof...(Objs),
+            "node functor arity must match the number of Guarded arguments");
+        fill_node<Args>(node, std::index_sequence_for<Objs...>{},
+            std::forward<Fn>(fn), objs...);
+    }
+    else
+    {
+        fill_node_probed(node, std::index_sequence_for<Objs...>{},
+            std::forward<Fn>(fn), objs...);
+    }
+
+    node.name = name;
+    int index = static_cast<int>(nodes_.size());
+    nodes_.push_back(std::move(node));
+    compiled_ = false;
+
+    return Graph_node(this, index);
+}
+
+template<Access... Modes, std::size_t... I, typename Fn, typename... Ts>
+void Static_task_graph::fill_node_modes(Node& node, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... access)
+{
+    auto instances = std::make_tuple(&access.instance_...);
+
+    // A task-returning body must be exactly `Task<void>` - that is the coroutine-node
+    // shape, gated on below via `add_nested` so the node completes when the frame does. A
+    // `Task<R>` body would take the plain branch: the returned task discarded, the node
+    // completing (and releasing its grants) while the eager frame still runs - a stale
+    // inherited grant. Nodes carry no results by design; typed chaining is docs/TODO.md 2.1.
+    using Body_result = decltype(fn(detail::mode_ref<Modes>(std::get<I>(instances))...));
+    static_assert(!detail::is_task_v<Body_result> || std::is_same_v<Body_result, Task<void>>,
+        "a coroutine node body must return ts::Task<void>; a Task<R> result would be "
+        "discarded and the frame would outrun the node's grants (typed node results are "
+        "future work - docs/TODO.md 2.1)");
+
+    node.access = {
+        std::pair<const void*, Access>{
+            static_cast<const void*>(std::get<I>(instances)), Modes
+        }...
+    };
+
+    node.pipes = { (&access.pipe_)... };
+
+    auto epochs = std::make_tuple(detail::pipe_epoch(access.pipe_)...);
+    auto ranks = std::make_tuple(detail::pipe_rank(access.pipe_)...);
+    node.run = [fn = std::forward<Fn>(fn), instances, epochs, ranks]() mutable
+    {
+        Access_context ctx;
+        (ctx.add(static_cast<const void*>(std::get<I>(instances)), Modes,
+                 std::get<I>(epochs), std::get<I>(ranks)), ...);
+        Access_scope scope(ctx);
+        using Body_result = decltype(fn(detail::mode_ref<Modes>(std::get<I>(instances))...));
+        if constexpr (std::is_same_v<Body_result, Task<void>>)
+        {
+            // A coroutine node body (docs/coroutine-first.md §4.4): the returned frame's
+            // task gates the node's completion via the nested mechanism - the node
+            // completes (releasing grants and successors) when the frame completes, not
+            // at the first suspension. The frame inherits the node's grant snapshot at
+            // creation, so resumed segments keep the declared accesses.
+            detail::add_nested(detail::core_of(fn(detail::mode_ref<Modes>(std::get<I>(instances))...)));
+        }
+        else
+        {
+            fn(detail::mode_ref<Modes>(std::get<I>(instances))...);
+        }
+    };
+}
+
+template<typename Args, std::size_t... I, typename Fn, typename... Ts>
+void Static_task_graph::fill_node(Node& node, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... access)
+{
+    static_assert((std::is_lvalue_reference_v<std::tuple_element_t<I, Args>> && ...),
+        "a guarded-resource parameter must be `T&` or `const T&`: taking it by value copies "
+        "the resource (writes hit the copy and are silently discarded), and `T&&` cannot "
+        "bind the stored instance");
+    fill_node_modes<detail::async_mode_of<std::tuple_element_t<I, Args>>()...>(
+        node, seq, std::forward<Fn>(fn), access...);
+}
+
+template<std::size_t... I, typename Fn, typename... Ts>
+void Static_task_graph::fill_node_probed(Node& node, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... access)
+{
+    static_assert(std::invocable<Fn, Ts&...>,
+        "node functor parameters must match the Guarded arguments "
+        "(same arity, each taken by reference)");
+    // Guard the forward on the same condition: a failed assert does not stop
+    // instantiation, so without it `fill_node_modes` re-errors past the message.
+    if constexpr (std::invocable<Fn, Ts&...>)
+        fill_node_modes<detail::probed_mode<Fn, I, Ts...>()...>(
+            node, seq, std::forward<Fn>(fn), access...);
+}
+
+template<std::size_t... I, typename Fn, typename... Objs>
+void Static_task_graph::fill_node_tagged(Node& node, std::index_sequence<I...> seq, Fn&& fn, Objs&&... objs)
+{
+    fill_node_modes<std::remove_cvref_t<Objs>::mode...>(
+        node, seq, std::forward<Fn>(fn), *objs.obj...);
+}
 
 } // namespace ts

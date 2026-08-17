@@ -494,7 +494,7 @@ void Static_task_graph::bind_links_for_run(bool detach)
     bool any = false;
     for (std::size_t i = 0; i < distinct_pipes_.size(); ++i)
     {
-        char lend = 0;
+        std::uint8_t lend = 0;
         if (ctx != nullptr && pipe_instances_[i] != nullptr)
         {
             if (ctx->grants(pipe_instances_[i], pipe_modes_[i]))
