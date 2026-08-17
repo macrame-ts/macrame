@@ -443,8 +443,13 @@ IDs — when an item is done, mark it, don't renumber.
        `global_scheduler()` per dispatch ~11/node. Targets 1–3 could reclaim ~half the per-node
        machinery for the functor-node case without touching the async/coroutine paths. Full
        report: [graph-regression-callgrind.md](graph-regression-callgrind.md).
-   17. `[ ]` **(P2, author 2026-08 — raise at the static-graph review) `execute()` in a loop
-       without `sync()` — API reconsideration.** `graph.execute()` returns a `Task<void>` the
+   17. `[x]` **(P2, author 2026-08 — DONE at the C4 review, 2026-08-17) `execute()` in a loop
+       without `sync()` — API reconsideration.** Resolved as `[[nodiscard]]` on `execute()`
+       (the handle is the run's only completion signal and the one-run rule's sequencing
+       device; deliberate fire-and-forget spells `(void)`) plus a hardened in-flight fatal
+       (the guard now also requires the previous `done` handle settled - `remaining_nodes`
+       alone had a race window at the settle boundary). Implicit join was rejected (would
+       block inside a task); run overlap remains 2.3. Original question: `graph.execute()` returns a `Task<void>` the
        caller is expected to `sync()`/`co_await`; one run per instance is the rule (a second
        `execute()` while a run is in flight is fatal, `TS_SAFETY_CHECKS`, the `Run_state`-corruption
        guard). So `for (…) graph.execute();` with no join between iterations trips that fatal in
