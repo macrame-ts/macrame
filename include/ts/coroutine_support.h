@@ -19,6 +19,7 @@
 #include "ts/detail/suspension_registry.h"   // tier 3 of the deadlock report
 
 #include <atomic>
+#include <concepts>
 #include <coroutine>
 #include <optional>
 #include <tuple>
@@ -362,18 +363,18 @@ Optional_awaiter<R> operator co_await(Optional_awaitable<R> awaitable)
     return Optional_awaiter<R>(std::move(awaitable.core));
 }
 
-// The shared (result-agnostic) half of the fused promise. The block is the first member,
-// so `Task_control_block* == promise*` (the `Executable` pattern) and the block's `destroy`
-// destroys the whole coroutine frame. `num_locks` is armed to `execution_flag + 1`
+// The shared (result-agnostic) half of the fused promise. The block is a base subobject
+// (the `Executable` pattern): a `Task_control_block*` recovers the promise with a
+// `static_cast`, and the block's `destroy` destroys the whole coroutine frame. Derives
+// from `Task_control_block` directly, not `Block_backed` - the frame, not the promise, is
+// what `destroy` must tear down. `num_locks` is armed to `execution_flag + 1`
 // (executing + the body self-lock) in the constructor, so `detail::add_nested` can attach a
 // gating child (a nested graph run) to this coroutine across all its segments; the final
 // awaiter drops the self-lock - the task completes at `co_return` when no children are
 // pending, else when the last child settles.
 template<typename Derived>
-struct Promise_base
+struct Promise_base : Task_control_block
 {
-    Task_control_block core;   // MUST be first: block pointer doubles as promise pointer
-
     // The ambient access grant at creation (empty if created outside any task), re-installed
     // around each resumed segment.
     std::optional<Access_context> access_ctx_ = snapshot_access();
@@ -396,27 +397,27 @@ struct Promise_base
 
     Promise_base()
     {
-        core.destroy = &destroy_frame;
+        destroy = &destroy_frame;
         // The "running" self-reference: keeps the frame alive while the body runs even if
         // every external handle is dropped (fire-and-forget). Released by the final awaiter.
-        core.refcount.store(1, std::memory_order_relaxed);
+        refcount.store(1, std::memory_order_relaxed);
         // Executing + body self-lock: nested children add completion locks (task.h §4 regime).
-        core.num_locks.store(Task_control_block::execution_flag + 1, std::memory_order_relaxed);
-        core.flags.priority = priority_;
-        inherit_task_name(core);   // before `enter_segment` installs this frame as current
+        num_locks.store(Task_control_block::execution_flag + 1, std::memory_order_relaxed);
+        flags.priority = priority_;
+        inherit_task_name(*this);   // before `enter_segment` installs this frame as current
         enter_segment();   // the eager body runs on the caller right after the promise ctor
     }
 
     static void destroy_frame(Task_control_block* c)
     {
-        auto& promise = *reinterpret_cast<Derived*>(c);
+        auto& promise = *static_cast<Derived*>(c);
         std::coroutine_handle<Derived>::from_promise(promise).destroy();
     }
 
     void enter_segment()
     {
         prev_task_ = std::move(current_task);
-        current_task = Task_ptr(&core);
+        current_task = Task_ptr(this);
         prev_scope_ = current_scope_children;
         current_scope_children = &scope_children_;
         relaxed_.enter();
@@ -444,7 +445,7 @@ struct Promise_base
         {
             auto& promise = h.promise();
             promise.exit_segment();
-            Task_control_block* c = &promise.core;
+            Task_control_block* c = &promise;
             if (c->num_locks.fetch_sub(1, std::memory_order_acq_rel) == Task_control_block::execution_flag + 1)
                 c->complete();
             intrusive_dec(c);   // may destroy the frame; touch nothing afterwards
@@ -467,12 +468,12 @@ struct Task_promise : Promise_base<Task_promise<R>>
 {
     Result_storage<R> storage;
 
-    Task<R> get_return_object() { return Task<R>(Task_ptr(&this->core)); }
+    Task<R> get_return_object() { return Task<R>(Task_ptr(this)); }
 
     void return_value(R value)
     {
         storage.result.emplace(std::move(value));
-        this->core.result_ptr = &*storage.result;
+        this->result_ptr = &*storage.result;
         // Completion happens in the final awaiter (after the self-lock drop), uniform with
         // the nested-children gate.
     }
@@ -481,7 +482,7 @@ struct Task_promise : Promise_base<Task_promise<R>>
 template<>
 struct Task_promise<void> : Promise_base<Task_promise<void>>
 {
-    Task<void> get_return_object() { return Task<void>(Task_ptr(&core)); }
+    Task<void> get_return_object() { return Task<void>(Task_ptr(this)); }
 
     void return_void() {}   // completion happens in the final awaiter
 };
@@ -731,11 +732,13 @@ struct Access_awaiter
     }
 
 private:
+    // Our promise carries the block as a base subobject; a foreign promise has no block,
+    // so the owner falls back to the ambient task.
     template<typename P>
     static Task_control_block* owner_of(std::coroutine_handle<P> h) noexcept
     {
-        if constexpr (requires { h.promise().core; })
-            return &h.promise().core;
+        if constexpr (std::derived_from<P, Task_control_block>)
+            return static_cast<Task_control_block*>(&h.promise());
         else
             return current_task.get();
     }
@@ -891,11 +894,12 @@ private:
 #endif
     }
 
+    // Same block-backed-promise probe as the single-object awaiter's `owner_of`.
     template<typename P>
     static Task_control_block* owner_of(std::coroutine_handle<P> h) noexcept
     {
-        if constexpr (requires { h.promise().core; })
-            return &h.promise().core;
+        if constexpr (std::derived_from<P, Task_control_block>)
+            return static_cast<Task_control_block*>(&h.promise());
         else
             return current_task.get();
     }

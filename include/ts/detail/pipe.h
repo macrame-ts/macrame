@@ -172,17 +172,16 @@ void circular_wait_clear(const void* ticket) noexcept;
 #endif
 
 // An executable pipe task: the `Executable` wrapper plus its embedded per-pipe links -
-// one allocation for block + result + body + links (docs/pipe-rebase.md §0.2). `exec` is
-// the first member and `Executable::core` its first, so the intrusive handle aliases the
-// whole wrapper as usual.
+// one allocation for block + result + body + links (docs/pipe-rebase.md §0.2). Derives
+// from `Executable` (itself block-backed), so the intrusive handle's `Task_control_block*`
+// recovers the whole wrapper with a `static_cast` as usual.
 template<typename Body, typename R, std::size_t N>
-struct Piped_executable
+struct Piped_executable : Executable<Body, R>
 {
-    Executable<Body, R> exec;
     Pipe_link links[N];
 
     explicit Piped_executable(Body b)
-        : exec(std::move(b))
+        : Executable<Body, R>(std::move(b))
     {}
 };
 
@@ -196,13 +195,14 @@ Task_ptr make_piped_executable(Body&& body, Cancellation_token token)
     using Exec = Executable<std::decay_t<Body>, R>;
     using Wrapper = Piped_executable<std::decay_t<Body>, R, N>;
     auto* w = new Wrapper(std::forward<Body>(body));
-    Task_control_block& core = w->exec.core;
-    core.destroy = [](Task_control_block* c) { delete reinterpret_cast<Wrapper*>(c); };
-    core.execute = &Exec::run;
-    core.on_complete = &pipe_links_on_complete;
-    core.token = std::move(token);
-    core.pipe_links = w->links;
-    return Task_ptr(&core);   // refcount 0 -> 1, owns the wrapper
+    // Not `install_destroy`: that would delete the `Executable` layer - the deleted type
+    // must be the most-derived wrapper, links included.
+    w->destroy = [](Task_control_block* c) { delete static_cast<Wrapper*>(c); };
+    w->execute = &Exec::run;
+    w->on_complete = &pipe_links_on_complete;
+    w->token = std::move(token);
+    w->pipe_links = w->links;
+    return Task_ptr(w);   // refcount 0 -> 1, owns the wrapper
 }
 
 // Bind the block's next link to (pipe, mode). Canonical order is the caller's contract:

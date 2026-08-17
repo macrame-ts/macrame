@@ -326,8 +326,9 @@ void pipe_enter_first(Task_control_block* blk, Task_ptr* record = nullptr);
 // The refcounted completion/dependency core behind a `Task<R>` handle. fully
 // monomorphic - parameterized on nothing. The result type is erased behind a
 // `void* result_ptr` (nullptr => no result: `void`/bodyless); a body, when present,
-// hangs off an `Executable<Body,R>` wrapper (or a coroutine promise frame) that has
-// `core` as its first member so a `Task_control_block*` aliases it (see docs/task-internals.md §2).
+// hangs off an `Executable<Body,R>` wrapper (or a coroutine promise frame) that derives
+// from the block, so a `Task_control_block*` recovers it with a `static_cast` (see
+// docs/task-internals.md §2).
 // Continuations receive `(result_ptr-or-nullptr, cancelled)` so they propagate a
 // cancellation to their own subsequent. `settle()` is idempotent - the first settle
 // wins (so a bodyless block can be triggered; see `Signal`). Result-consumption contract:
@@ -727,6 +728,21 @@ inline void intrusive_dec(Task_control_block* p) noexcept
     q.draining = false;
 }
 
+// CRTP base for a wrapper that embeds the block as a base subobject (`Executable`, the
+// graph's node block): recovery from the type-erased `Task_control_block*` is a
+// `static_cast` down to the derived wrapper - standard-defined for single non-virtual
+// inheritance, unlike the first-member `reinterpret_cast` idiom this replaces (only
+// conditionally supported for these non-standard-layout types). `from` is the recovery
+// spelling; `install_destroy` wires the matching plain-`delete` thunk. A wrapper with its
+// own destroy policy (a coroutine frame, a most-derived state deleted through a shared
+// base) derives from `Task_control_block` directly and spells its own `static_cast`.
+template<typename Derived>
+struct Block_backed : Task_control_block
+{
+    static Derived* from(Task_control_block* c) noexcept { return static_cast<Derived*>(c); }
+    void install_destroy() noexcept { destroy = [](Task_control_block* c) { delete static_cast<Derived*>(c); }; }
+};
+
 // A bare block (no result, no body - `Signal`): one allocation, destroyed as a plain
 // `Task_control_block` when its refcount hits 0.
 inline Task_ptr make_bare_block()
@@ -838,15 +854,14 @@ inline void Task_control_block::sync_wait(const Task_ptr& blk)
 template<typename R> struct Result_storage { std::optional<R> result; };
 template<> struct Result_storage<void> {};
 
-// An executable task: the monomorphic block (first member, so a `Task_control_block*`
-// aliases / `reinterpret_cast`s back to it) + result storage + the body + a token.
-// `run` is wired into `core.execute`; the scheduler/pipe invokes it via
-// `block->execute(block)`. The body lives here, its type erased behind the `execute`
-// function pointer, so the block and everything downstream stay monomorphic.
+// An executable task: the monomorphic block as a base subobject (`Block_backed`, so a
+// `Task_control_block*` recovers the wrapper with a `static_cast`) + result storage +
+// the body + a token. `run` is wired into the block's `execute`; the scheduler/pipe
+// invokes it via `block->execute(block)`. The body lives here, its type erased behind the
+// `execute` function pointer, so the block and everything downstream stay monomorphic.
 template<typename Body, typename R>
-struct Executable
+struct Executable : Block_backed<Executable<Body, R>>
 {
-    Task_control_block core;   // MUST be first
     Result_storage<R> storage;   // empty for void
     // The body lives in a union so `~Executable` does not auto-destroy it (TODO 7.3). The block
     // outlives the task's settle - its last ref is dropped on a worker, so a plain member would
@@ -889,7 +904,7 @@ struct Executable
             return;   // machinery bug (fatal under TS_SAFETY_CHECKS); skip in shipping
                       // - the losing dispatch never ran the body, so it must not destroy it.
 
-        auto* self = reinterpret_cast<Executable*>(c.get());
+        auto* self = Executable::from(c.get());
         if (c->token.is_cancel_requested() || c->prereq_cancelled.load(std::memory_order_acquire))
         {
             self->destroy_body();   // never invoked -> destroy before settle, no result to consume
@@ -942,10 +957,10 @@ Task_ptr make_executable(Body&& body, Cancellation_token token)
 {
     using Exec = Executable<std::decay_t<Body>, R>;
     auto* exec = new Exec(std::forward<Body>(body));
-    exec->core.destroy = [](Task_control_block* c) { delete reinterpret_cast<Exec*>(c); };
-    exec->core.execute = &Exec::run;
-    exec->core.token = std::move(token);
-    return Task_ptr(&exec->core);   // refcount 0 -> 1, owns the wrapper
+    exec->install_destroy();
+    exec->execute = &Exec::run;
+    exec->token = std::move(token);
+    return Task_ptr(exec);   // refcount 0 -> 1, owns the wrapper
 }
 
 // A task body may opt into cooperative cancellation by declaring a trailing

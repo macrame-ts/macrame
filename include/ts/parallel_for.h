@@ -69,15 +69,17 @@ inline int claim_grain(Balance balance, int size, int claimed, int concurrency)
     return g < 1 ? 1 : g;
 }
 
-// State shared by every parallel loop flavor: the completion block the handle aliases (and
-// whose refcount keeps the state alive until every late helper has exited), the body, and
-// the caller's grant + trace-owner snapshots, taken by value on the calling thread so a
-// chunk touching guarded state the caller owns passes the harness on any worker. One heap
-// allocation per call (see the "no allocs" note in docs/TODO.md - a later pass pools these).
+// State shared by every parallel loop flavor: the completion block as a base subobject
+// (the handle points at it, and its refcount keeps the state alive until every late
+// helper has exited), the body, and the caller's grant + trace-owner snapshots, taken by
+// value on the calling thread so a chunk touching guarded state the caller owns passes
+// the harness on any worker. One heap allocation per call (see the "no allocs" note in
+// docs/TODO.md - a later pass pools these). Derives from `Task_control_block` directly,
+// not `Block_backed`: `destroy` must delete the most-derived state
+// (`Parallel_state`/`Colored_state`), which `set_destroy` below installs per flavor.
 template<typename Body>
-struct Parallel_base
+struct Parallel_base : Task_control_block
 {
-    Task_control_block core;   // must be first (the handle and `destroy` alias the state through it)
     Body body;
     int concurrency;
     Balance balance;
@@ -124,7 +126,7 @@ void run_loop(Parallel_state<Body>* st)
         // acq_rel forms a release sequence over `done`, so the executor that reaches `n`
         // (and the waiter it wakes) sees every executor's body writes.
         if (st->done.fetch_add(stop - start, std::memory_order_acq_rel) + (stop - start) == st->n)
-            st->core.complete();   // processed the last item -> signal completion
+            st->complete();   // processed the last item -> signal completion
     }
 }
 
@@ -202,7 +204,7 @@ void run_loop(Colored_state<Body>* st)
             {
                 st->phase_next.store(terminal, std::memory_order_release);
                 st->phase_next.notify_all();
-                st->core.complete();
+                st->complete();
                 break;
             }
             st->band_done.store(0, std::memory_order_relaxed);   // ordered by the release below
@@ -234,13 +236,15 @@ void helper_entry(void* p)
         Trace_busy_scope trace_busy_scope;
         run_loop(st);
     }
-    intrusive_dec(&st->core);
+    intrusive_dec(st);
 }
 
+// Installs the deleter for the most-derived `State` (the block's `destroy` receives the
+// base pointer; the `static_cast` recovers the state, `Block_backed`-style).
 template<typename State>
 void set_destroy(State* st)
 {
-    st->core.destroy = [](Task_control_block* c) { delete reinterpret_cast<State*>(c); };
+    st->destroy = [](Task_control_block* c) { delete static_cast<State*>(c); };
 }
 
 // Fan out `conc - 1` helpers on the one process-wide `global_scheduler()` (with the
@@ -253,9 +257,9 @@ void set_destroy(State* st)
 template<typename State>
 void run_participants(State* st, std::optional<Priority> priority)
 {
-    Task_ptr handle(&st->core);   // the caller's ref (refcount 1)
+    Task_ptr handle(st);   // the caller's ref (refcount 1)
     int conc = st->concurrency;
-    st->core.refcount.fetch_add(conc - 1, std::memory_order_relaxed);   // one ref per helper
+    st->refcount.fetch_add(conc - 1, std::memory_order_relaxed);   // one ref per helper
 
     Priority prio = resolved_priority(priority);   // resolved once, on the calling thread
     Scheduler& sched = global_scheduler();
@@ -263,7 +267,7 @@ void run_participants(State* st, std::optional<Priority> priority)
         sched.submit(&helper_entry<State>, st, prio);
 
     run_loop(st);      // caller participates (its ref is `handle`, so no dec here)
-    st->core.wait();   // block until complete
+    st->wait();        // block until complete
 
     // `handle` releases the caller's ref on return; helpers release theirs on exit -> freed.
 }
@@ -318,8 +322,8 @@ Task<void> async_parallel_for(int n, Body&& body, Parallel_options opts = {})
     auto* st = new State(std::forward<Body>(body), n, conc, opts.balance);
     detail::set_destroy(st);
 
-    Task<void> result(detail::Task_ptr(&st->core));   // the returned handle (refcount 1)
-    st->core.refcount.fetch_add(conc, std::memory_order_relaxed);   // one ref per helper
+    Task<void> result(detail::Task_ptr{ st });   // the returned handle (refcount 1)
+    st->refcount.fetch_add(conc, std::memory_order_relaxed);   // one ref per helper
 
     Priority prio = detail::resolved_priority(opts.priority);   // resolved once, on the calling thread
     Scheduler& sched = global_scheduler();

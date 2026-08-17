@@ -33,15 +33,14 @@ struct Static_task_graph::Run_state
 namespace
 {
 
-// A graph node's reusable task block: the monomorphic control block (first member, so a
-// `Task_control_block*` aliases / `reinterpret_cast`s back to it) plus the back-pointers
-// its execute/on_complete hooks need to reach the node body and the run. Allocated once
-// in compile(), re-armed each execute() - so a run dispatches nodes with no per-node
-// allocation. The body is not stored here (reached via graph->nodes_[index].run), so
-// there is no per-run body closure either.
-struct Graph_node_block
+// A graph node's reusable task block: the monomorphic control block as a base subobject
+// (`Block_backed`, so a `Task_control_block*` recovers the node block with a `static_cast`)
+// plus the back-pointers its execute/on_complete hooks need to reach the node body and the
+// run. Allocated once in compile(), re-armed each execute() - so a run dispatches nodes
+// with no per-node allocation. The body is not stored here (reached via
+// graph->nodes_[index].run), so there is no per-run body closure either.
+struct Graph_node_block : detail::Block_backed<Graph_node_block>
 {
-    detail::Task_control_block core;   // must be first
     Static_task_graph* graph = nullptr;
     int index = -1;
 };
@@ -247,16 +246,16 @@ void Static_task_graph::compile(const char* DOT_path)
     for (int i = 0; i < static_cast<int>(nodes_.size()); ++i)
     {
         auto* wrapper = new Graph_node_block();
-        wrapper->core.destroy = [](detail::Task_control_block* c) { delete reinterpret_cast<Graph_node_block*>(c); };
+        wrapper->install_destroy();
         wrapper->graph = this;
         wrapper->index = i;
-        wrapper->core.execute = &run_graph_node;
-        wrapper->core.on_complete = &graph_node_completed;
+        wrapper->execute = &run_graph_node;
+        wrapper->on_complete = &graph_node_completed;
         // The node block is owned by this graph (its `Task_ptr` below) for the whole run, so
         // its queued dispatch borrows a raw pointer - no dispatch-hop refcount (Opt 2). Set
         // once here; the per-run re-arm rewrites priority/run_inline but preserves this bit.
-        wrapper->core.flags.borrowed = true;
-        nodes_[i].block = detail::Task_ptr(&wrapper->core);
+        wrapper->flags.borrowed = true;
+        nodes_[i].block = detail::Task_ptr(wrapper);
         // The node's block carries the node's identity, so every diagnostic that names a
         // task names the node - including the pipe entries it takes, which are this block.
         detail::set_task_name(nodes_[i].block, nodes_[i].name);
@@ -384,7 +383,7 @@ void Static_task_graph::run_graph_node(const detail::Task_ptr& block)
     if (!block->claim())
         return;   // already claimed (belt-and-suspenders; graph nodes dispatch once)
 
-    auto* self = reinterpret_cast<Graph_node_block*>(block.get());
+    auto* self = Graph_node_block::from(block.get());
     if (block->token.is_cancel_requested())
     {
         block->cancel();   // skip body; on_complete drains the run
@@ -416,7 +415,7 @@ void Static_task_graph::run_graph_node(const detail::Task_ptr& block)
 // The node block's `on_complete`: the node's body and all its nested tasks have settled.
 void Static_task_graph::graph_node_completed(detail::Task_control_block* block)
 {
-    auto* self = reinterpret_cast<Graph_node_block*>(block);
+    auto* self = Graph_node_block::from(block);
     // The settle-must-advance-links contract (the graph is the second pipe-task creation
     // site next to `make_piped_executable`): retire this node's line entries first, so a
     // successor going data-ready below enters lines the node no longer holds. An object-free
@@ -627,9 +626,9 @@ Task<void> Static_task_graph::execute(Execution_options opts)
         // Re-arm the node's task block for this run (its successors/prerequisites/
         // continuations are never populated - graph edges use remaining_deps, completion
         // uses on_complete - so nothing there needs clearing).
-        auto* w = reinterpret_cast<Graph_node_block*>(nodes_[i].block.get());
+        auto* w = Graph_node_block::from(nodes_[i].block.get());
         w->graph = this;   // refresh back pointer too (see above)
-        detail::Task_control_block& b = w->core;
+        detail::Task_control_block& b = *w;
         b.body_claimed.store(false, std::memory_order_relaxed);   // unclaimed (nodes aren't reset())
         b.completed = false;
         b.cancelled = false;
