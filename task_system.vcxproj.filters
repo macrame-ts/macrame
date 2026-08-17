@@ -167,6 +167,12 @@
     <ClInclude Include="include\ts\task.h">
       <Filter>include\ts</Filter>
     </ClInclude>
+    <ClInclude Include="include\ts\cancellation.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\detail\task_block.h">
+      <Filter>include\ts\detail</Filter>
+    </ClInclude>
     <ClInclude Include="include\ts\ts.h">
       <Filter>include\ts</Filter>
     </ClInclude>
