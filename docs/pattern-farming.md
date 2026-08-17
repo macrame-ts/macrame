@@ -35,7 +35,8 @@ Legend: ✅ approved · ❌ rejected · 🕓 undecided (revisit) · 🔬 design 
 | 2.4 linked / child tokens (+ reason) | 🕓 undecided | Rewritten for clarity per author. |
 | 2.5 structured task-group scope | 🕓 undecided | Terminology fixed (launch, not spawn). |
 | 2.59 delegate/event recipe | ✅ done | Shipped as `sample/events.cpp` (2026-08): four-tier ladder (intra-system / command / event board / batch+edge), determinism-checked. Superseded by the `ts::Event_bus` promotion (see re-raise item (c)). |
-| 2.39 colored `parallel_for` | ⭐ important | Author-flagged 2026-08-17; use-case modeled in `sample/coloring.cpp` (colored cloth solver). Library piece (`parallel_for_colored` driver) still open. |
+| 2.39 colored `parallel_for` | ⭐ important | Author-flagged 2026-08-17; use-case modeled in `sample/coloring.cpp` (colored cloth solver). Driver shipped same day (`ts::parallel_for_colored`, phase-advance protocol; TSan spin-storm fixed with atomic wait/notify). Tiers B/C open. |
+| game_frame integration of `Event_bus` + `parallel_for_colored` | ❌ rejected (2026-08-17) | Assessed: game_frame is the calibrated measurement fixture (workload constant, allocs/frame, bench deltas, determinism oracles ×3 variants) and its bodies are cost mocks — the bus would replace deliberately-Tier-4 flows with Tier 3 (wrong lesson), coloring has nothing real to color. Cross-references added to game_frame's header instead; **the integration belongs to the hostile/integration sample's charter** (real solver, delegate storms, entity churn, streaming — where both features compose naturally and no baselines are disturbed). |
 
 **Undecided items to revisit:** 2.3, 2.4, 2.5. *(kept current as we go — the "remind me later" list)*
 

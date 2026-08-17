@@ -50,6 +50,15 @@
 //     awaits and folds; AI fires speculative cancellable nav queries.
 //   - Internal parallelism: heavy systems split their work with `parallel_for`.
 //
+// Not shown here, by design - the system bodies are cost mocks and this file is
+// the calibrated measurement fixture, so two library pieces live in their own
+// samples instead: a real engine would route sparse cross-system notifications
+// (achievements, UI events, script triggers) through `ts::Event_bus`
+// (sample/events.cpp - the flows here that look bus-shaped, combat -> stats /
+// replication, are deliberately the heavier batch-object + derived-edge tier),
+// and a real solver or cloth would run `ts::parallel_for_colored` inside its
+// node (sample/coloring.cpp - the mock physics has no constraint graph to color).
+//
 // The core logic is plainly thread-unsafe single-threaded code - no atomics, no
 // locks. The library turns it into a safe parallel schedule from the access
 // declarations alone; the systems never learn about threading.
