@@ -71,12 +71,15 @@ public:
         TS_CHECK_ACCESS();
         int base = static_cast<int>(particles_.size());
         for (int j = 0; j < h; ++j)
+        {
             for (int i = 0; i < w; ++i)
             {
                 float x = x0 + i * spacing, y = y0 + j * spacing;
                 particles_.push_back({ x, y, x, y, j == 0 });
             }
+        }
         for (int j = 0; j < h; ++j)
+        {
             for (int i = 0; i < w; ++i)
             {
                 if (i + 1 < w)
@@ -84,6 +87,7 @@ public:
                 if (j + 1 < h)
                     constraints_.push_back({ base + j * w + i, base + (j + 1) * w + i, spacing });
             }
+        }
         return base;
     }
 
@@ -180,6 +184,7 @@ bool coloring_valid(const std::vector<std::vector<int>>& bands, const std::vecto
 {
     std::vector<int> last_band(particle_count, -1);
     for (int b = 0; b < static_cast<int>(bands.size()); ++b)
+    {
         for (int ci : bands[b])
         {
             if (last_band[cs[ci].a] == b || last_band[cs[ci].b] == b)
@@ -187,6 +192,7 @@ bool coloring_valid(const std::vector<std::vector<int>>& bands, const std::vecto
             last_band[cs[ci].a] = b;
             last_band[cs[ci].b] = b;
         }
+    }
     return true;
 }
 
@@ -234,11 +240,15 @@ Coloring_stats run_coloring_frames(int frames)
         c.integrate(1.0f / 60.0f, -9.8f);
         constexpr int iterations = 8;
         for (int it = 0; it < iterations; ++it)
-            for (const std::vector<int>& band : bands)          // bands sequential: the barrier
+        {
+            for (const std::vector<int>& band : bands)   // bands sequential: the barrier
+            {
                 ts::parallel_for(static_cast<int>(band.size()), [&c, &band](int k)
                 {
-                    c.relax(band[k]);                            // disjoint endpoints within a band
+                    c.relax(band[k]);                    // disjoint endpoints within a band
                 });
+            }
+        }
     }, cloth);
     g.compile();
 
