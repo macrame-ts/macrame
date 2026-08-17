@@ -213,15 +213,15 @@ struct Coloring_stats
     }
 };
 
-Coloring_stats run_coloring_frames(int frames)
+Coloring_stats run_coloring_frames(int frames, int w1, int h1, int w2, int h2)
 {
     ts::Guarded<Cloth> cloth{ ts::Named{} };
 
     // Two disconnected patches -- islands. Colored together, solved together.
-    cloth.access([](Cloth& c)
+    cloth.access([=](Cloth& c)
     {
-        c.add_patch(0.0f, 0.0f, 40, 30, 1.0f);
-        c.add_patch(100.0f, 0.0f, 20, 20, 1.0f);
+        c.add_patch(0.0f, 0.0f, w1, h1, 1.0f);
+        c.add_patch(100.0f, 0.0f, w2, h2, 1.0f);
     }).sync();
 
     Coloring_stats st;
@@ -268,11 +268,20 @@ Coloring_stats run_coloring_frames(int frames)
 
 } // namespace
 
+// A small run for sanitizer stress: same protocol coverage (claims, phase
+// advances, terminal, late helpers, the drained park), a fraction of the work -
+// a sanitizer multiplies every atomic, so the full sample blows the TSan
+// harness's watchdog budget on volume alone.
+void stress_coloring(int frames)
+{
+    (void)run_coloring_frames(frames, 10, 8, 6, 6);
+}
+
 void run_coloring_sample()
 {
     constexpr int frames = 60;
-    Coloring_stats a = run_coloring_frames(frames);
-    Coloring_stats b = run_coloring_frames(frames);
+    Coloring_stats a = run_coloring_frames(frames, 40, 30, 20, 20);
+    Coloring_stats b = run_coloring_frames(frames, 40, 30, 20, 20);
 
     std::printf("coloring sample: %d particles, %d constraints (2 islands), %d colors, "
                 "coloring %s, max stretch %.2f%%, %s\n",

@@ -11,7 +11,6 @@
 #include <cstdint>
 #include <optional>
 #include <span>
-#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -169,14 +168,17 @@ void run_loop(Colored_state<Body>* st)
         {
             // Band fully claimed but not yet finished: the remaining chunks are running on
             // workers right now, so this wait is bounded - the same exemption as
-            // `parallel_for`'s join, spelled as a spin because the phase flip is imminent.
-            int spins = 0;
+            // `parallel_for`'s join. Spin briefly (the flip is usually imminent), then park
+            // on the atomic: drained participants cost nothing while the last chunks run,
+            // and a sanitizer sees a futex wait instead of an instrumented spin storm (the
+            // yield-spin version starved the runner under TSan and tripped the watchdog).
             std::uint64_t seen = cur;
+            int spins = 0;
             while ((seen = st->phase_next.load(std::memory_order_acquire)) == cur)
             {
                 if (++spins > 64)
                 {
-                    std::this_thread::yield();
+                    st->phase_next.wait(cur, std::memory_order_acquire);
                     spins = 0;
                 }
             }
@@ -199,12 +201,14 @@ void run_loop(Colored_state<Body>* st)
             if (ph + 1 >= st->total_phases)
             {
                 st->phase_next.store(terminal, std::memory_order_release);
+                st->phase_next.notify_all();
                 st->core.complete();
                 break;
             }
             st->band_done.store(0, std::memory_order_relaxed);   // ordered by the release below
             cur = std::uint64_t(ph + 1) << 32;
             st->phase_next.store(cur, std::memory_order_release);
+            st->phase_next.notify_all();
             continue;
         }
         cur = st->phase_next.load(std::memory_order_acquire);
