@@ -272,6 +272,12 @@
     <ClInclude Include="include\ts\detail\pipe_link.h">
       <Filter>include\ts\detail</Filter>
     </ClInclude>
+    <ClInclude Include="include\ts\detail\pipe.h">
+      <Filter>include\ts\detail</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\detail\access_deduction.h">
+      <Filter>include\ts\detail</Filter>
+    </ClInclude>
     <ClInclude Include="include\ts\detail\suspension_registry.h">
       <Filter>include\ts\detail</Filter>
     </ClInclude>

@@ -90,6 +90,8 @@
     <ClInclude Include="include\ts\version.h" />
     <ClInclude Include="include\ts\guarded.h" />
     <ClInclude Include="include\ts\detail\pipe_link.h" />
+    <ClInclude Include="include\ts\detail\pipe.h" />
+    <ClInclude Include="include\ts\detail\access_deduction.h" />
     <ClInclude Include="include\ts\deferred.h" />
     <ClInclude Include="include\ts\detail\journal.h" />
     <ClInclude Include="include\ts\event_bus.h" />
