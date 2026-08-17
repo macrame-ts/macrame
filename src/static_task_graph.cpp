@@ -433,9 +433,9 @@ void Static_task_graph::node_complete(Run_state& run, int index)
 
     run.stamps.mark_end(index);
 
-    // Phase 1: settle successor data-deps; collect those this node's completion makes ready
-    // (it is exclusively their trigger, so this node's thread owns them until we hand off /
-    // dispatch them below - no race with another prerequisite).
+    // Settle successor data-deps; collect those this node's completion makes ready (it is
+    // exclusively their trigger, so this node's thread owns them until they are dispatched
+    // below - no race with another prerequisite).
     std::vector<int>& ready = node.ready_buf;
     ready.clear();
     for (int successor : node.successors)
@@ -444,9 +444,7 @@ void Static_task_graph::node_complete(Run_state& run, int index)
             ready.push_back(successor);
     }
 
-
-    // Phase 3: trigger the ready successors (they acquire their objects, skipping any handed
-    // to them).
+    // Trigger the ready successors (each acquires its objects through its pipe links).
     for (int successor : ready)
         on_data_ready(run, successor);
 

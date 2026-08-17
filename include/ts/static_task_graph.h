@@ -1,5 +1,14 @@
 #pragma once
 
+// The static task graph - the library's build-once / run-many scheduling layer. Nodes declare
+// which `Guarded` systems they read and write, and `compile()` derives the execution DAG from
+// those declarations (conflicting nodes are ordered, independent ones run in parallel) plus any
+// explicit `after`/`before` edges. It exists so a frame's parallel structure follows from
+// declared data access instead of being hand-wired: the schedule stays correct as systems
+// change, and the same declarations are the safety harness's ground truth. This header carries
+// `Static_task_graph`, the `Graph_node` build-time handle, and `Execution_options`.
+// User guide: docs/guide.md §6; per-node acquisition and its hazards: docs/task-internals.md §10.
+
 #include "ts/access.h"
 #include "ts/scheduler.h"
 #include "ts/guarded.h"
@@ -21,9 +30,6 @@
 
 namespace ts
 {
-
-// `detail::Function_traits` (per-argument type extraction for access-mode deduction) now
-// lives in `guarded.h` - shared with multi-object `ts::async`.
 
 class Static_task_graph;
 
@@ -114,7 +120,8 @@ struct Execution_options
 // Build once, execute many. Nodes declare access to `Guarded<>` systems and,
 // optionally, explicit ordering edges. `compile()` turns access conflicts (plus
 // explicit edges) into a DAG; `execute()` runs it, parallelizing independent
-// nodes. Nodes are void (they mutate the systems they access).
+// nodes. A node returns no result - its output is the writes to the systems it
+// declares (typed node results are future work, docs/TODO.md 2.1).
 class Static_task_graph
 {
     friend class Graph_node;
@@ -262,6 +269,17 @@ private:
     void fill_node_modes(Node& node, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... access)
     {
         auto instances = std::make_tuple(&access.instance_...);
+
+        // A task-returning body must be exactly `Task<void>` - that is the coroutine-node
+        // shape, gated on below via `add_nested` so the node completes when the frame does. A
+        // `Task<R>` body would take the plain branch: the returned task discarded, the node
+        // completing (and releasing its grants) while the eager frame still runs - a stale
+        // inherited grant. Nodes carry no results by design; typed chaining is docs/TODO.md 2.1.
+        using Body_result = decltype(fn(detail::mode_ref<Modes>(std::get<I>(instances))...));
+        static_assert(!detail::is_task_v<Body_result> || std::is_same_v<Body_result, Task<void>>,
+            "a coroutine node body must return ts::Task<void>; a Task<R> result would be "
+            "discarded and the frame would outrun the node's grants (typed node results are "
+            "future work - docs/TODO.md 2.1)");
 
         node.access = {
             std::pair<const void*, Access>{

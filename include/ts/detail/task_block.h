@@ -34,6 +34,8 @@
 namespace ts
 {
 
+template<typename R> class Task;   // defined in ts/task.h; named here by the `Is_task` trait
+
 namespace detail
 {
 
@@ -829,6 +831,13 @@ template<typename Fn> using Task_result_t = typename Task_result<std::decay_t<Fn
 // Dependent-false for a `static_assert` in a discarded `if constexpr` branch (the
 // plain-`false` form is C++23 but not yet uniform across the toolchains we build on).
 template<typename...> inline constexpr bool always_false = false;
+
+// Whether `T` is a `ts::Task<R>` specialization (any `R`). Used where a body's result type
+// selects behavior - e.g. a graph node body returning `Task<void>` is a coroutine node, and
+// any other `Task<R>` result is rejected at compile time (static_task_graph.h).
+template<typename T> struct Is_task : std::false_type {};
+template<typename R> struct Is_task<Task<R>> : std::true_type {};
+template<typename T> inline constexpr bool is_task_v = Is_task<T>::value;
 
 // A bare task body (`ts::launch`): no parameters, or a single trailing
 // `Cancellation_token` (cooperative cancellation, see `takes_token_v`). Gated at the
