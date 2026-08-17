@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -128,16 +129,14 @@ void run_loop(Parallel_state<Body>* st)
     }
 }
 
-// --- colored loop (parallel_for_colored, interaction coloring tier A) ----------------
+// --- colored loop (parallel_for_colored, interaction coloring) -----------------------
 
 template<typename Body>
 struct Colored_state : Parallel_base<Body>
 {
-    struct Band
-    {
-        const int* items;
-        int size;
-    };
+    // A band views the caller's index vector (the call blocks, so the caller's
+    // vectors outlive every helper).
+    using Band = std::span<const int>;
     std::vector<Band> bands;   // non-empty bands only
     int total_phases = 0;      // rounds x bands
     // `phase << 32 | next-claim-index` in one word: a claim CAS re-checks both halves, so
@@ -164,8 +163,9 @@ void run_loop(Colored_state<Body>* st)
         if (ph >= st->total_phases)
             break;
         const auto& band = st->bands[ph % st->bands.size()];
+        int band_size = static_cast<int>(band.size());
         int idx = static_cast<int>(cur & 0xffffffffu);
-        if (idx >= band.size)
+        if (idx >= band_size)
         {
             // Band fully claimed but not yet finished: the remaining chunks are running on
             // workers right now, so this wait is bounded - the same exemption as
@@ -183,18 +183,18 @@ void run_loop(Colored_state<Body>* st)
             cur = seen;
             continue;
         }
-        int g = claim_grain(st->balance, band.size, idx, st->concurrency);
+        int g = claim_grain(st->balance, band_size, idx, st->concurrency);
         int stop = idx + g;
-        if (stop > band.size)
-            stop = band.size;
+        if (stop > band_size)
+            stop = band_size;
         if (!st->phase_next.compare_exchange_weak(cur, (std::uint64_t(ph) << 32) | std::uint64_t(stop),
                 std::memory_order_acq_rel, std::memory_order_acquire))
             continue;   // cur reloaded by the failed CAS
         for (int i = idx; i < stop; ++i)
-            st->body(band.items[i]);
+            st->body(band[i]);
         // acq_rel: the last finisher acquires every sibling's body writes here, and its
         // release-store of the new phase below publishes them to the next band's claimers.
-        if (st->band_done.fetch_add(stop - idx, std::memory_order_acq_rel) + (stop - idx) == band.size)
+        if (st->band_done.fetch_add(stop - idx, std::memory_order_acq_rel) + (stop - idx) == band_size)
         {
             if (ph + 1 >= st->total_phases)
             {
@@ -358,7 +358,7 @@ void parallel_for_colored(const std::vector<std::vector<int>>& bands, int rounds
     for (const std::vector<int>& band : bands)
     {
         if (!band.empty())
-            st->bands.push_back({ band.data(), static_cast<int>(band.size()) });
+            st->bands.emplace_back(band);
     }
     st->total_phases = rounds * static_cast<int>(st->bands.size());
 

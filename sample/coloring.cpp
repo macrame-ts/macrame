@@ -239,9 +239,9 @@ Coloring_stats run_coloring_frames(int frames)
     g.add_node(ts::Named{}, [&bands](Cloth& c)
     {
         c.integrate(1.0f / 60.0f, -9.8f);
-        // Tier A driver: helpers fanned out once for the whole iterations x bands
-        // solve; band transitions are atomic phase advances, not per-band
-        // fork/join (the 2.39 design note). Same bit-deterministic result.
+        // The colored driver: helpers fan out once for the whole
+        // iterations x bands solve; band transitions are atomic phase
+        // advances, not per-band fork/join. Same bit-deterministic result.
         constexpr int iterations = 8;
         ts::parallel_for_colored(bands, iterations, [&c](int ci)
         {
