@@ -147,11 +147,13 @@ namespace
 {
 
 // A held grant's queue entry (`pipe_acquire`, the coroutine guards): a link with a null
-// `owner` plus the grant callback. The one allocating pipe path; freed when its admission
-// fires the callback. An immediate (uncontended) acquire allocates nothing.
-struct Hold_node
+// `owner` (the base's initializer - the queue's hold-vs-task discriminator) plus the grant
+// callback. Derives from `Pipe_link` so recovery from a queued link is a standard derived
+// cast (the same contract as the block wrappers' `Block_backed`). The one allocating pipe
+// path; freed when its admission fires the callback. An immediate (uncontended) acquire
+// allocates nothing.
+struct Hold_node : Pipe_link
 {
-    Pipe_link link;
     std::move_only_function<void()> on_acquired;
     Task_control_block* grant_owner = nullptr;   // published as `writer_owner` for a write hold
 };
@@ -199,7 +201,7 @@ void admit_locked(Pipe& pipe, Pipe_link* l)
     pipe.writer_active = true;
     Task_control_block* owner = l->owner != nullptr
         ? l->owner
-        : reinterpret_cast<Hold_node*>(l)->grant_owner;   // `link` is the node's first member
+        : static_cast<Hold_node*>(l)->grant_owner;   // a null-`owner` link is a `Hold_node`
     pipe.writer_owner.store(owner, std::memory_order_release);
 #if TS_SAFETY_CHECKS
     pipe.write_epoch.fetch_add(1, std::memory_order_relaxed);   // write window opens
@@ -252,7 +254,7 @@ void fire_granted(Granted& granted)
         {
             // A held grant: hand the pipe to the holder via its callback (scheduled, as a
             // closure - the holder resumes on a worker), then retire the node.
-            auto* node = reinterpret_cast<Hold_node*>(l);
+            auto* node = static_cast<Hold_node*>(l);
             submit_closure(global_scheduler(), std::move(node->on_acquired), Priority::normal);
             delete node;
         }
@@ -389,11 +391,11 @@ bool pipe_acquire(Scheduler&, Pipe& pipe, Access mode, std::move_only_function<v
     // Deferred: queue behind the pending work; admitted (FIFO) when it drains, firing the
     // callback. No admission pass here - the blocking condition still holds.
     auto* node = new Hold_node();
-    node->link.pipe = &pipe;
-    node->link.mode = mode;
+    node->pipe = &pipe;
+    node->mode = mode;
     node->on_acquired = std::move(on_acquired);
     node->grant_owner = owner;
-    queue_push(pipe, &node->link);
+    queue_push(pipe, node);
     return false;
 }
 
