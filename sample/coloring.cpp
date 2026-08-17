@@ -7,14 +7,15 @@
 //
 // The pattern: color the constraint graph so no two constraints sharing a
 // particle get the same color. All constraints of one color touch disjoint
-// particles, so a color band runs as one `parallel_for` with no races -- and,
-// because each particle is written by at most one helper per band, the result
-// is independent of chunking and stealing: bit-deterministic under any
-// scheduling. Bands run sequentially (`parallel_for`'s synchronous join is the
-// barrier), so band k+1 sees band k's corrections -- the within-iteration
-// propagation deferral cannot give. Coloring is domain code (a greedy pass
-// here, run once at setup); the library contributes the grant-inheriting
-// `parallel_for` and the node that owns the whole solve.
+// particles, so a color band runs in parallel with no races -- and, because
+// each particle is written by at most one helper per band, the result is
+// independent of chunking and stealing: bit-deterministic under any
+// scheduling. Bands run sequentially, so band k+1 sees band k's corrections --
+// the within-iteration propagation deferral cannot give. Coloring is domain
+// code (a greedy pass here, run once at setup); the library contributes
+// `ts::parallel_for_colored` -- grant-inheriting helpers fanned out once for
+// the whole iterations x bands solve, band transitions as atomic phase
+// advances rather than per-band fork/join -- and the node that owns it.
 //
 // Islands (disconnected constraint graphs -- two separate cloth patches below)
 // need no special handling: their constraints never conflict, so the greedy
@@ -238,17 +239,14 @@ Coloring_stats run_coloring_frames(int frames)
     g.add_node(ts::Named{}, [&bands](Cloth& c)
     {
         c.integrate(1.0f / 60.0f, -9.8f);
+        // Tier A driver: helpers fanned out once for the whole iterations x bands
+        // solve; band transitions are atomic phase advances, not per-band
+        // fork/join (the 2.39 design note). Same bit-deterministic result.
         constexpr int iterations = 8;
-        for (int it = 0; it < iterations; ++it)
+        ts::parallel_for_colored(bands, iterations, [&c](int ci)
         {
-            for (const std::vector<int>& band : bands)   // bands sequential: the barrier
-            {
-                ts::parallel_for(static_cast<int>(band.size()), [&c, &band](int k)
-                {
-                    c.relax(band[k]);                    // disjoint endpoints within a band
-                });
-            }
-        }
+            c.relax(ci);   // disjoint endpoints within a band
+        });
     }, cloth);
     g.compile();
 

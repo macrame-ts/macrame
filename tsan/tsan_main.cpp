@@ -18,6 +18,7 @@ void game_frame_stats(int frames, float time_scale,
                       double& avg_ms, double& serial_ms, float& transform0);
 void stress_game_frame_optimised(int frames, int workers);
 void run_blackboard_sample();
+void run_coloring_sample();
 std::size_t physics_pose_hash(int frames);   // final snapshot hash after `frames` frames
 }
 #include "ts/parallel_for.h"
@@ -1105,6 +1106,7 @@ int main()
     std::puts("tsan: versioned stress");     stress_versioned();
     std::puts("tsan: physics frames");       stress_physics();
     std::puts("tsan: blackboard frames");    sample::run_blackboard_sample();
+    std::puts("tsan: coloring frames");      sample::run_coloring_sample();
     std::puts("tsan: game_frame frames");
     for (int i = 0; i < 20; ++i)
     {

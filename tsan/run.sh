@@ -18,7 +18,7 @@ CXX="${CXX:-clang++}"
 OUT="${TMPDIR:-/tmp}/ts_tsan"
 TIMEOUT="${TSAN_TIMEOUT:-180}"   # watchdog seconds; a deadlock fails fast, never hangs
 SRC="src/scheduler.cpp src/worker_thread.cpp src/guarded.cpp src/static_task_graph.cpp src/access.cpp src/fatal.cpp \
-     sample/game_frame.cpp sample/physics.cpp sample/blackboard.cpp tsan/tsan_main.cpp"
+     sample/game_frame.cpp sample/physics.cpp sample/blackboard.cpp sample/coloring.cpp tsan/tsan_main.cpp"
 
 # A previous run that deadlocked keeps the binary busy (a build can't overwrite a
 # running executable) and burns no CPU while looking "alive". Kill any leftover and

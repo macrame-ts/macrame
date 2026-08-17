@@ -856,9 +856,17 @@ split-on-steal and optional cross-frame affinity replay of split points. Also a
 
 #### 2.39 Islands + graph coloring for conflict-free parallel loops
 
-**Status: ⭐ important (author, 2026-08-17).** Use-case modeled in
-`sample/coloring.cpp` (colored cloth solver, two islands, greedy coloring,
-determinism check).
+**Status: ⭐ important (author, 2026-08-17); tier A SHIPPED (same day).**
+Use-case modeled in `sample/coloring.cpp` (colored cloth solver, two islands,
+greedy coloring, determinism check); `ts::parallel_for_colored(bands, rounds,
+body, opts)` implemented in `parallel_for.h` — not a fixed-participant barrier
+but a phase-advance protocol (one packed `phase|next` atomic, CAS-guarded
+claims immune to cross-phase ABA, the band's last finisher advances), which
+preserves `parallel_for`'s caller-can-drain deadlock-freedom and lets late
+helpers join the current band harmlessly; shares the flat loop's base state,
+grain policy, helper entry, and launch/join scaffolding (`Parallel_base`,
+`claim_grain`, `helper_entry`, `run_participants`). Tiers B (islands) and C
+(chunk DAG) remain the open escalations below.
 
 **Driver design note (2026-08-17, from the "4 bands = 4 sync points" question):**
 the global band barrier is sufficient, not necessary — the true requirement is

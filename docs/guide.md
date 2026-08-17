@@ -1104,7 +1104,18 @@ node's declared objects.
 
 Cross-item mutation (item *i* writing item *j*) is not synchronized by
 `parallel_for` itself — see the WIP note in §12 and the staging tools in §9,
-which cover the common cases today.
+which cover the common cases today. For the case staging cannot serve —
+iterative solvers whose cross-item effects must land *within* the pass
+(physics constraints, relaxation) — use **interaction coloring** with
+`ts::parallel_for_colored(bands, rounds, body)`: partition items into bands
+whose members touch disjoint state (color the interaction graph once at
+setup), and the driver runs `rounds` passes with bands sequential and each
+band's items in parallel. Helpers fan out once for the whole run (band
+transitions are atomic phase advances, not per-band fork/join), the caller
+participates and can drain every band alone (the same deadlock-freedom as
+`parallel_for`), and if the bands uphold the coloring invariant the result is
+bit-deterministic under any chunking, stealing, or worker count. Worked
+example incl. the greedy coloring: `sample/coloring.cpp`.
 
 ---
 
