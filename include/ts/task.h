@@ -1,18 +1,14 @@
 #pragma once
 
-// The scheduler-independent completion core. `Task<R>` is the one completion primitive behind
-// every result-bearing producer (`access`/`async`/`launch`/`execute`/a coroutine): `co_await`
-// it from a task, or `sync()`/`take()` it from a blue (non-task) thread. Underneath sits the
-// fully monomorphic `detail::Task_control_block` - one refcounted allocation holding the result
-// (type-erased behind `void*`), the body (an `Executable<Body,R>` wrapper the handle aliases, or
-// a fused coroutine frame), and the `num_locks` counter that gates first execution, then
-// completion. Also here: cooperative cancellation (`Cancellation_source`/`token`/
+// The task layer. `Task<R>` is the one completion handle behind every async result
+// (`access`/`async`/`launch`/a graph run/a coroutine): `co_await` it inside a task,
+// `sync()`/`take()` it from outside (the blue boundary - blocking inside a task is fatal).
+// Also here: cooperative cancellation (`Cancellation_source`/`Cancellation_token`/
 // `Cancel_callback`), the option aggregates (`Access_options`, `Launch_options`), `ts::launch`
-// (the bare-task verb), `Signal` (a hand-triggered bodyless task), `External_wait` + the
-// deadlock-net tuning, and `detail::add_nested` (graph-internal completion gating). Depends on
-// nothing from the scheduler or pipe - that wiring is reached through function-pointer seams
-// (`submit_ready`, `pipe_enter_first`, `blocking_sync_diagnose`, `drain_serial_pending`) defined
-// in those layers. See docs/task-internals.md and docs/coroutine-first.md.
+// (run a bare functor on the scheduler, detached - it inherits no access), `Signal` (a
+// hand-triggered task: done-signal, barrier, the bridge for OS/GPU completions), and
+// `External_wait` (declare an off-pool completion so the deadlock net does not misfire).
+// User guide: docs/guide.md §4; internals: docs/task-internals.md.
 
 #include "ts/access.h"   // grant inheritance for launched/parallel_for sub-work (snapshot_access)
 #include "ts/fatal.h"

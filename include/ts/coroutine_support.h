@@ -3,38 +3,16 @@
 // Coroutine support - makes `ts::Task<R>` awaitable and provides a `promise_type`
 // so a coroutine can return `Task<R>` and `co_await` other tasks. Header-only;
 // coroutines are mandatory (docs/coroutine-first.md), so the library assumes a
-// coroutine-capable toolchain.
+// coroutine-capable toolchain. Tasks are eager (`initial_suspend = suspend_never`): a body
+// runs on the caller's thread until its first real suspension, and awaiting an
+// already-settled task never suspends. A coroutine task costs one allocation (the frame),
+// a resumed body keeps its creator's access grants on whatever worker it wakes on, and the
+// task completes only when any nested work the body attached has settled.
 //
-// Frame/block fusion (coroutine-first stage 1): the promise embeds the task's
-// `Task_control_block` (+ result storage) - one allocation per coroutine task (the frame),
-// not frame + block. The block is the promise's first member, so the block pointer doubles
-// as the promise pointer (the `Executable` first-member pattern); the block's `destroy`
-// thunk destroys the whole frame via `coroutine_handle::from_promise`. Lifetime: the
-// promise holds a "running" self-reference released at `final_suspend`; the returned
-// `Task<R>`, awaiters, and nested children hold their own refs, so the frame (and the
-// result inside it) outlives the last observer, and a fire-and-forget coroutine whose
-// handle is dropped stays alive until it completes.
-//
-// Segment-carried ambient state: a coroutine migrates threads across suspension, but the
-// harness and the nested-task machinery key off thread-locals (`current_access`,
-// `current_task`). The promise snapshots the creator's grant once (`snapshot_access`) and
-// installs `current_task = &core` for every segment of the body: the initial segment via
-// the promise constructor (eager start runs the body immediately after), resumed segments
-// via the resume trampoline; every genuine suspension restores the previous value before
-// the thread leaves the frame (`exit_segment` in the awaiters, ordered before the
-// suspension handshake publishes the frame for resumption - no cross-thread overlap on
-// the save slots). A nested graph run started inside any segment therefore attaches to the
-// coroutine (via `detail::add_nested`), not to whatever task happened to launch it: the
-// promise arms the block's `execution_flag` + self-lock exactly like `Executable::run`, the
-// body-end drops the self-lock, and the last nested completion completes the task. A gating
-// child holds a ref on the block, which keeps the frame - and the coroutine's parameters -
-// alive until it settles.
-//
-// Resume scheduling: a resume goes through a bounded coroutine-resume trampoline
-// (`schedule_resume`) on the settling/granting thread - the eager-task equivalent of
-// symmetric transfer (there is no suspended producer handle to transfer into; the awaited
-// task runs to completion on its own thread, and the waiter's frame is resumed directly,
-// iteratively, O(1) stack).
+// Contents: the `co_await` machinery for `Task<R>` (`Task_awaiter`, the `operator co_await`s,
+// `as_optional`), the fused promise (`Promise_base`/`Task_promise`), the held-grant guards
+// (`ts::read_write`/`read_only` -> `Access_guard`/`Multi_access_guard` and their awaiters),
+// and the bounded resume trampoline. Design notes live with each piece below.
 
 #include "ts/task.h"
 #include "ts/guarded.h"   // Pipe, pipe_acquire/release, Guarded(_access), global_scheduler
