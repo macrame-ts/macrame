@@ -1,20 +1,12 @@
 #pragma once
 
-// `Guarded<T>` - the access-controlled wrapper, the sanctioned way to share a thread-unsafe
-// `T` across threads. Rather than locking `T` by hand, you hand the library a function:
-// `obj.access(fn)` / `obj.async(fn)` run `fn(T&)` to modify `T` or `fn(const T&)` to read it,
-// and the library orders conflicting accesses for you - any number of reads run at once, a
-// write runs alone, all in submission order - so a reader never sees a half-finished write and
-// two writes never overlap. Which one an access is (read or write) is deduced from the functor's
-// parameter const-ness (or the `ts::as_read_only`/`as_read_write` tags), so the schedule follows
-// from what each body declares it touches. The free `ts::access`/`ts::async(fn, a, b, ...)`
-// verbs take several objects at once, acquired in one deadlock-free canonical order; the same
-// ordering backs the static graph's per-node access and the coroutine held-grant guards.
-//
-// This header is `class Guarded<T>` and the free access verbs. The per-object serializer that
-// enforces the ordering lives in `detail/pipe.h`, and the compile-time access-mode deduction in
-// `detail/access_deduction.h`. User guide: docs/guide.md §5; the serializer internals and the
-// evolved cascade: docs/pipe-rebase.md §0; the per-node turn mechanism: docs/task-internals.md §10.
+// The `Guarded<T>` access-controlled wrapper and the free `ts::access`/`ts::async` verbs over it -
+// the sanctioned way to share a thread-unsafe `T` across threads: hand the library a functor
+// instead of locking `T` by hand, and it runs under serialized access (concurrent reads, one
+// exclusive write). The full model is documented on `class Guarded<T>` below. The per-object
+// serializer it rides lives in `detail/pipe.h`, the compile-time access-mode deduction in
+// `detail/access_deduction.h`. User guide: docs/guide.md §5; serializer internals and the evolved
+// cascade: docs/pipe-rebase.md §0.
 
 #include "ts/access.h"
 #include "ts/detail/access_deduction.h"
@@ -56,18 +48,7 @@ void submit_borrowed_on(Scheduler& scheduler, Task_control_block* blk);
 
 } // namespace detail
 
-// `Guarded::access`/`async` and the multi-object `ts::access`/`ts::async` take `Access_options`
-// (defined in task.h) = `{token, priority}`. There is deliberately no run-inline knob - the
-// verb chooses inline vs enqueued (`access` inline-when-free, `async` always enqueued), so the
-// impossible option can't be passed.
-
-// The only sanctioned way to touch a `T` across threads. You never receive a bare `T&`; you
-// hand a functor to `access()` (opportunistic - inline when free) or `async()` (always
-// enqueued) and it runs once access has been granted. Access mode is deduced from the functor's
-// parameter const-ness:
-//   `functor(T&)`       -> `read_write`
-//   `functor(const T&)` -> `read_only`
-class Static_task_graph;
+class Static_task_graph;   // friend: reaches a Guarded's instance + pipe to build node access
 
 namespace detail
 {
@@ -76,6 +57,18 @@ namespace detail
 struct Guarded_access;
 }
 
+// `Guarded<T>` - the access-controlled wrapper, the sanctioned way to touch a `T` across threads.
+// You never receive a bare `T&`; you hand a functor to `access()` (opportunistic - runs inline
+// when the object is momentarily free) or `async()` (always enqueued), and it runs once access has
+// been granted. The library orders conflicting accesses for you - any number of reads run at once,
+// a write runs alone, all in submission order - so a reader never sees a half-finished write and
+// two writes never overlap. The mode (read vs write) is deduced from the functor's resource
+// parameter (see `access`/`async` below); the free `ts::access`/`ts::async(fn, a, b, ...)` verbs
+// extend this to several objects at once in one deadlock-free canonical order, and the same
+// ordering backs the static graph's per-node access and the coroutine held-grant guards.
+//
+// Both verbs take `Access_options` (task.h) = `{token, priority}`; there is deliberately no
+// run-inline knob - the verb chooses inline vs enqueued, so the impossible option can't be passed.
 template<typename T>
 class Guarded
 {

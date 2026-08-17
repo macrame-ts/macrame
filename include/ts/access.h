@@ -3,7 +3,7 @@
 // The access-safety harness: the runtime oracle that catches undeclared access to a `Guarded`
 // object. Every guarded method opens with `TS_CHECK_ACCESS()` (~1 ns), which checks `this`
 // against `Access_context` - the per-task permission set installed thread-locally while a task
-// runs (a small inline array + linear scan; a task touches a handful of objects). An entry may
+// runs. An entry may
 // carry a grant-window epoch (the object's `write_epoch` + the value captured at declaration),
 // so an inherited grant that outlived its window faults instead of silently racing, and a lock
 // `Rank` for objects awaited dynamically while another grant is held. Defines the `Access` enum

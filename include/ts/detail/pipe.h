@@ -1,20 +1,13 @@
 #pragma once
 
-// The per-object reader/writer serializer - the `Pipe` (docs/pipe-rebase.md §0). Every
-// `Guarded`/`Versioned` owns exactly one, and it is what orders conflicting accesses to that
-// object: concurrent readers run at once, one exclusive writer runs alone, all in FIFO
-// admission order. Different objects have independent pipes and run in parallel. The pipe is
-// non-blocking - no caller ever waits in it; admission is completion-driven, and an admitted
-// entry's turn fires `release()` on its owner block (the pipe is a prerequisite source for the
-// task machinery, not a dispatcher). Queueing allocates nothing: the queue is the tasks' own
-// embedded `Pipe_link`s threaded intrusively.
-//
-// This header carries the `Pipe` struct, its cascade entry points (`pipe_enter_first`,
-// `advance_pipe_links`, `pipe_acquire`/`pipe_release`, `pipe_try_inline`), the waits-for cycle
-// detector hooks, and the pipe-task block builders (`Piped_executable`, `make_piped_executable`,
-// `bind_pipe_link`). The public `Guarded<T>` and the free access verbs live in ts/guarded.h; the
-// compile-time access-mode deduction in ts/detail/access_deduction.h. Serializer internals and
-// the evolved cascade: docs/pipe-rebase.md §0; the per-node turn mechanism: docs/task-internals.md §10.
+// The per-object reader/writer serializer that orders conflicting accesses to one `Guarded`/
+// `Versioned` object - concurrent reads, one exclusive write, FIFO, non-blocking. Full semantics
+// are on the `Pipe` struct below; this header carries `Pipe`, its cascade entry points
+// (`pipe_enter_first`, `advance_pipe_links`, `pipe_acquire`/`pipe_release`, `pipe_try_inline`), the
+// waits-for cycle detector hooks, and the pipe-task block builders (`Piped_executable`,
+// `make_piped_executable`, `bind_pipe_link`). Public `Guarded<T>` + verbs: ts/guarded.h;
+// access-mode deduction: ts/detail/access_deduction.h. Internals: docs/pipe-rebase.md §0; the
+// per-node turn mechanism: docs/task-internals.md §10.
 
 #include "ts/access.h"
 #include "ts/detail/pipe_link.h"
