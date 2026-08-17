@@ -61,20 +61,24 @@ Three types on the Task tier; two private, two public handles (one shared).
   `Task_control_block*`.
 
 - **Storage wrappers** (private, per instantiation) — everything that carries a type
-  is composed *around* the block, not into it:
-  - `Executable<Body,R> { Task_control_block core; Result_storage<R> storage; Body body; }`
+  is composed *around* the block, not into it. Each wrapper **derives from
+  `Task_control_block`** (via the `detail::Block_backed<Derived>` CRTP helper where the
+  destroy is a plain `delete`), so recovering the wrapper from a `Task_control_block*` is a
+  standard-defined `static_cast` to the derived type — not the first-member
+  `reinterpret_cast` idiom, which is only conditionally supported for these
+  non-standard-layout types:
+  - `Executable<Body,R> : Block_backed<...> { Result_storage<R> storage; Body body; }`
     — for `async` / `launch`.
-  - `Task_promise<R>` — the **fused coroutine frame**: the promise embeds the block
-    (first member) inside the compiler-allocated frame, so frame + block + result are
-    one allocation and the block's `destroy` thunk destroys the whole frame.
+  - `Task_promise<R>` — the **fused coroutine frame**: the promise derives from the block
+    inside the compiler-allocated frame, so frame + block + result are one allocation and
+    the block's `destroy` thunk destroys the whole frame (`from_promise`, not `delete`).
   - a bodyless resultless block (`Signal`) is just `Task_control_block`.
 
   Ownership is **intrusive**: the refcount and a `destroy` thunk live in the block
   (`Task_ptr` is one pointer, half a `shared_ptr` handle), and the thunk deletes the
-  enclosing wrapper — the block is the wrapper's first member, so a
-  `Task_control_block*` aliases it. `core.result_ptr` points at the wrapper's stored
-  result (or null); `core.execute` points at a per-`Body` thunk that casts the block
-  back to the wrapper and runs the body.
+  enclosing wrapper through that derived cast. The block's `result_ptr` points at the
+  wrapper's stored result (or null); its `execute` points at a per-`Body` thunk that casts
+  the block back to the wrapper and runs the body.
 
 - **`Task<R>`** (public) — the consumer handle: `co_await` (from tasks), `sync()` /
   `take()` (from blue threads), `is_done()`/`is_cancelled()`. `sync()` reads
