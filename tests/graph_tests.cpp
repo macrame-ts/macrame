@@ -1029,7 +1029,7 @@ void test_nested_run_auto_joins_scope()
     outer.add_node(ts::Named{}, [&inner](int& v)
     {
         v += 1;
-        inner.execute();   // handle dropped: the scope join is what keeps it honest
+        (void)inner.execute();   // handle deliberately dropped: the scope join is what keeps it honest
     }, x);
     outer.compile();
 

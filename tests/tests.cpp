@@ -270,7 +270,7 @@ void run_death_scenario(const char* name)
         outer.add_node(ts::Named{}, [&inner_live, &inner_lend](int& v) -> ts::Task<void>
         {
             (void)v;
-            inner_live.execute();          // un-awaited: joins the frame's scope, stays live
+            (void)inner_live.execute();    // deliberately un-awaited: joins the frame's scope, stays live
             co_await inner_lend.execute(); // scope not quiet -> fatal
         }, x);
         outer.compile();
@@ -285,7 +285,7 @@ void run_death_scenario(const char* name)
         g.add_node(ts::Named{}, [&g](int& v)
         {
             (void)v;
-            g.execute();   // -> fatal
+            (void)g.execute();   // -> fatal
         }, x);
         g.compile();
         g.execute().sync();

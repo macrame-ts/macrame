@@ -225,7 +225,12 @@ public:
     // race the lent-to graph on the same object, both "validly"); and calling `execute()` on a graph
     // whose previous run is still in flight (one run at a time - use a second instance, or
     // order the callers).
-    Task<void> execute(Execution_options opts = {});
+    //
+    // `[[nodiscard]]`: the returned handle is the run's only completion signal, and the
+    // one-run rule means the next `execute()` is legal only after this run is awaited or
+    // sync()ed - dropping the handle forfeits both. A deliberate fire-and-forget (a detached
+    // run whose completion genuinely does not matter) spells its intent with `(void)`.
+    [[nodiscard]] Task<void> execute(Execution_options opts = {});
 
     // Attach an aggregating runtime trace (tools/graph_trace.h), or detach with nullptr.
     // Requires a compiled graph: the compiled structure (node labels, declared accesses,

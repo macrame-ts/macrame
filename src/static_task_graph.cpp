@@ -577,7 +577,14 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     // sub-graph invoked from two concurrently running parents collides here. v1 rule is one
     // instance per concurrent user (compile a clone, or order the parents with an edge);
     // run-queueing is TODO 2.3.
-    if (run_ && run_->remaining_nodes.load(std::memory_order_acquire) != 0)
+    //
+    // Both conditions are needed: `remaining_nodes` reaches 0 before the run's tail (the trace
+    // fold + the `done` settle) finishes on the settling thread, so a too-early second call
+    // could slip a count-only check and race that tail. The previous `done` handle's `ready` is
+    // set only after the fold, so requiring it settled closes the window. A legal caller - one
+    // that awaited or sync()ed the previous run - always passes both.
+    if (run_ && (run_->remaining_nodes.load(std::memory_order_acquire) != 0
+                 || (run_->done && !run_->done->ready.load(std::memory_order_acquire))))
     {
         ts::fatal("Static_task_graph::execute called while a run of this graph is still in flight "
                   "(one run at a time - await the previous run, or use a separate graph instance)");
