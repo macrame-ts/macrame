@@ -68,10 +68,13 @@ template arguments are user-spellable: `ts::Access_op<World, Snapshot>`.
 - **Pinned**: non-movable and non-copyable once constructed - the pipe's
   intrusive FIFO holds `&link` (same rationale as `Access_guard`, whose address
   is the installed context; the two converged independently).
-- **Destruction contract** (decided, §9.2): destroying a started-but-unsettled
-  op would corrupt the pipe queue, so the dtor waits until settled in every
-  config; checked builds additionally fire a `TS_ENSURE` before waiting (the
-  wait is the safety net, the ensure is the bug report).
+- **Destruction contract** (decided, §9.2; refined §10.1): destroying a
+  started-but-unsettled op would corrupt the pipe queue. Outside a task the
+  dtor waits until settled in every config, checked builds firing a
+  `TS_ENSURE` first (the wait is the safety net, the ensure is the bug
+  report); inside a task the wait cannot be offered (blue boundary - worker
+  exhaustion, or an op on a pipe the task holds never settles), so it is
+  fatal via `blocking_sync_diagnose`.
 
 ## 4. Custody: why the pipe does not change
 
@@ -151,9 +154,9 @@ integration for pending requests. Not in v1.
    `pipe_acquire` reduced to the link-enter protocol.
 3. **Multi-object `Access_op`** (N embedded links through the same canonical
    cascade) - closes TODO 1.2 (multi-object inline arm) as a side effect.
-4. **`rearm()` + member placement** - the SBO'd-body spelling for ops as
-   members rides the `Function<Sig, N>` work (TODO 4.2); until then, member
-   ops are `decltype`-typed or lambda-free.
+4. **The §10 lifecycle** - `start()` refire, default-ctor unbound, `bind()`,
+   `ts::dormant`, the §10.1 state machine and its checks; the erased-body
+   member spelling rides the `Function<Sig, N>` work (TODO 4.2).
 5. **`async` rebased on the same machinery** - a heap-placed op with
    self-ownership; one code path, two ownership modes (pure refactor, no
    behavior change).
@@ -175,8 +178,10 @@ integration for pending requests. Not in v1.
 2. **Decided: the dtor waits in every config; checked builds additionally
    fire a `TS_ENSURE` before waiting** (an unsettled op at destruction is a
    latent bug worth reporting, but corrupting the pipe or fatalling over it
-   buys nothing shipping's wait does not). Verify the wait against the
-   deadlock net (a blue-thread dtor holding what the op needs).
+   buys nothing shipping's wait does not). Refined by §10.1: the wait applies
+   outside a task only - inside a task it is fatal (blue boundary). Verify
+   the wait against the deadlock net (a blue-thread dtor holding what the op
+   needs).
 3. **Decided: mirror `Task`** (`is_cancelled()` check, fatal on blind
    consume; `try_take`/`as_optional` analogs if demand appears).
 4. **Decided: yes** - `Access_options{.token,.priority}` passes through
@@ -245,11 +250,53 @@ Lifecycle for members (decided 2026-08-18): three orthogonal steps -
   allocation, nothing added to the fire path).
 - `op.bind(world, body)` - store the target + construct the body in place;
   does not fire.
-- `Access_op(ts::defer, world, body)` - bound-but-dormant in one expression
+- `Access_op(ts::dormant, world, body)` - bound-but-dormant in one expression
   (= default + bind); needed because a member init list cannot call `bind()`.
+  (`ts::dormant`, not `defer` - avoids collision with `Deferred`.)
 - `Access_op(world.access(body))` - the eager form: bind + `start()` in the
   constructor.
 - `op.start()` - fire (§5): never-started or settled only, fatal in flight.
+
+### 10.1 State machine
+
+Four states - **unbound → dormant (bound) → in flight → settled** - plus a
+*consumed* sub-flag on settled (`sync()`/`await_resume` move the result out).
+Storage: a `bound` bit + a `started` bit; in-flight/settled live in the core.
+The full operation matrix:
+
+| op \ state | unbound | dormant | in flight | settled |
+|---|---|---|---|---|
+| destroy | trivial | destroy body, no check (a) | see dtor contract below | destroy R if unconsumed |
+| `start()` | fatal | first fire | fatal | refire; discards unconsumed R (b) |
+| `bind()` | ok | rebind ok (destroy old body) | fatal | rebind ok (c) |
+| `sync()` / `co_await` | fatal - would hang forever | fatal - would hang forever | wait / suspend | consume; second consume is a checked fatal, mirroring `take()` |
+
+**Dtor contract refined** (supersedes the §9.2 wording): the wait is itself a
+blocking sync, so it obeys the blue boundary - **outside a task**: checked
+builds fire `TS_ENSURE` then wait, shipping waits silently; **inside a task**:
+fatal via the `blocking_sync_diagnose` seam (a worker parking on the wait
+risks exhaustion deadlock, and an op targeting a pipe the current task holds
+would never settle - the wait cannot be offered). The common coroutine
+spellings never hit this: an awaited temporary and an awaited named op are
+both settled before their dtor runs; only an *abandoned* in-task op does,
+which is exactly a bug worth reporting.
+
+The benign cases, decided as non-issues:
+
+- (a) destroying bound-but-never-started destroys the body with no lost-work
+  check - unlike `~Deferred`'s staged-command fatal, a dormant op is a
+  declared *capability*, not a pending *effect*; never firing it loses
+  nothing.
+- (b) refiring over an unconsumed result destroys the old R first - legal and
+  documented (`Task` results are droppable too; "skip a stale frame's read"
+  is a legitimate steady state). `start()` clears the consumed flag.
+- (c) rebind on settled is legal (settled ⇔ pipe refs drained, so
+  retargeting to a different `Guarded` is safe) - the pooled/reused-op
+  enabler.
+
+Single-owner contract: `start`/`bind`/`sync`/destroy are not thread-safe
+against each other - one owner, external synchronization if shared (the
+`co_await` completion handshake is of course internally synchronized).
 
 Op size as a member: core + link + body + R ~= 320-400 B - unremarkable, and
 it replaces a per-frame heap block of the same magnitude.
