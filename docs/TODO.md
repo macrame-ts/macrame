@@ -287,6 +287,22 @@ IDs — when an item is done, mark it, don't renumber.
        objects get best-effort coverage of the first 8 in canonical order. Related: 2.19 (the
        lend-await hole on ATTACHED runs - same "containment assumes the await" family).
 
+   18. `[ ]` **(P1, evidence 2026-08-18) Pipe turn tail-chaining on the releasing worker.**
+       The global-bottleneck bench (`benchmarks/global_bottleneck_bench.cpp`) exposed it: at
+       crit=1us on one hot store, `Guarded` dead-heats the mutex (0.43 vs 0.42 M/s, both at
+       ~42% of the serial bound) because once the pool has drained everything except the hot
+       pipe's chain, every admitted turn is dispatched via `submit` and *wakes a parked
+       worker* - the pipe pays the same ~1.4 us wake-per-element a mutex convoy pays. The
+       access-control bench showed the opposite (pipe beats the mutex hot chain) only because
+       cold jobs kept workers awake - the "completing worker dispatches the next turn
+       directly" advantage exists only while the pool stays busy. Fix shape: when `release`
+       admits the next turn and the releasing thread is a worker, run the admitted command
+       inline on it (tail-chain) instead of submitting - bounded by the usual trampoline
+       discipline; interacts with fairness (a long hot chain would monopolize the worker -
+       cap chained turns, then submit) and with priorities. Expected effect: the 1 us column
+       roughly doubles toward the serial bound; the 200 ns column's remaining gap is
+       per-touch block allocation, i.e. the `Access_op` work.
+
 2. **Static task graph**
    1. `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.
    2. `[ ]` **(P2, raised within-band) Ambiguity detection** — `compile({.ambiguity = Warn|Error|Ignore})` determinism diagnostic; needs edge provenance; feeds profiler-guided reorder. **Research validation (2026-07, [research-static-vs-dynamic.md](research-static-vs-dynamic.md)):** ordering ambiguity is the top user-facing failure of access-derived schedules — Bevy shipped exactly this diagnostic (`ambiguity_detection`) after its stageless rework because users hit nondeterministic system order in practice. **PARKED (author, 2026-07).** Full analysis in [ordering-ambiguity.md](ordering-ambiguity.md): our declaration-index orientation is deterministic, so we lack Bevy's per-frame-nondeterminism bug class — the residual is *hidden, unratified* orientation (a refactor that swaps two `add_node` lines silently flips gameplay). The proposed feature (conflict provenance + a fragile-orientation lint + a commutativity annotation feeding the optimizer) is rescoped as optimizer infrastructure, not a safety feature — but the annotation-cost question (pairwise = combinatorial; object-level = the mitigation, unproven) is unresolved. Do nothing until real usage data (start with the tiebreak-only pair count on `game_frame`). Provenance itself is still needed by 2.4/2.5 and the DOT dump regardless.
