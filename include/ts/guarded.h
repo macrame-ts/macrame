@@ -71,6 +71,11 @@ inline constexpr Dormant dormant{};
 
 namespace detail
 {
+// `Access_op::sync() &`'s return: a non-consuming `const R&` peek, `void` for a void access.
+template<typename R2> struct Sync_ref { using type = const R2&; };
+template<> struct Sync_ref<void> { using type = void; };
+template<typename R2> using Sync_ref_t = typename Sync_ref<R2>::type;
+
 // The op's hooks for the coroutine awaiter (coroutine_support.h). Defined below the class.
 template<typename T, typename Body>
 Task_control_block* access_op_core(Access_op<T, Body>& op) noexcept;
@@ -137,10 +142,17 @@ public:
     bool is_done() const noexcept;
     bool is_cancelled() const noexcept;
 
-    // Blocks until the access settles and returns the result BY VALUE (moved out of the op's
-    // storage - consume once). Legal only outside a task (the blue boundary, as `Task::sync`);
-    // fatal on a cancelled value access - check `is_cancelled()` first.
-    result_type sync();
+    // The blocking consumes/peeks - one vocabulary with `Task`, applied to caller-owned
+    // storage (legal only outside a task - the blue boundary; fatal on a cancelled value
+    // access, check `is_cancelled()` first):
+    //   sync() &   - non-consuming `const R&` peek, repeatable (`Task::sync`'s meaning)
+    //   sync() &&  - `R` by value: the temporary form `obj.access(fn).sync()` stays
+    //                dangle-free (the op dies at the semicolon)
+    //   take()     - the explicit consuming move (`Task::take`'s meaning); consuming the
+    //                same cycle twice is a checked fatal
+    detail::Sync_ref_t<result_type> sync() &;
+    result_type sync() &&;
+    result_type take() requires (!std::is_void_v<result_type>);
 
     // Never blocks: empty when the access is unsettled or cancelled, else moves the result
     // out (the last consume). Also legal inside a task, like `Task::try_take`.
@@ -197,6 +209,10 @@ private:
     // The fire fast path (reentrant arm / inline when free / enqueue), shared by the eager
     // constructor and `start()`.
     void fire();
+
+    // The blocking-wait prologue shared by `sync()`/`take()`: never-started check, the
+    // in-task blocking-sync rule, then the settled fast path or the real wait.
+    void wait_settled();
 
     State state_;
     // Set when the LAST fire's inline/reentrant arm ran the body to completion on this
@@ -473,16 +489,16 @@ bool Access_op<T, Body>::is_cancelled() const noexcept
 }
 
 template<typename T, typename Body>
-typename Access_op<T, Body>::result_type Access_op<T, Body>::sync()
+void Access_op<T, Body>::wait_settled()
 {
 #if TS_SAFETY_CHECKS
     if (!state_.started)
-        ts::fatal("Access_op::sync() on an op that was never started - start() it first "
+        ts::fatal("Access_op: waiting on an op that was never started - start() it first "
                   "(waiting on a dormant op would hang forever)");
 #endif
 #if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
     // The rule is about the call, not the incident (as `sync_wait`): checked before the
-    // settled fast path, so an in-task `sync()` faults deterministically even on a settled op.
+    // settled fast path, so an in-task wait faults deterministically even on a settled op.
     if (detail::current_task && rule_enforced(Rule::in_task_sync))
         detail::blocking_sync_diagnose(&state_);
 #endif
@@ -492,6 +508,12 @@ typename Access_op<T, Body>::result_type Access_op<T, Body>::sync()
         detail::Task_control_block::sync_wait(self);
         self.release();
     }
+}
+
+template<typename T, typename Body>
+detail::Sync_ref_t<typename Access_op<T, Body>::result_type> Access_op<T, Body>::sync() &
+{
+    wait_settled();
     if constexpr (std::is_void_v<result_type>)
     {
         return;
@@ -500,14 +522,33 @@ typename Access_op<T, Body>::result_type Access_op<T, Body>::sync()
     {
         if (state_.cancelled)
             ts::fatal("Access_op::sync() on a cancelled access; check is_cancelled() first");
-#if TS_SAFETY_CHECKS
-        if (state_.consumed)
-            ts::fatal("Access_op: result already consumed this cycle - start() refires before "
-                      "the next consume");
-#endif
-        state_.consumed = true;
-        return std::move(*static_cast<result_type*>(state_.result_ptr));
+        return *static_cast<const result_type*>(state_.result_ptr);
     }
+}
+
+template<typename T, typename Body>
+typename Access_op<T, Body>::result_type Access_op<T, Body>::sync() &&
+{
+    if constexpr (std::is_void_v<result_type>)
+        wait_settled();
+    else
+        return take();   // the temporary form is a consume; same contract, same fatals
+}
+
+template<typename T, typename Body>
+typename Access_op<T, Body>::result_type Access_op<T, Body>::take()
+    requires (!std::is_void_v<result_type>)
+{
+    wait_settled();
+    if (state_.cancelled)
+        ts::fatal("Access_op::take() on a cancelled access; check is_cancelled() first");
+#if TS_SAFETY_CHECKS
+    if (state_.consumed)
+        ts::fatal("Access_op: result already consumed this cycle - start() refires before "
+                  "the next consume");
+#endif
+    state_.consumed = true;
+    return std::move(*static_cast<result_type*>(state_.result_ptr));
 }
 
 template<typename T, typename Body>

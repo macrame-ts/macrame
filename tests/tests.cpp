@@ -715,8 +715,8 @@ void run_death_scenario(const char* name)
     {
         ts::Guarded<int> d{ ts::Named{}, 2 };
         auto op = d.access([](const int& v) { return v; });   // free pipe: settled inline
-        (void)op.sync();
-        (void)op.sync();   // second consume of the same cycle -> fatal
+        (void)op.take();
+        (void)op.take();   // second consume of the same cycle -> fatal (sync() & would be legal)
     }
 #endif
 #if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)

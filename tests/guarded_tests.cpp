@@ -659,7 +659,7 @@ void test_op_refire()
     {
         d.async([](int& v) { ++v; }).sync();
         op.start();
-        TS_CHECK(op.sync() == frame);
+        TS_CHECK(op.take() == frame);   // consuming each cycle; start() re-arms the flag
     }
     op.start();   // settle, never consume...
     while (!op.is_done())
@@ -680,6 +680,18 @@ void test_op_rebind_settled()
     op.bind(b, Read_plus{ 2 });   // settled: rebind destroys the old body, retargets
     op.start();
     TS_CHECK(op.sync() == 202);
+}
+
+// The consume/peek vocabulary (§5 revised): `sync() &` is a repeatable non-consuming peek,
+// `take()` the explicit consuming move, `sync() &&` the temporary form's by-value consume.
+void test_op_sync_take_vocabulary()
+{
+    ts::Guarded<int> d{ ts::Named{}, 7 };
+    auto op = d.access([](const int& v) { return v; });
+    TS_CHECK(op.sync() == 7);
+    TS_CHECK(op.sync() == 7);                                    // sync() & does not consume
+    TS_CHECK(op.take() == 7);                                    // peek then take: legal, take moves
+    TS_CHECK(d.access([](const int& v) { return v; }).sync() == 7);   // temporary: by value
 }
 
 // --- Access_op: nested completion-gating (s4 as revised) -------------------
@@ -767,6 +779,7 @@ void run_guarded_tests()
     run("op: refire loop", test_op_refire);
     run("op: rebind settled to another object", test_op_rebind_settled);
     run("op: nested graph run gates completion", test_op_nested_graph_run);
+    run("op: sync/take vocabulary", test_op_sync_take_vocabulary);
     run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op start unbound",
         []{ TS_CHECK(ts::test::expect_death("access_op_start_unbound")); });
     run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op sync never started",
