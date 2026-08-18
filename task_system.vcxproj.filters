@@ -66,6 +66,9 @@
     <ClCompile Include="benchmarks\game_frame_bench.cpp">
       <Filter>benchmarks</Filter>
     </ClCompile>
+    <ClCompile Include="benchmarks\global_bottleneck_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
     <ClCompile Include="benchmarks\scheduler_bench.cpp">
       <Filter>benchmarks</Filter>
     </ClCompile>

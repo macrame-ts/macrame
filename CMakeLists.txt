@@ -63,6 +63,7 @@ if(WIN32)
     benchmarks/benchmarks.cpp
     benchmarks/features_bench.cpp
     benchmarks/game_frame_bench.cpp
+    benchmarks/global_bottleneck_bench.cpp
     benchmarks/scheduler_bench.cpp
     benchmarks/staged_commands_bench.cpp
         tests/access_tests.cpp
