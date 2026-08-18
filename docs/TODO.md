@@ -311,8 +311,16 @@ IDs — when an item is done, mark it, don't renumber.
        (verified: entries already refcount the owner block and `fire_granted` is pipe-free).
        Five phases in the doc (floor metric, the type + return-type change, guard awaiters
        embedding their links - kills `pipe_acquire`'s hold-node alloc, multi-object, rearm +
-       async rebase). Supersedes 1.1's tiering, delivers 1.15(c), closes 1.2 at phase 3. Open
-       questions listed in the doc §9 - decide before phase 1 code.
+       async rebase). Supersedes 1.1's tiering, delivers 1.15(c), closes 1.2 at phase 3.
+       **Progress (2026-08-18)**: phases 0-1 + the §10 lifecycle landed (`37070f9`/`707b7b0`/
+       `26afa54`); §9 questions all decided; custody as landed deviates from the doc's §4
+       claim - `Flags::caller_owned` borrowed-pointer path, see the doc's §4 correction.
+       **REVIEW - perf still short of target (author flag)**: floor moved 125.5 -> 54.9 ns/op
+       but that is ~4.4x a bare mutex vs the §7 target of ~2-3x; the malloc was only ~13 ns
+       of the original gap. Residual ~40 ns = two pipe-mutex passes (admit + release) +
+       claim CAS + context install - revisit after phases 2-3 and 1.18 (tail-chaining is
+       the mechanism aimed at exactly the mutex-pass cost); if still short, profile the
+       admission path itself.
 
 2. **Static task graph**
    1. `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.
