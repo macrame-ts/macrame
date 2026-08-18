@@ -66,6 +66,9 @@
     <ClCompile Include="benchmarks\production_contention_bench.cpp">
       <Filter>benchmarks</Filter>
     </ClCompile>
+    <ClCompile Include="benchmarks\production_contention_lib_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
     <ClCompile Include="benchmarks\scheduler_bench.cpp">
       <Filter>benchmarks</Filter>
     </ClCompile>

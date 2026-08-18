@@ -8,5 +8,6 @@ void run_scheduler_bench();        // scheduler_bench.cpp
 void run_features_bench();         // features_bench.cpp
 void run_coro_resume_bench();      // features_bench.cpp
 void run_staged_commands_bench();  // staged_commands_bench.cpp
-void run_production_contention_bench();   // production_contention_bench.cpp
+void run_production_contention_bench();       // production_contention_bench.cpp
+void run_production_contention_lib_bench();   // production_contention_lib_bench.cpp
 void run_game_frame_bench();       // game_frame_bench.cpp

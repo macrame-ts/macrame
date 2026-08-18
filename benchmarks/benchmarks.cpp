@@ -11,6 +11,8 @@
 //   staged_commands_bench.cpp - the Deferred closure-tier cost series
 //   production_contention_bench.cpp - the generalized production lock-contention case
 //                               (docs/lock-contention-research.md), pure mutex baseline
+//   production_contention_lib_bench.cpp - the same workload architected on the library
+//                               (staged touches, per-wave commit, apply-lane slow op)
 //   game_frame_bench.cpp      - graph vs graph-free frame composition
 // The call order below is the published output order - keep it stable so recorded
 // baselines stay diffable.
@@ -24,6 +26,7 @@ void run_benchmarks()
     run_features_bench();
     run_staged_commands_bench();
     run_production_contention_bench();
+    run_production_contention_lib_bench();
     run_coro_resume_bench();
     run_game_frame_bench();
 }

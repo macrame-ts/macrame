@@ -39,6 +39,7 @@
     <ClCompile Include="benchmarks\features_bench.cpp" />
     <ClCompile Include="benchmarks\game_frame_bench.cpp" />
     <ClCompile Include="benchmarks\production_contention_bench.cpp" />
+    <ClCompile Include="benchmarks\production_contention_lib_bench.cpp" />
     <ClCompile Include="benchmarks\scheduler_bench.cpp" />
     <ClCompile Include="benchmarks\staged_commands_bench.cpp" />
     <ClCompile Include="sample\blackboard.cpp" />
