@@ -288,13 +288,13 @@ IDs — when an item is done, mark it, don't renumber.
        lend-await hole on ATTACHED runs - same "containment assumes the await" family).
 
    18. `[ ]` **(P1, evidence 2026-08-18) Pipe turn tail-chaining on the releasing worker.**
-       The global-bottleneck bench (`benchmarks/global_bottleneck_bench.cpp`) exposed it: at
-       crit=1us on one hot store, `Guarded` dead-heats the mutex (0.43 vs 0.42 M/s, both at
-       ~42% of the serial bound) because once the pool has drained everything except the hot
-       pipe's chain, every admitted turn is dispatched via `submit` and *wakes a parked
-       worker* - the pipe pays the same ~1.4 us wake-per-element a mutex convoy pays. The
-       access-control bench showed the opposite (pipe beats the mutex hot chain) only because
-       cold jobs kept workers awake - the "completing worker dispatches the next turn
+       Exposed by an exploratory mutex-vs-`Guarded` bench (2026-08-18, since removed; numbers
+       preserved here): at a 1 us critical section on one hot store, `Guarded` dead-heats the
+       mutex (0.43 vs 0.42 M/s, both at ~42% of the serial bound) because once the pool has
+       drained everything except the hot pipe's chain, every admitted turn is dispatched via
+       `submit` and *wakes a parked worker* - the pipe pays the same ~1.4 us wake-per-element
+       a mutex convoy pays. A busy-pool variant of the same experiment showed the opposite
+       (pipe beats the mutex hot chain) - the "completing worker dispatches the next turn
        directly" advantage exists only while the pool stays busy. Fix shape: when `release`
        admits the next turn and the releasing thread is a worker, run the admitted command
        inline on it (tail-chain) instead of submitting - bounded by the usual trampoline
@@ -542,7 +542,8 @@ IDs — when an item is done, mark it, don't renumber.
    **Two distinct oversubscription mechanisms (UE, verified from source — keep them separate, both are SCHEDULER-impl concerns behind the unchanged `Task` API, NOT task-layer):** (i) *background-band gap-filling* — the variant above: a standing low-OS-priority pool the OS preempts out the instant foreground work is ready. (ii) *dynamic oversubscription around a blocking region* — `FOversubscriptionScope` bumps a count that wakes a parked standby worker (or spawns one under dynamic thread creation, `IncrementOversubscription`); surplus workers self-retire via `ConditionalStandby` when the count drops. (ii) keeps the pool alive when a task genuinely BLOCKS (mutex / I/O / `Wait` on unrelated work) — the case our current scheduler does NOT cover. (2026-08: awaits no longer belong on that list — a `co_await` suspends the frame and frees the worker, and retraction is gone. What is left uncovered is opaque blocking inside a body, with no suspension point for us to use; see 5.3.) (ii) is the prior art for closing that gap in the alternative scheduler; see 5.3.
    8. `[ ]` **(P3, micro-opt, raised 2026-07) De-correlated per-worker park-spin timing.** UE gives each worker a distinct prime-ish spin duration from a small table (`{719,991,1361,…}[worker_id % 8]`, the `YieldCycles` arg to the pre-park spin) so parked workers don't re-scan the queues in lockstep — a cheap thundering-herd mitigation. Our `spin_then_block`/`handoff` idle loops spin a uniform `spin_cycles` on every worker. Cheap to add (a per-worker offset seeded at construction); measure whether it cuts contended eventcount re-scans under a fully-parked burst/drain. Prior art: UE `FWaitingQueue::Park` ([task-systems-comparison.md](task-systems-comparison.md) §UE).
    9. `[ ]` **(P1, evidence 2026-08-18) Investigate the 2x-worker throughput collapse.** Across two
-      unrelated bench workloads (`global_bottleneck_bench`, `subsystem_contention_bench`), every row
+      unrelated exploratory bench workloads (2026-08-18, since removed - a global-bottleneck flood
+      and a multi-store contention mix), every row
       run with `num_threads = 2 x hw` collapses to a near-constant ~0.5-0.63 M tasks/s - regardless
       of lock mechanism, contention level, or task shape (even the uncontended uniform control),
       while the same workload at `hw` workers runs 2-4x faster. Workload-independence points at the

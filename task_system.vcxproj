@@ -35,13 +35,11 @@
     <ClCompile Include="src\static_task_graph.cpp" />
     <ClCompile Include="src\guarded.cpp" />
     <ClCompile Include="src\worker_thread.cpp" />
-    <ClCompile Include="benchmarks\access_control_bench.cpp" />
     <ClCompile Include="benchmarks\benchmarks.cpp" />
     <ClCompile Include="benchmarks\features_bench.cpp" />
     <ClCompile Include="benchmarks\game_frame_bench.cpp" />
-    <ClCompile Include="benchmarks\global_bottleneck_bench.cpp" />
+    <ClCompile Include="benchmarks\production_contention_bench.cpp" />
     <ClCompile Include="benchmarks\scheduler_bench.cpp" />
-    <ClCompile Include="benchmarks\subsystem_contention_bench.cpp" />
     <ClCompile Include="benchmarks\staged_commands_bench.cpp" />
     <ClCompile Include="sample\blackboard.cpp" />
     <ClCompile Include="sample\coloring.cpp" />
