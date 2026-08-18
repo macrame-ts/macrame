@@ -1,4 +1,5 @@
 #include "guarded_tests.h"
+#include "ts/coroutine_support.h"   // the Access_op awaiter tests
 #include "ts/guarded.h"
 #include "harness.h"
 #include "test_util.h"
@@ -356,7 +357,7 @@ void test_access_runs_synchronously()
 {
     ts::Guarded<int> d{ ts::Named{}, 5 };
     std::thread::id body_thread{};
-    ts::Task<int> t = d.access([&body_thread](int& v)
+    auto t = d.access([&body_thread](int& v)
     {
         body_thread = std::this_thread::get_id();
         return ++v;   // 6
@@ -399,7 +400,7 @@ void test_access_falls_back_when_busy()
     });
 
     // `access` while the writer holds the pipe -> must defer (not run on the caller).
-    ts::Task<int> t = d.access([&body_thread](int& v)
+    auto t = d.access([&body_thread](int& v)
     {
         body_thread.store(std::this_thread::get_id());
         return ++v;
@@ -473,6 +474,150 @@ void test_writer_fifo()
     TS_CHECK(read_value(d) == 123456);   // FIFO: (((((1)*10+2)*10+3)...)
 }
 
+// --- Access_op: the caller-owned operation state `access` returns ---------
+
+// Pinned by contract: the pipe's intrusive FIFO holds the embedded entry's address.
+static_assert(!std::is_copy_constructible_v<ts::Access_op<int, Int_read>>);
+static_assert(!std::is_move_constructible_v<ts::Access_op<int, Int_read>>);
+static_assert(!std::is_copy_assignable_v<ts::Access_op<int, Int_read>>);
+static_assert(!std::is_move_assignable_v<ts::Access_op<int, Int_read>>);
+// Mode and result deduce from the body, one spelling rule.
+static_assert(ts::Access_op<int, Int_read>::mode == ts::Access::read_only);
+static_assert(ts::Access_op<int, Int_write>::mode == ts::Access::read_write);
+static_assert(std::is_same_v<ts::Access_op<int, Write_fn>::result_type, void>);
+
+// A void access: `sync()` returns nothing, the write lands.
+void test_op_void_result()
+{
+    ts::Guarded<int> d{ ts::Named{}, 0 };
+    d.access([](int& v) { v = 42; }).sync();
+    TS_CHECK(read_value(d) == 42);
+}
+
+// The member spelling the flattened Body exists for (docs/access-op-design.md §10 tier 1): a
+// named functor as `Body`, the op a directly-declared member, constructed in place by
+// guaranteed elision through the `access` return.
+void test_op_member_storage()
+{
+    struct Snapshot
+    {
+        int bonus;
+        int operator()(const int& v) const { return v + bonus; }
+    };
+    struct Holder
+    {
+        ts::Access_op<int, Snapshot> op;
+        explicit Holder(ts::Guarded<int>& g) : op(g.access(Snapshot{ 3 })) {}
+    };
+
+    ts::Guarded<int> d{ ts::Named{}, 7 };
+    Holder h(d);
+    TS_CHECK(h.op.is_done());   // free pipe: ran inline during Holder's construction
+    TS_CHECK(h.op.sync() == 10);
+}
+
+// `try_take`: empty while unsettled, the moved value once settled, empty when cancelled.
+void test_op_try_take()
+{
+    ts::Guarded<int> d{ ts::Named{}, 5 };
+    std::atomic<bool> gate{ false };
+    ts::Task<void> blocker = d.async([&gate](int&) { while (!gate.load()) std::this_thread::yield(); });
+
+    auto op = d.access([](const int& v) { return v; });
+    TS_CHECK(!op.try_take().has_value());   // queued behind the blocker: unsettled
+    gate.store(true);
+    blocker.sync();
+    TS_CHECK(op.sync() == 5);
+}
+
+// Cancellation mirrors `Task`: a pre-cancelled token skips the body, the op settles
+// cancelled, `try_take` is empty, a void `sync()` returns normally.
+void test_op_cancellation()
+{
+    ts::Guarded<int> d{ ts::Named{}, 1 };
+    ts::Cancellation_source src;
+    src.request_cancel();
+
+    auto value_op = d.access([](const int& v) { return v; }, { .token = src.token() });
+    TS_CHECK(value_op.is_done());
+    TS_CHECK(value_op.is_cancelled());
+    TS_CHECK(!value_op.try_take().has_value());
+
+    auto void_op = d.access([](int& v) { v = 99; }, { .token = src.token() });
+    TS_CHECK(void_op.is_cancelled());
+    void_op.sync();   // a cancelled void access unblocks normally
+    TS_CHECK(read_value(d) == 1);   // the body never ran
+
+    // Queued then cancelled-before-dispatch: the turn is taken and released, the op settles
+    // cancelled, and the pipe drains normally behind it.
+    std::atomic<bool> gate{ false };
+    ts::Task<void> blocker = d.async([&gate](int&) { while (!gate.load()) std::this_thread::yield(); });
+    auto queued = d.access([](const int& v) { return v; }, { .token = src.token() });
+    TS_CHECK(!queued.is_done());
+    gate.store(true);
+    blocker.sync();
+    TS_CHECK(!queued.try_take().has_value());
+    while (!queued.is_done())
+        std::this_thread::yield();
+    TS_CHECK(queued.is_cancelled());
+}
+
+// `co_await obj.access(fn)` - the frame-resident temporary, across a genuine suspension: the
+// pipe is held when the coroutine starts, so the awaiter suspends and the settling worker
+// resumes the frame (destroying the op inside the resume - the custody shape the
+// caller-owned settle exists for).
+void test_op_await_suspending()
+{
+    ts::Guarded<int> d{ ts::Named{}, 11 };
+    std::atomic<bool> gate{ false };
+    ts::Task<void> blocker = d.async([&gate](int&) { while (!gate.load()) std::this_thread::yield(); });
+
+    auto frame = [&]() -> ts::Task<int>
+    {
+        int v = co_await d.access([](const int& x) { return x; });
+        co_return v + 1;
+    }();
+    TS_CHECK(!frame.is_done());   // suspended behind the blocker
+    gate.store(true);
+    blocker.sync();
+    TS_CHECK(frame.sync() == 12);
+}
+
+// The named-op form: eager start at the declaration, awaited later (overlap for free); the
+// settled await never suspends.
+void test_op_await_named()
+{
+    ts::Guarded<int> d{ ts::Named{}, 20 };
+    auto frame = [&]() -> ts::Task<int>
+    {
+        auto op = d.access([](const int& x) { return x * 2; });   // free pipe: settles in the ctor
+        co_return co_await op;
+    }();
+    TS_CHECK(frame.sync() == 40);
+}
+
+// Destroying a started-but-unsettled op: checked builds report it (`TS_ENSURE`), every build
+// then blocks until the access settles - the write must have landed by the time the
+// destructor returns.
+void test_op_dtor_waits_unsettled()
+{
+    ts::Guarded<int> d{ ts::Named{}, 0 };
+    std::atomic<bool> gate{ false };
+    ts::Task<void> blocker = d.async([&gate](int&) { while (!gate.load()) std::this_thread::yield(); });
+    std::thread releaser;
+    {
+#if TS_SAFETY_CHECKS
+        ts::test::Expected_ensures expected(1);
+#endif
+        auto op = d.access([](int& v) { v = 7; });
+        TS_CHECK(!op.is_done());
+        releaser = std::thread([&gate] { std::this_thread::sleep_for(10ms); gate.store(true); });
+    }   // ~Access_op: ensure fires (checked), then blocks until the write settles
+    releaser.join();
+    blocker.sync();
+    TS_CHECK(read_value(d) == 7);   // the dtor waited the access out; nothing was lost
+}
+
 } // namespace
 
 void run_guarded_tests()
@@ -503,4 +648,11 @@ void run_guarded_tests()
     run("access falls back when busy", test_access_falls_back_when_busy);
     run("async always schedules", test_async_always_schedules);
     run("async read schedules", test_async_read_schedules);
+    run("op: void result", test_op_void_result);
+    run("op: member storage", test_op_member_storage);
+    run("op: try_take", test_op_try_take);
+    run("op: cancellation", test_op_cancellation);
+    run("op: awaited across suspension", test_op_await_suspending);
+    run("op: named form awaited", test_op_await_named);
+    run("op: dtor waits out unsettled", test_op_dtor_waits_unsettled);
 }

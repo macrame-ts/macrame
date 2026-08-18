@@ -116,13 +116,13 @@ void stress_inline_async()
                     if (k & 1)
                     {
                         auto w = [](int& v) { ++v; };
-                        if (opportunistic) obj.access(w); else obj.async(w);
+                        if (opportunistic) obj.access(w).sync(); else obj.async(w);
                     }
                     else
                     {
                         auto r = [&reads](const int& v)
                             { reads.fetch_add(1, std::memory_order_relaxed); return v; };
-                        if (opportunistic) obj.access(r); else obj.async(r);
+                        if (opportunistic) (void)obj.access(r).sync(); else obj.async(r);
                     }
                 }
             });
@@ -149,11 +149,11 @@ void pipe_rw_producers(ts::Guarded<tests::Rw_probe>& probe, int threads, int per
                 bool write = (seed % 3) == 0;   // ~1/3 writes
                 bool inl = (seed % 2) == 0;     // half via access (may run inline)
                 if (write && inl)
-                    probe.access([seed](tests::Rw_probe& p) { p.observe_write(seed); });
+                    probe.access([seed](tests::Rw_probe& p) { p.observe_write(seed); }).sync();
                 else if (write)
                     probe.async([seed](tests::Rw_probe& p) { p.observe_write(seed); });
                 else if (inl)
-                    probe.access([seed](const tests::Rw_probe& p) { p.observe_read(seed); });
+                    probe.access([seed](const tests::Rw_probe& p) { p.observe_read(seed); }).sync();
                 else
                     probe.async([seed](const tests::Rw_probe& p) { p.observe_read(seed); });
             }

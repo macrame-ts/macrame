@@ -948,6 +948,54 @@ detail::Task_awaiter<R> operator co_await(Task<R>&& t)
     return detail::Task_awaiter<R>(detail::core_of(t));
 }
 
+namespace detail
+{
+
+// Awaiter for `co_await obj.access(fn)` / a named `Access_op`. The wait is `Task_awaiter`'s
+// (same handshake, same rule checks - the reentrant exemption works off the op's bound link);
+// only the resume differs: the result moves out BY VALUE, mirroring `Access_op::sync()` - the
+// op owns the storage and, in the temporary form, dies at the end of the full-expression.
+// The awaiter's `core_` ref on the op block is balanced within the op's lifetime (the awaiter
+// is destroyed before the op, both being parts of the same full-expression / frame).
+template<typename R>
+struct Access_op_awaiter : Task_awaiter<R>
+{
+    using Task_awaiter<R>::Task_awaiter;
+
+    R await_resume()
+    {
+        this->end_wait();
+        if constexpr (std::is_void_v<R>)
+        {
+            return;   // a cancelled void access simply resumes (mirrors sync())
+        }
+        else
+        {
+            if (this->core_->cancelled)
+                ts::fatal("co_await on a cancelled access has no result; check is_cancelled() first");
+            return std::move(*static_cast<R*>(this->core_->result_ptr));
+        }
+    }
+};
+
+} // namespace detail
+
+// `co_await` an `Access_op` (usually the temporary from `obj.access(fn)`, materialized in the
+// coroutine frame for the suspension - zero-alloc; or a named op, awaited once).
+template<typename T, typename Body>
+auto operator co_await(Access_op<T, Body>& op)
+{
+    return detail::Access_op_awaiter<typename Access_op<T, Body>::result_type>(
+        detail::Task_ptr(detail::access_op_core(op)));
+}
+
+template<typename T, typename Body>
+auto operator co_await(Access_op<T, Body>&& op)
+{
+    return detail::Access_op_awaiter<typename Access_op<T, Body>::result_type>(
+        detail::Task_ptr(detail::access_op_core(op)));
+}
+
 
 // Async-lock a `Guarded<T>` in a coroutine: `auto g = co_await ts::read_write(w);` suspends
 // until exclusive write access is granted, then resumes with an RAII guard giving direct

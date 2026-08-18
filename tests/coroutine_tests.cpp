@@ -663,7 +663,7 @@ void test_access_reentrant_under_own_grant()
     g.add_node(ts::Named{}, [&a, &seen](int& v)
     {
         v = 5;
-        ts::Task<int> r = a.access([](const int& x) { return x; });   // reentrant: inline, done
+        auto r = a.access([](const int& x) { return x; });   // reentrant: inline, done
         TS_CHECK(r.is_done());
         // `sync()` inside a task is illegal even on a settled target (TODO 6.10 - the rule,
         // not the incident); `try_take()` is the non-blocking read.

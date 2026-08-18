@@ -259,6 +259,16 @@ struct Task_control_block
         // pointer - no per-dispatch refcount inc/dec (`submit_borrowed`). Set once at
         // compile(); never true for async/coroutine blocks, which the queue must own.
         bool borrowed : 1 = false;
+        // The block lives in caller storage (`Access_op`): the machinery must hold NO
+        // reference past the moment the settle fires its continuations - a fired
+        // continuation can resume the awaiting coroutine, whose frame owns the block, so a
+        // straggling machinery ref would dec freed memory. Dispatch routes through the
+        // borrowed (raw-pointer) queue path, and the pipe carries the entry without a ref
+        // (`pipe_enter_link` / `fire_task_turn`); the block settles through the op's own
+        // notify-under-lock settle, never the generic one. Unlike `borrowed` the owner is
+        // not a longer-lived registry but the op itself, whose destructor blocks until the
+        // access settles - that wait is the lifetime guarantee the refs used to be.
+        bool caller_owned : 1 = false;
     };
     Flags flags;
     // -----------------------------------------------------------------------------------
@@ -354,8 +364,9 @@ struct Task_control_block
         if (!blk->flags.run_inline)
         {
             // queued: the scheduler runs it (at blk->flags.priority). A borrowed block (a
-            // graph node, owned by its `Run_state`) skips the dispatch-hop refcount.
-            if (blk->flags.borrowed)
+            // graph node, owned by its `Run_state`) and a caller-owned one (an `Access_op`,
+            // owned by its op storage) skip the dispatch-hop refcount.
+            if (blk->flags.borrowed || blk->flags.caller_owned)
                 submit_borrowed(blk.get());
             else
                 submit_ready(blk);

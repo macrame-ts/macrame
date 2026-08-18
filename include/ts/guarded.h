@@ -14,10 +14,12 @@
 #include "ts/scheduler.h"
 #include "ts/task.h"
 
+#include <atomic>
 #include <concepts>
 #include <cstdio>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <source_location>
 #include <tuple>
 #include <type_traits>
@@ -55,6 +57,324 @@ namespace detail
 // Grants the multi-object `ts::access`/`ts::async` builder access to a `Guarded`'s instance + pipe
 // (the same internals `Static_task_graph` reaches as a friend). Defined below `Guarded`.
 struct Guarded_access;
+}
+
+template<typename T, typename Body> class Access_op;
+
+namespace detail
+{
+// The op's control block, for the coroutine awaiter (coroutine_support.h). Defined below the class.
+template<typename T, typename Body>
+Task_control_block* access_op_core(Access_op<T, Body>& op) noexcept;
+}
+
+// `Access_op<T, Body>` - the caller-owned operation state `Guarded<T>::access` returns
+// (docs/access-op-design.md). `access` is the ATTENDED verb: the caller stays for the result, so
+// the operation's whole state - completion core, result storage, body, pipe entry - lives in the
+// returned object instead of a heap block, and an access allocates nothing. `async` remains the
+// detached verb and keeps returning a heap-backed `Task<R>`.
+//
+// `Body` is the user's decayed functor, verbatim - no library wrapper closure - so the type is
+// spellable for members: `ts::Access_op<World, Snapshot> op_;` with `Snapshot` a named functor.
+// The access mode and result type are deduced from `Body` exactly as the verb deduces them.
+//
+// The op is eager (the constructor performs the access fast path: reentrant arm, inline when the
+// pipe is free, else enqueued) and pinned - non-copyable and non-movable, because the pipe's
+// intrusive FIFO holds the embedded entry's address. Consume the result exactly once:
+// `co_await op` from a coroutine, `op.sync()` from outside a task (returns `R` BY VALUE - the op
+// owns the storage and often dies at the semicolon), or `try_take()` for the non-blocking /
+// cancellation-tolerant read. Destroying an unsettled op is a bug the destructor reports
+// (`TS_ENSURE`) and then survives: it blocks until the access settles in every configuration -
+// the caller-owned analog of the heap block's refcount.
+template<typename T, typename Body>
+class Access_op
+{
+public:
+    static constexpr Access mode = detail::accessor_mode<Body, T>();
+    using result_type = detail::Accessor_result_t<Body, T, mode>;
+
+    Access_op(const Access_op&) = delete;
+    Access_op& operator=(const Access_op&) = delete;
+
+    ~Access_op();
+
+    bool is_done() const noexcept;
+    bool is_cancelled() const noexcept;
+
+    // Blocks until the access settles and returns the result BY VALUE (moved out of the op's
+    // storage - consume once). Legal only outside a task (the blue boundary, as `Task::sync`);
+    // fatal on a cancelled value access - check `is_cancelled()` first.
+    result_type sync();
+
+    // Never blocks: empty when the access is unsettled or cancelled, else moves the result
+    // out (the last consume). Also legal inside a task, like `Task::try_take`.
+    std::optional<result_type> try_take() requires (!std::is_void_v<result_type>);
+
+private:
+    template<typename U> friend class Guarded;
+    template<typename U, typename B> friend detail::Task_control_block* detail::access_op_core(Access_op<U, B>&) noexcept;
+
+    // A read access stores (and hands the body) `const T*`; the const-ness is structural, not
+    // a runtime mode check.
+    using Inst = std::conditional_t<mode == Access::read_only, const T, T>;
+
+    // The op's block: the monomorphic core as a base (recovery is the standard derived cast),
+    // result storage, the flattened access context (instance/epoch/rank as plain members - what
+    // the heap path captures in a wrapper closure), the user's body, and the embedded pipe
+    // entry. `caller_owned` custody: the machinery holds no ref on it, ever (Flags doc).
+    struct State : detail::Task_control_block
+    {
+        detail::Result_storage<result_type> storage;
+        detail::Pipe_link link;
+        Inst* inst;
+        const std::atomic<std::uint64_t>* epoch;
+        unsigned rank;
+        Body body;
+        // Set by the constructor around its inline/reentrant execute: no observer can exist
+        // before the constructor returns (the op is the only handle and it is mid-construction),
+        // so `op_settle` skips the mutex and the notify entirely - plain stores, sequenced
+        // before every later member call by the constructor's return.
+        bool settle_synchronously = false;
+
+        State(Inst* i, const std::atomic<std::uint64_t>* e, unsigned r, Body b,
+              Cancellation_token tok, Priority pri);
+
+        static void run(const detail::Task_ptr& c);
+        void op_settle(bool cancel);
+    };
+
+    Access_op(detail::Pipe& pipe, Inst* inst, Body body, Access_options opts, Named name);
+
+    State state_;
+    // Set when the constructor's inline/reentrant arm ran the body to completion on this
+    // thread: the settle fully preceded the constructor's return, so the destructor needs no
+    // synchronization at all (the fast path pays no lock in the dtor).
+    bool settled_in_ctor_ = false;
+};
+
+template<typename T, typename Body>
+Access_op<T, Body>::State::State(Inst* i, const std::atomic<std::uint64_t>* e, unsigned r, Body b,
+                                 Cancellation_token tok, Priority pri)
+    : inst(i)
+    , epoch(e)
+    , rank(r)
+    , body(std::move(b))
+{
+    destroy = [](detail::Task_control_block*) {};   // caller-owned: a drained refcount frees nothing
+    execute = &State::run;
+    token = std::move(tok);
+    flags.priority = pri;
+    flags.caller_owned = true;
+    pipe_links = &link;
+}
+
+template<typename T, typename Body>
+void Access_op<T, Body>::State::run(const detail::Task_ptr& c)
+{
+    if (!c->claim())
+        return;   // machinery bug (fatal under TS_SAFETY_CHECKS); skip in shipping
+    auto* self = static_cast<State*>(c.get());
+    if (c->token.is_cancel_requested() || c->prereq_cancelled.load(std::memory_order_acquire))
+    {
+        detail::advance_pipe_links(self);   // the turn was taken; release it before settling
+        self->op_settle(true);
+        return;
+    }
+    c->num_locks.store(detail::Task_control_block::execution_flag + 1, std::memory_order_relaxed);
+    auto prev = std::move(detail::current_task);
+    // Borrowed install, not a counted copy: the op provably outlives its own body, and the
+    // slot is defused before `prev` is restored - no refcount traffic on the hot path. A
+    // copy taken FROM the slot by body-launched machinery still counts normally (and the
+    // one copier that could outlive the op - `add_nested` - is rejected below).
+    detail::current_task = detail::Task_ptr(c.get(), detail::Adopt_ref{});
+    {
+        // The flattened access context: what the heap path's wrapper closure installs, done
+        // structurally from the op's own members.
+        Access_context ctx;
+        ctx.add(static_cast<const void*>(self->inst), mode, self->epoch, self->rank);
+        Access_scope scope(ctx);
+        constexpr bool takes_token = detail::accessor_takes_token_v<Body, Inst&>;
+        if constexpr (std::is_void_v<result_type>)
+        {
+            if constexpr (takes_token)
+                self->body(*self->inst, c->token);
+            else
+                self->body(*self->inst);
+        }
+        else
+        {
+            if constexpr (takes_token)
+                self->storage.result.emplace(self->body(*self->inst, c->token));
+            else
+                self->storage.result.emplace(self->body(*self->inst));
+            c->result_ptr = &*self->storage.result;
+        }
+    }
+    detail::current_task.release();   // defuse the borrowed install (never a counted ref)
+    detail::current_task = std::move(prev);
+    // Caller-owned completion is not gatable by nested children: the child's later release
+    // would route through the generic settle, whose post-notify member touches assume
+    // refcounted storage. A body that needs `detail::add_nested` (a nested graph run) is a
+    // detached shape - run it through `async`.
+    if (c->num_locks.fetch_sub(1, std::memory_order_acq_rel) != detail::Task_control_block::execution_flag + 1)
+        ts::fatal("Access_op: the body attached nested completion-gating work (e.g. a nested graph "
+                  "run) - a caller-owned access cannot be completion-gated by children; use async");
+    detail::advance_pipe_links(self);
+    self->op_settle(false);
+}
+
+// The op's settle. Two deliberate divergences from the generic `Task_control_block::settle`,
+// both because the storage is caller-owned rather than refcounted: (1) the `done_cv` notify
+// happens UNDER the mutex (the pipe's `idle` teardown pattern) - a woken `sync()` waiter
+// cannot return until it re-acquires the mutex, so it cannot destroy the op while this
+// thread is still inside `notify_all`; (2) nothing on this frame touches a member after the
+// continuations fire - a fired continuation can resume the awaiting coroutine, whose frame
+// owns this op, and run it to the end of the `co_await`'s full-expression, destroying the op
+// (and possibly the frame) before the loop below even advances.
+template<typename T, typename Body>
+void Access_op<T, Body>::State::op_settle(bool cancel)
+{
+    if (settle_synchronously)
+    {
+        // In-constructor settle (inline / reentrant arm): the op has not been returned to
+        // its owner, so no waiter and no continuation can exist - plain stores suffice.
+        completed = true;
+        cancelled = cancel;
+        ready.store(true, std::memory_order_release);
+        return;
+    }
+    std::vector<std::move_only_function<void(void*, bool)>> conts;
+    void* r = nullptr;
+    {
+        std::scoped_lock lock(mutex);
+        completed = true;
+        cancelled = cancel;
+        ready.store(true, std::memory_order_release);
+        conts = std::move(continuations);
+        r = cancel ? nullptr : result_ptr;
+        done_cv.notify_all();
+    }
+    for (auto& cont : conts)
+        cont(r, cancel);
+}
+
+template<typename T, typename Body>
+Access_op<T, Body>::Access_op(detail::Pipe& pipe, Inst* inst, Body body, Access_options opts, Named name)
+    : state_(inst, detail::pipe_epoch(pipe), detail::pipe_rank(pipe), std::move(body),
+             std::move(opts.token), opts.priority)
+{
+    // Borrowed wrapper for this frame's machinery calls - defused before every return
+    // (`this` outlives the constructor by definition; the refcount stays untouched).
+    detail::Task_ptr self(&state_, detail::Adopt_ref{});
+    detail::set_task_name(self, name);
+    detail::bind_pipe_link(&state_, 0, pipe, mode);
+    // Reentrant arm (waiting rule (b)): the calling task already holds this pipe's write
+    // grant - run inline under it, touching the pipe not at all (the link above is
+    // diagnostics only; `run` overwrites the unused turn lock).
+    detail::Task_control_block* owner = pipe.writer_owner.load(std::memory_order_acquire);
+    if (owner != nullptr && owner == detail::current_task.get())
+    {
+        state_.settle_synchronously = true;
+        state_.execute(self);
+        settled_in_ctor_ = true;
+        self.release();
+        return;
+    }
+    state_.num_locks.store(1, std::memory_order_relaxed);   // the one pipe turn
+    // Inline fast path: claim an idle pipe and run on this thread; else enqueue - the
+    // admitted turn's release dispatches the body (borrowed route, no machinery refs).
+    state_.settle_synchronously = true;
+    if (detail::pipe_try_inline(global_scheduler(), pipe, mode, self))
+    {
+        settled_in_ctor_ = true;
+        self.release();
+        return;
+    }
+    state_.settle_synchronously = false;
+    self.release();
+    detail::pipe_enter_first(&state_, nullptr);
+}
+
+template<typename T, typename Body>
+Access_op<T, Body>::~Access_op()
+{
+    if (settled_in_ctor_)
+        return;   // settled synchronously on this thread before the ctor returned
+    if (!state_.ready.load(std::memory_order_acquire))
+    {
+#if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
+        // In-flight at destruction INSIDE a task: the wait below is a blocking sync, and the
+        // blue boundary applies to it exactly as to `sync()` - fatal, with the same sharp
+        // same-object diagnosis.
+        if (detail::current_task && rule_enforced(Rule::in_task_sync))
+            detail::blocking_sync_diagnose(&state_);
+#endif
+        TS_ENSURE(false,
+            "Access_op destroyed before completion - co_await or sync() it first (the destructor "
+            "blocks until the access settles)");
+        detail::drain_serial_pending();
+    }
+    // Wait until settled - and, via the mutex, until the settling thread is past every
+    // member touch (`op_settle` notifies under the lock). Runs even when `ready` already
+    // reads true: the lock-free read can observe the settle mid-flight.
+    state_.wait();
+}
+
+template<typename T, typename Body>
+bool Access_op<T, Body>::is_done() const noexcept
+{
+    return state_.ready.load(std::memory_order_acquire);
+}
+
+template<typename T, typename Body>
+bool Access_op<T, Body>::is_cancelled() const noexcept
+{
+    return state_.ready.load(std::memory_order_acquire) && state_.cancelled;
+}
+
+template<typename T, typename Body>
+typename Access_op<T, Body>::result_type Access_op<T, Body>::sync()
+{
+#if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
+    // The rule is about the call, not the incident (as `sync_wait`): checked before the
+    // settled fast path, so an in-task `sync()` faults deterministically even on a settled op.
+    if (detail::current_task && rule_enforced(Rule::in_task_sync))
+        detail::blocking_sync_diagnose(&state_);
+#endif
+    if (!state_.ready.load(std::memory_order_acquire))
+    {
+        detail::Task_ptr self(&state_, detail::Adopt_ref{});
+        detail::Task_control_block::sync_wait(self);
+        self.release();
+    }
+    if constexpr (std::is_void_v<result_type>)
+    {
+        return;
+    }
+    else
+    {
+        if (state_.cancelled)
+            ts::fatal("Access_op::sync() on a cancelled access; check is_cancelled() first");
+        return std::move(*static_cast<result_type*>(state_.result_ptr));
+    }
+}
+
+template<typename T, typename Body>
+std::optional<typename Access_op<T, Body>::result_type> Access_op<T, Body>::try_take()
+    requires (!std::is_void_v<result_type>)
+{
+    if (!state_.ready.load(std::memory_order_acquire) || state_.cancelled)
+        return std::nullopt;
+    return std::move(*static_cast<result_type*>(state_.result_ptr));
+}
+
+namespace detail
+{
+template<typename T, typename Body>
+Task_control_block* access_op_core(Access_op<T, Body>& op) noexcept
+{
+    return &op.state_;
+}
 }
 
 // `Guarded<T>` - the access-controlled wrapper, the sanctioned way to touch a `T` across threads.
@@ -166,15 +486,17 @@ public:
     // `source_location` captures its caller, so it is declared here, on the function the
     // user calls, and the resulting `Named` is passed down explicitly.
 
-    // access, read_write.
+    // access, read_write. Returns the caller-owned `Access_op` (zero-alloc; see the class
+    // doc): consume via `co_await`, `.sync()` (from blue), or `try_take()`. To detach - drop
+    // the handle, store a `Task<R>` - use `async`.
     template<typename Fn>
         requires detail::Read_write_accessor<Fn, T>
     auto access(Fn&& fn, Access_options opts = {},
                 std::source_location site = std::source_location::current())
-        -> Task<detail::Accessor_result_t<Fn, T, Access::read_write>>
+        -> Access_op<T, std::decay_t<Fn>>
     {
-        return launch<detail::Accessor_result_t<Fn, T, Access::read_write>, Access::read_write>(
-            &instance_, std::forward<Fn>(fn), opts, detail::named_from(opts, site), /*try_inline=*/true);
+        return Access_op<T, std::decay_t<Fn>>(pipe_, &instance_, std::forward<Fn>(fn), opts,
+                                              detail::named_from(opts, site));
     }
 
     // access, read_only.
@@ -182,10 +504,10 @@ public:
         requires detail::Read_only_accessor<Fn, T>
     auto access(Fn&& fn, Access_options opts = {},
                 std::source_location site = std::source_location::current()) const
-        -> Task<detail::Accessor_result_t<Fn, T, Access::read_only>>
+        -> Access_op<T, std::decay_t<Fn>>
     {
-        return launch<detail::Accessor_result_t<Fn, T, Access::read_only>, Access::read_only>(
-            &instance_, std::forward<Fn>(fn), opts, detail::named_from(opts, site), /*try_inline=*/true);
+        return Access_op<T, std::decay_t<Fn>>(pipe_, &instance_, std::forward<Fn>(fn), opts,
+                                              detail::named_from(opts, site));
     }
 
     // async, read_write: always enqueued (never inline).
@@ -196,7 +518,7 @@ public:
         -> Task<detail::Accessor_result_t<Fn, T, Access::read_write>>
     {
         return launch<detail::Accessor_result_t<Fn, T, Access::read_write>, Access::read_write>(
-            &instance_, std::forward<Fn>(fn), opts, detail::named_from(opts, site), /*try_inline=*/false);
+            &instance_, std::forward<Fn>(fn), opts, detail::named_from(opts, site));
     }
 
     // async, read_only: always enqueued (never inline).
@@ -207,12 +529,14 @@ public:
         -> Task<detail::Accessor_result_t<Fn, T, Access::read_only>>
     {
         return launch<detail::Accessor_result_t<Fn, T, Access::read_only>, Access::read_only>(
-            &instance_, std::forward<Fn>(fn), opts, detail::named_from(opts, site), /*try_inline=*/false);
+            &instance_, std::forward<Fn>(fn), opts, detail::named_from(opts, site));
     }
 
 private:
+    // The heap-block path behind `async` (and `Deferred::commit`'s recorded write): always
+    // enqueued, detached custody. `access`'s inline/reentrant arms live on `Access_op`.
     template<typename R, Access mode, typename Inst, typename Fn>
-    Task<R> launch(Inst* inst, Fn&& fn, Access_options opts, Named name, bool try_inline,
+    Task<R> launch(Inst* inst, Fn&& fn, Access_options opts, Named name,
                    detail::Task_ptr* record = nullptr) const
     {
         // The body (stored in the block) runs `fn` under this object's access scope. If
@@ -249,28 +573,8 @@ private:
         }();
         core->flags.priority = opts.priority;
         detail::set_task_name(core, name);
-        // Reentrant fast path (`access` only, docs/coroutine-first.md §4.2 / waiting rule (b)):
-        // the caller's task already holds this pipe's write grant - run the body inline
-        // under that grant, touching the pipe not at all (no acquire, no turn; the held
-        // write is exclusive, so a read or write body is equally legal). Queueing instead
-        // would park the access behind the caller's own hold. `Executable::run` overwrites
-        // the unused pipe-turn lock when it arms the execution counter.
-        if (try_inline)
-        {
-            detail::Task_control_block* owner = pipe_.writer_owner.load(std::memory_order_acquire);
-            if (owner != nullptr && owner == detail::current_task.get())
-            {
-                detail::bind_pipe_link(core.get(), 0, pipe_, mode);   // diagnostics only; never enqueued
-                core->execute(core);
-                return Task<R>(core);
-            }
-        }
         detail::bind_pipe_link(core.get(), 0, pipe_, mode);
         core->num_locks.store(1, std::memory_order_relaxed);   // the one pipe turn
-        // Inline fast path (`access`): claim an idle pipe and run on this thread; otherwise
-        // (or for `async`) enqueue - the admitted turn's release dispatches the body.
-        if (try_inline && detail::pipe_try_inline(global_scheduler(), pipe_, mode, core))
-            return Task<R>(core);
         detail::pipe_enter_first(core.get(), record);
         return Task<R>(core);
     }
@@ -302,7 +606,7 @@ struct Guarded_access
     static Task<void> commit_write(Guarded<T>& t, Fn&& fn, Access_options opts, Named name, Task_ptr* record)
     {
         return t.template launch<void, Access::read_write>(
-            &t.instance_, std::forward<Fn>(fn), opts, name, /*try_inline=*/false, record);
+            &t.instance_, std::forward<Fn>(fn), opts, name, record);
     }
 };
 

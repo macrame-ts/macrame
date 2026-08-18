@@ -233,10 +233,17 @@ void fire_task_turn(Pipe_link& l)
 {
     Task_control_block* owner = l.owner;
     std::uint8_t index = l.index;
+    // A caller-owned block's entry carries no ref (see `pipe_enter_link`), so the wrapper is
+    // defused below instead of dropping one. The flag is read into a local FIRST: `release`
+    // can dispatch, run, settle and hand the block back to a destructing owner before it
+    // returns, so nothing on this frame may touch the block afterwards.
+    const bool caller_owned = owner->flags.caller_owned;
     Task_ptr keep(owner, Adopt_ref{});   // adopt the entry's ref (taken at enter)
     if (index + 1 < owner->pipe_count)
         pipe_enter_link(owner->pipe_links[index + 1], nullptr);
     Task_control_block::release(keep);
+    if (caller_owned)
+        keep.release();   // detach without a dec - no entry ref existed
 }   // `keep` drops the entry ref; the owner lives on via the queue/handle refs downstream
 
 // Fire one admission pass's granted entries, in admission order. Runs without the mutex.
@@ -312,7 +319,12 @@ void release_and_redispatch(Pipe& pipe, Access mode)
 void pipe_enter_link(Pipe_link& l, Task_ptr* record)
 {
     Pipe& pipe = *l.pipe;
-    intrusive_inc(l.owner);   // the entry's ref
+    // The entry's ref - the push-UAF bracket for detached owners. A caller-owned block
+    // (`Access_op`) takes none: its storage is pinned by the op, whose destructor waits out
+    // an unsettled access, and a ref here would be dropped by machinery that can outlive
+    // the op's own resume-and-destroy (see `Flags::caller_owned`).
+    if (!l.owner->flags.caller_owned)
+        intrusive_inc(l.owner);
     bool now = false;
     {
         std::scoped_lock lock(pipe.mutex);

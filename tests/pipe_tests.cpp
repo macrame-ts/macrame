@@ -116,14 +116,14 @@ void test_mixed_interleave()
                 {
                     ++my_writes;
                     if (inl)
-                        probe.access([seed](Rw_probe& p) { p.observe_write(seed); });
+                        probe.access([seed](Rw_probe& p) { p.observe_write(seed); }).sync();
                     else
                         local.push_back(probe.async([seed](Rw_probe& p) { p.observe_write(seed); }));
                 }
                 else
                 {
                     if (inl)
-                        probe.access([seed](const Rw_probe& p) { p.observe_read(seed); });
+                        probe.access([seed](const Rw_probe& p) { p.observe_read(seed); }).sync();
                     else
                         local.push_back(probe.async([seed](const Rw_probe& p) { p.observe_read(seed); }));
                 }
@@ -476,7 +476,7 @@ void test_writer_owner_inline_and_reentrant()
     x.async([&](int& v)
     {
         outer.store(owner_of(x));
-        ts::Task<void> nested = x.access([&](int& w) { w += 1; inner_ran.store(true); inner.store(owner_of(x)); });
+        auto nested = x.access([&](int& w) { w += 1; inner_ran.store(true); inner.store(owner_of(x)); });
         TS_CHECK(nested.is_done());   // reentrant: ran inline, in-call
         after.store(owner_of(x));
         v += 1;
