@@ -91,6 +91,20 @@ heap-allocated by the pipe. Consequences:
 - The change is confined to: where the block lives (caller storage vs heap),
   and the fact that no `Task<R>` handle aliases it (the op *is* the handle).
 
+**Implementation correction (2026-08-18, phase 1 as landed)**: the refcounted
+custody above did not survive contact. With caller-owned storage the
+machinery must hold *no* reference past continuation-fire - a fired
+continuation resumes the awaiting coroutine, which may destroy the op (and
+the frame containing it) before the settling stack unwinds, so a ref dropped
+afterwards is a UAF and a drain-wait on the settler's own stack would
+livelock. As landed: a `Flags::caller_owned` bit routes dispatch through the
+existing borrowed raw-pointer queue path (two conditionals in `guarded.cpp`:
+`pipe_enter_link` skips the entry ref, `fire_task_turn` defuses), and the
+op's settle notifies under the lock (the pipe's `idle` teardown pattern) and
+touches no member after continuations fire. Consequence: nested
+completion-gating inside an op body (e.g. a nested graph `execute()`) is
+fatal - that shape needs a self-owning block, use `async`.
+
 ## 5. API surface
 
 - `co_await obj.access(fn)` - unchanged spelling. The awaitable temporary is
@@ -140,6 +154,13 @@ integration for pending requests. Not in v1.
    `features_bench` (the old floor number lived in a removed bench); acceptance
    for phase 1 is that row dropping to pipe-claim + context-install cost
    (target: within ~2-3x of a bare mutex, from ~6x).
+   *Measured (2026-08-18)*: baseline 125.5 ns/op vs bare mutex ~13 (~9.4x);
+   post-phase-1 54.9 ns/op (~4.4x). The malloc was only ~13 ns of the gap
+   (LFH); the rest of the win came from cutting settled-path sync-wait
+   machinery, the `current_task` refcount pair, and in-ctor-settle
+   notification. The residual ~40 ns is the two pipe-mutex passes (admit +
+   release), the claim CAS, and the context install - tail-chaining territory
+   (TODO 1.18), not this design's.
 1. **`Access_op<T, Body>` + `access` returns it** (single object), with the
    §3 flattening from the start (Body = the user's decayed functor; no library
    wrapper closure - retrofitting it later would churn the just-landed type).
