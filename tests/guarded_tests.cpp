@@ -14,6 +14,7 @@
 
 using namespace std::chrono_literals;
 using ts::test::run;
+using ts::test::run_if;
 using tests::Counter;
 using tests::wait_until;
 
@@ -618,6 +619,68 @@ void test_op_dtor_waits_unsettled()
     TS_CHECK(read_value(d) == 7);   // the dtor waited the access out; nothing was lost
 }
 
+// --- Access_op lifecycle: construct / bind / start (§10.1) -----------------
+
+struct Read_plus
+{
+    int add = 0;
+    int operator()(const int& v) const { return v + add; }
+};
+
+// Unbound and dormant ops destroy without any check firing (a dormant body is a capability,
+// not a pending effect); bind-then-start is the deferred spelling of the eager constructor.
+void test_op_lifecycle_bind_start()
+{
+    ts::Guarded<int> d{ ts::Named{}, 4 };
+    {
+        ts::Access_op<int, Read_plus> unbound;   // trivial destroy
+    }
+    {
+        ts::Access_op<int, Read_plus> parked(ts::dormant, d, Read_plus{ 1 });   // body destroyed, no check
+        TS_CHECK(!parked.is_done());
+    }
+    ts::Access_op<int, Read_plus> op;
+    op.bind(d, Read_plus{ 10 });
+    TS_CHECK(!op.is_done());   // bound, not fired
+    op.start();
+    TS_CHECK(op.sync() == 14);
+}
+
+// start() refires a settled op from the same storage: fresh values each cycle, the consumed
+// flag re-arms, and an unconsumed result is discarded by the next start() (the documented
+// skip-a-stale-frame steady state).
+void test_op_refire()
+{
+    ts::Guarded<int> d{ ts::Named{}, 0 };
+    auto op = d.access(Read_plus{});
+    TS_CHECK(op.sync() == 0);
+    for (int frame = 1; frame <= 5; ++frame)
+    {
+        d.async([](int& v) { ++v; }).sync();
+        op.start();
+        TS_CHECK(op.sync() == frame);
+    }
+    op.start();   // settle, never consume...
+    while (!op.is_done())
+        std::this_thread::yield();
+    op.start();   // ...then refire over the unconsumed result: discarded, legal
+    TS_CHECK(op.sync() == 5);
+}
+
+// Rebind on settled retargets the same op storage to a DIFFERENT Guarded (pipe refs are
+// drained at settle, so the embedded entry is free) - the pooled/reused-op enabler.
+void test_op_rebind_settled()
+{
+    ts::Guarded<int> a{ ts::Named{}, 100 };
+    ts::Guarded<int> b{ ts::Named{}, 200 };
+    ts::Access_op<int, Read_plus> op(ts::dormant, a, Read_plus{ 1 });
+    op.start();
+    TS_CHECK(op.sync() == 101);
+    op.bind(b, Read_plus{ 2 });   // settled: rebind destroys the old body, retargets
+    op.start();
+    TS_CHECK(op.sync() == 202);
+}
+
 } // namespace
 
 void run_guarded_tests()
@@ -655,4 +718,15 @@ void run_guarded_tests()
     run("op: awaited across suspension", test_op_await_suspending);
     run("op: named form awaited", test_op_await_named);
     run("op: dtor waits out unsettled", test_op_dtor_waits_unsettled);
+    run("op: bind then start", test_op_lifecycle_bind_start);
+    run("op: refire loop", test_op_refire);
+    run("op: rebind settled to another object", test_op_rebind_settled);
+    run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op start unbound",
+        []{ TS_CHECK(ts::test::expect_death("access_op_start_unbound")); });
+    run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op sync never started",
+        []{ TS_CHECK(ts::test::expect_death("access_op_sync_never_started")); });
+    run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op double consume",
+        []{ TS_CHECK(ts::test::expect_death("access_op_double_consume")); });
+    run_if(ts::test::with_rule_in_task_sync, "TS_RULE_IN_TASK_SYNC off", "death: op dtor in task",
+        []{ TS_CHECK(ts::test::expect_death("access_op_dtor_in_task")); });
 }

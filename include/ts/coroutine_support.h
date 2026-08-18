@@ -960,7 +960,12 @@ namespace detail
 template<typename R>
 struct Access_op_awaiter : Task_awaiter<R>
 {
-    using Task_awaiter<R>::Task_awaiter;
+    bool* consumed;   // the op's this-cycle consume flag (unused for void R)
+
+    Access_op_awaiter(Task_ptr core, bool* consumed_flag)
+        : Task_awaiter<R>(std::move(core))
+        , consumed(consumed_flag)
+    {}
 
     R await_resume()
     {
@@ -973,27 +978,44 @@ struct Access_op_awaiter : Task_awaiter<R>
         {
             if (this->core_->cancelled)
                 ts::fatal("co_await on a cancelled access has no result; check is_cancelled() first");
+#if TS_SAFETY_CHECKS
+            if (*consumed)
+                ts::fatal("co_await on an Access_op whose result was already consumed this cycle - "
+                          "start() refires before the next consume");
+#endif
+            *consumed = true;
             return std::move(*static_cast<R*>(this->core_->result_ptr));
         }
     }
 };
 
+// The awaiter build shared by both value categories: never-started check + core/consume hookup.
+template<typename T, typename Body>
+Access_op_awaiter<typename Access_op<T, Body>::result_type> make_access_op_awaiter(Access_op<T, Body>& op)
+{
+#if TS_SAFETY_CHECKS
+    if (!access_op_started(op))
+        ts::fatal("co_await on an Access_op that was never started - start() it first "
+                  "(awaiting a dormant op would suspend forever)");
+#endif
+    return Access_op_awaiter<typename Access_op<T, Body>::result_type>(
+        Task_ptr(access_op_core(op)), access_op_consumed(op));
+}
+
 } // namespace detail
 
 // `co_await` an `Access_op` (usually the temporary from `obj.access(fn)`, materialized in the
-// coroutine frame for the suspension - zero-alloc; or a named op, awaited once).
+// coroutine frame for the suspension - zero-alloc; or a named op, awaited once per cycle).
 template<typename T, typename Body>
 auto operator co_await(Access_op<T, Body>& op)
 {
-    return detail::Access_op_awaiter<typename Access_op<T, Body>::result_type>(
-        detail::Task_ptr(detail::access_op_core(op)));
+    return detail::make_access_op_awaiter(op);
 }
 
 template<typename T, typename Body>
 auto operator co_await(Access_op<T, Body>&& op)
 {
-    return detail::Access_op_awaiter<typename Access_op<T, Body>::result_type>(
-        detail::Task_ptr(detail::access_op_core(op)));
+    return detail::make_access_op_awaiter(op);
 }
 
 

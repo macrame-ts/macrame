@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <functional>
 #include <memory>
+#include <new>
 #include <optional>
 #include <source_location>
 #include <tuple>
@@ -59,13 +60,24 @@ namespace detail
 struct Guarded_access;
 }
 
+template<typename T> class Guarded;
 template<typename T, typename Body> class Access_op;
+
+// Tag for the bound-but-dormant `Access_op` constructor: `Access_op(ts::dormant, world, body)`
+// stores the target and body without firing - `start()` fires later. Needed because a member
+// init list cannot call `bind()`. (Named `dormant`, not `defer` - `Deferred` is taken.)
+struct Dormant {};
+inline constexpr Dormant dormant{};
 
 namespace detail
 {
-// The op's control block, for the coroutine awaiter (coroutine_support.h). Defined below the class.
+// The op's hooks for the coroutine awaiter (coroutine_support.h). Defined below the class.
 template<typename T, typename Body>
 Task_control_block* access_op_core(Access_op<T, Body>& op) noexcept;
+template<typename T, typename Body>
+bool* access_op_consumed(Access_op<T, Body>& op) noexcept;
+template<typename T, typename Body>
+bool access_op_started(const Access_op<T, Body>& op) noexcept;
 }
 
 // `Access_op<T, Body>` - the caller-owned operation state `Guarded<T>::access` returns
@@ -96,6 +108,30 @@ public:
     Access_op(const Access_op&) = delete;
     Access_op& operator=(const Access_op&) = delete;
 
+    // Lifecycle (docs/access-op-design.md §10.1): unbound -> dormant -> in flight -> settled,
+    // with `start()` the only verb that touches the pipe. The eager form (`world.access(fn)`)
+    // is bind + start fused; these give members the deferred spellings. Single-owner: none of
+    // start/bind/sync/destroy synchronize against each other.
+
+    // Unbound: no target, no body - for members whose target does not exist yet. `bind()` then
+    // `start()`.
+    Access_op() = default;
+
+    // Bound but dormant: target and body stored, pipe untouched; `start()` fires.
+    Access_op(Dormant, Guarded<T>& target, Body body, Access_options opts = {},
+              std::source_location site = std::source_location::current());
+
+    // Store the target + construct the body in place; does not fire. Legal on an unbound,
+    // dormant, or settled op (rebinding destroys the old body; a settled op's pipe refs are
+    // drained, so retargeting is safe - the pooled/reused-op enabler); fatal in flight.
+    void bind(Guarded<T>& target, Body body);
+
+    // Fire: first fire on a dormant op, refire on a settled one (an unconsumed result is
+    // discarded - "skip a stale frame's read" is a legitimate steady state). Fatal on an
+    // unbound op and while in flight. Zero-alloc in the steady state: the same storage
+    // re-enters the pipe.
+    void start();
+
     ~Access_op();
 
     bool is_done() const noexcept;
@@ -113,6 +149,8 @@ public:
 private:
     template<typename U> friend class Guarded;
     template<typename U, typename B> friend detail::Task_control_block* detail::access_op_core(Access_op<U, B>&) noexcept;
+    template<typename U, typename B> friend bool* detail::access_op_consumed(Access_op<U, B>&) noexcept;
+    template<typename U, typename B> friend bool detail::access_op_started(const Access_op<U, B>&) noexcept;
 
     // A read access stores (and hands the body) `const T*`; the const-ness is structural, not
     // a runtime mode check.
@@ -126,18 +164,27 @@ private:
     {
         detail::Result_storage<result_type> storage;
         detail::Pipe_link link;
-        Inst* inst;
-        const std::atomic<std::uint64_t>* epoch;
-        unsigned rank;
-        Body body;
-        // Set by the constructor around its inline/reentrant execute: no observer can exist
-        // before the constructor returns (the op is the only handle and it is mid-construction),
-        // so `op_settle` skips the mutex and the notify entirely - plain stores, sequenced
-        // before every later member call by the constructor's return.
+        detail::Pipe* pipe = nullptr;
+        Inst* inst = nullptr;
+        const std::atomic<std::uint64_t>* epoch = nullptr;
+        unsigned rank = 0;
+        // The body lives in raw storage behind the `bound` bit (symmetric with the result
+        // storage): an unbound op has none, `bind()` constructs it in place, a rebind
+        // destroys and reconstructs. No allocation, nothing on the fire path.
+        alignas(Body) unsigned char body_store[sizeof(Body)];
+        bool bound = false;
+        bool started = false;    // ever fired; with `ready` it splits dormant/in flight/settled
+        bool consumed = false;   // this cycle's result was moved out (sync/await/try_take)
+        // Set by a fire around its inline/reentrant execute: no observer can exist before the
+        // firing call returns (single owner, mid-call), so `op_settle` skips the mutex and the
+        // notify entirely - plain stores, sequenced before every later member call.
         bool settle_synchronously = false;
 
-        State(Inst* i, const std::atomic<std::uint64_t>* e, unsigned r, Body b,
-              Cancellation_token tok, Priority pri);
+        State();
+        State(Body b, Cancellation_token tok, Priority pri);   // bound; target set by the caller
+        ~State();
+
+        Body& body() noexcept { return *std::launder(reinterpret_cast<Body*>(body_store)); }
 
         static void run(const detail::Task_ptr& c);
         void op_settle(bool cancel);
@@ -145,27 +192,41 @@ private:
 
     Access_op(detail::Pipe& pipe, Inst* inst, Body body, Access_options opts, Named name);
 
+    // The fire fast path (reentrant arm / inline when free / enqueue), shared by the eager
+    // constructor and `start()`.
+    void fire();
+
     State state_;
-    // Set when the constructor's inline/reentrant arm ran the body to completion on this
-    // thread: the settle fully preceded the constructor's return, so the destructor needs no
+    // Set when the LAST fire's inline/reentrant arm ran the body to completion on this
+    // thread: the settle fully preceded the firing call's return, so the destructor needs no
     // synchronization at all (the fast path pays no lock in the dtor).
-    bool settled_in_ctor_ = false;
+    bool settled_sync_ = false;
 };
 
 template<typename T, typename Body>
-Access_op<T, Body>::State::State(Inst* i, const std::atomic<std::uint64_t>* e, unsigned r, Body b,
-                                 Cancellation_token tok, Priority pri)
-    : inst(i)
-    , epoch(e)
-    , rank(r)
-    , body(std::move(b))
+Access_op<T, Body>::State::State()
 {
     destroy = [](detail::Task_control_block*) {};   // caller-owned: a drained refcount frees nothing
     execute = &State::run;
-    token = std::move(tok);
-    flags.priority = pri;
     flags.caller_owned = true;
     pipe_links = &link;
+}
+
+template<typename T, typename Body>
+Access_op<T, Body>::State::State(Body b, Cancellation_token tok, Priority pri)
+    : State()
+{
+    ::new (static_cast<void*>(body_store)) Body(std::move(b));
+    bound = true;
+    token = std::move(tok);
+    flags.priority = pri;
+}
+
+template<typename T, typename Body>
+Access_op<T, Body>::State::~State()
+{
+    if (bound)
+        std::destroy_at(&body());   // a dormant body is a capability, not a pending effect - no lost-work check
 }
 
 template<typename T, typename Body>
@@ -197,16 +258,16 @@ void Access_op<T, Body>::State::run(const detail::Task_ptr& c)
         if constexpr (std::is_void_v<result_type>)
         {
             if constexpr (takes_token)
-                self->body(*self->inst, c->token);
+                self->body()(*self->inst, c->token);
             else
-                self->body(*self->inst);
+                self->body()(*self->inst);
         }
         else
         {
             if constexpr (takes_token)
-                self->storage.result.emplace(self->body(*self->inst, c->token));
+                self->storage.result.emplace(self->body()(*self->inst, c->token));
             else
-                self->storage.result.emplace(self->body(*self->inst));
+                self->storage.result.emplace(self->body()(*self->inst));
             c->result_ptr = &*self->storage.result;
         }
     }
@@ -260,13 +321,29 @@ void Access_op<T, Body>::State::op_settle(bool cancel)
 
 template<typename T, typename Body>
 Access_op<T, Body>::Access_op(detail::Pipe& pipe, Inst* inst, Body body, Access_options opts, Named name)
-    : state_(inst, detail::pipe_epoch(pipe), detail::pipe_rank(pipe), std::move(body),
-             std::move(opts.token), opts.priority)
+    : state_(std::move(body), std::move(opts.token), opts.priority)
 {
+    state_.pipe = &pipe;
+    state_.inst = inst;
+    state_.epoch = detail::pipe_epoch(pipe);
+    state_.rank = detail::pipe_rank(pipe);
+    {
+        detail::Task_ptr self(&state_, detail::Adopt_ref{});   // borrowed wrapper, defused below
+        detail::set_task_name(self, name);
+        self.release();
+    }
+    state_.started = true;
+    fire();
+}
+
+template<typename T, typename Body>
+void Access_op<T, Body>::fire()
+{
+    detail::Pipe& pipe = *state_.pipe;
+    settled_sync_ = false;
     // Borrowed wrapper for this frame's machinery calls - defused before every return
-    // (`this` outlives the constructor by definition; the refcount stays untouched).
+    // (`this` outlives the call by the single-owner contract; the refcount stays untouched).
     detail::Task_ptr self(&state_, detail::Adopt_ref{});
-    detail::set_task_name(self, name);
     detail::bind_pipe_link(&state_, 0, pipe, mode);
     // Reentrant arm (waiting rule (b)): the calling task already holds this pipe's write
     // grant - run inline under it, touching the pipe not at all (the link above is
@@ -276,7 +353,7 @@ Access_op<T, Body>::Access_op(detail::Pipe& pipe, Inst* inst, Body body, Access_
     {
         state_.settle_synchronously = true;
         state_.execute(self);
-        settled_in_ctor_ = true;
+        settled_sync_ = true;
         self.release();
         return;
     }
@@ -286,7 +363,7 @@ Access_op<T, Body>::Access_op(detail::Pipe& pipe, Inst* inst, Body body, Access_
     state_.settle_synchronously = true;
     if (detail::pipe_try_inline(global_scheduler(), pipe, mode, self))
     {
-        settled_in_ctor_ = true;
+        settled_sync_ = true;
         self.release();
         return;
     }
@@ -296,10 +373,49 @@ Access_op<T, Body>::Access_op(detail::Pipe& pipe, Inst* inst, Body body, Access_
 }
 
 template<typename T, typename Body>
+void Access_op<T, Body>::start()
+{
+#if TS_SAFETY_CHECKS
+    if (!state_.bound)
+        ts::fatal("Access_op::start() on an unbound op - bind() a target and body first");
+    if (state_.started && !state_.ready.load(std::memory_order_acquire))
+        ts::fatal("Access_op::start() while the access is in flight - consume it first "
+                  "(start() fires a dormant op or refires a settled one)");
+#endif
+    if (state_.started)
+    {
+        // Re-arm the settled core for the next cycle. The brief mutex pass serializes past
+        // the settling thread's tail (a lock-free `ready` read can observe a settle
+        // mid-flight); everything else is single-owner plain state.
+        {
+            std::scoped_lock lock(state_.mutex);
+            state_.completed = false;
+            state_.cancelled = false;
+            state_.ready.store(false, std::memory_order_relaxed);
+        }
+        state_.body_claimed.store(false, std::memory_order_relaxed);
+        state_.prereq_cancelled.store(false, std::memory_order_relaxed);
+        state_.num_locks.store(0, std::memory_order_relaxed);
+        state_.pipes_entered = 0;   // a reentrant refire must not re-advance the last cycle's turn
+        if constexpr (!std::is_void_v<result_type>)
+        {
+            state_.storage.result.reset();   // discard an unconsumed (or moved-from) result
+            state_.result_ptr = nullptr;
+        }
+        state_.consumed = false;
+    }
+    state_.started = true;
+    fire();
+}
+
+template<typename T, typename Body>
 Access_op<T, Body>::~Access_op()
 {
-    if (settled_in_ctor_)
-        return;   // settled synchronously on this thread before the ctor returned
+    // Unbound / dormant: no fire outstanding, nothing to synchronize (the State dtor
+    // destroys a bound body). Settled-synchronously: the settle preceded the firing call's
+    // return on this very thread.
+    if (!state_.started || settled_sync_)
+        return;
     if (!state_.ready.load(std::memory_order_acquire))
     {
 #if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
@@ -335,6 +451,11 @@ bool Access_op<T, Body>::is_cancelled() const noexcept
 template<typename T, typename Body>
 typename Access_op<T, Body>::result_type Access_op<T, Body>::sync()
 {
+#if TS_SAFETY_CHECKS
+    if (!state_.started)
+        ts::fatal("Access_op::sync() on an op that was never started - start() it first "
+                  "(waiting on a dormant op would hang forever)");
+#endif
 #if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
     // The rule is about the call, not the incident (as `sync_wait`): checked before the
     // settled fast path, so an in-task `sync()` faults deterministically even on a settled op.
@@ -355,6 +476,12 @@ typename Access_op<T, Body>::result_type Access_op<T, Body>::sync()
     {
         if (state_.cancelled)
             ts::fatal("Access_op::sync() on a cancelled access; check is_cancelled() first");
+#if TS_SAFETY_CHECKS
+        if (state_.consumed)
+            ts::fatal("Access_op: result already consumed this cycle - start() refires before "
+                      "the next consume");
+#endif
+        state_.consumed = true;
         return std::move(*static_cast<result_type*>(state_.result_ptr));
     }
 }
@@ -363,8 +490,9 @@ template<typename T, typename Body>
 std::optional<typename Access_op<T, Body>::result_type> Access_op<T, Body>::try_take()
     requires (!std::is_void_v<result_type>)
 {
-    if (!state_.ready.load(std::memory_order_acquire) || state_.cancelled)
+    if (!state_.ready.load(std::memory_order_acquire) || state_.cancelled || state_.consumed)
         return std::nullopt;
+    state_.consumed = true;
     return std::move(*static_cast<result_type*>(state_.result_ptr));
 }
 
@@ -374,6 +502,18 @@ template<typename T, typename Body>
 Task_control_block* access_op_core(Access_op<T, Body>& op) noexcept
 {
     return &op.state_;
+}
+
+template<typename T, typename Body>
+bool* access_op_consumed(Access_op<T, Body>& op) noexcept
+{
+    return &op.state_.consumed;
+}
+
+template<typename T, typename Body>
+bool access_op_started(const Access_op<T, Body>& op) noexcept
+{
+    return op.state_.started;
 }
 }
 
@@ -609,6 +749,49 @@ struct Guarded_access
             &t.instance_, std::forward<Fn>(fn), opts, name, record);
     }
 };
+
+} // namespace detail
+
+// Defined here rather than with the other `Access_op` members: both need `Guarded`'s
+// internals (`Guarded_access`), which are only complete below the class.
+template<typename T, typename Body>
+Access_op<T, Body>::Access_op(Dormant, Guarded<T>& target, Body body, Access_options opts,
+                              std::source_location site)
+    : state_(std::move(body), std::move(opts.token), opts.priority)
+{
+    detail::Pipe& pipe = detail::Guarded_access::pipe(target);
+    state_.pipe = &pipe;
+    state_.inst = detail::Guarded_access::instance(target);
+    state_.epoch = detail::pipe_epoch(pipe);
+    state_.rank = detail::pipe_rank(pipe);
+    {
+        detail::Task_ptr self(&state_, detail::Adopt_ref{});
+        detail::set_task_name(self, detail::named_from(opts, site));
+        self.release();
+    }
+}
+
+template<typename T, typename Body>
+void Access_op<T, Body>::bind(Guarded<T>& target, Body body)
+{
+#if TS_SAFETY_CHECKS
+    if (state_.started && !state_.ready.load(std::memory_order_acquire))
+        ts::fatal("Access_op::bind() while the access is in flight - the queued entry still "
+                  "references the current target");
+#endif
+    if (state_.bound)
+        std::destroy_at(&state_.body());
+    ::new (static_cast<void*>(state_.body_store)) Body(std::move(body));
+    detail::Pipe& pipe = detail::Guarded_access::pipe(target);
+    state_.pipe = &pipe;
+    state_.inst = detail::Guarded_access::instance(target);
+    state_.epoch = detail::pipe_epoch(pipe);
+    state_.rank = detail::pipe_rank(pipe);
+    state_.bound = true;
+}
+
+namespace detail
+{
 
 // Snapshot a slot written under `pipe`'s admission serialization (`Deferred`'s recorded
 // last commit) with the same ordering: on the mutex pipe, under its mutex. A destructor

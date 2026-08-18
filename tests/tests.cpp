@@ -697,5 +697,45 @@ void run_death_scenario(const char* name)
         ts::Task<void> t = await_signal(s);   // suspends (never triggered)
         s.reset();   // -> fatal
     }
+#if TS_SAFETY_CHECKS
+    else if (std::strcmp(name, "access_op_start_unbound") == 0)
+    {
+        struct Read_fn { int operator()(const int& v) const { return v; } };
+        ts::Access_op<int, Read_fn> op;
+        op.start();   // no target, no body -> fatal
+    }
+    else if (std::strcmp(name, "access_op_sync_never_started") == 0)
+    {
+        struct Read_fn { int operator()(const int& v) const { return v; } };
+        ts::Guarded<int> d{ ts::Named{}, 1 };
+        ts::Access_op<int, Read_fn> op(ts::dormant, d, Read_fn{});
+        (void)op.sync();   // dormant: the wait would hang forever -> fatal
+    }
+    else if (std::strcmp(name, "access_op_double_consume") == 0)
+    {
+        ts::Guarded<int> d{ ts::Named{}, 2 };
+        auto op = d.access([](const int& v) { return v; });   // free pipe: settled inline
+        (void)op.sync();
+        (void)op.sync();   // second consume of the same cycle -> fatal
+    }
+#endif
+#if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
+    else if (std::strcmp(name, "access_op_dtor_in_task") == 0)
+    {
+        // Destroying an in-flight op INSIDE a task: the dtor's wait is a blocking sync, so
+        // the blue boundary applies - fatal via `blocking_sync_diagnose`, not ensure+wait
+        // (a worker parking here risks exhaustion deadlock). The gate is never released:
+        // the fatal aborts first; were the check absent the dtor would wait forever, so the
+        // scenario is compiled only with the rule (the run_if registration names it).
+        ts::Guarded<int> x{ ts::Named{ "x" }, 0 };
+        ts::Guarded<int> y{ ts::Named{ "y" }, 0 };
+        std::atomic<bool> gate{ false };
+        ts::Task<void> blocker = y.async([&gate](int&) { while (!gate.load()) std::this_thread::yield(); });
+        x.async([&y](int&)
+        {
+            auto op = y.access([](const int& v) { return v; });   // queued behind the blocker
+        }).sync();   // -> fatal on the worker at op's destruction
+    }
+#endif
     // unknown scenario: return without dying -> parent's expect_death fails
 }
