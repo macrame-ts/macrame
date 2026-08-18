@@ -35,6 +35,7 @@
     <ClCompile Include="src\static_task_graph.cpp" />
     <ClCompile Include="src\guarded.cpp" />
     <ClCompile Include="src\worker_thread.cpp" />
+    <ClCompile Include="benchmarks\access_control_bench.cpp" />
     <ClCompile Include="benchmarks\benchmarks.cpp" />
     <ClCompile Include="sample\blackboard.cpp" />
     <ClCompile Include="sample\coloring.cpp" />
@@ -100,6 +101,7 @@
     <ClInclude Include="include\ts\versioned.h" />
     <ClInclude Include="include\ts\detail\work_stealing_deque.h" />
     <ClInclude Include="include\ts\detail\worker_thread.h" />
+    <ClInclude Include="benchmarks\bench_harness.h" />
     <ClInclude Include="benchmarks\benchmarks.h" />
     <ClInclude Include="tests\access_tests.h" />
     <ClInclude Include="tests\rules_tests.h" />

@@ -54,6 +54,9 @@
     <ClCompile Include="src\worker_thread.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="benchmarks\access_control_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
     <ClCompile Include="benchmarks\benchmarks.cpp">
       <Filter>benchmarks</Filter>
     </ClCompile>
@@ -211,6 +214,9 @@
     </ClInclude>
     <ClInclude Include="tools\trace_stamps.h">
       <Filter>tools</Filter>
+    </ClInclude>
+    <ClInclude Include="benchmarks\bench_harness.h">
+      <Filter>benchmarks</Filter>
     </ClInclude>
     <ClInclude Include="benchmarks\benchmarks.h">
       <Filter>benchmarks</Filter>

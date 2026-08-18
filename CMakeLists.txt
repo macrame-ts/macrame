@@ -59,7 +59,8 @@ if(WIN32)
         ${TS_SAMPLE_SOURCES}
         src/main.cpp
         src/mem_profile.cpp
-        benchmarks/benchmarks.cpp
+        benchmarks/access_control_bench.cpp
+    benchmarks/benchmarks.cpp
         tests/access_tests.cpp
         tests/coroutine_tests.cpp
         tests/deferred_tests.cpp
