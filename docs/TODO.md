@@ -271,6 +271,21 @@ IDs — when an item is done, mark it, don't renumber.
        does not, document the hazards (which nestings deadlock, defeat the harness, or serialize
        unexpectedly) AND add tests pinning the failure modes so they cannot silently regress. Either
        outcome ships coverage. Relates to 1.6 (sub-object grants) and the completeness-hazard story.
+   17. `[ ]` **(P2, author 2026-08-18 - harness strengthening) Detect awaiting a detached graph
+       run from a caller holding one of its objects.** The deadlock shape: a detached run
+       (`execute({.detach = true})`) receives no lend, so its nodes queue behind the caller's
+       holds; the caller then awaiting the run waits on work that waits for the caller's own
+       release. Design (rides existing detectors, no new machinery): give the detached run's
+       `done` block pipe METADATA - a per-graph `Pipe_link` array carrying `distinct_pipes_`
+       (never entered; `num_locks` untouched) - so (a) `co_await` while holding a declared
+       object hits `circular_wait_record`'s self-cycle branch ("holding X awaits X", immediate
+       + named), (b) an in-task `sync()` gets `blocking_sync_diagnose`'s sharp same-object
+       message, (c) an awaiter holding none of the objects records edges and proceeds - which
+       is the correct, legal case. Cost: one lazy allocation per graph + two stores per
+       detached execute; zero on attached runs and ordinary tasks. Caveat: the awaiter's
+       collection array caps at `Access_context::max_entries` (8), so graphs touching more
+       objects get best-effort coverage of the first 8 in canonical order. Related: 2.19 (the
+       lend-await hole on ATTACHED runs - same "containment assumes the await" family).
 
 2. **Static task graph**
    1. `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.

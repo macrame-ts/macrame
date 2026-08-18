@@ -235,16 +235,17 @@ private:
         // (`Access_context`) keys by; `const void*` because the graph is type-erased over `T`.
         // Drives conflict-edge derivation and the body's access context.
         std::vector<std::pair<const void*, Access>> access;
-        // The declared objects' pipes, parallel to `access` (argument order, duplicates
-        // possible). Raw input for `compile()`, which derives the canonical form below and
-        // releases this (the graph is build-once, so it is never needed again).
+        // The declared objects' pipes, parallel to `access` (argument order; distinct by
+        // construction - a duplicate object is fatal at `add_node`). Raw input for
+        // `compile()`, which derives the canonical form below and releases this (the graph
+        // is build-once, so it is never needed again).
         std::vector<detail::Pipe*> pipes;
         Priority priority = Priority::normal;   // applied to `block` at each run's re-arm
         bool inline_dispatch = false;           // run on the settling thread if its acquires all succeed synchronously
 
         // --- derived by `compile()` / used by the run machinery --------------------------
         std::vector<int> pipe_indices;      // `pipes` deduped as indices into distinct_pipes_ (ascending = canonical acquire order)
-        std::vector<Access> pipe_modes;     // this node's effective mode per pipe_indices entry (write wins on a dup)
+        std::vector<Access> pipe_modes;     // this node's access mode per pipe_indices entry
         std::vector<int> successors;        // edges out of this node (targets' indices), conflict-derived + explicit
         int indegree = 0;                   // edges in; each run seeds `remaining_deps` from it (0 = a root)
         std::vector<int> ready_buf;         // scratch: successors made ready by this node's completion (reused; single completion/run)
@@ -376,6 +377,19 @@ Graph_node Static_task_graph::add_node(Named name, Fn&& fn, Objs&&... objs)
     {
         fill_node_probed(node, std::index_sequence_for<Objs...>{},
             std::forward<Fn>(fn), objs...);
+    }
+
+    // A repeated object is fatal (same strictness as the multi-object verbs): a duplicate
+    // is a copy-paste bug far more often than intent, and it would double the object in the
+    // declaration record (DOT, trace, diagnostics). Cold path, <= 8 declarations.
+    for (std::size_t i = 0; i < node.access.size(); ++i)
+    {
+        for (std::size_t j = i + 1; j < node.access.size(); ++j)
+        {
+            if (node.access[i].first == node.access[j].first)
+                ts::fatal("add_node: the same Guarded object is declared twice on one node - "
+                          "declare each object once, with the strongest access the body needs");
+        }
     }
 
     node.name = name;

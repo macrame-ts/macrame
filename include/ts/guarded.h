@@ -377,8 +377,11 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
     Named name{ nullptr };
     name.literal = opts.name;
     set_task_name(block, name);
-    // Dedup write-wins + insertion-sort by pipe address (canonical order), in place - the
-    // pack is small, and this replaces the old per-call `std::map`.
+    // Insertion-sort by pipe address (canonical order), in place - the pack is small. A
+    // repeated object is fatal: declare each object once, with the strongest mode the body
+    // needs (a duplicate is a copy-paste bug far more often than intent; this was previously
+    // a silent write-wins dedup and can be relaxed back on demand, e.g. for generically
+    // assembled object packs).
     std::size_t n = 0;
     for (std::size_t k = 0; k < sizeof...(Ts); ++k)
     {
@@ -388,11 +391,8 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
         while (i < n && pipes[i] < pk)
             ++i;
         if (i < n && pipes[i] == pk)
-        {
-            if (mk == Access::read_write)
-                modes[i] = Access::read_write;   // write wins on a repeated object
-            continue;
-        }
+            ts::fatal("ts::access/ts::async: the same Guarded object was passed twice - declare "
+                      "each object once, with the strongest access the body needs");
         for (std::size_t j = n; j > i; --j)
         {
             pipes[j] = pipes[j - 1];

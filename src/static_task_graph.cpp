@@ -209,20 +209,15 @@ void Static_task_graph::compile(const char* DOT_path)
     lent_.assign(distinct_pipes_.size(), 0);
     links_lent_ = false;
 
-    // Per node: the deduped pipe indices it touches (ascending = canonical acquire order)
-    // and its effective access mode per pipe (write wins if it lists one both ways). Drives
-    // the per-node mode-aware acquire/release (on_data_ready / node_complete).
+    // Per node: its pipe indices in ascending order (= canonical acquire order) with the
+    // access mode per pipe. Drives the per-node mode-aware acquire/release (on_data_ready /
+    // node_complete). Objects are distinct per node (a duplicate is fatal at add_node), so
+    // the map only sorts.
     for (int n = 0; n < static_cast<int>(nodes_.size()); ++n)
     {
         std::map<int, Access> mode_by_pipe;   // ordered by pipe index -> canonical
         for (size_t k = 0; k < nodes_[n].pipes.size(); ++k)
-        {
-            int pi = index_of[nodes_[n].pipes[k]];
-            Access m = nodes_[n].access[k].second;
-            auto [it, inserted] = mode_by_pipe.try_emplace(pi, m);
-            if (!inserted && m == Access::read_write)
-                it->second = Access::read_write;
-        }
+            mode_by_pipe.emplace(index_of[nodes_[n].pipes[k]], nodes_[n].access[k].second);
         nodes_[n].pipe_indices.clear();
         nodes_[n].pipe_modes.clear();
         for (const auto& [pi, m] : mode_by_pipe)

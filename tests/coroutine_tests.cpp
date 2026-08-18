@@ -320,6 +320,13 @@ void test_death_multi_guard_await_under_guard()
     TS_CHECK(ts::test::expect_death("multi_guard_await_under_guard"));
 }
 
+// The same object twice in one multi-object hold is fatal (strict, matching `ts::async` and
+// `add_node`: declare each object once). Subprocess death test.
+void test_death_multi_guard_duplicate()
+{
+    TS_CHECK(ts::test::expect_death("multi_guard_duplicate_object"));
+}
+
 // M6. Ranked objects at top level (nothing held): a multi-object hold orders against nothing,
 // so ranked objects acquire cleanly. The out-of-order fatal shares check_access_rank with the
 // single-object awaiter (rules tests cover the descend case).
@@ -838,6 +845,7 @@ void run_coroutine_tests()
     run("co multi-guard structured bindings", test_multi_guard_structured_bindings);
     run("co multi-guard read_only concurrent", test_multi_guard_read_only);
     run("co multi-guard canonical order (no deadlock)", test_multi_guard_canonical_order);
+    run("death: multi-guard duplicate object", test_death_multi_guard_duplicate);
     run("co multi-guard await-under-guard fatal", test_death_multi_guard_await_under_guard);
     run("co multi-guard ranked objects", test_multi_guard_ranked_objects);
     run("co single guard still works", test_single_guard_still_works);

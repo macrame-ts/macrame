@@ -935,6 +935,7 @@ void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycl
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_compile_twice()    { TS_CHECK(ts::test::expect_death("graph_compile_twice")); }
 void test_death_add_after_compile(){ TS_CHECK(ts::test::expect_death("graph_add_node_after_compile")); }
+void test_death_duplicate_object() { TS_CHECK(ts::test::expect_death("graph_duplicate_object")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
 void test_death_guarded_outlived() { TS_CHECK(ts::test::expect_death("guarded_outlived_by_graph")); }
 void test_death_graph_mid_run()    { TS_CHECK(ts::test::expect_death("graph_destroyed_mid_run")); }
@@ -1372,6 +1373,7 @@ void run_graph_tests()
     run("death: execute before compile", test_death_before_compile);
     run("death: compile twice (build-once)", test_death_compile_twice);
     run("death: add_node after compile (build-once)", test_death_add_after_compile);
+    run("death: duplicate object on one node", test_death_duplicate_object);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: undeclared access", test_death_undeclared);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: Guarded outlived by graph", test_death_guarded_outlived);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: graph destroyed mid-run", test_death_graph_mid_run);

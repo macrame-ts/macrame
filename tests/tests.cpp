@@ -321,6 +321,25 @@ void run_death_scenario(const char* name)
         g.compile();
         g.add_node(ts::Named{}, [](int& v) { ++v; }, a);   // -> fatal: build-once
     }
+    else if (std::strcmp(name, "graph_duplicate_object") == 0)
+    {
+        ts::Guarded<int> a{ ts::Named{}, 0 };
+        ts::Static_task_graph g;
+        g.add_node(ts::Named{}, [](int& v, const int& r) { v = r; }, a, a);   // -> fatal: duplicate
+    }
+    else if (std::strcmp(name, "async_duplicate_object") == 0)
+    {
+        ts::Guarded<int> a{ ts::Named{}, 0 };
+        ts::async([](int& v, const int& r) { v = r; }, a, a).sync();   // -> fatal: duplicate
+    }
+    else if (std::strcmp(name, "multi_guard_duplicate_object") == 0)
+    {
+        ts::Guarded<int> a{ ts::Named{}, 0 };
+        [](ts::Guarded<int>& x) -> ts::Task<void>
+        {
+            auto g = co_await ts::read_write(x, x);   // -> fatal: duplicate
+        }(a).sync();
+    }
     else if (std::strcmp(name, "graph_undeclared") == 0)
     {
         Counter outside;

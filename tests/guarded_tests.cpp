@@ -485,6 +485,7 @@ void run_guarded_tests()
     run("destructor waits", test_destructor_waits);
     run("sync then destroy", test_sync_then_destroy);
     run("multi-object sync then destroy", test_multi_sync_then_destroy);
+    run("death: multi-object duplicate object", []{ TS_CHECK(ts::test::expect_death("async_duplicate_object")); });
     run("serial correctness", test_serial_correctness);
     run("concurrent readers", test_concurrent_readers);
     run("writer exclusion", test_writer_exclusion);

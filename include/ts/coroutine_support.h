@@ -776,8 +776,9 @@ struct Multi_access_awaiter
         , objs_(&objs...)
     {
         Pipe* raw[] = { &Guarded_access::pipe(objs)... };
-        // Insertion-sort by pipe address + dedup (uniform mode - a repeated object is simply
-        // dropped), the canonical order `async_build_modes` uses. `pipe_count_` <= N.
+        // Insertion-sort by pipe address, the canonical order `async_build_modes` uses. A
+        // repeated object is fatal (same strictness as the multi-object verbs and `add_node`:
+        // declare each object once).
         for (std::size_t k = 0; k < N; ++k)
         {
             Pipe* pk = raw[k];
@@ -785,7 +786,8 @@ struct Multi_access_awaiter
             while (i < pipe_count_ && pipes_[i] < pk)
                 ++i;
             if (i < pipe_count_ && pipes_[i] == pk)
-                continue;
+                ts::fatal("ts::read_write/ts::read_only: the same Guarded object was passed "
+                          "twice - list each object once");
             for (std::size_t j = pipe_count_; j > i; --j)
                 pipes_[j] = pipes_[j - 1];
             pipes_[i] = pk;
