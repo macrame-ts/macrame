@@ -1,6 +1,7 @@
 #include "guarded_tests.h"
 #include "ts/coroutine_support.h"   // the Access_op awaiter tests
 #include "ts/guarded.h"
+#include "ts/static_task_graph.h"   // the op nested-graph-run gating test
 #include "harness.h"
 #include "test_util.h"
 
@@ -681,6 +682,50 @@ void test_op_rebind_settled()
     TS_CHECK(op.sync() == 202);
 }
 
+// --- Access_op: nested completion-gating (s4 as revised) -------------------
+
+// A functor op body that starts a nested graph run and RETURNS: `execute()` attaches the run
+// via `detail::add_nested` (borrowed parent link for a caller-owned block), so the op settles
+// only when the run does - grants held across, exactly the graph-node model. Covers the
+// in-ctor inline arm returning with the op still in flight (`settled_sync_` bookkeeping) and
+// the child-settle completion route (`release()` -> `settle_thunk`).
+void test_op_nested_graph_run()
+{
+    ts::Guarded<int> x{ ts::Named{}, 0 };
+    ts::Guarded<int> y{ ts::Named{}, 0 };
+    std::atomic<bool> release_node{ false };
+    std::atomic<bool> node_ran{ false };
+    ts::Static_task_graph inner;
+    inner.add_node(ts::Named{}, [&release_node, &node_ran](int& v)
+    {
+        while (!release_node.load())
+            std::this_thread::yield();
+        v = 5;
+        node_ran.store(true);
+    }, y);
+    inner.compile();
+
+    auto op = x.access([&inner](int& v)
+    {
+        v = 1;
+        (void)inner.execute();   // gates the op's completion; the body returns with the run in flight
+    });
+    TS_CHECK(!op.is_done());   // inline arm ran the body, but the nested run still gates completion
+
+    // The grant is held across the nested run: a concurrent write on `x` queues behind the op.
+    std::atomic<bool> waiter_ran{ false };
+    ts::Task<void> waiter = x.async([&waiter_ran](int&) { waiter_ran.store(true); });
+    std::this_thread::sleep_for(5ms);
+    TS_CHECK(!waiter_ran.load());
+
+    release_node.store(true);
+    op.sync();   // settles only after the inner run
+    TS_CHECK(node_ran.load());
+    waiter.sync();
+    TS_CHECK(waiter_ran.load());
+    TS_CHECK(read_value(x) == 1);
+}
+
 } // namespace
 
 void run_guarded_tests()
@@ -721,6 +766,7 @@ void run_guarded_tests()
     run("op: bind then start", test_op_lifecycle_bind_start);
     run("op: refire loop", test_op_refire);
     run("op: rebind settled to another object", test_op_rebind_settled);
+    run("op: nested graph run gates completion", test_op_nested_graph_run);
     run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op start unbound",
         []{ TS_CHECK(ts::test::expect_death("access_op_start_unbound")); });
     run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op sync never started",

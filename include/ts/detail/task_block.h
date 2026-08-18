@@ -340,7 +340,19 @@ struct Task_control_block
         if (now == 0)
             dispatch_ready(blk);          // pre-execution: all locks (incl. pipe turns) met
         else if (now == execution_flag)
-            blk->complete();              // post-execution: nested done -> complete
+        {
+            // Post-execution: the last nested child settled -> complete. A caller-owned
+            // block (`Access_op`) must not complete through the generic settle (its settle
+            // is the op's own notify-under-lock one, and its pipe advance is deferred to
+            // completion - grants stay held across nested children); its settle thunk sits
+            // on the otherwise-unused `on_complete` seam. Nothing here touches `blk` after
+            // the call: the op may be destroyed inside it (a fired continuation resumes the
+            // owner).
+            if (blk->flags.caller_owned)
+                blk->on_complete(blk.get());
+            else
+                blk->complete();
+        }
         else if (now == blk->pipe_count)
             pipe_enter_first(blk.get());  // only pipe locks left -> enter line 0 (§5.5 pipes last)
         // The pipe branch is exact: pre-execution counts decrease monotonically (the
@@ -455,7 +467,16 @@ struct Task_control_block
         for (auto& c : conts)
             c(r, cancel_);
         if (parent)
-            release(parent, cancel_);   // propagate cancellation to the gating parent
+        {
+            // Propagate cancellation to the gating parent. A caller-owned parent's link is
+            // borrowed (see `add_nested`): read the flag into a local FIRST - the release can
+            // complete the parent, whose owner may destroy it before `release` returns - then
+            // defuse without a dec (`fire_task_turn`'s discipline).
+            const bool parent_caller_owned = parent->flags.caller_owned;
+            release(parent, cancel_);
+            if (parent_caller_owned)
+                parent.release();
+        }
         if (on_complete)
             on_complete(this);
     }
@@ -867,9 +888,14 @@ concept Task_body = std::invocable<std::decay_t<Fn>&>
 // static_task_graph.cpp); nesting is a completion dependency, orthogonal to how the child runs.
 inline void add_nested(Task_ptr child_core)
 {
-    Task_ptr parent = current_task;
-    if (!parent)
+    if (!current_task)
         ts::fatal("detail::add_nested called outside a running task");
+    // A caller-owned parent (`Access_op`) is linked BORROWED: the machinery must hold no ref
+    // on it (Flags::caller_owned), and the op cannot settle - so cannot be legally destroyed
+    // - before the child's release fires. The child's settle defuses symmetrically.
+    Task_ptr parent = current_task->flags.caller_owned
+        ? Task_ptr(current_task.get(), Adopt_ref{})
+        : current_task;
 
     parent->num_locks.fetch_add(1, std::memory_order_relaxed);   // a completion lock on the parent
 
@@ -895,7 +921,12 @@ inline void add_nested(Task_ptr child_core)
             return;
         }
     }
-    Task_control_block::release(parent);   // child already settled -> release the lock now
+    // Child already settled -> release the lock now (same borrowed-link discipline as the
+    // child-side settle: flag first, release, defuse).
+    const bool parent_caller_owned = parent->flags.caller_owned;
+    Task_control_block::release(parent);
+    if (parent_caller_owned)
+        parent.release();
 }
 
 } // namespace detail

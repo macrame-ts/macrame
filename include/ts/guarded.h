@@ -187,7 +187,9 @@ private:
         Body& body() noexcept { return *std::launder(reinterpret_cast<Body*>(body_store)); }
 
         static void run(const detail::Task_ptr& c);
+        static void settle_thunk(detail::Task_control_block* c);
         void op_settle(bool cancel);
+        void finish(bool cancel);   // the shared completion tail: advance pipes, settle
     };
 
     Access_op(detail::Pipe& pipe, Inst* inst, Body body, Access_options opts, Named name);
@@ -208,6 +210,10 @@ Access_op<T, Body>::State::State()
 {
     destroy = [](detail::Task_control_block*) {};   // caller-owned: a drained refcount frees nothing
     execute = &State::run;
+    // The completion route for a nested-gated op: `release()`'s execution-flag branch calls
+    // `on_complete` for a caller-owned block instead of the generic `complete()` (task_block.h).
+    // Never fired by `op_settle`, so the seam is otherwise unused here.
+    on_complete = &State::settle_thunk;
     flags.caller_owned = true;
     pipe_links = &link;
 }
@@ -237,8 +243,7 @@ void Access_op<T, Body>::State::run(const detail::Task_ptr& c)
     auto* self = static_cast<State*>(c.get());
     if (c->token.is_cancel_requested() || c->prereq_cancelled.load(std::memory_order_acquire))
     {
-        detail::advance_pipe_links(self);   // the turn was taken; release it before settling
-        self->op_settle(true);
+        self->finish(true);
         return;
     }
     c->num_locks.store(detail::Task_control_block::execution_flag + 1, std::memory_order_relaxed);
@@ -273,15 +278,32 @@ void Access_op<T, Body>::State::run(const detail::Task_ptr& c)
     }
     detail::current_task.release();   // defuse the borrowed install (never a counted ref)
     detail::current_task = std::move(prev);
-    // Caller-owned completion is not gatable by nested children: the child's later release
-    // would route through the generic settle, whose post-notify member touches assume
-    // refcounted storage. A body that needs `detail::add_nested` (a nested graph run) is a
-    // detached shape - run it through `async`.
-    if (c->num_locks.fetch_sub(1, std::memory_order_acq_rel) != detail::Task_control_block::execution_flag + 1)
-        ts::fatal("Access_op: the body attached nested completion-gating work (e.g. a nested graph "
-                  "run) - a caller-owned access cannot be completion-gated by children; use async");
-    detail::advance_pipe_links(self);
-    self->op_settle(false);
+    // The child set is frozen from here: `add_nested` requires the running task, and
+    // `current_task` is restored. If children are pending, this fire cannot settle
+    // synchronously - clear the flag BEFORE dropping the self-lock, so a child's settle
+    // (any thread, via `release()` -> `settle_thunk`) takes the locked settle path. The
+    // grants stay held until then: the pipe advance lives in `finish`, which only the
+    // completing release reaches - the coroutine-graph-node model.
+    if (c->num_locks.load(std::memory_order_acquire) != detail::Task_control_block::execution_flag + 1)
+        self->settle_synchronously = false;
+    if (c->num_locks.fetch_sub(1, std::memory_order_acq_rel) == detail::Task_control_block::execution_flag + 1)
+        self->finish(false);
+    // else: the last nested child's settle completes the op through `settle_thunk`.
+}
+
+template<typename T, typename Body>
+void Access_op<T, Body>::State::settle_thunk(detail::Task_control_block* c)
+{
+    // A cancelled nested child is ordering-only (the flag is read before the body, which
+    // already ran) - the op completes normally.
+    static_cast<State*>(c)->finish(false);
+}
+
+template<typename T, typename Body>
+void Access_op<T, Body>::State::finish(bool cancel)
+{
+    detail::advance_pipe_links(this);   // release the taken turn(s); admissions fire pipe-free
+    op_settle(cancel);
 }
 
 // The op's settle. Two deliberate divergences from the generic `Task_control_block::settle`,
@@ -353,7 +375,9 @@ void Access_op<T, Body>::fire()
     {
         state_.settle_synchronously = true;
         state_.execute(self);
-        settled_sync_ = true;
+        // `run` cleared the flag if the body attached nested children - the op is then
+        // still in flight when this call returns, and the destructor must synchronize.
+        settled_sync_ = state_.settle_synchronously;
         self.release();
         return;
     }
@@ -363,7 +387,7 @@ void Access_op<T, Body>::fire()
     state_.settle_synchronously = true;
     if (detail::pipe_try_inline(global_scheduler(), pipe, mode, self))
     {
-        settled_sync_ = true;
+        settled_sync_ = state_.settle_synchronously;   // false if the body attached children
         self.release();
         return;
     }
