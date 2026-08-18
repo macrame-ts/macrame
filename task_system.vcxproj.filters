@@ -60,6 +60,18 @@
     <ClCompile Include="benchmarks\benchmarks.cpp">
       <Filter>benchmarks</Filter>
     </ClCompile>
+    <ClCompile Include="benchmarks\features_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="benchmarks\game_frame_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="benchmarks\scheduler_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="benchmarks\staged_commands_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
     <ClCompile Include="sample\blackboard.cpp">
       <Filter>sample</Filter>
     </ClCompile>

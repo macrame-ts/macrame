@@ -61,6 +61,10 @@ if(WIN32)
         src/mem_profile.cpp
         benchmarks/access_control_bench.cpp
     benchmarks/benchmarks.cpp
+    benchmarks/features_bench.cpp
+    benchmarks/game_frame_bench.cpp
+    benchmarks/scheduler_bench.cpp
+    benchmarks/staged_commands_bench.cpp
         tests/access_tests.cpp
         tests/coroutine_tests.cpp
         tests/deferred_tests.cpp
