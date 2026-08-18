@@ -374,7 +374,9 @@ void Static_task_graph::on_data_ready(Run_state& run, int index)
 // (or a nested graph run) can gate the node's completion via `detail::add_nested`, then
 // completes once the self-lock and any nested completions release. The block carries the
 // run's `token`, so a cancelled node skips its body (settling cancelled) - `on_complete`
-// still fires, keeping the drain going.
+// still fires, keeping the drain going. The same token is handed to the body wrapper,
+// which forwards it only to a body that opted in via the trailing `Cancellation_token`
+// parameter (delivery at call time, so it is always the current run's token).
 void Static_task_graph::run_graph_node(const detail::Task_ptr& block)
 {
     using Block = detail::Task_control_block;
@@ -400,7 +402,7 @@ void Static_task_graph::run_graph_node(const detail::Task_ptr& block)
         // slices' and async work's) counts toward this node's true-busy. No-op untraced.
         detail::Trace_owner_scope trace_owner_scope(self->index);
         detail::Trace_busy_scope trace_busy_scope;
-        self->graph->nodes_[self->index].run();   // node body: installs its own Access_scope
+        self->graph->nodes_[self->index].run(block->token);   // node body: installs its own Access_scope
     }
 
     detail::current_task = std::move(prev);

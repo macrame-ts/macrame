@@ -257,10 +257,10 @@ void test_cancel_skips_nodes()
 }
 
 // Cancellation arriving mid-run: the first node cancels the run's token from inside its
-// body (node bodies are not handed the token - this one captures the source it was built
-// with). It has already passed its own token check, so it finishes; the second node, edge-
-// ordered behind it, sees the cancelled token when it is about to run and settles cancelled
-// without running its body; the run's completion settles cancelled.
+// body (this body does not declare the trailing-token parameter - it captures the source it
+// was built with). It has already passed its own token check, so it finishes; the second
+// node, edge-ordered behind it, sees the cancelled token when it is about to run and settles
+// cancelled without running its body; the run's completion settles cancelled.
 void test_cancel_mid_run()
 {
     ts::Cancellation_source src;
@@ -281,6 +281,77 @@ void test_cancel_mid_run()
 
     TS_CHECK(run.is_cancelled());
     TS_CHECK(x.async([](const int& v) { return v; }).sync() == 1);   // second's body never ran
+}
+
+// The trailing-token opt-in, introspectable tier: a node body declaring a trailing
+// `Cancellation_token` after its resource parameters receives the run's token. The body
+// proves it is the live token (not a stale capture): clear before the captured source
+// cancels, set right after. Its cooperative return settles the node completed - the write
+// is visible - while the run's completion settles cancelled (the run token was cancelled).
+void test_node_trailing_token()
+{
+    ts::Cancellation_source src;
+    ts::Guarded<int> x{ ts::Named{}, 0 };
+    bool clear_before = false, set_after = false;
+
+    ts::Static_task_graph g;
+    g.add_node("n", [&](int& v, ts::Cancellation_token t)
+    {
+        clear_before = !t.is_cancel_requested();
+        src.request_cancel();
+        set_after = t.is_cancel_requested();   // the delivered token is the run's live token
+        v = 7;                                 // cooperative return: the node still completes
+    }, x);
+    g.compile();
+
+    ts::Task<void> run = g.execute({ .token = src.token() });
+    run.sync();
+
+    TS_CHECK(clear_before);
+    TS_CHECK(set_after);
+    TS_CHECK(run.is_cancelled());              // the run token ended up cancelled
+    TS_CHECK(read_value(x) == 7);              // but the body ran to its cooperative return
+}
+
+// The trailing-token opt-in, probed (generic-lambda) tier: the rvalue probe must still
+// classify the resource positions with the token as an extra probe argument - `auto&` =
+// write, `const auto&` = read - proven by the propagated values.
+void test_node_trailing_token_probed()
+{
+    ts::Guarded<int> a{ ts::Named{}, 1 }, b{ ts::Named{}, 0 };
+
+    ts::Static_task_graph g;
+    g.add_node("w", [](auto& v, ts::Cancellation_token t)
+    {
+        if (!t.is_cancel_requested())
+            v += 10;
+    }, a);
+    g.add_node("r", [](const auto& v, auto& out, ts::Cancellation_token) { out = v * 2; }, a, b);
+    g.compile();
+
+    g.execute().sync();   // no token passed: the default token never cancels
+
+    TS_CHECK(read_value(a) == 11);   // `auto&` deduced write, token clear so the body wrote
+    TS_CHECK(read_value(b) == 22);   // read-then-write chain ordered after the writer
+}
+
+// The trailing-token opt-in for a coroutine node body: `Task<void>(T&, Cancellation_token)`
+// - the token is copied into the frame and stays valid across suspensions.
+void test_node_trailing_token_coroutine()
+{
+    ts::Guarded<int> x{ ts::Named{}, 0 };
+
+    ts::Static_task_graph g;
+    g.add_node("co", [](int& v, ts::Cancellation_token t) -> ts::Task<void>
+    {
+        if (!t.is_cancel_requested())
+            v = 5;
+        co_return;
+    }, x);
+    g.compile();
+
+    g.execute().sync();
+    TS_CHECK(read_value(x) == 5);
 }
 
 // A node fans out sub-work with parallel_for; the synchronous join gates the body, so the
@@ -1263,6 +1334,9 @@ void run_graph_tests()
     run("graph stress", test_graph_stress);
     run("cancel skips nodes", test_cancel_skips_nodes);
     run("cancel mid-run skips the rest", test_cancel_mid_run);
+    run("node trailing token", test_node_trailing_token);
+    run("node trailing token probed", test_node_trailing_token_probed);
+    run("node trailing token coroutine", test_node_trailing_token_coroutine);
     run("nested gates completion", test_nested_gates_completion);
     run("nested inherits access", test_nested_inherits_access);
     run("nested before successor", test_nested_before_successor);

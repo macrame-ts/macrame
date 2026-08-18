@@ -412,8 +412,9 @@ ts::launch([](ts::Cancellation_token tok)
 ```
 
 A cooperative early return settles the task **completed** (it ran), not
-cancelled. This works in `launch` bodies and `async` accessors
-(`[](T& v, ts::Cancellation_token t)`). For work that blocks rather than
+cancelled. This works in `launch` bodies, `async` accessors
+(`[](T& v, ts::Cancellation_token t)`), and graph node bodies (§6, where the
+token delivered is the run's). For work that blocks rather than
 polls, register a push notification:
 `ts::Cancel_callback cb(token, [] { wake_the_socket(); });` —
 `request_cancel()` invokes it synchronously.
@@ -756,7 +757,11 @@ Node capabilities:
   and its declared grants are held for the frame's whole life. While the
   frame is suspended its worker is free.
 - `execute({ .token = t })` accepts a cancellation token: not-yet-started
-  nodes are skipped and the run's completion settles cancelled.
+  nodes are skipped and the run's completion settles cancelled. A node body
+  may opt into a mid-body early-out by declaring a trailing
+  `ts::Cancellation_token` after its resource parameters — the same spelling
+  as `launch`/`async` bodies (§4.4) — and receives the current run's token;
+  a cooperative return settles the node completed, not cancelled.
 
 Objects are held per node, not per run: a node acquires exactly the objects
 it declared, for exactly its duration, so an object is free between its

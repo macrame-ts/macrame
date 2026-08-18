@@ -148,7 +148,9 @@ public:
     //   add_node({}, [](const auto& p, auto& a){ a.pose(p); }, physics, anim);  // p:read, a:write
     // or explicit `ts::as_read_only`/`as_read_write` tags on every object (don't mix tagged and
     // bare in one node). Read positions receive `const T&`, so a mutating body under a read
-    // classification does not compile. Returns a `Graph_node` ordering handle.
+    // classification does not compile. A body may declare an optional trailing
+    // `Cancellation_token` after the resource parameters to receive the run's token (see
+    // `execute`). Returns a `Graph_node` ordering handle.
     template<typename Fn, typename... Objs>
         requires (detail::Object_arg<Objs> && ...)
     Graph_node add_node(Named name, Fn&& fn, Objs&&... objs);
@@ -165,8 +167,11 @@ public:
     // Cancellation is cooperative, through the run's token: each node checks it as it is
     // about to run, so not-yet-started nodes are skipped (they settle cancelled) while nodes
     // already in flight finish normally; the completion handle then settles cancelled (query
-    // with `Task::is_cancelled()`). Node bodies are not handed the token - a body that wants
-    // a mid-body early-out captures the same token the caller passes here.
+    // with `Task::is_cancelled()`). A body that wants a mid-body early-out opts in by
+    // declaring a trailing `Cancellation_token` parameter after its resource parameters -
+    // the same spelling as `Guarded::async` accessors and `ts::launch` bodies - and receives
+    // this run's token to poll; a cooperative mid-body return settles the node completed
+    // (it ran), not cancelled.
     //
     // Runs on the process-wide scheduler. To run under a different configuration for a scope,
     // reconfigure it with `Scheduler_scope` - another worker count, or the worker-less
@@ -221,7 +226,10 @@ private:
     {
         // --- captured from `add_node` (the user's declaration) ---------------------------
         Named name{ nullptr };                  // literal or `add_node` call site; empty if unnamed
-        std::move_only_function<void()> run;    // the body, wrapped with its access scope
+        // The body, wrapped with its access scope. Receives the run's token (off the node
+        // block, re-armed each `execute()`); the wrapper forwards it only to a body that
+        // declared the opt-in trailing `Cancellation_token` parameter.
+        std::move_only_function<void(const Cancellation_token&)> run;
         // Per declared object, in argument order: (instance, mode). The instance is the
         // type-erased address of the `Guarded`'s stored `T` - the same identity the harness
         // (`Access_context`) keys by; `const void*` because the graph is type-erased over `T`.
@@ -252,13 +260,16 @@ private:
     // (compile-time) `Modes...`. Read positions are invoked with `const T&` (`mode_ref`), so a
     // mutating body under a read classification fails to compile - structural, on top of the
     // harness. The deduced / probed / tagged wrappers below differ only in the `Modes` source,
-    // so `compile()` derives identical edges and exclusion for all three.
-    template<Access... Modes, std::size_t... I, typename Fn, typename... Ts>
+    // so `compile()` derives identical edges and exclusion for all three. `Takes_token` marks
+    // a body that declared the opt-in trailing `Cancellation_token` (each tier detects it);
+    // the wrapper then forwards the run's token as the extra trailing argument.
+    template<bool Takes_token, Access... Modes, std::size_t... I, typename Fn, typename... Ts>
     void fill_node_modes(Node& node, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... access);
 
     // Deduced (bare args, introspectable functor): modes from parameter const-ness; by-value /
-    // rvalue-ref resource parameters rejected.
-    template<typename Args, std::size_t... I, typename Fn, typename... Ts>
+    // rvalue-ref resource parameters rejected. `I` spans the resource parameters only, so a
+    // trailing token parameter (detected by `add_node`) never reaches mode deduction.
+    template<typename Args, bool Takes_token, std::size_t... I, typename Fn, typename... Ts>
     void fill_node(Node& node, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... access);
 
     // Probed (bare args, generic functor): modes from the per-position rvalue probe -
@@ -354,9 +365,11 @@ Graph_node Static_task_graph::add_node(Named name, Fn&& fn, Objs&&... objs)
     else if constexpr (detail::introspectable_v<Fn>)
     {
         using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
-        static_assert(std::tuple_size_v<Args> == sizeof...(Objs),
-            "node functor arity must match the number of Guarded arguments");
-        fill_node<Args>(node, std::index_sequence_for<Objs...>{},
+        constexpr bool takes_token = detail::last_arg_is_token_v<Args, sizeof...(Objs)>;
+        static_assert(std::tuple_size_v<Args> == sizeof...(Objs) + (takes_token ? 1 : 0),
+            "node functor arity must match the number of Guarded arguments "
+            "(plus an optional trailing Cancellation_token)");
+        fill_node<Args, takes_token>(node, std::index_sequence_for<Objs...>{},
             std::forward<Fn>(fn), objs...);
     }
     else
@@ -372,7 +385,7 @@ Graph_node Static_task_graph::add_node(Named name, Fn&& fn, Objs&&... objs)
     return Graph_node(this, index);
 }
 
-template<Access... Modes, std::size_t... I, typename Fn, typename... Ts>
+template<bool Takes_token, Access... Modes, std::size_t... I, typename Fn, typename... Ts>
 void Static_task_graph::fill_node_modes(Node& node, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... access)
 {
     auto instances = std::make_tuple(&access.instance_...);
@@ -382,7 +395,7 @@ void Static_task_graph::fill_node_modes(Node& node, std::index_sequence<I...>, F
     // `Task<R>` body would take the plain branch: the returned task discarded, the node
     // completing (and releasing its grants) while the eager frame still runs - a stale
     // inherited grant. Nodes carry no results by design; typed chaining is docs/TODO.md 2.1.
-    using Body_result = decltype(fn(detail::mode_ref<Modes>(std::get<I>(instances))...));
+    using Body_result = typename detail::Node_body_result<Takes_token, Fn&, detail::Mode_ref_t<Modes, Ts>...>::type;
     static_assert(!detail::is_task_v<Body_result> || std::is_same_v<Body_result, Task<void>>,
         "a coroutine node body must return ts::Task<void>; a Task<R> result would be "
         "discarded and the frame would outrun the node's grants (typed node results are "
@@ -398,57 +411,88 @@ void Static_task_graph::fill_node_modes(Node& node, std::index_sequence<I...>, F
 
     auto epochs = std::make_tuple(detail::pipe_epoch(access.pipe_)...);
     auto ranks = std::make_tuple(detail::pipe_rank(access.pipe_)...);
-    node.run = [fn = std::forward<Fn>(fn), instances, epochs, ranks]() mutable
+    node.run = [fn = std::forward<Fn>(fn), instances, epochs, ranks](
+        [[maybe_unused]] const Cancellation_token& token) mutable
     {
         Access_context ctx;
         (ctx.add(static_cast<const void*>(std::get<I>(instances)), Modes,
                  std::get<I>(epochs), std::get<I>(ranks)), ...);
         Access_scope scope(ctx);
-        using Body_result = decltype(fn(detail::mode_ref<Modes>(std::get<I>(instances))...));
-        if constexpr (std::is_same_v<Body_result, Task<void>>)
+        // One invocation spelling for both arities: a token-taking body (opt-in trailing
+        // `Cancellation_token`) receives the run's token - by value into a coroutine
+        // body's frame - and may return cooperatively mid-body (the node then settles
+        // completed, not cancelled, exactly like `Executable::run`'s model).
+        auto invoke_body = [&]() -> decltype(auto)
+        {
+            if constexpr (Takes_token)
+                return fn(detail::mode_ref<Modes>(std::get<I>(instances))..., token);
+            else
+                return fn(detail::mode_ref<Modes>(std::get<I>(instances))...);
+        };
+        if constexpr (std::is_same_v<decltype(invoke_body()), Task<void>>)
         {
             // A coroutine node body (docs/coroutine-first.md §4.4): the returned frame's
             // task gates the node's completion via the nested mechanism - the node
             // completes (releasing grants and successors) when the frame completes, not
             // at the first suspension. The frame inherits the node's grant snapshot at
             // creation, so resumed segments keep the declared accesses.
-            detail::add_nested(detail::core_of(fn(detail::mode_ref<Modes>(std::get<I>(instances))...)));
+            detail::add_nested(detail::core_of(invoke_body()));
         }
         else
         {
-            fn(detail::mode_ref<Modes>(std::get<I>(instances))...);
+            invoke_body();
         }
     };
 }
 
-template<typename Args, std::size_t... I, typename Fn, typename... Ts>
+template<typename Args, bool Takes_token, std::size_t... I, typename Fn, typename... Ts>
 void Static_task_graph::fill_node(Node& node, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... access)
 {
     static_assert((std::is_lvalue_reference_v<std::tuple_element_t<I, Args>> && ...),
         "a guarded-resource parameter must be `T&` or `const T&`: taking it by value copies "
         "the resource (writes hit the copy and are silently discarded), and `T&&` cannot "
         "bind the stored instance");
-    fill_node_modes<detail::async_mode_of<std::tuple_element_t<I, Args>>()...>(
+    fill_node_modes<Takes_token, detail::async_mode_of<std::tuple_element_t<I, Args>>()...>(
         node, seq, std::forward<Fn>(fn), access...);
 }
 
 template<std::size_t... I, typename Fn, typename... Ts>
 void Static_task_graph::fill_node_probed(Node& node, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... access)
 {
-    static_assert(std::invocable<Fn, Ts&...>,
+    // Token-taking wins for a variadic-generic functor that accepts both arities - the
+    // `accessor_takes_token_v` precedent.
+    constexpr bool takes_token = std::invocable<Fn, Ts&..., const Cancellation_token&>;
+    static_assert(takes_token || std::invocable<Fn, Ts&...>,
         "node functor parameters must match the Guarded arguments "
-        "(same arity, each taken by reference)");
-    // Guard the forward on the same condition: a failed assert does not stop
-    // instantiation, so without it `fill_node_modes` re-errors past the message.
-    if constexpr (std::invocable<Fn, Ts&...>)
-        fill_node_modes<detail::probed_mode<Fn, I, Ts...>()...>(
+        "(same arity, each taken by reference, plus an optional trailing Cancellation_token)");
+    // Guard the forwards on the same conditions: a failed assert does not stop
+    // instantiation, so without them `fill_node_modes` re-errors past the message.
+    if constexpr (takes_token)
+    {
+        // The rvalue probe must carry the trailing token, or a token-taking generic lambda
+        // fails the probe's arity and every position mis-probes as a write. `Cancellation_token`
+        // joins as one more probe argument: `I` still ranges over the resource positions only,
+        // so the token position always receives an lvalue, which binds the body's by-value
+        // (or `const&`) token parameter in every probe invocation.
+        fill_node_modes<true, detail::probed_mode<Fn, I, Ts..., Cancellation_token>()...>(
             node, seq, std::forward<Fn>(fn), access...);
+    }
+    else if constexpr (std::invocable<Fn, Ts&...>)
+    {
+        fill_node_modes<false, detail::probed_mode<Fn, I, Ts...>()...>(
+            node, seq, std::forward<Fn>(fn), access...);
+    }
 }
 
 template<std::size_t... I, typename Fn, typename... Objs>
 void Static_task_graph::fill_node_tagged(Node& node, std::index_sequence<I...> seq, Fn&& fn, Objs&&... objs)
 {
-    fill_node_modes<std::remove_cvref_t<Objs>::mode...>(
+    // Probe token-taking with the tagged mode refs - the exact refs the body will be
+    // invoked with, so the probe instantiates nothing the real invocation would not.
+    constexpr bool takes_token = std::invocable<Fn,
+        detail::Mode_ref_t<std::remove_cvref_t<Objs>::mode, typename std::remove_cvref_t<Objs>::value_type>...,
+        const Cancellation_token&>;
+    fill_node_modes<takes_token, std::remove_cvref_t<Objs>::mode...>(
         node, seq, std::forward<Fn>(fn), *objs.obj...);
 }
 

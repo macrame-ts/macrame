@@ -86,6 +86,27 @@ constexpr Access probed_mode()
         ? Access::read_only : Access::read_write;
 }
 
+// Trailing-token detection over an introspected parameter tuple `Args` with `N` declared
+// resources: true when the arity is exactly `N + 1` and the extra (last) parameter decays to
+// `Cancellation_token`. The guarded specialization keeps `tuple_element_t<N>` from being
+// formed on any other arity (a hard error, not a substitution failure).
+template<typename Args, std::size_t N, bool = (std::tuple_size_v<Args> == N + 1)>
+struct Last_arg_is_token : std::false_type {};
+template<typename Args, std::size_t N>
+struct Last_arg_is_token<Args, N, true>
+    : std::is_same<std::remove_cvref_t<std::tuple_element_t<N, Args>>, Cancellation_token> {};
+
+template<typename Args, std::size_t N>
+inline constexpr bool last_arg_is_token_v = Last_arg_is_token<Args, N>::value;
+
+// Invoke result of a node body over its mode-corrected resource refs `As...`, with or
+// without the opt-in trailing `Cancellation_token` (the token-taking specialization mirrors
+// `Async_result_sel` below).
+template<bool Takes_token, typename Fn, typename... As>
+struct Node_body_result { using type = std::invoke_result_t<Fn, As...>; };
+template<typename Fn, typename... As>
+struct Node_body_result<true, Fn, As...> { using type = std::invoke_result_t<Fn, As..., const Cancellation_token&>; };
+
 // Per-position access-corrected reference: a read position hands the body `const T&`, so a
 // mutating body under a read classification fails to compile (structural const-correctness,
 // on top of the runtime harness); a write position hands `T&`.
