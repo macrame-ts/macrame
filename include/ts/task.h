@@ -68,6 +68,13 @@ struct Access_options
     // captured by the verb itself (its own defaulted `std::source_location`), so an
     // unnamed access is still identified in diagnostics.
     const char* name = nullptr;
+    // `access` only (`async` always enqueues): never run the body inline on the calling
+    // thread - the attended-but-never-inline quadrant, for a heavy body whose result the
+    // caller still stays for. Skips only the inline-when-free arm; the reentrant arm (the
+    // caller's task already holds the object's write grant) stays inline regardless -
+    // that arm is correctness, not opportunism: an access queued behind its own caller's
+    // held grant deadlocks when awaited.
+    bool queued = false;
 };
 
 // Dispatch options for launching a standalone task (`ts::launch`). `token` makes it

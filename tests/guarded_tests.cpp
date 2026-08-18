@@ -694,6 +694,33 @@ void test_op_sync_take_vocabulary()
     TS_CHECK(d.access([](const int& v) { return v; }).sync() == 7);   // temporary: by value
 }
 
+// `Access_options{.queued = true}`: attended but never-inline - the body runs off the
+// calling thread even on a free pipe. The reentrant arm ignores the option (queuing behind
+// the caller's own held grant would deadlock when awaited).
+void test_op_queued_option()
+{
+    ts::Guarded<int> d{ ts::Named{}, 3 };
+    std::thread::id caller = std::this_thread::get_id();
+    std::atomic<std::thread::id> body_thread{};
+    auto op = d.access([&body_thread](const int& v)
+    {
+        body_thread.store(std::this_thread::get_id());
+        return v;
+    }, { .queued = true });
+    TS_CHECK(op.sync() == 3);
+    TS_CHECK(body_thread.load() != caller);   // free pipe, still dispatched to a worker
+
+    // Reentrant + queued: runs inline under the held grant regardless of the option.
+    std::atomic<bool> inner_ok{ false };
+    d.async([&d, &inner_ok](int& v)
+    {
+        v = 9;
+        auto inner = d.access([](const int& x) { return x; }, { .queued = true });
+        inner_ok.store(inner.is_done() && inner.try_take().value_or(-1) == 9);
+    }).sync();
+    TS_CHECK(inner_ok.load());
+}
+
 // --- Access_op: nested completion-gating (s4 as revised) -------------------
 
 // A functor op body that starts a nested graph run and RETURNS: `execute()` attaches the run
@@ -780,6 +807,7 @@ void run_guarded_tests()
     run("op: rebind settled to another object", test_op_rebind_settled);
     run("op: nested graph run gates completion", test_op_nested_graph_run);
     run("op: sync/take vocabulary", test_op_sync_take_vocabulary);
+    run("op: queued option", test_op_queued_option);
     run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op start unbound",
         []{ TS_CHECK(ts::test::expect_death("access_op_start_unbound")); });
     run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op sync never started",

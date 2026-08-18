@@ -186,14 +186,15 @@ private:
         alignas(Body) unsigned char body_store[sizeof(Body)];
         bool bound = false;
         bool started = false;    // ever fired; with `ready` it splits dormant/in flight/settled
-        bool consumed = false;   // this cycle's result was moved out (sync/await/try_take)
+        bool consumed = false;   // this cycle's result was moved out (take/sync&&/await/try_take)
+        bool queued = false;     // `Access_options::queued`: skip the inline-when-free arm
         // Set by a fire around its inline/reentrant execute: no observer can exist before the
         // firing call returns (single owner, mid-call), so `op_settle` skips the mutex and the
         // notify entirely - plain stores, sequenced before every later member call.
         bool settle_synchronously = false;
 
         State();
-        State(Body b, Cancellation_token tok, Priority pri);   // bound; target set by the caller
+        State(Body b, Cancellation_token tok, Priority pri, bool queued_opt);   // bound; target set by the caller
         ~State();
 
         Body& body() noexcept { return *std::launder(reinterpret_cast<Body*>(body_store)); }
@@ -235,13 +236,14 @@ Access_op<T, Body>::State::State()
 }
 
 template<typename T, typename Body>
-Access_op<T, Body>::State::State(Body b, Cancellation_token tok, Priority pri)
+Access_op<T, Body>::State::State(Body b, Cancellation_token tok, Priority pri, bool queued_opt)
     : State()
 {
     ::new (static_cast<void*>(body_store)) Body(std::move(b));
     bound = true;
     token = std::move(tok);
     flags.priority = pri;
+    queued = queued_opt;
 }
 
 template<typename T, typename Body>
@@ -359,7 +361,7 @@ void Access_op<T, Body>::State::op_settle(bool cancel)
 
 template<typename T, typename Body>
 Access_op<T, Body>::Access_op(detail::Pipe& pipe, Inst* inst, Body body, Access_options opts, Named name)
-    : state_(std::move(body), std::move(opts.token), opts.priority)
+    : state_(std::move(body), std::move(opts.token), opts.priority, opts.queued)
 {
     state_.pipe = &pipe;
     state_.inst = inst;
@@ -400,14 +402,19 @@ void Access_op<T, Body>::fire()
     state_.num_locks.store(1, std::memory_order_relaxed);   // the one pipe turn
     // Inline fast path: claim an idle pipe and run on this thread; else enqueue - the
     // admitted turn's release dispatches the body (borrowed route, no machinery refs).
-    state_.settle_synchronously = true;
-    if (detail::pipe_try_inline(global_scheduler(), pipe, mode, self))
+    // `.queued` skips only this arm (never-inline is a dispatch preference); the reentrant
+    // arm above is correctness, not opportunism, so it ran regardless.
+    if (!state_.queued)
     {
-        settled_sync_ = state_.settle_synchronously;   // false if the body attached children
-        self.release();
-        return;
+        state_.settle_synchronously = true;
+        if (detail::pipe_try_inline(global_scheduler(), pipe, mode, self))
+        {
+            settled_sync_ = state_.settle_synchronously;   // false if the body attached children
+            self.release();
+            return;
+        }
+        state_.settle_synchronously = false;
     }
-    state_.settle_synchronously = false;
     self.release();
     detail::pipe_enter_first(&state_, nullptr);
 }
@@ -822,7 +829,7 @@ struct Guarded_access
 template<typename T, typename Body>
 Access_op<T, Body>::Access_op(Dormant, Guarded<T>& target, Body body, Access_options opts,
                               std::source_location site)
-    : state_(std::move(body), std::move(opts.token), opts.priority)
+    : state_(std::move(body), std::move(opts.token), opts.priority, opts.queued)
 {
     detail::Pipe& pipe = detail::Guarded_access::pipe(target);
     state_.pipe = &pipe;
