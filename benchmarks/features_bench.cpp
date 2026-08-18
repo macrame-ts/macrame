@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -235,6 +236,46 @@ std::vector<double> bench_graph_execute()
     });
 }
 
+// Uncontended single-object floor: a read `access` + boundary `sync()` on a free pipe, one
+// thread - the pure mechanism cost with zero contention (the Access_op acceptance metric,
+// docs/access-op-design.md §7 phase 0), reported beside the bare-mutex floor it is measured
+// against.
+std::vector<double> bench_access_floor()
+{
+    ts::Guarded<uint64_t> obj{ ts::Named{}, 7 };
+    constexpr uint64_t batch = 20000;
+    volatile uint64_t sink = 0;
+    return measure([&]() -> uint64_t
+    {
+        uint64_t sum = 0;
+        for (uint64_t i = 0; i < batch; ++i)
+            sum += obj.access([](const uint64_t& v) { return v; }).sync();
+        sink = sum;
+        return batch;
+    });
+}
+
+// The bare-mutex equivalent of the row above: lock, read, unlock - what a hand-rolled
+// mutex-guarded object pays for the same uncontended access.
+std::vector<double> bench_mutex_floor()
+{
+    std::mutex m;
+    uint64_t value = 7;
+    constexpr uint64_t batch = 20000;
+    volatile uint64_t sink = 0;
+    return measure([&]() -> uint64_t
+    {
+        uint64_t sum = 0;
+        for (uint64_t i = 0; i < batch; ++i)
+        {
+            std::scoped_lock lock(m);
+            sum += value;
+        }
+        sink = sum;
+        return batch;
+    });
+}
+
 // Access harness: cost of a guarded method call (TS_CHECK_ACCESS).
 struct Guarded
 {
@@ -275,6 +316,8 @@ void run_features_bench()
     report("coro nst", bench_coro_nest());
     report("ts_write", bench_ts_write());
     report("ts_read", bench_ts_read());
+    report("access", bench_access_floor());
+    report("mutex", bench_mutex_floor());
     report("coro join", bench_coro_join());
     report("graph", bench_graph_execute());
     report("harness", bench_harness());
