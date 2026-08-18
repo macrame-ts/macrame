@@ -124,9 +124,12 @@ counterparts already in the codebase, so the restriction is removed:
   `current_task` is defused after the body, so there is no race window.
 
 Cost: one flag branch in `add_nested` and in `release()`'s completion branch
-(both cold), zero on the hot path. `co_await inner.execute()` from an
-`access` body then works as it does from a graph node, lend protocol
-included.
+(both cold), zero on the hot path. A functor op body calls `inner.execute()`
+and returns - the run gates the op's completion (functor bodies cannot
+`co_await`; that spelling applies once the body is a coroutine) - with the
+lend protocol working as it does from a graph node. Publicly reachable:
+`execute()` calls `detail::add_nested` whenever `current_task` is set, so
+the fixed path is user-facing, not merely detail-layer hardening.
 
 ## 5. API surface
 
