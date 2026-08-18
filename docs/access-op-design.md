@@ -101,21 +101,56 @@ livelock. As landed: a `Flags::caller_owned` bit routes dispatch through the
 existing borrowed raw-pointer queue path (two conditionals in `guarded.cpp`:
 `pipe_enter_link` skips the entry ref, `fire_task_turn` defuses), and the
 op's settle notifies under the lock (the pipe's `idle` teardown pattern) and
-touches no member after continuations fire. Consequence: nested
-completion-gating inside an op body (e.g. a nested graph `execute()`) is
-fatal - that shape needs a self-owning block, use `async`.
+touches no member after continuations fire.
+
+**Nested completion-gating (fixed after review, 2026-08-18)**: phase 1 landed
+with `add_nested` inside an op body fatal. That was an implementation
+shortcut, not structural - both incompatibilities have caller-owned-safe
+counterparts already in the codebase, so the restriction is removed:
+
+- `nested_parent` is *borrowed* for a caller-owned parent (no inc at attach;
+  the child's settle reads `caller_owned` into a local, releases, then
+  defuses without a dec - `fire_task_turn`'s exact pattern). The lifetime
+  guarantee is the same one the flag already documents: the op's dtor blocks
+  until settled, and the op cannot settle before this release fires.
+- `release()`'s `execution_flag` branch routes a `caller_owned` block through
+  a settle thunk installed by the op (the otherwise-unused `on_complete`
+  seam) whose body is the same tail `run_body` ends with:
+  `advance_pipe_links` + `op_settle`. The deferred pipe release is also
+  semantically required - grants stay held across the nested run, exactly
+  the coroutine-graph-node model.
+- The in-ctor inline arm's `settle_synchronously` is cleared before the
+  self-lock drops when children are pending; the child set is frozen once
+  `current_task` is defused after the body, so there is no race window.
+
+Cost: one flag branch in `add_nested` and in `release()`'s completion branch
+(both cold), zero on the hot path. `co_await inner.execute()` from an
+`access` body then works as it does from a graph node, lend protocol
+included.
 
 ## 5. API surface
 
 - `co_await obj.access(fn)` - unchanged spelling. The awaitable temporary is
   materialized in the coroutine frame and the language guarantees it lives
   across the suspension - frame-resident op, zero alloc.
-- `obj.access(fn).sync()` - unchanged spelling from blue. **Divergence
-  decided here: `Access_op::sync()` returns `R` by value** (the op owns the
-  storage and dies at the semicolon in the temporary form; returning `const R&`
-  would manufacture a dangling-reference footgun `Task::sync()` does not have).
-  `take()` is therefore not needed on the op; `Task<R>` keeps its own
-  contract.
+- `obj.access(fn).sync()` - unchanged spelling from blue. **Revised
+  2026-08-18 (uniformity review)**: the phase-1 by-value `sync()` gave the
+  same verb different semantics than `Task::sync()` (consuming move vs
+  non-consuming `const R&`) - a trap for anyone switching between the two.
+  Ref-qualification deletes the asymmetry instead of documenting it:
+
+  ```cpp
+  const R& sync() &;   // named op: non-consuming peek - Task::sync()'s meaning
+  R sync() &&;         // temporary op: by value - obj.access(fn).sync() stays dangle-free
+  R take();            // the explicit consuming move - Task::take()'s meaning
+  ```
+
+  The by-value form was only ever needed *for temporaries*, which is exactly
+  what the `&&` qualifier expresses. Double-`take` stays the checked fatal
+  (§10.1's consumed flag); double-`sync` on a named op is legal and correct.
+  One consume/query vocabulary across `Task` and `Access_op`
+  (`sync`/`take`/`try_take`/`is_done`/`is_cancelled`/`co_await`), applied to
+  two ownership models.
 - Named form: `auto op = obj.access(fn); ... co_await op;` - eager start at
   the declaration, overlap for free.
 - `op.start()` - the one firing verb, legal in exactly two states: never
@@ -128,6 +163,15 @@ fatal - that shape needs a self-owning block, use `async`.
   refire are the same operation. Safe where executable-reuse was not:
   retraction and its generation machinery are gone; single-owner re-fire of a
   settled block is a small contract.
+- `Access_options{.queued = true}` (added 2026-08-18, uniformity review) -
+  the missing quadrant: attended but never-inline. `async`'s original job
+  (heavy body, off the caller's thread) is otherwise welded to heap
+  detachment, forcing a heavy attended body to choose between inline risk
+  and an allocation it does not need. `.queued` skips only the
+  `pipe_try_inline` arm - the reentrant arm is correctness, not opportunism
+  (an op queued behind its own caller's held grant deadlocks when awaited),
+  so it stays inline regardless. Dispatch restored as an option, orthogonal
+  to ownership.
 - Cancellation: token stored in `core` as today; awaiting a cancelled value op
   follows `Task`'s rules (check first / `as_optional` analog - §9.3).
 - Fire-and-forget on an op is impossible *by construction* - that case is
