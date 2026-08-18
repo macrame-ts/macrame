@@ -55,7 +55,7 @@ struct Pipe
     // tripwire in access.h).
     std::atomic<std::uint64_t> write_epoch{ 0 };
     // Count of compiled `Static_task_graph`s whose `distinct_pipes_` reference this pipe
-    // (`compile()` +1; graph destruction, recompile, and move-assign-overwrite -1).
+    // (`compile()` +1; graph destruction, incl. a move-assign overwrite, -1).
     // `~Guarded` fatals while it is nonzero: destroying the object would leave the graph
     // holding dangling pipe/instance pointers for its next run (the Taskflow-#82 class of
     // lifetime misuse, caught at the cause instead of crashing far from it).

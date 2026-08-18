@@ -726,7 +726,12 @@ nodes with no explicit order run in declaration order, deterministically.
 
 `execute()` returns a `Task<void>` completion handle; runs are sequential
 (one at a time) and re-runnable, and a run allocates almost nothing (node
-state is built at compile time and re-armed per run). The handle is
+state is built at compile time and re-armed per run). The graph is literally
+build-once: add nodes and edges, `compile()` exactly once, then `execute()`
+as many times as you like — adding a node or edge after `compile()`, or
+compiling twice, is fatal. For a different structure, build a new graph (your
+graph-building function makes that a one-liner; pre-compiled variants cover
+discrete mode switches). The handle is
 `[[nodiscard]]`: it is the run's only completion signal, and the one-run rule
 means the next `execute()` is legal only after the previous run was awaited or
 `sync()`ed — a second call while a run is in flight is fatal in checked builds.
@@ -918,8 +923,7 @@ edge's average hand-off point; and any two bars that overlap in time land on
 different rows by construction of the packing.
 
 Tracing costs two clock reads per node per run when attached, one branch when
-not, and nothing at all with `TS_PROFILING=0`. Cancelled runs are not folded;
-a recompile re-pushes the structure and resets the aggregates.
+not, and nothing at all with `TS_PROFILING=0`. Cancelled runs are not folded.
 
 The sample wires this up as `task_system --trace [frames]`, tracing two
 variants of the same ~34-system frame on an 8-worker scheduler — a `baseline`

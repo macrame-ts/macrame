@@ -91,8 +91,10 @@ Static_task_graph& Static_task_graph::operator=(Static_task_graph&& other) noexc
 
 void Static_task_graph::add_edge(int prerequisite, int successor)
 {
+    if (compiled_)
+        ts::fatal("Graph_node::after/before on a compiled graph - the graph is build-once "
+                  "(declare every edge before compile(), or build a new graph)");
     explicit_edges_.emplace_back(prerequisite, successor);
-    compiled_ = false;
 }
 
 Graph_node& Graph_node::after(const Graph_node& prerequisite)
@@ -139,17 +141,9 @@ bool Static_task_graph::conflicts(const Node& a, const Node& b)
 
 void Static_task_graph::compile(const char* DOT_path)
 {
-#if TS_SAFETY_CHECKS
-    // Recompiling releases the previous compile's pipe registrations (the new set
-    // re-registers below); also fatals on a recompile while a run is in flight.
-    check_quiescent_and_release_pipes("recompiled");
-#endif
-
-    for (Node& node : nodes_)
-    {
-        node.successors.clear();
-        node.indegree = 0;
-    }
+    if (compiled_)
+        ts::fatal("Static_task_graph::compile called twice - the graph is build-once "
+                  "(build a new graph instance instead)");
 
     // dedup edges across explicit + access-conflict sources
     std::set<std::pair<int, int>> edges;
@@ -187,7 +181,7 @@ void Static_task_graph::compile(const char* DOT_path)
 #if TS_SAFETY_CHECKS
     // Register this graph on every pipe it references; `~Guarded` fatals while any
     // compiled graph still holds its pipe (see `Pipe::graph_refs`). Balanced by
-    // `check_quiescent_and_release_pipes` (dtor / recompile / move-assign overwrite).
+    // `check_quiescent_and_release_pipes` (the destructor, incl. a move-assign overwrite).
     for (detail::Pipe* p : distinct_pipes_)
         p->graph_refs.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -286,6 +280,11 @@ void Static_task_graph::compile(const char* DOT_path)
             offset += n.pipe_indices.size();
         }
     }
+
+    // The raw per-argument pipe capture is fully consumed above, and the graph is
+    // build-once - release it.
+    for (Node& node : nodes_)
+        node.pipes = {};
 
     // Reused per-run state: values are reset each execute(), vector capacity persists, so
     // a run allocates only its completion handle (`done`). Rebuilt here since node/pipe

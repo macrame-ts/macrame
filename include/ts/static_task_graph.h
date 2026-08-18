@@ -68,9 +68,8 @@ public:
 
     // Dispatch this node inline: when it becomes ready, run it on the thread that settled
     // its last prerequisite (and acquired its objects) instead of queueing - but only if
-    // that thread can acquire all its objects synchronously; if any is contended (held by
-    // async), it defers to the queue. Bounded by the shared inline trampoline. Trade-offs:
-    // it runs on a nondeterministic thread and must not block.
+    // that thread can acquire all its grants synchronously; if any is contended, it defers 
+    // to the queue.
     Graph_node& set_inline();
 
 private:
@@ -110,12 +109,12 @@ struct Execution_options
     // Only meaningful for a nested run - `execute()` called from inside a task (see
     // `execute`). By default such a run is tied to its caller: the caller cannot finish
     // until the run does, and objects the caller already holds are lent to it. `detach =
-    // true` cuts both ties: the run may outlive its caller, and it takes every object
-    // turn itself, queueing behind the caller's holds like any unrelated work. That makes
-    // it dangerous when the graph touches an object its caller holds: the run cannot start
-    // those nodes until the caller releases, so the caller awaiting the detached run
-    // deadlocks (it waits on work that waits on it). Use it only for fire-and-forget runs
-    // over objects the caller does not hold. Ignored outside a task.
+    // true` cuts both ties for a fire-and-forget run: it may outlive its caller, receives
+    // no lend, and queues behind the caller's holds like any unrelated work (on shared
+    // objects it typically starts after the caller releases them). Do not await a detached
+    // run from its caller: if the graph touches an object the caller holds, that await
+    // deadlocks - the caller waits on a run that waits for the caller's own release.
+    // Awaiting is what the default (attached) mode is for. Ignored outside a task.
     bool detach = false;
 };
 
@@ -129,12 +128,9 @@ class Static_task_graph
     friend class Graph_node;
 
 public:
-    // Declared out-of-line because the reused `run_` (unique_ptr<Run_state>) has an
-    // incomplete pointee here. Movable so a graph can be built-and-returned (e.g.
-    // build_frame_graph); execute() refreshes the blocks' back pointers, so a moved graph
-    // is valid on its next run. Under `TS_SAFETY_CHECKS` the destructor (and a move-assign
-    // overwrite) fatals while a run is in flight, and balances the pipes'
-    // graph-registration counts (see `Pipe::graph_refs` / `~Guarded`).
+    // Movable so a graph can be built-and-returned (e.g. `build_frame_graph`). 
+    // Under `TS_SAFETY_CHECKS` the destructor (and a move-assign
+    // overwrite) fatals while a run is in flight.
     Static_task_graph();
     ~Static_task_graph();
     Static_task_graph(Static_task_graph&&) noexcept;
@@ -157,31 +153,41 @@ public:
         requires (detail::Object_arg<Objs> && ...)
     Graph_node add_node(Named name, Fn&& fn, Objs&&... objs);
 
-    // Resolve access conflicts + explicit edges into a DAG; detect cycles. A non-null
-    // `DOT_path` also writes the compiled structure as a Graphviz DOT file (see
+    // Resolve access conflicts + explicit edges into a DAG; detect cycles. Called exactly
+    // once, after every `add_node`/`after`/`before`: the graph is build-once, so further
+    // building - or a second `compile()` - is fatal; build a new graph instance instead.
+    // A non-null `DOT_path` also writes the compiled structure as a Graphviz DOT file (see
     // `tools/dot_writer.h` for the style scheme); no-op when `TS_PROFILING` is 0.
     void compile(const char* DOT_path = nullptr);
 
-    // Run the compiled graph; returns a completion handle. Re-runnable. If the token is
-    // cancelled, not-yet-started nodes are skipped and the completion is cancelled
-    // (query with `Task::is_cancelled()`); in-flight nodes still finish.
-    // Runs on the one global scheduler (there are no ad-hoc `Scheduler` instances; use a
-    // `Scheduler_scope` to run on a specific pool for a scope - including a worker-less
-    // `{.single_threaded = true}` one, which runs the whole graph deterministically on the
-    // calling thread).
+    // Run the compiled graph; returns a completion handle. Re-runnable.
+    //
+    // Cancellation is cooperative, through the run's token: each node checks it as it is
+    // about to run, so not-yet-started nodes are skipped (they settle cancelled) while nodes
+    // already in flight finish normally; the completion handle then settles cancelled (query
+    // with `Task::is_cancelled()`). Node bodies are not handed the token - a body that wants
+    // a mid-body early-out captures the same token the caller passes here.
+    //
+    // Runs on the process-wide scheduler. To run under a different configuration for a scope,
+    // reconfigure it with `Scheduler_scope` - another worker count, or the worker-less
+    // `{.single_threaded = true}` mode (the scheduler owns no threads and every task executes
+    // inline at submit, so the whole run happens deterministically on the calling thread).
     //
     // nested runs (docs/coroutine-first.md §4.8). Calling `execute()` from inside a task -
     // typically `co_await inner.execute()` in a graph node - is supported, and two things
     // happen by default:
     //  - **Lending.** Every object this graph declares that the calling task already holds a
     //    covering grant on (write covers read and write, read covers read) is lent for the
-    //    run: the inner nodes skip their pipe turns on it, because the caller's grant already
-    //    excludes everyone else. Without this an inner node would queue behind the grant its
-    //    own caller is holding - a deadlock. The compiled conflict edges still order the
-    //    inner nodes among themselves on a lent object, and the inner nodes' access contexts
-    //    carry the caller's grant window, so the harness stays live. Recursion works by
-    //    construction. External `async`s are unaffected: they queue behind the caller's hold
-    //    exactly as before, because the pipe never sees the lend.
+    //    run: the inner nodes skip taking their own turns on it, because the caller's grant
+    //    already excludes everyone else. Without this an inner node would queue behind the
+    //    grant its own caller is holding - a deadlock. The compiled conflict edges still
+    //    order the inner nodes among themselves on a lent object, and the inner nodes'
+    //    access contexts carry the caller's grant window, so the harness stays live.
+    //    Recursion works by construction. Concurrent `async` accesses are unaffected: they
+    //    queue behind the caller's hold exactly as before. Await a lent run before the
+    //    caller's own body touches the lent objects again - the lend hands the caller's
+    //    exclusivity to the run, so a caller body racing its own lent run goes undetected;
+    //    the sanctioned spelling is `co_await inner.execute()` directly.
     //  - **Scope join.** The run joins the calling task's implicit scope, so the caller
     //    cannot complete (and a node cannot release its objects) while the inner run is
     //    still going. An un-awaited inner run therefore cannot float; pass `{.detach = true}`
@@ -203,10 +209,9 @@ public:
     // Attach an aggregating runtime trace (tools/graph_trace.h), or detach with nullptr.
     // Requires a compiled graph: the compiled structure (node labels, declared accesses,
     // edge provenance) is pushed into the trace immediately, then each completed run is
-    // folded into it at settle (cancelled runs are skipped). A recompile re-pushes the
-    // structure, resetting the trace's aggregates. The trace must outlive its attachment;
-    // it is not owned. With `TS_PROFILING` 0 the attachment is accepted but records
-    // nothing (stamps and fold compile out).
+    // folded into it at settle (cancelled runs are skipped). The trace must outlive its
+    // attachment; it is not owned. With `TS_PROFILING` 0 the attachment is accepted but
+    // records nothing (stamps and fold compile out).
     void set_trace(tools::Graph_trace* trace);
 
     int node_count() const { return static_cast<int>(nodes_.size()); }
@@ -223,8 +228,8 @@ private:
         // Drives conflict-edge derivation and the body's access context.
         std::vector<std::pair<const void*, Access>> access;
         // The declared objects' pipes, parallel to `access` (argument order, duplicates
-        // possible). The raw input `compile()` derives the canonical form below from; kept
-        // because `compile()` may run again after further `add_node`s.
+        // possible). Raw input for `compile()`, which derives the canonical form below and
+        // releases this (the graph is build-once, so it is never needed again).
         std::vector<detail::Pipe*> pipes;
         Priority priority = Priority::normal;   // applied to `block` at each run's re-arm
         bool inline_dispatch = false;           // run on the settling thread if its acquires all succeed synchronously
@@ -232,8 +237,8 @@ private:
         // --- derived by `compile()` / used by the run machinery --------------------------
         std::vector<int> pipe_indices;      // `pipes` deduped as indices into distinct_pipes_ (ascending = canonical acquire order)
         std::vector<Access> pipe_modes;     // this node's effective mode per pipe_indices entry (write wins on a dup)
-        std::vector<int> successors;
-        int indegree = 0;
+        std::vector<int> successors;        // edges out of this node (targets' indices), conflict-derived + explicit
+        int indegree = 0;                   // edges in; each run seeds `remaining_deps` from it (0 = a root)
         std::vector<int> ready_buf;         // scratch: successors made ready by this node's completion (reused; single completion/run)
         // The node's reusable task block (a `Graph_node_block`, allocated once in
         // compile() and re-armed each run). Its `execute`/`on_complete` are wired so the
@@ -295,8 +300,8 @@ private:
 
 #if TS_SAFETY_CHECKS
     // Fatal if a run is in flight (`where` names the misuse); balance the pipes'
-    // `graph_refs` for the current `distinct_pipes_`. Called by the destructor, a
-    // move-assign overwrite, and `compile()` (recompile releases the previous set).
+    // `graph_refs` for the current `distinct_pipes_`. Called by the destructor (which a
+    // move-assign overwrite routes through).
     void check_quiescent_and_release_pipes(const char* where) noexcept;
 #endif
 
@@ -332,6 +337,10 @@ template<typename Fn, typename... Objs>
     requires (detail::Object_arg<Objs> && ...)
 Graph_node Static_task_graph::add_node(Named name, Fn&& fn, Objs&&... objs)
 {
+    if (compiled_)
+        ts::fatal("Static_task_graph::add_node on a compiled graph - the graph is build-once "
+                  "(add every node before compile(), or build a new graph)");
+
     Node node;
     constexpr bool any_tagged = (detail::is_access_arg_v<Objs> || ...);
     if constexpr (any_tagged)
@@ -359,7 +368,6 @@ Graph_node Static_task_graph::add_node(Named name, Fn&& fn, Objs&&... objs)
     node.name = name;
     int index = static_cast<int>(nodes_.size());
     nodes_.push_back(std::move(node));
-    compiled_ = false;
 
     return Graph_node(this, index);
 }

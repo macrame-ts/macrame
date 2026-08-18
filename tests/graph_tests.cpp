@@ -256,6 +256,33 @@ void test_cancel_skips_nodes()
     TS_CHECK(ran.load() == 0);          // every node skipped
 }
 
+// Cancellation arriving mid-run: the first node cancels the run's token from inside its
+// body (node bodies are not handed the token - this one captures the source it was built
+// with). It has already passed its own token check, so it finishes; the second node, edge-
+// ordered behind it, sees the cancelled token when it is about to run and settles cancelled
+// without running its body; the run's completion settles cancelled.
+void test_cancel_mid_run()
+{
+    ts::Cancellation_source src;
+    ts::Guarded<int> x{ ts::Named{}, 0 };
+
+    ts::Static_task_graph g;
+    auto first = g.add_node(ts::Named{}, [&src](int& v)
+    {
+        v += 1;
+        src.request_cancel();
+    }, x);
+    auto second = g.add_node(ts::Named{}, [](int& v) { v += 10; }, x);
+    second.after(first);
+    g.compile();
+
+    ts::Task<void> run = g.execute({ .token = src.token() });
+    run.sync();   // a cancelled void task unblocks normally
+
+    TS_CHECK(run.is_cancelled());
+    TS_CHECK(x.async([](const int& v) { return v; }).sync() == 1);   // second's body never ran
+}
+
 // A node fans out sub-work with parallel_for; the synchronous join gates the body, so the
 // run cannot complete until every helper settles.
 void test_nested_gates_completion()
@@ -835,6 +862,8 @@ void test_graph_trace_overhead_end_to_end()
 
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
+void test_death_compile_twice()    { TS_CHECK(ts::test::expect_death("graph_compile_twice")); }
+void test_death_add_after_compile(){ TS_CHECK(ts::test::expect_death("graph_add_node_after_compile")); }
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
 void test_death_guarded_outlived() { TS_CHECK(ts::test::expect_death("guarded_outlived_by_graph")); }
 void test_death_graph_mid_run()    { TS_CHECK(ts::test::expect_death("graph_destroyed_mid_run")); }
@@ -843,9 +872,9 @@ void test_death_graph_mid_run()    { TS_CHECK(ts::test::expect_death("graph_dest
 // reporting (it aborts once the report is observed).
 void test_death_sync_own_object()  { TS_CHECK(ts::test::expect_death("sync_own_object_deadlock")); }
 
-// The pipe-registration counts stay balanced across recompiles, moves, and a move-assign
-// overwrite - so destroying the graphs and then the objects raises no lifetime fatal, and
-// every configuration still runs correctly.
+// The pipe-registration counts stay balanced across moves and a move-assign overwrite -
+// so destroying the graphs and then the objects raises no lifetime fatal, and every
+// configuration still runs correctly.
 void test_lifetime_registration_balance()
 {
     ts::Guarded<int> a{ ts::Named{}, 0 };
@@ -854,7 +883,6 @@ void test_lifetime_registration_balance()
         ts::Static_task_graph g;
         g.add_node(ts::Named{}, [](int& x) { x += 1; }, a);
         g.compile();
-        g.compile();   // recompile releases + re-registers (balanced)
         g.execute().sync();
 
         ts::Static_task_graph g2 = std::move(g);   // registration rides the move
@@ -1234,6 +1262,7 @@ void run_graph_tests()
     run("completion after all", test_completion_after_all);
     run("graph stress", test_graph_stress);
     run("cancel skips nodes", test_cancel_skips_nodes);
+    run("cancel mid-run skips the rest", test_cancel_mid_run);
     run("nested gates completion", test_nested_gates_completion);
     run("nested inherits access", test_nested_inherits_access);
     run("nested before successor", test_nested_before_successor);
@@ -1267,6 +1296,8 @@ void run_graph_tests()
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: execute while a run is in flight", test_death_execute_in_flight);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
+    run("death: compile twice (build-once)", test_death_compile_twice);
+    run("death: add_node after compile (build-once)", test_death_add_after_compile);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: undeclared access", test_death_undeclared);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: Guarded outlived by graph", test_death_guarded_outlived);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: graph destroyed mid-run", test_death_graph_mid_run);

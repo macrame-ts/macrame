@@ -305,6 +305,22 @@ void run_death_scenario(const char* name)
         ts::Static_task_graph g;
         g.execute().sync();   // -> fatal
     }
+    else if (std::strcmp(name, "graph_compile_twice") == 0)
+    {
+        ts::Guarded<int> a{ ts::Named{}, 0 };
+        ts::Static_task_graph g;
+        g.add_node(ts::Named{}, [](int& v) { ++v; }, a);
+        g.compile();
+        g.compile();   // -> fatal: build-once
+    }
+    else if (std::strcmp(name, "graph_add_node_after_compile") == 0)
+    {
+        ts::Guarded<int> a{ ts::Named{}, 0 };
+        ts::Static_task_graph g;
+        g.add_node(ts::Named{}, [](int& v) { ++v; }, a);
+        g.compile();
+        g.add_node(ts::Named{}, [](int& v) { ++v; }, a);   // -> fatal: build-once
+    }
     else if (std::strcmp(name, "graph_undeclared") == 0)
     {
         Counter outside;

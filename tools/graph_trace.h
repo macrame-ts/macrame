@@ -86,8 +86,8 @@ inline constexpr double rank_min_share = 0.05;
 class Graph_trace
 {
 public:
-    // --- structure (pushed by `Static_task_graph::set_trace` / re-pushed by a recompile;
-    //     `begin_structure` also resets all aggregates) ---
+    // --- structure (pushed by `Static_task_graph::set_trace`; `begin_structure` also
+    //     resets all aggregates) ---
 
     void begin_structure(int node_count)
     {

@@ -131,7 +131,7 @@ public:
             char msg[256];
             std::snprintf(msg, sizeof msg,
                 "Guarded object '%s' destroyed while a compiled Static_task_graph still "
-                "references it (destroy or recompile the graph first)",
+                "references it (destroy the graph first)",
                 named_display(pipe_.debug_name, label, sizeof label));
             ts::fatal(msg);
         }

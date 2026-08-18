@@ -487,6 +487,18 @@ IDs — when an item is done, mark it, don't renumber.
        at some point measure whether the trace/critical-path machinery survives `derive = off`.
        Overall stance (author): most of these decisions need real-life data — defer until there is
        a real consumer codebase to measure.
+   19. `[ ]` **(P2, author 2026-08-18 - from the C4 lend review, item 14) Harness check: caller
+       touches a lent object while its lent nested run is unsettled.** The lend containment
+       argument assumes the caller awaits the run: an un-awaited lent run and the caller's own
+       continued body can both touch the lent object "validly" (both carry covering contexts),
+       and the harness cannot see it - the v1 non-quiet-scope fatal only fires at the SECOND
+       lend. A direct fatal at execute() is impossible (whether the caller will await is not
+       knowable there); the enforceable shape is a check at the caller's next guarded access:
+       fatal if the object is lent to a nested run still in flight in the caller's scope
+       (needs bookkeeping - the lent set is per-graph and re-bound per run; the caller-side
+       check would consult the scope's unsettled children's lend sets). Until then the rule is
+       documented discipline: `co_await inner.execute()` directly (the execute() comment and
+       guide state it).
 3. **Scheduler**
    0. `[x]` **Single global scheduler — DONE (2026-07, `d173d9a`+`2b48a5b`).** Author chose single-global over the ambient-multi model (3.1). Exactly one scheduler process-wide, reachable via `global_scheduler()` (renamed from `default_scheduler`); reconfigurable by teardown+recreate (`configure_scheduler(config)`, a coarse quiescent-point op, NOT thread-safe against concurrent use) + a scoped `Scheduler_scope(config)` RAII (snapshot→reconfigure→restore) for running a block on a specific pool. `execute()` drops its `Scheduler&` arg (uses the global); `parallel_for` fans out on `current_scheduler` (Phase-1 fix `ea471dd` — a parallel_for inside a task uses that task's pool, not the global default, which had silently oversubscribed the sample's variant traces). Supersedes 3.1's ambient-override idea and its `Launch_options{.scheduler}` (nothing to select among). **Residual (P3): compile-time ban on ad-hoc `ts::Scheduler` — DONE (2026-08).** The `Scheduler` ctor is now PRIVATE; the sole construction path is a `detail::make_scheduler(config)` factory (friend; returns `unique_ptr`, class non-movable) used by the global holder, so `ts::Scheduler s{...}` no longer compiles. Went further than the original plan: rather than migrate the unit tests to the factory (which would still stand up rival pools), every ad-hoc site (`scheduler_tests.cpp`, benchmarks, tsan, `parallel_tests.cpp`) now reconfigures the GLOBAL for its scope (`Scheduler_scope`), so at most one worker pool ever runs. The `thread_local current_scheduler` "which scheduler" selector was retired entirely — `current_worker_index >= 0` is the sole worker-vs-external discriminator (fast path, `parallel_for` fan-out, profiling bridges, `Parallel_recorder::lane`); `current_or_global_scheduler()` collapsed to `global_scheduler()`. Verified: Release 628/0, Shipping 477/0/35, Debug 629/0, bench in-band, --stress deterministic, TSan clean.
    1. `[~]` **(P1, superseded by 3.0) Ambient (overridable) scheduler** — was: `launch`/`task`/`access` resolve to an *ambient* scheduler + `Scheduler_scope` override + `Launch_options{.scheduler}`. The single-global model (3.0) took the simpler road: one reconfigurable global, `Scheduler_scope` reconfigures it rather than overriding among many. Kept for the record. [§D3]
