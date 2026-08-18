@@ -11,6 +11,7 @@
 //   staged_commands_bench.cpp - the Deferred closure-tier cost series
 //   access_control_bench.cpp  - std::mutex pool vs Guarded::access
 //   global_bottleneck_bench.cpp - short-scope global mutex vs Guarded under task flood
+//   subsystem_contention_bench.cpp - skewed multi-store contention, mixed task shape
 //   game_frame_bench.cpp      - graph vs graph-free frame composition
 // The call order below is the published output order - keep it stable so recorded
 // baselines stay diffable.
@@ -25,6 +26,7 @@ void run_benchmarks()
     run_staged_commands_bench();
     run_access_control_bench();
     run_global_bottleneck_bench();
+    run_subsystem_contention_bench();
     run_coro_resume_bench();
     run_game_frame_bench();
 }
