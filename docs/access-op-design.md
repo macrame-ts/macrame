@@ -45,15 +45,22 @@ One teaching sentence: *`access` when you stay, `async` when you leave.*
 ## 3. The type
 
 ```cpp
-template<typename R, typename Body>          // spelled via auto at call sites
-class Access_op                              // = Piped_executable<R,1> with automatic storage
+template<typename T, typename Body>          // Body = the USER's decayed functor, verbatim;
+class Access_op                              // R and the access mode are deduced from it
 {
     detail::Task_control_block core;         // refcounted INTERNALLY (pipe entries), no external handle
-    /* result storage for R */
-    Body body;
+    /* result storage for R = Accessor_result_t<Body, T> */
+    Body body;                               // no library wrapper closure - see below
     detail::Pipe_link link;                  // embedded, as every pipe entry already is
-};
+    T* inst;                                 // flattened context: what today's access wraps in a
+    /* epoch / rank capture */               // library-generated closure moves to plain members,
+};                                           // and run() installs the Access_context structurally
 ```
+
+The flattening is load-bearing for member storage (§10): today `access` wraps the
+user's functor in a library-generated context-install closure, making the true
+body type unnameable *even in principle*. With the wrapper flattened, both
+template arguments are user-spellable: `ts::Access_op<World, Snapshot>`.
 
 - **Eager**: the constructor performs today's `access` fast path - reentrant
   arm, `pipe_try_inline`, else `pipe_enter_first`. No `start()`; "launch early,
@@ -61,11 +68,10 @@ class Access_op                              // = Piped_executable<R,1> with aut
 - **Pinned**: non-movable and non-copyable once constructed - the pipe's
   intrusive FIFO holds `&link` (same rationale as `Access_guard`, whose address
   is the installed context; the two converged independently).
-- **Destruction contract**: destroying a started-but-unsettled op corrupts the
-  pipe queue. `TS_SAFETY_CHECKS`: fatal with a named message ("await it
-  first"). Shipping: follow `~Deferred`'s precedent - a conditional
-  `wait`-until-settled safety net rather than UB. (Open question §9.2 on
-  whether shipping should wait or also fast-fail.)
+- **Destruction contract** (decided, §9.2): destroying a started-but-unsettled
+  op would corrupt the pipe queue, so the dtor waits until settled in every
+  config; checked builds additionally fire a `TS_ENSURE` before waiting (the
+  wait is the safety net, the ensure is the bug report).
 
 ## 4. Custody: why the pipe does not change
 
@@ -95,11 +101,16 @@ heap-allocated by the pipe. Consequences:
   contract.
 - Named form: `auto op = obj.access(fn); ... co_await op;` - eager start at
   the declaration, overlap for free.
-- `op.rearm()` - restart a *settled* op for the next frame: zero-alloc steady
+- `op.start()` - the one firing verb, legal in exactly two states: never
+  started (a dormant/unbound op, §10) or settled; fatal in flight. Firing a
+  *settled* op re-enters the pipe from the same storage: zero-alloc steady
   state for a per-frame access from a stable site (the dynamic-site analog of
   the graph's compile()-time node blocks and their allocation-free re-runs).
-  Safe where executable-reuse was not: retraction and its generation machinery
-  are gone; single-owner re-arm of a settled block is a small contract.
+  There is no separate re-fire verb (`rearm` was rejected: arming suggests
+  preparing without firing, but the call fires) - first fire and per-frame
+  refire are the same operation. Safe where executable-reuse was not:
+  retraction and its generation machinery are gone; single-owner re-fire of a
+  settled block is a small contract.
 - Cancellation: token stored in `core` as today; awaiting a cancelled value op
   follows `Task`'s rules (check first / `as_optional` analog - §9.3).
 - Fire-and-forget on an op is impossible *by construction* - that case is
@@ -126,9 +137,12 @@ integration for pending requests. Not in v1.
    `features_bench` (the old floor number lived in a removed bench); acceptance
    for phase 1 is that row dropping to pipe-claim + context-install cost
    (target: within ~2-3x of a bare mutex, from ~6x).
-1. **`Access_op<R, Body>` + `access` returns it** (single object). The factory
-   inversion in `guarded.h` (construct in caller storage; run reentrant/inline
-   arms through it), the dtor contract, `sync()`-by-value, awaiter. Tests:
+1. **`Access_op<T, Body>` + `access` returns it** (single object), with the
+   §3 flattening from the start (Body = the user's decayed functor; no library
+   wrapper closure - retrofitting it later would churn the just-landed type).
+   The factory inversion in `guarded.h` (construct in caller storage; run
+   reentrant/inline arms through it), the dtor contract, `sync()`-by-value,
+   awaiter. Tests:
    settled/unsettled dtor death test, inline/queued/reentrant paths, coroutine
    and blue forms, cancellation. Migration: call sites that stored the old
    `Task<R>` break at compile - each is by definition a *leaver* - switch to
@@ -155,17 +169,87 @@ integration for pending requests. Not in v1.
   the one-sentence rule from §2; `Signal`, `launch`, graph `done` handles,
   `Deferred::commit` all stay `Task`.
 
-## 9. Open questions (decide before phase 1 code)
+## 9. Open questions - all decided 2026-08-18
 
-1. Type spelling: `Access_op` vs `Pending_access` (users mostly write `auto`;
-   pick once, it appears in diagnostics).
-2. Shipping-config dtor policy: conditional wait (Deferred precedent) vs
-   fast-fail; a waited dtor can deadlock a blue thread holding what the op
-   needs - lean wait + document, but verify against the deadlock net.
-3. Cancelled-value semantics on the op: mirror `Task` (`is_cancelled()` check,
-   fatal on blind consume) or fold `as_optional` into `sync()`'s return -
-   lean mirror-`Task` for consistency.
-4. Whether `access` keeps accepting `Access_options{.token,.priority}`
-   unchanged (lean yes; priority only matters on the queued path).
-5. `TS_DEBUG_NAMES`/suspension-registry integration for ops parked on a pipe
-   (they should appear in the tier-3 registry like any suspended waiter).
+1. **Decided: `Access_op`.**
+2. **Decided: the dtor waits in every config; checked builds additionally
+   fire a `TS_ENSURE` before waiting** (an unsettled op at destruction is a
+   latent bug worth reporting, but corrupting the pipe or fatalling over it
+   buys nothing shipping's wait does not). Verify the wait against the
+   deadlock net (a blue-thread dtor holding what the op needs).
+3. **Decided: mirror `Task`** (`is_cancelled()` check, fatal on blind
+   consume; `try_take`/`as_optional` analogs if demand appears).
+4. **Decided: yes** - `Access_options{.token,.priority}` passes through
+   unchanged.
+5. **Decided: no per-op naming.** Identity = the `Guarded`'s `debug_name` +
+   the `access` call site (the verb's defaulted `source_location`, the
+   existing `Named` rule); ops parked on a pipe appear in the tier-3
+   suspension registry under that identity.
+
+## 10. Member storage (the never-allocating stored op)
+
+Prerequisite: the §3 flattening (Body = the user's functor type). Three
+declaration tiers, in recommended order:
+
+1. **Named functor - the blessed member idiom.** Captures become members, the
+   type is directly spellable, mutable cross-frame state has a home:
+
+   ```cpp
+   class Hud
+   {
+   public:
+       explicit Hud(ts::Guarded<World>& world)
+           : op_(world.access(Snapshot{ this }))   // eager: first run starts here; C++17
+       {                                            // guaranteed elision constructs the
+       }                                            // non-movable op in place in the member
+
+       void frame()
+       {
+           hp_shown_ = op_.sync();                  // by value; or co_await from a coroutine
+           op_.start();                             // fire next frame's read, same storage, no alloc
+       }
+
+   private:
+       struct Snapshot
+       {
+           Hud* self;
+           int operator()(const World& w) const { return w.player_hp; }
+       };
+
+       int hp_shown_ = 0;
+       ts::Access_op<World, Snapshot> op_;          // no decltype anywhere
+   };
+   ```
+
+2. **Named static lambda** (stateless bodies only): `static constexpr auto
+   snapshot = [](const World& w) { ... };` +
+   `ts::Access_op<World, decltype(snapshot)> op_;`. Trap to document: every
+   lambda *expression* is a distinct type - declaration and initializer must
+   reference the same named object; an inline `decltype([]{...})` in the
+   member declaration can never be initialized. Captures force tier 1.
+
+3. **Erased fixed-size body** (phase 4, rides TODO 4.2):
+   `ts::Access_op<World, ts::Function<int(const World&), 32>>` - any capture
+   up to N inline, oversize is a compile error (no silent heap fallback), one
+   indirect call per run. For containers of ops and body-polymorphic APIs;
+   tier 1 stays the cheaper default.
+
+Lifecycle for members (decided 2026-08-18): three orthogonal steps -
+**construct / bind / start** - with constructors as fused conveniences and
+`start()` as the only verb that touches the pipe:
+
+- `Access_op()` - default-constructed, **unbound**: no target, no body. For
+  members whose target `Guarded` does not exist yet at owner construction.
+  Body moves from a plain member into raw storage (placement-new + a bound
+  flag - symmetric with the result storage the op already manages; no
+  allocation, nothing added to the fire path).
+- `op.bind(world, body)` - store the target + construct the body in place;
+  does not fire.
+- `Access_op(ts::defer, world, body)` - bound-but-dormant in one expression
+  (= default + bind); needed because a member init list cannot call `bind()`.
+- `Access_op(world.access(body))` - the eager form: bind + `start()` in the
+  constructor.
+- `op.start()` - fire (§5): never-started or settled only, fatal in flight.
+
+Op size as a member: core + link + body + R ~= 320-400 B - unremarkable, and
+it replaces a per-frame heap block of the same magnitude.
