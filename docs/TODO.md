@@ -303,6 +303,17 @@ IDs — when an item is done, mark it, don't renumber.
        roughly doubles toward the serial bound; the 200 ns column's remaining gap is
        per-touch block allocation, i.e. the `Access_op` work.
 
+   19. `[ ]` **(P1, planned 2026-08-18) `Access_op` - caller-owned operation state for `access`.**
+       Design of record: [access-op-design.md](access-op-design.md). The one-sentence model: the
+       block allocation is the price of detachment, not of `R` - `access` returns the operation
+       state itself (eager, pinned once queued, dtor-checked), `async` keeps the heap handle for
+       the leavers; zero-alloc attended access for any `R`, no SBO tiers. Pipe layer unchanged
+       (verified: entries already refcount the owner block and `fire_granted` is pipe-free).
+       Five phases in the doc (floor metric, the type + return-type change, guard awaiters
+       embedding their links - kills `pipe_acquire`'s hold-node alloc, multi-object, rearm +
+       async rebase). Supersedes 1.1's tiering, delivers 1.15(c), closes 1.2 at phase 3. Open
+       questions listed in the doc §9 - decide before phase 1 code.
+
 2. **Static task graph**
    1. `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.
    2. `[ ]` **(P2, raised within-band) Ambiguity detection** — `compile({.ambiguity = Warn|Error|Ignore})` determinism diagnostic; needs edge provenance; feeds profiler-guided reorder. **Research validation (2026-07, [research-static-vs-dynamic.md](research-static-vs-dynamic.md)):** ordering ambiguity is the top user-facing failure of access-derived schedules — Bevy shipped exactly this diagnostic (`ambiguity_detection`) after its stageless rework because users hit nondeterministic system order in practice. **PARKED (author, 2026-07).** Full analysis in [ordering-ambiguity.md](ordering-ambiguity.md): our declaration-index orientation is deterministic, so we lack Bevy's per-frame-nondeterminism bug class — the residual is *hidden, unratified* orientation (a refactor that swaps two `add_node` lines silently flips gameplay). The proposed feature (conflict provenance + a fragile-orientation lint + a commutativity annotation feeding the optimizer) is rescoped as optimizer infrastructure, not a safety feature — but the annotation-cost question (pairwise = combinatorial; object-level = the mitigation, unproven) is unresolved. Do nothing until real usage data (start with the tiebreak-only pair count on `game_frame`). Provenance itself is still needed by 2.4/2.5 and the DOT dump regardless.
