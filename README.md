@@ -178,7 +178,7 @@ poses.publish().sync();
 
 ### 5. Seeing the frame — the built-in trace
 
-The graph profiles itself: `--trace` runs the bundled ~30-system mock game frame and renders the average run — bars packed into concurrency rows, the measured critical path, dead-time bands. The SVG is interactive — hover tooltips with per-node stats and access declarations, view-toggle buttons — but GitHub strips scripts from images, so the picture below is static; for the live version download [the SVG file](docs/media/game_frame_trace.svg) and open it in a browser:
+The graph profiles itself: `--trace` runs the bundled ~30-system mock game frame and renders the average run — bars packed into concurrency rows, the measured critical path, dead-time bands. The SVG is interactive — hover tooltips with per-node stats and access declarations, view-toggle buttons — but GitHub strips scripts from images, so the picture below is static. For the interactive version — download [the SVG file](docs/media/game_frame_trace.svg) and open it in a browser:
 
 ![Traced game frame](docs/media/game_frame_trace.svg)
 
