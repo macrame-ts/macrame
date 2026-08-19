@@ -15,7 +15,8 @@ C++23, no external dependencies, exceptions disabled project-wide.
 - **Visual Studio 2022+** — open `task_system.slnx` (x64). Configurations:
   `Debug`, `Release`, and `Shipping` (Release with the safety harness compiled
   out — see below).
-- **CMake** — presets `windows-msvc`, `windows-clang-cl`, `linux-clang`:
+- **CMake** — presets `windows-msvc`, `windows-clang-cl`, `windows-shipping`,
+  `linux-clang`, `linux-tsan`:
   ```
   cmake --preset windows-msvc
   cmake --build --preset windows-msvc
@@ -31,9 +32,9 @@ task_system --version
 
 ## Running the tests
 
-`task_system --tests` should print `345 checks, 0 failures` (the count grows as
-tests are added; the failure count must stay 0). Fatal paths are exercised as
-subprocess *death tests* from the same binary.
+`task_system --tests` prints a check total ending in `0 failures` (the check
+count grows as tests are added; the failure count must stay 0). Fatal paths are
+exercised as subprocess *death tests* from the same binary.
 
 ### ThreadSanitizer (required for concurrency changes)
 
@@ -56,9 +57,9 @@ Types wrapped in `Guarded<T>` are made race-safe by declaring access; a runtime
 with `TS_CHECK_ACCESS()` at the top — the harness faults (with a stack trace) if a
 method runs without the caller holding a declared grant. It costs ~1 ns and is
 gated by `TS_SAFETY_CHECKS` (default on). The **Shipping** build defines
-`TS_SAFETY_CHECKS=0` and compiles the harness out (CMake: `-DTS_SAFETY_CHECKS=OFF`);
-the access-violation death tests are expected not to fire there, so `--tests` is
-not run against a shipping build.
+`TS_SAFETY_CHECKS=0` and compiles the harness out (CMake: `-DTS_SAFETY_CHECKS=OFF`).
+The suite still runs against Shipping — CI has a dedicated job for it — with the
+tests that need the harness reported as skipped (`run_if`), not silently dropped.
 
 ## No exceptions
 
@@ -78,14 +79,23 @@ A `.clang-format` at the repo root encodes the house style. In short:
   classes, and multi-line lambdas. Short lambdas may stay one-liners.
 - **No alignment padding** — never align `=`, parameters, or trailing comments
   across lines. Single spaces only.
+- **Lines up to 120 characters**; prefer one line where it fits.
+- **Acronyms stay ALL-CAPS inside identifiers** — `write_DOT_dump`, `write_SVG`,
+  `dur_P50`; file names stay lower snake_case (`dot_writer.h`).
 - In comments, wrap code identifiers in backticks: `pipe_enqueue`, `current_access`.
 
 ## Keeping the Visual Studio project in sync
 
-Visual Studio does not auto-discover files. When you add a `.cpp` or `.h`, add it
-to the matching `<ItemGroup>` in `task_system.vcxproj` (`<ClCompile>` for `.cpp`,
-`<ClInclude>` for `.h`, path-including-subfolder). The `CMakeLists.txt` source
-lists must be kept in sync too.
+Visual Studio does not auto-discover files. When you add a `.cpp` or `.h`, keep
+**three lists** identical:
+
+- `task_system.vcxproj` — a `<ClCompile>` (for `.cpp`) or `<ClInclude>` (for `.h`)
+  entry, path-including-subfolder. Controls what *builds*.
+- `task_system.vcxproj.filters` — the same entry with a `<Filter>` matching its
+  directory. Controls the Solution Explorer tree; a file added only to the
+  `.vcxproj` builds fine but lands ungrouped at the project root.
+- `CMakeLists.txt` — the source list. CI builds via CMake, not the `.vcxproj`, so
+  a `.cpp` missing here links fine locally but fails CI with unresolved externals.
 
 ## Documentation
 

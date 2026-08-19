@@ -84,10 +84,43 @@ and [docs/pipe-rebase.md](docs/pipe-rebase.md) §0.
   graphs over shared objects are supported (validated), with nondeterministic cross-graph
   ordering.
 
+### Attended access: `Access_op`
+
+- `Guarded::access` returns the caller-owned `ts::Access_op<T, Body>` instead of a heap-backed
+  task handle: the operation's whole state — completion core, result storage, body, pipe
+  entry — lives in the returned object, so an access **allocates nothing**. `async` remains the
+  detached verb and keeps returning a `Task<R>`.
+- Consume the result exactly once: `co_await op`; `op.sync()` — ref-qualified, `&` is a
+  non-consuming `const R&` peek, `&&` returns `R` by value so the temporary form
+  `obj.access(fn).sync()` stays dangle-free; `take()` — the explicit consuming move; or the
+  non-blocking, cancellation-tolerant `try_take()`. Destroying an unsettled op is a reported
+  bug (`TS_ENSURE`) that then blocks until the access settles.
+- Deferred spellings for members: an unbound op (`Access_op()`, then `bind()` + `start()`) and
+  a bound-but-dormant one (`Access_op(ts::dormant, obj, body)`); `start()` also refires a
+  settled op with the same storage — a zero-alloc steady state.
+- `Access_options{.queued}`: attended but never inline, for a heavy body whose result the
+  caller still stays for. Skips only the inline-when-free arm; the reentrant arm stays inline
+  regardless (correctness, not opportunism).
+
+### Also in 0.1.0
+
+- Debug identity is required at construction: `Guarded`/`Versioned` take a leading `ts::Named`
+  (a literal, or `ts::Named{}` to capture the construction site), and `add_node` takes a
+  leading name the same way — it is what every diagnostic, DOT tooltip and trace row prints.
+- `ts::Event_bus` (public header, in the `ts.h` umbrella): per-domain pub/sub over
+  `Guarded`+`Deferred` — grant-free staged `publish`/`subscribe`, a `dispatch_fn()` delivery
+  node, pinned subscriptions with auto-disconnect on owner death.
+- The waiting-rule policy (`ts/rules.h`): the coroutine-first waiting rules as compile-selectable
+  runtime checks (`TS_ENABLED_RULES` / `ts::Rule`), scoped opt-out via `ts::Relaxed_scope`,
+  declared lock ranks (`ts::Rank`), and the three-tier deadlock report.
+- Build-once is literal: `add_node`/`after`/`before` after `compile()`, and a second
+  `compile()`, are fatal — structural change means a new graph.
+
 ### Internals
 
-- `Task_control_block` shrank 320 → 264 bytes (the `prerequisites` vector went with
-  retraction; `successors` collapsed to a single `nested_parent` slot).
+- `Task_control_block` shrank 320 → 248 bytes (the `prerequisites` vector went with
+  retraction; `successors` collapsed to a single `nested_parent` slot; the generation/reuse
+  substrate retired with reuse itself).
 - Resumption runs on a bounded thread-local trampoline on the settling/granting thread — no
   queue hop, iterative so the stack stays O(1).
 
@@ -104,9 +137,9 @@ and [docs/pipe-rebase.md](docs/pipe-rebase.md) §0.
 - New `--bench` section (`graph 1.0` / `free 1.0` / `graph .05` / `free .05`, µs/frame) and
   `--memprofile` entries (`frame graph` / `frame graph-free`, allocations per frame).
 
-## 0.1.0 — never tagged
+## Pre-0.1.0 — never tagged
 
 The pre-coroutine state: the callback composition vocabulary (`then` / `when_all` / task
 builders / `after`), retraction, reusable tasks, and the `std::deque`-based pipe. Described
-by the docs as they stood before 0.2.0; kept here as the reference point the removals above
-are measured against.
+by the docs as they stood before the transformations above; kept here as the reference point
+the removals are measured against.
