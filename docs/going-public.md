@@ -1,4 +1,5 @@
-<!-- Internal planning checklist for the public launch. Delete (or archive) at the flip.
+<!-- Internal planning checklist for the public launch. DECIDED (2026-08-19): this file and
+     docs/naming.md are deleted before the flip (see the checklist item below).
      The name decision lives in naming.md; this tracks everything else. -->
 
 # Going-public checklist
@@ -38,16 +39,16 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
       see `docs/naming.md`).
 - [ ] **Name rollout** (repo-local, before or at the move):
       - `--version` product string in `src/main.cpp` (`task_system %s` → `macrame %s`);
-        `version.h` macros stay `TS_*` if the namespace stays `ts::`.
-      - Confirm the namespace decision: keep `ts::` (the org suffix echoes it) or rename.
+        `version.h` macros stay `TS_*` (namespace decided, below).
+      - [x] Namespace decided (author, 2026-08-19): **stays `ts::`** (the org suffix echoes it).
       - Decide whether project/file names (`task_system.slnx`, `task_system.vcxproj`,
         CMake `project(task_system)`, the built exe, `tsan/run.sh`, CI yml, docs that
         spell `task_system --trace`) rename to `macrame` now or stay as working names.
       - `README.md` header comment + `CONTRIBUTING.md` note already point at the move.
-- [ ] **GitHub side** (author): create the `macrame-ts` org (re-verify availability - the
-      2026-07 clearance is stale), transfer `Andriy06/task_system` → `macrame-ts/macrame`
-      (a transfer keeps redirects; do it BEFORE the flip so badges/links are final), set
-      the repo description + topics, refresh the README CI badge owner/repo.
+- [ ] **GitHub side** (author): ~~create the `macrame-ts` org~~ — registered (2026-08-19).
+      Remaining: transfer `Andriy06/task_system` → `macrame-ts/macrame` (a transfer keeps
+      redirects; do it BEFORE the flip so badges/links are final), set the repo
+      description + topics, refresh the README CI badge owner/repo.
 - [ ] **Re-measure `docs/example-frame-optimization.md`** — its figures predate the
       `parallel_for` current-scheduler routing fix (see the note at the top of that doc):
       re-run baseline/optimised makespan, utilization, and dead time on the 6-worker trace,
@@ -66,8 +67,11 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
 - [ ] **Confirm CI green** on the final repo.
 - [ ] **Decide whether `CLAUDE.md` ships** — it is tracked, so it will appear in the public
       repo. It is the internal, LLM-oriented dev doc; common to ship, but a conscious call.
-- [ ] **Decide the fate of the internal planning docs** — this file and `docs/naming.md`:
-      keep, archive, or delete at the flip.
+- [ ] **Remove the internal planning docs before the flip** (decided, author, 2026-08-19):
+      delete this file and `docs/naming.md`, and scrub the references to them — the
+      `README.md` header comment and the CI-badge NOTE comment point here, so drop or
+      reword those at the same time (`git grep -l "naming.md\|going-public.md"` to catch
+      any others).
 
 ## Flip mechanics (fast, once the name is set)
 

@@ -6,8 +6,10 @@ name, the GitHub org/repo, and possibly the namespace.
 
 **DECIDED (author, 2026-08-19): Macramé** — shortlist item 0 below, exactly as
 scoped there: functional spelling `macrame` everywhere, `é` branding-only;
-org `macrame-ts`, target shape `github.com/macrame-ts/macrame`. The rollout
-checklist (what to rename, when) lives in `docs/going-public.md`.
+org `macrame-ts` (registered 2026-08-19), target shape
+`github.com/macrame-ts/macrame`. The namespace stays `ts::`. The rollout
+checklist (what to rename, when) lives in `docs/going-public.md`; this file
+and that one are deleted before the flip.
 
 The name should: (1) encode the differentiator — *tasks declare the data they
 touch; the library derives safe parallelism and a runtime harness polices it* —
