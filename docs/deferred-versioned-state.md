@@ -66,6 +66,14 @@ summary + the forward plan.
    order is still fixed at the cut, so `Versioned` replay stays exact.
 5. **`Versioned`: no read-your-writes** — outputs arrive as the NEXT version;
    fresh readers order after the publish. `publish()` completes at the swap.
+5a. **`read()` is attended (2026-08-18)**: it returns the caller-owned
+   `Access_op` via the front's `access` verb, not a heap `Task` via `async`.
+   The front is read-mostly by design (concurrent readers, one ~ns swap per
+   cycle), so the inline arm hits nearly always — zero-alloc reads — and a
+   discarded copy-out read is correct by construction (the op temporary's
+   destructor waits out the settle; the old detached form let it race).
+   Leavers use the detached spelling `v.state().async(fn)`.
+   `Access_options{.queued}` passes through for heavy read bodies.
 6. **Resync policies**: `replay` (default; commands must be deterministic —
    capture RNG/time at stage time; both applications see bit-identical
    pre-states) / `copy` / `overwrite` (writer rewrites everything).

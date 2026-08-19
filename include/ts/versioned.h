@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <source_location>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -172,12 +173,20 @@ public:
     }
 
     // Read the current published version - an ordinary read access on the front
-    // (concurrent readers overlap; a queued publish orders around it, FIFO).
+    // (concurrent readers overlap; a queued publish orders around it, FIFO). Returns the
+    // caller-owned `Access_op` (the attended `access` verb): the front is read-mostly by
+    // design - readers share it and the writer holds it for one ~ns swap per cycle - so the
+    // inline arm hits nearly always and a read is zero-alloc. Attended also makes
+    // copy-out-and-discard correct by construction (the op temporary's destructor waits out
+    // the settle; the old detached form let a discarded read task race its side effects).
+    // For a leaver - storing the handle, walking away - use the detached spelling:
+    // `v.state().async(fn)`.
     template<typename Fn>
         requires detail::Read_only_accessor<Fn, T>
-    auto read(Fn&& fn, Access_options opts = {}) const
+    auto read(Fn&& fn, Access_options opts = {},
+              std::source_location site = std::source_location::current()) const
     {
-        return std::as_const(front_).async(std::forward<Fn>(fn), opts);
+        return std::as_const(front_).access(std::forward<Fn>(fn), opts, site);
     }
 
     // The front's `Guarded` - for static-graph declarations. Declare read access

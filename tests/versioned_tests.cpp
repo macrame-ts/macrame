@@ -1,4 +1,5 @@
 #include "versioned_tests.h"
+#include "ts/coroutine_support.h"   // the awaited-read test
 #include "ts/versioned.h"
 #include "ts/static_task_graph.h"
 #include "harness.h"
@@ -422,6 +423,91 @@ void test_synced_publish_then_destroy()
     TS_CHECK(seen == 7);
 }
 
+// --- read() as the attended access verb -------------------------------------------
+
+// A free front runs the read inline on the calling thread (the read-mostly fast path the
+// access switch exists for - zero-alloc, no queue hop).
+void test_read_inline_on_caller()
+{
+    ts::Versioned<int> v{ ts::Named{} };
+    std::thread::id body_thread{};
+    TS_CHECK(v.read([&body_thread](const int& x) { body_thread = std::this_thread::get_id(); return x; }).sync() == 0);
+    TS_CHECK(body_thread == std::this_thread::get_id());
+}
+
+// A read arriving while a publish's swap is queued orders FIFO behind it - it sees the NEW
+// version, never overlaps the write. The swap is enqueued by phase 1 on a worker, so the
+// test waits until the entry is observably queued (under the pipe mutex) before issuing
+// the read - otherwise the read legally sees the still-current old version.
+void test_read_orders_behind_queued_publish()
+{
+    ts::Versioned<int> v{ ts::Named{} };
+    std::atomic<bool> release{ false };
+    // A detached spinning writer holds the front, so the publish's swap queues behind it.
+    ts::Task<void> blocker = v.state().async([&release](int&)
+    {
+        while (!release.load())
+            std::this_thread::yield();
+    });
+    auto rec = v.recorder();
+    rec.stage([](int& x) { x = 9; });
+    ts::Task<void> published = v.publish();
+    ts::detail::Pipe& pipe = ts::detail::Guarded_access::pipe(v.state());
+    for (;;)   // wait for phase 1 to enqueue the swap behind the blocker
+    {
+        std::scoped_lock lock(pipe.mutex);
+        if (pipe.queue_head != nullptr)
+            break;
+    }
+    auto op = v.read([](const int& x) { return x; });   // enqueues behind the queued swap (FIFO)
+    TS_CHECK(!op.is_done());
+    release.store(true);
+    blocker.sync();
+    published.sync();
+    TS_CHECK(op.take() == 9);   // the read saw the swapped-in version
+}
+
+// Copy-out-and-discard is correct by construction: the discarded op temporary's destructor
+// waits out the settle, so `out` is valid on the next statement (the old detached read
+// raced exactly this).
+void test_read_discarded_copy_out()
+{
+    ts::Versioned<int> v{ ts::Named{} };
+    auto rec = v.recorder();
+    rec.stage([](int& x) { x = 31; });
+    v.publish().sync();
+    int out = 0;
+    v.read([&out](const int& x) { out = x; });
+    TS_CHECK(out == 31);
+}
+
+// `co_await v.read(fn)` from a coroutine - the frame-resident op form.
+void test_read_awaited()
+{
+    ts::Versioned<int> v{ ts::Named{} };
+    auto rec = v.recorder();
+    rec.stage([](int& x) { x = 12; });
+    v.publish().sync();
+    auto frame = [&v]() -> ts::Task<int>
+    {
+        int x = co_await v.read([](const int& val) { return val; });
+        co_return x + 1;
+    }();
+    TS_CHECK(frame.sync() == 13);
+}
+
+// `.queued` passes through: the read enqueues even on a free front.
+void test_read_queued_option()
+{
+    ts::Versioned<int> v{ ts::Named{} };
+    std::thread::id caller = std::this_thread::get_id();
+    std::atomic<std::thread::id> body_thread{};
+    auto op = v.read([&body_thread](const int& x) { body_thread.store(std::this_thread::get_id()); return x; },
+                     { .queued = true });
+    TS_CHECK(op.sync() == 0);
+    TS_CHECK(body_thread.load() != caller);
+}
+
 } // namespace
 
 void run_versioned_tests()
@@ -448,5 +534,10 @@ void run_versioned_tests()
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "versioned: publish_into wrong instance is fatal", test_wrong_front_is_fatal);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "versioned: destroy with staged commands is fatal", test_drop_staged_is_fatal);
     run("versioned: synced publish then destroy is clean", test_synced_publish_then_destroy);
+    run("versioned: read inline on caller", test_read_inline_on_caller);
+    run("versioned: read orders behind a queued publish", test_read_orders_behind_queued_publish);
+    run("versioned: discarded copy-out read", test_read_discarded_copy_out);
+    run("versioned: awaited read", test_read_awaited);
+    run("versioned: read with .queued enqueues", test_read_queued_option);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "versioned: destroy with a publish in flight is fatal", test_dtor_inflight_publish_is_fatal);
 }

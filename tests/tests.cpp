@@ -502,8 +502,10 @@ void run_death_scenario(const char* name)
         {
             ts::Versioned<int> v{ ts::Named{} };
             // A spinning reader holds the front, so the publish's swap (a write) cannot
-            // run and the returned task stays unsettled.
-            ts::Task<void> blocker = v.read([&release](const int&)
+            // run and the returned task stays unsettled. The detached spelling: `read()`
+            // is attended (`access`) and would run this spinner inline on the free front,
+            // hanging the scenario before the publish.
+            ts::Task<void> blocker = v.state().async([&release](const int&)
             {
                 while (!release.load(std::memory_order_relaxed))
                     std::this_thread::yield();
