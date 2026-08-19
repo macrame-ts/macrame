@@ -511,6 +511,20 @@ mover" rule rather than adding a third kind of read. Neither exists for
 `Maybe<void>`-shaped type to make generic code uniform was judged not to earn
 its name.
 
+This whole vocabulary applies unchanged to the caller-owned `Access_op` that
+single-object `Guarded::access` returns. `access` is the *attended* verb — the
+caller stays for the result — so the operation's entire state (completion core,
+result storage, body, pipe entry) lives in the returned object rather than a heap
+block, and an access allocates nothing; `async` keeps the detached, heap-backed
+`Task<R>`. The consume verbs are the same, refined by the handle owning its
+storage: `co_await`, `take()`, and `try_take()` as above, plus a ref-qualified
+`sync()` — `&` is the non-consuming `const&` peek, `&&` returns by value so the
+temporary form `obj.access(fn).sync()` stays dangle-free. Because the handle is
+pinned (the pipe's FIFO holds its embedded entry's address) it is non-movable, and
+destroying it unsettled is the caller-owned analog of dropping an in-flight
+refcount — a checked bug that then blocks. The full rationale is
+`docs/access-op-design.md` (TODO 1.19).
+
 ### 4.3 One composition mechanism (historical: builders, `then`, `when_all`)
 
 Earlier revisions carried a full callback-composition surface: `then`
@@ -586,7 +600,7 @@ does the rest.
 
 Two decisions carry the design. Ranks are **not defaulted** — not to address
 order, which would make rejection ABI-dependent and non-reproducible across
-builds, and not to declaration order, which is not a specification (§2.x). And
+builds, and not to declaration order, which is not a specification (§2.3). And
 unranked is the **strict** state: holding an unranked object forbids dynamic
 awaits, because an order that does not exist cannot be climbed. Only objects
 that participate in a dynamic await need one, which is also the population that
