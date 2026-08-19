@@ -81,9 +81,14 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
 - [ ] Optional: branch protection on `master` (require CI green to merge).
 - [ ] Optional: make the README's "interactive version" trace-SVG link click-to-live.
       GitHub cannot serve it live (the blob page sanitizes to a static image; even raw
-      is served with `CSP: sandbox`, verified 2026-08-19) - needs a non-sandboxed host,
-      e.g. jsDelivr (`cdn.jsdelivr.net/gh/macrame-ts/macrame@<ref>/docs/media/...`,
-      third-party) or GitHub Pages (self-owned); both work only once public.
+      is served with `CSP: sandbox`, verified 2026-08-19) - needs a non-sandboxed host;
+      both options work only once public. Recommended: **GitHub Pages** (Settings ->
+      Pages -> deploy `/docs` from `master`; link becomes
+      `macrame-ts.github.io/macrame/media/game_frame_trace.svg`, scripts run, and the
+      same setup later hosts a docs site). Zero-setup alternative: jsDelivr
+      (`cdn.jsdelivr.net/gh/macrame-ts/macrame@<ref>/docs/media/...`, third-party;
+      pin a tag/commit ref - `@master` is CDN-cached for ~12 h). Then swap the README's
+      download instruction for the live link.
 - [ ] Tag `v0.1.0` and cut a GitHub release. (Nothing was ever tagged, so the library
       goes public as 0.1.0 — the coroutine-first and pipe transformations are part of
       what 0.1.0 *is*, not a delta against a released predecessor. Author decision,
