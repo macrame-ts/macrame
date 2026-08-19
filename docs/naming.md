@@ -2,7 +2,12 @@
 
 Working notes for choosing the public name (the library is currently the
 placeholder "task system", namespace `ts::`). The name will set the project
-name, the GitHub org/repo, and possibly the namespace. **Not yet decided.**
+name, the GitHub org/repo, and possibly the namespace.
+
+**DECIDED (author, 2026-08-19): Macramé** — shortlist item 0 below, exactly as
+scoped there: functional spelling `macrame` everywhere, `é` branding-only;
+org `macrame-ts`, target shape `github.com/macrame-ts/macrame`. The rollout
+checklist (what to rename, when) lives in `docs/going-public.md`.
 
 The name should: (1) encode the differentiator — *tasks declare the data they
 touch; the library derives safe parallelism and a runtime harness polices it* —

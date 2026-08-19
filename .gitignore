@@ -377,6 +377,8 @@ claude_resume.bat
 # Generated graph dumps (task_system --dot / tools/show_graph.ps1)
 *.dot
 *.svg
+# ...except the curated README/docs images
+!docs/media/*.svg
 
 # Crash dumps from death tests
 *.dmp

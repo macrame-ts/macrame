@@ -1,6 +1,8 @@
-<!-- Project name undecided (placeholder "task_system"); see docs/naming.md. -->
+<!-- Name decided: Macrame (see docs/naming.md). Project/file names stay "task_system" until the repo moves to macrame-ts/macrame - the rollout list is in docs/going-public.md. -->
 
 # Macrame
+
+*Threads, knotted on purpose.*
 
 **A C++23 high-level parallelisation framework built around controlled access to shared resources.**
 
@@ -97,7 +99,7 @@ ts::Task<void> loot(ItemId id)
 } // access released at scope exit
 ```
 
-No lock is written, taken, or forgotten; concurrent writes serialise, reads run together, and any code that touches the inventory without a grant faults.
+No lock is written, taken, or forgotten; concurrent writes serialise, reads run together, and any code that touches the inventory without a grant faults — the check is one macro line (`TS_CHECK_ACCESS()`) at the top of each `Inventory` method, ~1 ns per call.
 
 ### 2. A game frame as a graph — edges derived from access
 
@@ -174,6 +176,12 @@ auto n = poses.read([](const Poses& p) { return p.count(); }).sync();
 poses.publish().sync();
 ```
 
+### 5. Seeing the frame — the built-in trace
+
+The graph profiles itself: `--trace` runs the bundled ~30-system mock game frame and renders the average run — bars packed into concurrency rows, the measured critical path, dead-time bands, per-node stats and access declarations on hover (open the SVG file directly for the tooltips):
+
+![Traced game frame](docs/media/game_frame_trace.svg)
+
 ---
 
 ## What's in the box
@@ -185,7 +193,7 @@ Layered and composable — use as much as you need, and in a way that suits you 
 - **`parallel_for`** — for the data-parallel work that does live inside a part; caller-participating (nested-safe) and self-balancing. Plus **`async_parallel_for`** and **`parallel_for_colored`** for extra flexibility.
 - **Coroutines** — `co_await` any task; `co_await ts::read_only/read_write(obj)` yields an RAII access guard; holding one across a suspension is detected and fails fast.
 - **`Guarded<T>`** — a thread-safe API for a shared object: a per-object reader/writer queue (concurrent reads, exclusive writes, FIFO) reached via `access` (attended and allocation-free — runs inline when free) or `async` (always scheduled), plus multi-object operations with deadlock-free ordered acquisition.
-- **`Static_task_graph`** — build-once/run-many DAG whose edges are derived from access conflicts (plus explicit ordering where you want it); a re-run reuses the compiled nodes and allocates only its completion handle. Profiling and visualisation are included, focused on parallelism metrics like "dead time", "critical path" and core utilisation — see the worked profiler-guided optimisation exercise in [docs/example-frame-optimization.md](docs/example-frame-optimization.md). Automatic PGO - WIP.
+- **`Static_task_graph`** — build-once/run-many DAG whose edges are derived from access conflicts (plus explicit ordering where you want it); a re-run reuses the compiled nodes and allocates only its completion handle. Profiling and visualisation are included, focused on parallelism metrics like "dead time", "critical path" and core utilisation — see the worked profiler-guided optimisation exercise in [docs/example-frame-optimization.md](docs/example-frame-optimization.md). Automatic PGO — WIP.
 - **Design patterns** — `Deferred<T>` / `Versioned<T>` — staged writes: record grant-free from any thread, apply the batch atomically at a defined point; `Versioned` gives readers a whole-frame stable snapshot. Deterministic by construction. Plus `Event_bus`, a lightweight pub/sub built on the same staging machinery.
 
 **v0.1.0** (unreleased) — pre-1.0: the API is stable in shape but not frozen. See [CHANGELOG.md](CHANGELOG.md) for what 0.1.0 contains. Some areas are actively evolving (**WIP**): the allocation/performance campaign, a platform abstraction layer, and benchmark regression tracking. See [docs/TODO.md](docs/TODO.md) for the live roadmap.
@@ -221,6 +229,12 @@ Running the built driver with no arguments runs everything; `--tests`, `--bench`
 - **[docs/design.md](docs/design.md)** — design rationale: the decisions, the rejected alternatives, the references.
 - **[docs/task-systems-comparison.md](docs/task-systems-comparison.md)** — how it compares to other task systems.
 - Deep dives: [task-internals](docs/task-internals.md), [command-buffer-design](docs/command-buffer-design.md), [deferred-versioned-state](docs/deferred-versioned-state.md).
+
+---
+
+## Contributing
+
+Contributions of all sizes are welcome — bug reports, docs, tests, code. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 

@@ -33,15 +33,27 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
       → "Inconsistencies to resolve"): `run_inline`-on-`access`, multi-object `access` semantics,
       stale `async`→`access` comments, `pipe`/`queue` terminology. Lock the public surface while
       still pre-1.0 — breaking changes after public are costly.
-- [ ] **Finalize the library name** (see `docs/naming.md`). Then update: `README.md` title
-      + the placeholder header comment, `LICENSE` if needed, the `TS_VERSION`/`version.h`
-      product string and any `--version` text, the namespace if it changes, and the GitHub
-      org/repo.
+- [x] **Finalize the library name** — decided 2026-08-19: **Macrame** (`macrame`
+      functional, `é` branding-only; org `macrame-ts`, target `github.com/macrame-ts/macrame`;
+      see `docs/naming.md`).
+- [ ] **Name rollout** (repo-local, before or at the move):
+      - `--version` product string in `src/main.cpp` (`task_system %s` → `macrame %s`);
+        `version.h` macros stay `TS_*` if the namespace stays `ts::`.
+      - Confirm the namespace decision: keep `ts::` (the org suffix echoes it) or rename.
+      - Decide whether project/file names (`task_system.slnx`, `task_system.vcxproj`,
+        CMake `project(task_system)`, the built exe, `tsan/run.sh`, CI yml, docs that
+        spell `task_system --trace`) rename to `macrame` now or stay as working names.
+      - `README.md` header comment + `CONTRIBUTING.md` note already point at the move.
+- [ ] **GitHub side** (author): create the `macrame-ts` org (re-verify availability - the
+      2026-07 clearance is stale), transfer `Andriy06/task_system` → `macrame-ts/macrame`
+      (a transfer keeps redirects; do it BEFORE the flip so badges/links are final), set
+      the repo description + topics, refresh the README CI badge owner/repo.
 - [ ] **Re-measure `docs/example-frame-optimization.md`** — its figures predate the
       `parallel_for` current-scheduler routing fix (see the note at the top of that doc):
       re-run baseline/optimised makespan, utilization, and dead time on the 6-worker trace,
       interleaved A/B with medians (the measurement rule), and update the doc's numbers
-      before publishing. The qualitative analysis and the levers stand.
+      before publishing. The qualitative analysis and the levers stand. While at it,
+      regenerate `docs/media/game_frame_trace.svg` (the README embed) from the fresh trace.
 - [ ] **Re-run the secrets/paths scrub** (must be clean):
       ```
       git grep -niE "c:\\\\users\\\\[a-z]|/home/[a-z]+/|/mnt/c/" -- .            # personal paths

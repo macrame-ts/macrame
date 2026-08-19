@@ -1,0 +1,1293 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1442" height="883" viewBox="0 0 1202 736" font-family="'Segoe UI', sans-serif">
+<rect width="1202" height="736" fill="#272822"/>
+<defs><pattern id="dead" width="6" height="6" patternUnits="userSpaceOnUse"><rect width="6" height="6" fill="#f92672" opacity="0.10"/><path d="M0 6 L6 0" stroke="#f92672" stroke-width="1.4" opacity="0.7"/></pattern><pattern id="deadcore" width="6" height="6" patternUnits="userSpaceOnUse"><rect width="6" height="6" fill="#fd971f" opacity="0.10"/><path d="M0 6 L6 0" stroke="#fd971f" stroke-width="1.4" opacity="0.7"/></pattern><pattern id="deadmix" width="12" height="6" patternUnits="userSpaceOnUse"><rect width="12" height="6" fill="#f92672" opacity="0.05"/><rect width="12" height="6" fill="#fd971f" opacity="0.05"/><path d="M0 6 L6 0" stroke="#f92672" stroke-width="1.4" opacity="0.7"/><path d="M6 6 L12 0" stroke="#fd971f" stroke-width="1.4" opacity="0.7"/></pattern></defs>
+<style>.term{cursor:help;}</style>
+<text x="16" y="26" font-size="15" font-weight="600" fill="#f8f8f2">Sample &quot;game_frame&quot; (optimised): average run — 5.50 ms</text>
+<text x="16" y="48" font-size="12" font-weight="600" xml:space="preserve"><tspan fill="#a6e22e" class="term hv" data-hl="#a6e22e" data-tip="core utilization&#10;Share of the machine's time that ran tasks.&#10;Low means CPU cores sat idle.&#10;Covers only configured worker threads.&#10;&#10;`a6e22egreen`: &gt;=75%&#10;`e6db74yellow`: 50-75%&#10;`ff5f45red`: &lt;50%">core utilization</tspan><tspan fill="#a6e22e">: 94.7%</tspan><tspan fill="#cfcfc2">  |  </tspan><tspan fill="#e6db74" class="term hv" data-hl="#e6db74" data-tip="critical path dead time&#10;Frame time minus the work on the longest&#10;dependency chain (critical path):&#10;how long that chain sat waiting instead&#10;of working. High is an optimisation&#10;opportunity; the fix depends on the cause&#10;(see the split below):&#10;core-bound - add cores if possible,&#10;or cut total work;&#10;dependency-bound - loosen dependencies or&#10;rearrange nodes, often profiler-guided.&#10;&#10;`a6e22egreen`: &lt;5%&#10;`e6db74yellow`: 5-10%&#10;`ff5f45red`: &gt;10%">critical path dead time</tspan><tspan fill="#e6db74">: 405 µs (7.4% of frame time)</tspan><tspan fill="#cfcfc2"> (</tspan><tspan fill="#fd971f" class="term hv" data-hl="#fd971f" data-tip="core-bound&#10;Dead time where the chain waited for a free&#10;core (every core was busy).&#10;Fix: add workers or shorten the chain.">core-bound</tspan><tspan fill="#fd971f"> 6.7%</tspan><tspan fill="#cfcfc2"> / </tspan><tspan fill="#e6db74" class="term hv" data-hl="#e6db74" data-tip="mixed&#10;A stretch of dead time with both causes present:&#10;some cores free, some work still blocked.">mixed</tspan><tspan fill="#e6db74"> 0.6%</tspan><tspan fill="#cfcfc2">)</tspan></text>
+<text x="16" y="68" font-size="12" font-weight="600" xml:space="preserve"><tspan fill="#cfcfc2" class="term hv" data-hl="#cfcfc2" data-tip="core-time&#10;Total worker-time available in a frame:&#10;workers x frame time. 100% the split to&#10;the right divides up.">core-time</tspan><tspan fill="#cfcfc2">: </tspan><tspan fill="#cfcfc2" class="term hv" data-hl="#cfcfc2" data-tip="body&#10;Core-time spent running your task functors&#10;(the actual work), summed over all workers.">body</tspan><tspan fill="#cfcfc2"> 87.1%  |  </tspan><tspan fill="#e6db74" class="term hv" data-hl="#e6db74" data-tip="framework overhead&#10;Core-time the framework spent for internal processing:&#10;graph execution, launching tasks, scheduling&#10;etc. High means tasks are too fine-grained.&#10;Try reducing the number of tasks by moving&#10;parallelisation to the higher abstraction&#10;layer (graph nodes).&#10;&#10;`a6e22egreen`: &lt;=5%&#10;`e6db74yellow`: 5-15%&#10;`ff5f45red`: &gt;15%">framework overhead</tspan><tspan fill="#e6db74"> 7.6%</tspan><tspan fill="#cfcfc2">  |  </tspan><tspan fill="#cfcfc2" class="term hv" data-hl="#cfcfc2" data-tip="idle&#10;Core-time with no task to run (workers&#10;parked or spinning). High means the frame&#10;can't keep the cores fed. Try splitting&#10;long-running nodes or add internal node&#10;parallelisation.">idle</tspan><tspan fill="#cfcfc2"> 5.3%</tspan></text>
+<text x="16" y="86" font-size="11" xml:space="preserve"><tspan fill="#cfcfc2">runs: 100  |  </tspan><tspan fill="#cfcfc2" class="term hv" data-hl="#cfcfc2" data-tip="frame time&#10;Wall-clock length of the frame:&#10;first task starting to last task finishing.">frame time</tspan><tspan fill="#cfcfc2"> 5.50 ms (min 5.14 / max 6.16)  |  </tspan><tspan fill="#cfcfc2" class="term hv" data-hl="#cfcfc2" data-tip="critical path&#10;The fastest the frame could finish given&#10;only task durations and dependencies, with&#10;infinite amount of workers and CPU cores.&#10;The lower limit for frame time. Can only be&#10;improved by loosening dependencies or&#10;optimising graph nodes internally.">critical path</tspan><tspan fill="#cfcfc2"> 5.16 ms  |  workers: 8  |  tasks ~190/run  |  per run: </tspan><tspan fill="#cfcfc2" class="term hv" data-hl="#cfcfc2" data-tip="body&#10;Total work in the frame:&#10;every task functor's time added up across&#10;all workers. Divide by workers for the&#10;perfect-parallel floor.">body</tspan><tspan fill="#cfcfc2"> 38.34 ms / framework 3.36 ms / </tspan><tspan fill="#cfcfc2" class="term hv" data-hl="#cfcfc2" data-tip="orchestration&#10;Time the calling thread spends building the&#10;run each frame (binding links, re-arming&#10;nodes), off the worker cores.">orchestration</tspan><tspan fill="#cfcfc2"> 16.2 µs</tspan></text>
+<g class="btn" data-view="crit" style="cursor:pointer"><rect x="16.0" y="107.0" width="100.0" height="20.0" rx="4" fill="#3e3d32" stroke="#75715e" stroke-width="1"/><text x="66.0" y="121.0" font-size="11" fill="#cfcfc2" text-anchor="middle">Critical focus</text></g>
+<g class="btn" data-view="edges" style="cursor:pointer"><rect x="124.0" y="107.0" width="78.0" height="20.0" rx="4" fill="#3e3d32" stroke="#75715e" stroke-width="1"/><text x="163.0" y="121.0" font-size="11" fill="#cfcfc2" text-anchor="middle">Edges: on</text></g>
+<g class="btn" data-view="kind" style="cursor:pointer"><rect x="210.0" y="107.0" width="116.0" height="20.0" rx="4" fill="#3e3d32" stroke="#75715e" stroke-width="1"/><text x="268.0" y="121.0" font-size="11" fill="#cfcfc2" text-anchor="middle">Edge type: all</text></g>
+<g class="btn" data-view="cone" style="cursor:pointer"><rect x="334.0" y="107.0" width="82.0" height="20.0" rx="4" fill="#3e3d32" stroke="#75715e" stroke-width="1"/><text x="375.0" y="121.0" font-size="11" fill="#cfcfc2" text-anchor="middle">Cone: off</text></g>
+<g class="btn" data-view="dead" style="cursor:pointer"><rect x="424.0" y="107.0" width="112.0" height="20.0" rx="4" fill="#3e3d32" stroke="#75715e" stroke-width="1"/><text x="480.0" y="121.0" font-size="11" fill="#cfcfc2" text-anchor="middle">Dead-time focus</text></g>
+<g class="btn" data-view="metric" style="cursor:pointer"><rect x="544.0" y="107.0" width="104.0" height="20.0" rx="4" fill="#3e3d32" stroke="#75715e" stroke-width="1"/><text x="596.0" y="121.0" font-size="11" fill="#cfcfc2" text-anchor="middle">Colour: crit</text></g>
+<text x="662.0" y="121.0" font-size="10" fill="#75715e">views: click to toggle; cycles relabel; Cone: pick a node</text>
+<line x1="24.0" y1="128" x2="24.0" y2="408" stroke="#3e3d32" stroke-width="1"/>
+<text x="24.000000" y="426.000000" font-size="10" fill="#cfcfc2" text-anchor="middle">0.0 µs</text>
+<line x1="234.0" y1="128" x2="234.0" y2="408" stroke="#3e3d32" stroke-width="1"/>
+<text x="233.978792" y="426.000000" font-size="10" fill="#cfcfc2" text-anchor="middle">1000 µs</text>
+<line x1="444.0" y1="128" x2="444.0" y2="408" stroke="#3e3d32" stroke-width="1"/>
+<text x="443.957584" y="426.000000" font-size="10" fill="#cfcfc2" text-anchor="middle">2000 µs</text>
+<line x1="653.9" y1="128" x2="653.9" y2="408" stroke="#3e3d32" stroke-width="1"/>
+<text x="653.936376" y="426.000000" font-size="10" fill="#cfcfc2" text-anchor="middle">3000 µs</text>
+<line x1="863.9" y1="128" x2="863.9" y2="408" stroke="#3e3d32" stroke-width="1"/>
+<text x="863.915168" y="426.000000" font-size="10" fill="#cfcfc2" text-anchor="middle">4000 µs</text>
+<line x1="1073.9" y1="128" x2="1073.9" y2="408" stroke="#3e3d32" stroke-width="1"/>
+<text x="1073.893960" y="426.000000" font-size="10" fill="#cfcfc2" text-anchor="middle">5000 µs</text>
+<line x1="16" y1="452" x2="56" y2="452" stroke="#a6e22e" stroke-width="1.8"/>
+<polygon points="56,448 56,456 63,452" fill="#a6e22e"/>
+<text x="70" y="456" font-size="11" fill="#cfcfc2">explicit ordering (after/before)</text>
+<line x1="16" y1="470" x2="56" y2="470" stroke="#a6e22e" stroke-width="1.8" stroke-dasharray="5,3"/>
+<polygon points="56,466 56,474 63,470" fill="#a6e22e"/>
+<text x="70" y="474" font-size="11" fill="#cfcfc2">derived from declared access</text>
+<line x1="16" y1="488" x2="56" y2="488" stroke="#f92672" stroke-width="1.8"/>
+<polygon points="56,484 56,492 63,488" fill="#f92672"/>
+<text x="70" y="492" font-size="11" fill="#cfcfc2">critical-path edge (pink = share of runs)</text>
+<rect x="430" y="447" width="40" height="10" rx="2" fill="#3e3d32" stroke="#fd971f" stroke-width="2"/>
+<text x="484" y="456" font-size="11" fill="#cfcfc2">critical node (orange = share of runs)</text>
+<rect x="430" y="465" width="40" height="10" rx="2" fill="url(#dead)"/>
+<text x="484" y="474" font-size="11" fill="#cfcfc2">critical dead time, dependency-bound</text>
+<rect x="430" y="483" width="40" height="10" rx="2" fill="url(#deadcore)"/>
+<text x="484" y="492" font-size="11" fill="#cfcfc2">critical dead time, core-bound: cores busy</text>
+<text x="820" y="456" font-size="11"><tspan fill="#ff5f45">high</tspan><tspan fill="#cfcfc2"> / </tspan><tspan fill="#a6e22e">normal</tspan><tspan fill="#cfcfc2"> / </tspan><tspan fill="#bab8ad">low</tspan><tspan fill="#cfcfc2"> = node name colour = priority</tspan></text>
+<circle cx="840" cy="470" r="5" fill="#a6e22e"/>
+<text x="874" y="474" font-size="11" fill="#cfcfc2">handoff weld: nodes back to back</text>
+<text x="16" y="522.000000" font-size="12" font-weight="600" fill="#f8f8f2">critical-path ranking — 100 runs, frame time 5.50 ms</text>
+<text x="16" y="538.000000" font-size="11" fill="#cfcfc2">Nodes ranked by expected contribution to the binding critical chain (mean × chain%) — where optimising the frame helps most.</text>
+<text x="34.000000" y="564.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#75715e">#</text>
+<text x="46.000000" y="564.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="start" fill="#75715e">node</text>
+<text x="268.000000" y="564.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2"><tspan class="term hv" data-hl="#66d9ef" data-tip="chain %&#10;How often this node was on the frame's binding&#10;critical chain, across the runs.&#10;High = it usually decides frame time.">chain%</tspan></text>
+<text x="356.000000" y="564.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2"><tspan class="term hv" data-hl="#66d9ef" data-tip="mean&#10;Mean wall-clock duration of this node's bar&#10;over the runs.">mean</tspan></text>
+<text x="452.000000" y="564.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2"><tspan class="term hv" data-hl="#66d9ef" data-tip="mean × chain%&#10;The ranking key: mean duration times chain share&#10;= this node's expected contribution to frame time.&#10;The table sorts by this.">x share</tspan></text>
+<text x="548.000000" y="564.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2"><tspan class="term hv" data-hl="#66d9ef" data-tip="dead-in&#10;Incoming critical dead time: how long this node sat&#10;ready but waiting (for a core or a predecessor)&#10;before it ran, on runs where it bound the chain.">dead-in</tspan></text>
+<text x="628.000000" y="564.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2"><tspan class="term hv" data-hl="#66d9ef" data-tip="slack&#10;How far this node could slip without extending the frame&#10;(structural float from the critical-path method).&#10;0 = on the critical path, with no room to slip.">slack</tspan></text>
+<text x="712.000000" y="564.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2"><tspan class="term hv" data-hl="#66d9ef" data-tip="P95&#10;95th-percentile duration: the node's near-worst-case&#10;time, vs its mean.">P95</tspan></text>
+<text x="34.000000" y="580.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">1</text>
+<text x="46.000000" y="580.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="start" fill="#a6e22e">navigation</text>
+<text x="268.000000" y="580.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#fd971f">95%</text>
+<text x="356.000000" y="580.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">1644 µs</text>
+<text x="452.000000" y="580.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">1562 µs</text>
+<text x="548.000000" y="580.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">0.9 µs</text>
+<text x="628.000000" y="580.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">0</text>
+<text x="712.000000" y="580.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">1914 µs</text>
+<text x="34.000000" y="596.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">2</text>
+<text x="46.000000" y="596.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="start" fill="#a6e22e">AI</text>
+<text x="268.000000" y="596.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#fd971f">95%</text>
+<text x="356.000000" y="596.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">1512 µs</text>
+<text x="452.000000" y="596.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">1437 µs</text>
+<text x="548.000000" y="596.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">22.3 µs</text>
+<text x="628.000000" y="596.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">0</text>
+<text x="712.000000" y="596.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">1524 µs</text>
+<text x="34.000000" y="612.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">3</text>
+<text x="46.000000" y="612.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="start" fill="#a6e22e">anim_graph</text>
+<text x="268.000000" y="612.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#fd971f">95%</text>
+<text x="356.000000" y="612.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">780 µs</text>
+<text x="452.000000" y="612.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">741 µs</text>
+<text x="548.000000" y="612.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">175 µs</text>
+<text x="628.000000" y="612.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">0</text>
+<text x="712.000000" y="612.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">1127 µs</text>
+<text x="34.000000" y="628.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">4</text>
+<text x="46.000000" y="628.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="start" fill="#a6e22e">navmesh_rebuild</text>
+<text x="268.000000" y="628.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#fd971f">95%</text>
+<text x="356.000000" y="628.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">605 µs</text>
+<text x="452.000000" y="628.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">575 µs</text>
+<text x="548.000000" y="628.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">53.2 µs</text>
+<text x="628.000000" y="628.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">0</text>
+<text x="712.000000" y="628.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">608 µs</text>
+<text x="34.000000" y="644.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">5</text>
+<text x="46.000000" y="644.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="start" fill="#a6e22e">propagation</text>
+<text x="268.000000" y="644.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#fd971f">91%</text>
+<text x="356.000000" y="644.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">361 µs</text>
+<text x="452.000000" y="644.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">328 µs</text>
+<text x="548.000000" y="644.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">11.1 µs</text>
+<text x="628.000000" y="644.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">0</text>
+<text x="712.000000" y="644.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">401 µs</text>
+<text x="34.000000" y="660.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">6</text>
+<text x="46.000000" y="660.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="start" fill="#a6e22e">ik_post</text>
+<text x="268.000000" y="660.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#fd971f">95%</text>
+<text x="356.000000" y="660.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">211 µs</text>
+<text x="452.000000" y="660.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">201 µs</text>
+<text x="548.000000" y="660.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">8.1 µs</text>
+<text x="628.000000" y="660.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">0</text>
+<text x="712.000000" y="660.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">298 µs</text>
+<text x="34.000000" y="676.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">7</text>
+<text x="46.000000" y="676.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="start" fill="#a6e22e">input</text>
+<text x="268.000000" y="676.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#fd971f">99%</text>
+<text x="356.000000" y="676.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">104 µs</text>
+<text x="452.000000" y="676.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">103 µs</text>
+<text x="548.000000" y="676.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">-</text>
+<text x="628.000000" y="676.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">0</text>
+<text x="712.000000" y="676.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">110 µs</text>
+<text x="34.000000" y="692.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">8</text>
+<text x="46.000000" y="692.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="start" fill="#a6e22e">skinning</text>
+<text x="268.000000" y="692.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#66d9ef">7%</text>
+<text x="356.000000" y="692.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">278 µs</text>
+<text x="452.000000" y="692.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">19.5 µs</text>
+<text x="548.000000" y="692.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">13.9 µs</text>
+<text x="628.000000" y="692.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">116 µs</text>
+<text x="712.000000" y="692.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">365 µs</text>
+<text x="34.000000" y="708.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">9</text>
+<text x="46.000000" y="708.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="start" fill="#a6e22e">flip</text>
+<text x="268.000000" y="708.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#fd971f">92%</text>
+<text x="356.000000" y="708.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">5.9 µs</text>
+<text x="452.000000" y="708.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">5.4 µs</text>
+<text x="548.000000" y="708.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">2.4 µs</text>
+<text x="628.000000" y="708.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">0</text>
+<text x="712.000000" y="708.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="end" fill="#cfcfc2">11.6 µs</text>
+<text x="46.000000" y="724.000000" font-size="11" font-family="Consolas, 'Cascadia Mono', monospace" text-anchor="start" fill="#75715e">28 nodes with chain share &lt; 5% omitted (max: networking 4%)</text>
+<rect x="24.0" y="168.0" width="8.8" height="240.0" fill="#dadc67" opacity="0.24" pointer-events="none"/>
+<rect x="32.8" y="168.0" width="8.8" height="240.0" fill="#b0e139" opacity="0.24" pointer-events="none"/>
+<rect x="41.7" y="168.0" width="8.8" height="240.0" fill="#ade136" opacity="0.24" pointer-events="none"/>
+<rect x="50.5" y="168.0" width="8.8" height="240.0" fill="#a7e22f" opacity="0.24" pointer-events="none"/>
+<rect x="59.4" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="68.2" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="77.1" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="85.9" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="94.8" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="103.6" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="112.5" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="121.3" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="130.2" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="139.0" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="147.9" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="156.7" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="165.6" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="174.4" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="183.3" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="192.1" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="201.0" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="209.8" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="218.7" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="227.5" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="236.4" y="168.0" width="8.8" height="240.0" fill="#a7e22f" opacity="0.24" pointer-events="none"/>
+<rect x="245.2" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="254.1" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="262.9" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="271.8" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="280.6" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="289.5" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="298.3" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="307.2" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="316.0" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="324.9" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="333.7" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="342.6" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="351.4" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="360.3" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="369.1" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="378.0" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="386.8" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="395.7" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="404.5" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="413.4" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="422.2" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="431.1" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="439.9" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="448.8" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="457.6" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="466.5" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="475.3" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="484.2" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="493.0" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="501.9" y="168.0" width="8.8" height="240.0" fill="#a7e22f" opacity="0.24" pointer-events="none"/>
+<rect x="510.7" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="519.6" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="528.4" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="537.3" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="546.1" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="555.0" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="563.8" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="572.7" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="581.5" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="590.4" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="599.2" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="608.1" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="616.9" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="625.8" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="634.6" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="643.5" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="652.3" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="661.2" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="670.0" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="678.9" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="687.7" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="696.6" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="705.4" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="714.3" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="723.1" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="732.0" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="740.8" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="749.7" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="758.5" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="767.4" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="776.2" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="785.1" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="793.9" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="802.8" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="811.6" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="820.5" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="829.3" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="838.2" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="847.0" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="855.9" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="864.7" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="873.6" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="882.4" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="891.3" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="900.1" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="909.0" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="917.8" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="926.7" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="935.5" y="168.0" width="8.8" height="240.0" fill="#a6e22e" opacity="0.24" pointer-events="none"/>
+<rect x="944.4" y="168.0" width="8.8" height="240.0" fill="#a7e22f" opacity="0.24" pointer-events="none"/>
+<rect x="953.2" y="168.0" width="8.8" height="240.0" fill="#a9e231" opacity="0.24" pointer-events="none"/>
+<rect x="962.1" y="168.0" width="8.8" height="240.0" fill="#aee136" opacity="0.24" pointer-events="none"/>
+<rect x="970.9" y="168.0" width="8.8" height="240.0" fill="#b2e13b" opacity="0.24" pointer-events="none"/>
+<rect x="979.8" y="168.0" width="8.8" height="240.0" fill="#b7e040" opacity="0.24" pointer-events="none"/>
+<rect x="988.6" y="168.0" width="8.8" height="240.0" fill="#bbe045" opacity="0.24" pointer-events="none"/>
+<rect x="997.5" y="168.0" width="8.8" height="240.0" fill="#bddf47" opacity="0.24" pointer-events="none"/>
+<rect x="1006.3" y="168.0" width="8.8" height="240.0" fill="#bedf48" opacity="0.24" pointer-events="none"/>
+<rect x="1015.2" y="168.0" width="8.8" height="240.0" fill="#c0df4b" opacity="0.24" pointer-events="none"/>
+<rect x="1024.0" y="168.0" width="8.8" height="240.0" fill="#c2df4d" opacity="0.24" pointer-events="none"/>
+<rect x="1032.9" y="168.0" width="8.8" height="240.0" fill="#c7de52" opacity="0.24" pointer-events="none"/>
+<rect x="1041.7" y="168.0" width="8.8" height="240.0" fill="#c7de53" opacity="0.24" pointer-events="none"/>
+<rect x="1050.6" y="168.0" width="8.8" height="240.0" fill="#c4df4f" opacity="0.24" pointer-events="none"/>
+<rect x="1059.4" y="168.0" width="8.8" height="240.0" fill="#c6de51" opacity="0.24" pointer-events="none"/>
+<rect x="1068.3" y="168.0" width="8.8" height="240.0" fill="#c9de54" opacity="0.24" pointer-events="none"/>
+<rect x="1077.1" y="168.0" width="8.8" height="240.0" fill="#cbde56" opacity="0.24" pointer-events="none"/>
+<rect x="1086.0" y="168.0" width="8.8" height="240.0" fill="#cbde57" opacity="0.24" pointer-events="none"/>
+<rect x="1094.8" y="168.0" width="8.8" height="240.0" fill="#cbde56" opacity="0.24" pointer-events="none"/>
+<rect x="1103.7" y="168.0" width="8.8" height="240.0" fill="#ccde57" opacity="0.24" pointer-events="none"/>
+<rect x="1112.5" y="168.0" width="8.8" height="240.0" fill="#cede5a" opacity="0.24" pointer-events="none"/>
+<rect x="1121.4" y="168.0" width="8.8" height="240.0" fill="#d6dd63" opacity="0.24" pointer-events="none"/>
+<rect x="1130.2" y="168.0" width="8.8" height="240.0" fill="#e0dc6d" opacity="0.24" pointer-events="none"/>
+<rect x="1139.1" y="168.0" width="8.8" height="240.0" fill="#e4db72" opacity="0.24" pointer-events="none"/>
+<rect x="1147.9" y="168.0" width="8.8" height="240.0" fill="#e9ce6f" opacity="0.24" pointer-events="none"/>
+<line x1="24.0" y1="132.0" x2="1174.0" y2="132.0" stroke="#ff5f45" stroke-width="0.8" opacity="0.8"/>
+<defs><linearGradient id="utilkey"><stop offset="0" stop-color="#a6e22e"/><stop offset="0.5" stop-color="#e6db74"/><stop offset="1" stop-color="#ff5f45"/></linearGradient></defs>
+<rect x="1134.0" y="119.0" width="40" height="8" rx="2" fill="url(#utilkey)" opacity="0.8"/>
+<text x="1128.0" y="127.0" font-size="11" fill="#cfcfc2" text-anchor="end">core utilization over time</text>
+<line x1="24.0" y1="162.0" x2="1174.0" y2="162.0" stroke="#75715e" stroke-width="0.6" opacity="0.8"/>
+<g class="hv" data-hl="#dadc67" data-tip="core utilization: 59%&#10;t 0.02 ms"><rect x="24.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="24.0" y="144.2" width="8.8" height="17.8" fill="#dadc67"/>
+</g>
+<g class="hv" data-hl="#b0e139" data-tip="core utilization: 92%&#10;t 0.06 ms"><rect x="32.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="32.8" y="134.3" width="8.8" height="27.7" fill="#b0e139"/>
+</g>
+<g class="hv" data-hl="#ade136" data-tip="core utilization: 94%&#10;t 0.11 ms"><rect x="41.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="41.7" y="133.7" width="8.8" height="28.3" fill="#ade136"/>
+</g>
+<g class="hv" data-hl="#a7e22f" data-tip="core utilization: 99%&#10;t 0.15 ms"><rect x="50.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="50.5" y="132.3" width="8.8" height="29.7" fill="#a7e22f"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.19 ms"><rect x="59.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="59.4" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.23 ms"><rect x="68.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="68.2" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.27 ms"><rect x="77.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="77.1" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.32 ms"><rect x="85.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="85.9" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.36 ms"><rect x="94.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="94.8" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.40 ms"><rect x="103.6" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="103.6" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.44 ms"><rect x="112.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="112.5" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.48 ms"><rect x="121.3" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="121.3" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.53 ms"><rect x="130.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="130.2" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.57 ms"><rect x="139.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="139.0" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.61 ms"><rect x="147.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="147.9" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.65 ms"><rect x="156.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="156.7" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.70 ms"><rect x="165.6" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="165.6" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.74 ms"><rect x="174.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="174.4" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.78 ms"><rect x="183.3" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="183.3" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.82 ms"><rect x="192.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="192.1" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.86 ms"><rect x="201.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="201.0" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.91 ms"><rect x="209.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="209.8" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.95 ms"><rect x="218.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="218.7" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 0.99 ms"><rect x="227.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="227.5" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a7e22f" data-tip="core utilization: 100%&#10;t 1.03 ms"><rect x="236.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="236.4" y="132.1" width="8.8" height="29.9" fill="#a7e22f"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.07 ms"><rect x="245.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="245.2" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.12 ms"><rect x="254.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="254.1" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.16 ms"><rect x="262.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="262.9" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.20 ms"><rect x="271.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="271.8" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.24 ms"><rect x="280.6" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="280.6" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.29 ms"><rect x="289.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="289.5" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.33 ms"><rect x="298.3" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="298.3" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.37 ms"><rect x="307.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="307.2" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.41 ms"><rect x="316.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="316.0" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.45 ms"><rect x="324.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="324.9" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.50 ms"><rect x="333.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="333.7" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.54 ms"><rect x="342.6" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="342.6" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.58 ms"><rect x="351.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="351.4" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.62 ms"><rect x="360.3" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="360.3" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.66 ms"><rect x="369.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="369.1" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.71 ms"><rect x="378.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="378.0" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.75 ms"><rect x="386.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="386.8" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.79 ms"><rect x="395.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="395.7" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.83 ms"><rect x="404.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="404.5" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.88 ms"><rect x="413.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="413.4" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.92 ms"><rect x="422.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="422.2" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 1.96 ms"><rect x="431.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="431.1" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.00 ms"><rect x="439.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="439.9" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.04 ms"><rect x="448.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="448.8" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.09 ms"><rect x="457.6" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="457.6" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.13 ms"><rect x="466.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="466.5" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.17 ms"><rect x="475.3" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="475.3" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.21 ms"><rect x="484.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="484.2" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.25 ms"><rect x="493.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="493.0" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a7e22f" data-tip="core utilization: 99%&#10;t 2.30 ms"><rect x="501.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="501.9" y="132.2" width="8.8" height="29.8" fill="#a7e22f"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.34 ms"><rect x="510.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="510.7" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.38 ms"><rect x="519.6" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="519.6" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.42 ms"><rect x="528.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="528.4" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.47 ms"><rect x="537.3" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="537.3" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.51 ms"><rect x="546.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="546.1" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.55 ms"><rect x="555.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="555.0" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.59 ms"><rect x="563.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="563.8" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.63 ms"><rect x="572.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="572.7" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.68 ms"><rect x="581.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="581.5" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.72 ms"><rect x="590.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="590.4" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.76 ms"><rect x="599.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="599.2" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.80 ms"><rect x="608.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="608.1" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.84 ms"><rect x="616.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="616.9" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.89 ms"><rect x="625.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="625.8" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.93 ms"><rect x="634.6" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="634.6" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 2.97 ms"><rect x="643.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="643.5" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.01 ms"><rect x="652.3" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="652.3" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.06 ms"><rect x="661.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="661.2" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.10 ms"><rect x="670.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="670.0" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.14 ms"><rect x="678.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="678.9" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.18 ms"><rect x="687.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="687.7" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.22 ms"><rect x="696.6" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="696.6" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.27 ms"><rect x="705.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="705.4" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.31 ms"><rect x="714.3" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="714.3" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.35 ms"><rect x="723.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="723.1" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.39 ms"><rect x="732.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="732.0" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.43 ms"><rect x="740.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="740.8" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.48 ms"><rect x="749.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="749.7" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.52 ms"><rect x="758.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="758.5" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.56 ms"><rect x="767.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="767.4" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.60 ms"><rect x="776.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="776.2" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.65 ms"><rect x="785.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="785.1" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.69 ms"><rect x="793.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="793.9" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.73 ms"><rect x="802.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="802.8" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.77 ms"><rect x="811.6" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="811.6" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.81 ms"><rect x="820.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="820.5" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.86 ms"><rect x="829.3" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="829.3" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.90 ms"><rect x="838.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="838.2" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.94 ms"><rect x="847.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="847.0" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 3.98 ms"><rect x="855.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="855.9" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 4.02 ms"><rect x="864.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="864.7" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 4.07 ms"><rect x="873.6" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="873.6" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 4.11 ms"><rect x="882.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="882.4" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 4.15 ms"><rect x="891.3" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="891.3" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 4.19 ms"><rect x="900.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="900.1" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 4.24 ms"><rect x="909.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="909.0" y="132.1" width="8.8" height="29.9" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 4.28 ms"><rect x="917.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="917.8" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 4.32 ms"><rect x="926.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="926.7" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a6e22e" data-tip="core utilization: 100%&#10;t 4.36 ms"><rect x="935.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="935.5" y="132.0" width="8.8" height="30.0" fill="#a6e22e"/>
+</g>
+<g class="hv" data-hl="#a7e22f" data-tip="core utilization: 99%&#10;t 4.40 ms"><rect x="944.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="944.4" y="132.2" width="8.8" height="29.8" fill="#a7e22f"/>
+</g>
+<g class="hv" data-hl="#a9e231" data-tip="core utilization: 98%&#10;t 4.45 ms"><rect x="953.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="953.2" y="132.7" width="8.8" height="29.3" fill="#a9e231"/>
+</g>
+<g class="hv" data-hl="#aee136" data-tip="core utilization: 94%&#10;t 4.49 ms"><rect x="962.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="962.1" y="133.8" width="8.8" height="28.2" fill="#aee136"/>
+</g>
+<g class="hv" data-hl="#b2e13b" data-tip="core utilization: 90%&#10;t 4.53 ms"><rect x="970.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="970.9" y="134.9" width="8.8" height="27.1" fill="#b2e13b"/>
+</g>
+<g class="hv" data-hl="#b7e040" data-tip="core utilization: 87%&#10;t 4.57 ms"><rect x="979.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="979.8" y="135.9" width="8.8" height="26.1" fill="#b7e040"/>
+</g>
+<g class="hv" data-hl="#bbe045" data-tip="core utilization: 84%&#10;t 4.61 ms"><rect x="988.6" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="988.6" y="136.9" width="8.8" height="25.1" fill="#bbe045"/>
+</g>
+<g class="hv" data-hl="#bddf47" data-tip="core utilization: 82%&#10;t 4.66 ms"><rect x="997.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="997.5" y="137.4" width="8.8" height="24.6" fill="#bddf47"/>
+</g>
+<g class="hv" data-hl="#bedf48" data-tip="core utilization: 81%&#10;t 4.70 ms"><rect x="1006.3" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1006.3" y="137.6" width="8.8" height="24.4" fill="#bedf48"/>
+</g>
+<g class="hv" data-hl="#c0df4b" data-tip="core utilization: 80%&#10;t 4.74 ms"><rect x="1015.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1015.2" y="138.1" width="8.8" height="23.9" fill="#c0df4b"/>
+</g>
+<g class="hv" data-hl="#c2df4d" data-tip="core utilization: 78%&#10;t 4.78 ms"><rect x="1024.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1024.0" y="138.7" width="8.8" height="23.3" fill="#c2df4d"/>
+</g>
+<g class="hv" data-hl="#c7de52" data-tip="core utilization: 74%&#10;t 4.83 ms"><rect x="1032.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1032.9" y="139.7" width="8.8" height="22.3" fill="#c7de52"/>
+</g>
+<g class="hv" data-hl="#c7de53" data-tip="core utilization: 74%&#10;t 4.87 ms"><rect x="1041.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1041.7" y="139.8" width="8.8" height="22.2" fill="#c7de53"/>
+</g>
+<g class="hv" data-hl="#c4df4f" data-tip="core utilization: 77%&#10;t 4.91 ms"><rect x="1050.6" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1050.6" y="139.0" width="8.8" height="23.0" fill="#c4df4f"/>
+</g>
+<g class="hv" data-hl="#c6de51" data-tip="core utilization: 75%&#10;t 4.95 ms"><rect x="1059.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1059.4" y="139.5" width="8.8" height="22.5" fill="#c6de51"/>
+</g>
+<g class="hv" data-hl="#c9de54" data-tip="core utilization: 73%&#10;t 4.99 ms"><rect x="1068.3" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1068.3" y="140.1" width="8.8" height="21.9" fill="#c9de54"/>
+</g>
+<g class="hv" data-hl="#cbde56" data-tip="core utilization: 71%&#10;t 5.04 ms"><rect x="1077.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1077.1" y="140.6" width="8.8" height="21.4" fill="#cbde56"/>
+</g>
+<g class="hv" data-hl="#cbde57" data-tip="core utilization: 71%&#10;t 5.08 ms"><rect x="1086.0" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1086.0" y="140.8" width="8.8" height="21.2" fill="#cbde57"/>
+</g>
+<g class="hv" data-hl="#cbde56" data-tip="core utilization: 71%&#10;t 5.12 ms"><rect x="1094.8" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1094.8" y="140.7" width="8.8" height="21.3" fill="#cbde56"/>
+</g>
+<g class="hv" data-hl="#ccde57" data-tip="core utilization: 71%&#10;t 5.16 ms"><rect x="1103.7" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1103.7" y="140.8" width="8.8" height="21.2" fill="#ccde57"/>
+</g>
+<g class="hv" data-hl="#cede5a" data-tip="core utilization: 69%&#10;t 5.21 ms"><rect x="1112.5" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1112.5" y="141.3" width="8.8" height="20.7" fill="#cede5a"/>
+</g>
+<g class="hv" data-hl="#d6dd63" data-tip="core utilization: 62%&#10;t 5.25 ms"><rect x="1121.4" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1121.4" y="143.3" width="8.8" height="18.7" fill="#d6dd63"/>
+</g>
+<g class="hv" data-hl="#e0dc6d" data-tip="core utilization: 55%&#10;t 5.29 ms"><rect x="1130.2" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1130.2" y="145.6" width="8.8" height="16.4" fill="#e0dc6d"/>
+</g>
+<g class="hv" data-hl="#e4db72" data-tip="core utilization: 51%&#10;t 5.33 ms"><rect x="1139.1" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1139.1" y="146.6" width="8.8" height="15.4" fill="#e4db72"/>
+</g>
+<g class="hv" data-hl="#e9ce6f" data-tip="core utilization: 45%&#10;t 5.37 ms"><rect x="1147.9" y="132.0" width="8.8" height="30.0" fill="#000" fill-opacity="0" pointer-events="all"/>
+<rect x="1147.9" y="148.6" width="8.8" height="13.4" fill="#e9ce6f"/>
+</g>
+<rect class="deadband" x="1170.2" y="168.0" width="2.7" height="240.0" fill="url(#dead)" opacity="0.91" pointer-events="none"/>
+<rect class="deadband" x="513.8" y="168.0" width="11.3" height="240.0" fill="url(#deadcore)" opacity="0.95" pointer-events="none"/>
+<rect class="deadband" x="843.0" y="168.0" width="45.5" height="240.0" fill="url(#deadcore)" opacity="0.95" pointer-events="none"/>
+<rect class="deadband" x="1041.0" y="168.0" width="3.3" height="240.0" fill="url(#deadmix)" opacity="0.95" pointer-events="none"/>
+<rect class="deadband" x="1088.7" y="168.0" width="2.3" height="240.0" fill="url(#deadmix)" opacity="0.88" pointer-events="none"/>
+<g class="hv" data-node="0" data-crit="0.9900" data-dispatch="3.0590" data-slack="0.0000" data-hl="#fd971f" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="input&#10;Exec: mean 104 | P95 110 | σ 4.4 (CV 4.2%) | min/max 102/138 µs&#10;True busy (body+slices+async): mean 103 µs&#10;Critical: in 99.0% of runs&#10;Dispatch wait: mean 3.1 µs&#10;Access: input: `ff5f45RW`&#10;|-&gt;  `a6e22ecamera`, `a6e22enetworking`, `a6e22escripting`, `a6e22estreaming`, `f92672navmesh_rebuild`, `a6e22ecombat`, `a6e22eeconomy`, `a6e22equests`">
+<rect x="24.5" y="173.0" width="21.7" height="20" rx="3" fill="#3e3d32" stroke="#fd971f" stroke-width="2.5"/>
+<text x="51.2" y="187.0" font-size="10" font-weight="700" fill="#a6e22e">input</text>
+</g>
+<g class="hv" data-node="1" data-crit="0.0000" data-dispatch="561.0730" data-slack="1254.8178" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="camera&#10;Exec: mean 106 | P95 108 | σ 2.0 (CV 1.9%) | min/max 104/117 µs&#10;True busy (body+slices+async): mean 105 µs&#10;Critical: in 0.0% of runs&#10;Slack: 1255 µs&#10;Dispatch wait: mean 561 µs&#10;Access: input: `a6e22eRO`; camera: `ff5f45RW`&#10;-&gt;|  `a6e22einput`&#10;|-&gt;  `a6e22efrustum_cull`">
+<rect x="169.9" y="353.0" width="16.9" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="191.9" y="367.0" font-size="10" font-weight="400" fill="#a6e22e">camera</text>
+</g>
+<g class="hv" data-node="2" data-crit="0.0400" data-dispatch="861.4060" data-slack="1697.2177" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="networking&#10;Exec: mean 505 | P95 509 | σ 1.7 (CV 0.3%) | min/max 504/511 µs&#10;True busy (body+slices+async): mean 505 µs&#10;Critical: in 4.0% of runs&#10;Slack: 1697 µs&#10;Dispatch wait: mean 861 µs&#10;Access: input: `a6e22eRO`; net: `ff5f45RW`&#10;-&gt;|  `a6e22einput`&#10;|-&gt;  `a6e22escripting`, `a6e22ecombat`, `a6e22eeconomy`, `a6e22equests`">
+<rect x="237.3" y="353.0" width="97.3" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="285.9" y="367.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">networking</text>
+</g>
+<g class="hv" data-node="3" data-crit="0.0400" data-dispatch="6.5380" data-slack="1697.2177" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="scripting&#10;Exec: mean 608 | P95 614 | σ 3.1 (CV 0.5%) | min/max 606/619 µs&#10;True busy (body+slices+async): mean 608 µs&#10;Critical: in 4.0% of runs&#10;Slack: 1697 µs&#10;Dispatch wait: mean 6.5 µs&#10;Access: input: `a6e22eRO`; net: `a6e22eRO`; script_events: `ff5f45RW`&#10;-&gt;|  `a6e22einput`, `a6e22enetworking`&#10;|-&gt;  `a6e22ecombat`, `a6e22eeconomy`, `a6e22equests`">
+<rect x="342.3" y="353.0" width="127.4" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="406.0" y="367.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">scripting</text>
+</g>
+<g class="hv" data-node="4" data-crit="0.0000" data-dispatch="1099.1850" data-slack="3552.7544" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="streaming&#10;Exec: mean 1504 | P95 1505 | σ 1.1 (CV 0.1%) | min/max 1502/1507 µs&#10;True busy (body+slices+async): mean 1503 µs&#10;Critical: in 0.0% of runs&#10;Slack: 3553 µs&#10;Dispatch wait: mean 1099 µs&#10;Access: input: `a6e22eRO`&#10;-&gt;|  `a6e22einput`">
+<rect x="272.5" y="263.0" width="315.8" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="430.4" y="277.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">streaming</text>
+</g>
+<g class="hv" data-node="5" data-crit="0.9500" data-dispatch="49.5540" data-slack="0.0000" data-hl="#fd971f" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="navmesh_rebuild&#10;Exec: mean 605 | P95 608 | σ 3.1 (CV 0.5%) | min/max 604/631 µs&#10;True busy (body+slices+async): mean 605 µs&#10;Critical: in 95.0% of runs&#10;Dispatch wait: mean 49.6 µs&#10;Access: input: `a6e22eRO`; nav_tiles: `ff5f45RW`&#10;-&gt;|  `f92672input`&#10;|-&gt;  `f92672navigation`">
+<rect x="46.7" y="173.0" width="127.0" height="20" rx="3" fill="#3e3d32" stroke="#fd971f" stroke-width="2.5"/>
+<text x="110.2" y="187.0" font-size="11" font-weight="700" fill="#a6e22e" text-anchor="middle">navmesh_rebuild</text>
+</g>
+<g class="hv" data-node="6" data-crit="0.0400" data-dispatch="276.1530" data-slack="1697.2177" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="combat&#10;Exec: mean 534 | P95 804 | σ 141 (CV 26.5%) | min/max 312/825 µs&#10;True busy (body+slices+async): mean 852 µs&#10;Critical: in 4.0% of runs&#10;Slack: 1697 µs&#10;Dispatch wait: mean 276 µs&#10;Access: transforms: `a6e22eRO`; input: `a6e22eRO`; net: `a6e22eRO`; script_events: `a6e22eRO`; combat: `ff5f45RW`&#10;-&gt;|  `a6e22einput`, `a6e22enetworking`, `a6e22escripting`&#10;|-&gt;  `a6e22egameplay_snapshot`, `a6e22esolver`, `a6e22ereplication`, `a6e22estats`, `a6e22eflip`">
+<rect x="511.3" y="293.0" width="107.9" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="565.2" y="307.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">combat</text>
+</g>
+<g class="hv" data-node="7" data-crit="0.0000" data-dispatch="546.8630" data-slack="2822.4522" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="economy&#10;Exec: mean 716 | P95 726 | σ 5.8 (CV 0.8%) | min/max 710/730 µs&#10;True busy (body+slices+async): mean 715 µs&#10;Critical: in 0.0% of runs&#10;Slack: 2822 µs&#10;Dispatch wait: mean 547 µs&#10;Access: transforms: `a6e22eRO`; input: `a6e22eRO`; net: `a6e22eRO`; script_events: `a6e22eRO`; economy: `ff5f45RW`&#10;-&gt;|  `a6e22einput`, `a6e22enetworking`, `a6e22escripting`&#10;|-&gt;  `a6e22egameplay_snapshot`, `a6e22ereplication`, `a6e22estats`, `a6e22edebug_overlay`, `a6e22eflip`">
+<rect x="549.2" y="323.0" width="149.5" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="623.9" y="337.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">economy</text>
+</g>
+<g class="hv" data-node="8" data-crit="0.0000" data-dispatch="0.5940" data-slack="2092.7891" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="quests&#10;Exec: mean 715 | P95 723 | σ 5.4 (CV 0.8%) | min/max 709/726 µs&#10;True busy (body+slices+async): mean 715 µs&#10;Critical: in 0.0% of runs&#10;Slack: 2093 µs&#10;Dispatch wait: mean 0.6 µs&#10;Access: transforms: `a6e22eRO`; input: `a6e22eRO`; net: `a6e22eRO`; script_events: `a6e22eRO`; quests: `ff5f45RW`&#10;-&gt;|  `a6e22einput`, `a6e22enetworking`, `a6e22escripting`&#10;|-&gt;  `a6e22egameplay_snapshot`, `a6e22eUI`, `a6e22ereplication`, `a6e22eflip`">
+<rect x="470.4" y="203.0" width="149.4" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="545.1" y="217.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">quests</text>
+</g>
+<g class="hv" data-node="9" data-crit="0.9500" data-dispatch="0.7870" data-slack="0.0000" data-hl="#fd971f" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="navigation&#10;Exec: mean 1644 | P95 1914 | σ 219 (CV 13.3%) | min/max 919/2228 µs&#10;True busy (body+slices+async): mean 2657 µs&#10;Critical: in 95.0% of runs&#10;Dispatch wait: mean 0.8 µs&#10;Access: nav_mesh: `a6e22eRO`; nav_tiles: `a6e22eRO`; transforms: `a6e22eRO`; paths: `ff5f45RW`&#10;-&gt;|  `f92672navmesh_rebuild`&#10;|-&gt;  `f92672AI`, `a6e22eflip`">
+<rect x="174.1" y="173.0" width="339.7" height="20" rx="3" fill="#3e3d32" stroke="#fd971f" stroke-width="2.5"/>
+<text x="344.0" y="187.0" font-size="11" font-weight="700" fill="#a6e22e" text-anchor="middle">navigation</text>
+</g>
+<g class="hv" data-node="10" data-crit="0.9500" data-dispatch="21.0070" data-slack="0.0000" data-hl="#fd971f" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="AI&#10;Exec: mean 1512 | P95 1524 | σ 26.4 (CV 1.7%) | min/max 1325/1532 µs&#10;True busy (body+slices+async): mean 1516 µs&#10;Critical: in 95.0% of runs&#10;Dispatch wait: mean 21.0 µs&#10;Access: transforms: `a6e22eRO`; paths: `a6e22eRO`; gameplay: `a6e22eRO`; intents: `ff5f45RW`&#10;-&gt;|  `f92672navigation`&#10;|-&gt;  `a6e22egameplay_flip`, `f92672anim_graph`, `a6e22ereplication`, `a6e22eflip`">
+<rect x="525.1" y="173.0" width="317.9" height="20" rx="3" fill="#3e3d32" stroke="#fd971f" stroke-width="2.5"/>
+<text x="684.0" y="187.0" font-size="11" font-weight="700" fill="#a6e22e" text-anchor="middle">AI</text>
+</g>
+<g class="hv" data-node="11" data-crit="0.0000" data-dispatch="423.8300" data-slack="3123.0835" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="gameplay_snapshot&#10;Exec: mean 110 | P95 115 | σ 3.5 (CV 3.2%) | min/max 106/120 µs&#10;True busy (body+slices+async): mean 109 µs&#10;Critical: in 0.0% of runs&#10;Slack: 3123 µs&#10;Dispatch wait: mean 424 µs&#10;Access: combat: `a6e22eRO`; economy: `a6e22eRO`; quests: `a6e22eRO`&#10;-&gt;|  `a6e22ecombat`, `a6e22eeconomy`, `a6e22equests`&#10;|-&gt;  `a6e22egameplay_flip`">
+<rect x="798.8" y="293.0" width="22.7" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="826.5" y="307.0" font-size="10" font-weight="400" fill="#a6e22e">gameplay_snapshot</text>
+</g>
+<g class="hv" data-node="12" data-crit="0.0000" data-dispatch="83.0040" data-slack="1317.3843" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="gameplay_flip&#10;Exec: mean 3.0 | P95 4.3 | σ 1.5 (CV 49.9%) | min/max 1.6/14.5 µs&#10;True busy (body+slices+async): mean 2.5 µs&#10;Critical: in 0.0% of runs&#10;Slack: 1317 µs&#10;Dispatch wait: mean 83.0 µs&#10;Access: gameplay: `ff5f45RW`&#10;-&gt;|  `a6e22egameplay_snapshot`, `a6e22eAI`">
+<rect x="888.7" y="263.0" width="3.0" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="896.7" y="277.0" font-size="10" font-weight="400" fill="#a6e22e">gameplay_flip</text>
+</g>
+<g class="hv" data-node="13" data-crit="0.9500" data-dispatch="166.4900" data-slack="0.0000" data-hl="#fd971f" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="anim_graph&#10;Exec: mean 780 | P95 1127 | σ 160 (CV 20.5%) | min/max 630/1569 µs&#10;True busy (body+slices+async): mean 2627 µs&#10;Critical: in 95.0% of runs&#10;Dispatch wait: mean 166 µs&#10;Access: skeletons: `a6e22eRO`; intents: `a6e22eRO`; anim_pose: `ff5f45RW`&#10;-&gt;|  `f92672AI`&#10;|-&gt;  `f92672ik_post`">
+<rect x="888.5" y="233.0" width="152.5" height="20" rx="3" fill="#3e3d32" stroke="#fd971f" stroke-width="2.5"/>
+<text x="964.7" y="247.0" font-size="11" font-weight="700" fill="#a6e22e" text-anchor="middle">anim_graph</text>
+</g>
+<g class="hv" data-node="14" data-crit="0.9500" data-dispatch="9.7630" data-slack="0.0000" data-hl="#fd971f" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="ik_post&#10;Exec: mean 211 | P95 298 | σ 43.7 (CV 20.7%) | min/max 120/325 µs&#10;True busy (body+slices+async): mean 890 µs&#10;Critical: in 95.0% of runs&#10;Dispatch wait: mean 9.8 µs&#10;Access: anim_pose: `a6e22eRO`; local_xf: `ff5f45RW`&#10;-&gt;|  `f92672anim_graph`&#10;|-&gt;  `a6e22eskinning`, `f92672propagation`">
+<rect x="1044.3" y="173.0" width="44.4" height="20" rx="3" fill="#3e3d32" stroke="#fd971f" stroke-width="2.5"/>
+<text x="1093.7" y="187.0" font-size="10" font-weight="700" fill="#a6e22e">ik_post</text>
+</g>
+<g class="hv" data-node="15" data-crit="0.0700" data-dispatch="6.0590" data-slack="115.7105" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="skinning&#10;Exec: mean 278 | P95 365 | σ 37.9 (CV 13.6%) | min/max 254/466 µs&#10;True busy (body+slices+async): mean 1062 µs&#10;Critical: in 7.0% of runs&#10;Slack: 116 µs&#10;Dispatch wait: mean 6.1 µs&#10;Access: local_xf: `a6e22eRO`; skin_matrices: `ff5f45RW`&#10;-&gt;|  `a6e22eik_post`">
+<rect x="1091.3" y="203.0" width="56.0" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="1152.3" y="217.0" font-size="10" font-weight="400" fill="#a6e22e">skinning</text>
+</g>
+<g class="hv" data-node="16" data-crit="0.0000" data-dispatch="4.9860" data-slack="1423.2791" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="broadphase&#10;Exec: mean 538 | P95 824 | σ 196 (CV 36.5%) | min/max 220/834 µs&#10;True busy (body+slices+async): mean 830 µs&#10;Critical: in 0.0% of runs&#10;Slack: 1423 µs&#10;Dispatch wait: mean 5.0 µs&#10;Access: bodies: `a6e22eRO`; broad_pairs: `ff5f45RW`&#10;|-&gt;  `a6e22enarrowphase`, `a6e22efinalize`">
+<rect x="26.0" y="203.0" width="105.0" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="78.5" y="217.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">broadphase</text>
+</g>
+<g class="hv" data-node="17" data-crit="0.0000" data-dispatch="79.0160" data-slack="1423.2791" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="narrowphase&#10;Exec: mean 1390 | P95 1508 | σ 211 (CV 15.2%) | min/max 756/1532 µs&#10;True busy (body+slices+async): mean 1524 µs&#10;Critical: in 0.0% of runs&#10;Slack: 1423 µs&#10;Dispatch wait: mean 79.0 µs&#10;Access: broad_pairs: `a6e22eRO`; contacts: `ff5f45RW`&#10;-&gt;|  `a6e22ebroadphase`&#10;|-&gt;  `a6e22esolver`">
+<rect x="136.5" y="203.0" width="315.4" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="294.2" y="217.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">narrowphase</text>
+</g>
+<g class="hv" data-node="18" data-crit="0.0400" data-dispatch="3.6970" data-slack="1423.2791" data-hl="#66d9ef" data-nc="#ff5f45" data-prio="high-pri" data-pc="#ff5f45" data-tip="solver&#10;Exec: mean 1029 | P95 1343 | σ 154 (CV 15.0%) | min/max 705/1504 µs&#10;True busy (body+slices+async): mean 2967 µs&#10;Critical: in 4.0% of runs&#10;Slack: 1423 µs&#10;Dispatch wait: mean 3.7 µs&#10;Access: contacts: `a6e22eRO`; combat: `a6e22eRO`; velocities: `ff5f45RW`&#10;-&gt;|  `a6e22ecombat`, `a6e22enarrowphase`&#10;|-&gt;  `a6e22efinalize`, `a6e22epropagation`">
+<rect x="636.1" y="203.0" width="198.5" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="735.4" y="217.0" font-size="11" font-weight="400" fill="#ff5f45" text-anchor="middle">solver</text>
+</g>
+<g class="hv" data-node="19" data-crit="0.0400" data-dispatch="10.2360" data-slack="1423.2791" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="finalize&#10;Exec: mean 306 | P95 421 | σ 91.9 (CV 30.1%) | min/max 106/495 µs&#10;True busy (body+slices+async): mean 428 µs&#10;Critical: in 4.0% of runs&#10;Slack: 1423 µs&#10;Dispatch wait: mean 10.2 µs&#10;Access: velocities: `a6e22eRO`; bodies: `ff5f45RW`&#10;-&gt;|  `a6e22ebroadphase`, `a6e22esolver`&#10;|-&gt;  `a6e22epropagation`, `a6e22estats`">
+<rect x="846.2" y="173.0" width="63.7" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="878.1" y="187.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">finalize</text>
+</g>
+<g class="hv" data-node="20" data-crit="0.9100" data-dispatch="7.6130" data-slack="0.0000" data-hl="#fd971f" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="propagation&#10;Exec: mean 361 | P95 401 | σ 48.6 (CV 13.5%) | min/max 262/534 µs&#10;True busy (body+slices+async): mean 1108 µs&#10;Critical: in 91.0% of runs&#10;Dispatch wait: mean 7.6 µs&#10;Access: local_xf: `a6e22eRO`; bodies: `a6e22eRO`; velocities: `a6e22eRO`&#10;-&gt;|  `f92672ik_post`, `a6e22esolver`, `a6e22efinalize`&#10;|-&gt;  `f92672flip`">
+<rect x="1091.0" y="173.0" width="79.2" height="20" rx="3" fill="#3e3d32" stroke="#fd971f" stroke-width="2.5"/>
+<text x="1130.6" y="187.0" font-size="11" font-weight="700" fill="#a6e22e" text-anchor="middle">propagation</text>
+</g>
+<g class="hv" data-node="21" data-crit="0.0000" data-dispatch="1.0670" data-slack="1254.8178" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="frustum_cull&#10;Exec: mean 729 | P95 931 | σ 182 (CV 25.0%) | min/max 302/964 µs&#10;True busy (body+slices+async): mean 952 µs&#10;Critical: in 0.0% of runs&#10;Slack: 1255 µs&#10;Dispatch wait: mean 1.1 µs&#10;Access: transforms: `a6e22eRO`; camera: `a6e22eRO`; renderables: `a6e22eRO`; visibility: `ff5f45RW`&#10;-&gt;|  `a6e22ecamera`&#10;|-&gt;  `a6e22eflip`, `a6e22eocclusion_cull`, `a6e22estats`">
+<rect x="191.9" y="233.0" width="148.2" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="266.0" y="247.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">frustum_cull</text>
+</g>
+<g class="hv" data-node="22" data-crit="0.0000" data-dispatch="0.9430" data-slack="1254.8178" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="occlusion_cull&#10;Exec: mean 793 | P95 915 | σ 155 (CV 19.5%) | min/max 347/944 µs&#10;True busy (body+slices+async): mean 935 µs&#10;Critical: in 0.0% of runs&#10;Slack: 1255 µs&#10;Dispatch wait: mean 0.9 µs&#10;Access: transforms: `a6e22eRO`; visibility: `a6e22eRO`; vis_final: `ff5f45RW`&#10;-&gt;|  `a6e22efrustum_cull`&#10;|-&gt;  `a6e22eflip`, `a6e22ecmd_record`">
+<rect x="342.0" y="233.0" width="168.6" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="426.3" y="247.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">occlusion_cull</text>
+</g>
+<g class="hv" data-node="23" data-crit="0.0000" data-dispatch="5.7840" data-slack="2391.0761" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="shadow&#10;Exec: mean 739 | P95 1016 | σ 250 (CV 33.8%) | min/max 268/1029 µs&#10;True busy (body+slices+async): mean 1031 µs&#10;Critical: in 0.0% of runs&#10;Slack: 2391 µs&#10;Dispatch wait: mean 5.8 µs&#10;Access: transforms: `a6e22eRO`; skeletons: `a6e22eRO`; shadow_map: `ff5f45RW`&#10;|-&gt;  `a6e22eflip`, `a6e22ecmd_record`">
+<rect x="26.5" y="233.0" width="143.6" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="98.4" y="247.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">shadow</text>
+</g>
+<g class="hv" data-node="24" data-crit="0.0000" data-dispatch="37.3760" data-slack="1254.8178" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="cmd_record&#10;Exec: mean 1788 | P95 2659 | σ 518 (CV 29.0%) | min/max 788/2856 µs&#10;True busy (body+slices+async): mean 3178 µs&#10;Critical: in 0.0% of runs&#10;Slack: 1255 µs&#10;Dispatch wait: mean 37.4 µs&#10;Access: vis_final: `a6e22eRO`; shadow_map: `a6e22eRO`; renderables: `a6e22eRO`&#10;-&gt;|  `a6e22eocclusion_cull`, `a6e22eshadow`&#10;|-&gt;  `a6e22esubmit`, `a6e22eflip`">
+<rect x="510.6" y="233.0" width="363.2" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="692.2" y="247.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">cmd_record</text>
+</g>
+<g class="hv" data-node="25" data-crit="0.0000" data-dispatch="6.0940" data-slack="3211.3385" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="particles&#10;Exec: mean 1181 | P95 1941 | σ 343 (CV 29.1%) | min/max 559/2012 µs&#10;True busy (body+slices+async): mean 2063 µs&#10;Critical: in 0.0% of runs&#10;Slack: 3211 µs&#10;Dispatch wait: mean 6.1 µs&#10;Access: transforms: `a6e22eRO`; particles: `ff5f45RW`&#10;|-&gt;  `a6e22esubmit`, `a6e22eflip`, `a6e22evfx`, `a6e22egc`">
+<rect x="27.1" y="263.0" width="228.2" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="141.2" y="277.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">particles</text>
+</g>
+<g class="hv" data-node="26" data-crit="0.0000" data-dispatch="344.8130" data-slack="2092.7891" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="UI&#10;Exec: mean 895 | P95 1504 | σ 332 (CV 37.1%) | min/max 380/1566 µs&#10;True busy (body+slices+async): mean 1604 µs&#10;Critical: in 0.0% of runs&#10;Slack: 2093 µs&#10;Dispatch wait: mean 345 µs&#10;Access: quests: `a6e22eRO`; UI: `ff5f45RW`&#10;-&gt;|  `a6e22equests`&#10;|-&gt;  `a6e22esubmit`, `a6e22eflip`">
+<rect x="697.2" y="263.0" width="170.1" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="782.3" y="277.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">UI</text>
+</g>
+<g class="hv" data-node="27" data-crit="0.0000" data-dispatch="11.6940" data-slack="1254.8178" data-hl="#66d9ef" data-nc="#ff5f45" data-prio="high-pri" data-pc="#ff5f45" data-tip="submit&#10;Exec: mean 330 | P95 508 | σ 91.8 (CV 27.8%) | min/max 157/691 µs&#10;True busy (body+slices+async): mean 860 µs&#10;Critical: in 0.0% of runs&#10;Slack: 1255 µs&#10;Dispatch wait: mean 11.7 µs&#10;Access: transforms: `a6e22eRO`; draw_lists: `ff5f45RW`&#10;-&gt;|  `a6e22ecmd_record`, `a6e22eparticles`, `a6e22eUI`&#10;|-&gt;  `a6e22eflip`">
+<rect x="948.6" y="293.0" width="68.4" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="982.8" y="307.0" font-size="11" font-weight="400" fill="#ff5f45" text-anchor="middle">submit</text>
+</g>
+<g class="hv" data-node="28" data-crit="0.0100" data-dispatch="522.0400" data-slack="3549.9525" data-hl="#66d9ef" data-nc="#bab8ad" data-prio="low-pri" data-pc="#bab8ad" data-tip="audio&#10;Exec: mean 1606 | P95 1611 | σ 3.2 (CV 0.2%) | min/max 1604/1624 µs&#10;True busy (body+slices+async): mean 1605 µs&#10;Critical: in 1.0% of runs&#10;Slack: 3550 µs&#10;Dispatch wait: mean 522 µs&#10;Access: transforms: `a6e22eRO`; audio_out: `ff5f45RW`&#10;|-&gt;  `a6e22eflip`">
+<rect x="38.6" y="323.0" width="336.9" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="207.0" y="337.0" font-size="11" font-weight="400" fill="#bab8ad" text-anchor="middle">audio</text>
+</g>
+<g class="hv" data-node="29" data-crit="0.0000" data-dispatch="363.3990" data-slack="3460.6134" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="vfx&#10;Exec: mean 609 | P95 616 | σ 4.7 (CV 0.8%) | min/max 604/643 µs&#10;True busy (body+slices+async): mean 609 µs&#10;Critical: in 0.0% of runs&#10;Slack: 3461 µs&#10;Dispatch wait: mean 363 µs&#10;Access: transforms: `a6e22eRO`; particles: `a6e22eRO`; vfx: `ff5f45RW`&#10;-&gt;|  `a6e22eparticles`&#10;|-&gt;  `a6e22eflip`">
+<rect x="314.8" y="293.0" width="127.5" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="378.6" y="307.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">vfx</text>
+</g>
+<g class="hv" data-node="30" data-crit="0.0000" data-dispatch="57.9070" data-slack="908.8609" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="replication&#10;Exec: mean 415 | P95 423 | σ 5.6 (CV 1.3%) | min/max 410/427 µs&#10;True busy (body+slices+async): mean 415 µs&#10;Critical: in 0.0% of runs&#10;Slack: 909 µs&#10;Dispatch wait: mean 57.9 µs&#10;Access: combat: `a6e22eRO`; economy: `a6e22eRO`; quests: `a6e22eRO`; intents: `a6e22eRO`; replication: `ff5f45RW`&#10;-&gt;|  `a6e22ecombat`, `a6e22eeconomy`, `a6e22equests`, `a6e22eAI`">
+<rect x="862.5" y="203.0" width="86.4" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="905.7" y="217.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">replication</text>
+</g>
+<g class="hv" data-node="31" data-crit="0.0100" data-dispatch="28.0110" data-slack="1493.3977" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="stats&#10;Exec: mean 315 | P95 323 | σ 5.2 (CV 1.7%) | min/max 310/327 µs&#10;True busy (body+slices+async): mean 315 µs&#10;Critical: in 1.0% of runs&#10;Slack: 1493 µs&#10;Dispatch wait: mean 28.0 µs&#10;Access: combat: `a6e22eRO`; economy: `a6e22eRO`; bodies: `a6e22eRO`; visibility: `a6e22eRO`; stats: `ff5f45RW`&#10;-&gt;|  `a6e22ecombat`, `a6e22eeconomy`, `a6e22efinalize`, `a6e22efrustum_cull`">
+<rect x="914.5" y="263.0" width="65.6" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="947.3" y="277.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">stats</text>
+</g>
+<g class="hv" data-node="32" data-crit="0.0000" data-dispatch="1802.0600" data-slack="4295.1795" data-hl="#66d9ef" data-nc="#bab8ad" data-prio="low-pri" data-pc="#bab8ad" data-tip="asset_commit&#10;Exec: mean 2.7 | P95 5.0 | σ 1.5 (CV 53.9%) | min/max 0.5/6.3 µs&#10;True busy (body+slices+async): mean 2.5 µs&#10;Critical: in 0.0% of runs&#10;Slack: 4295 µs&#10;Dispatch wait: mean 1802 µs&#10;Access: assets: `ff5f45RW`&#10;|-&gt;  `a6e22egc`">
+<rect x="322.0" y="383.0" width="3.0" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="330.0" y="397.0" font-size="10" font-weight="400" fill="#bab8ad">asset_commit</text>
+</g>
+<g class="hv" data-node="33" data-crit="0.0000" data-dispatch="0.8330" data-slack="3211.3385" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="gc&#10;Exec: mean 800 | P95 1020 | σ 234 (CV 29.2%) | min/max 273/1052 µs&#10;True busy (body+slices+async): mean 1055 µs&#10;Critical: in 0.0% of runs&#10;Slack: 3211 µs&#10;Dispatch wait: mean 0.8 µs&#10;Access: assets: `a6e22eRO`; renderables: `a6e22eRO`; particles: `a6e22eRO`; gc: `ff5f45RW`&#10;-&gt;|  `a6e22eparticles`, `a6e22easset_commit`">
+<rect x="370.0" y="383.0" width="181.0" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="460.5" y="397.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">gc</text>
+</g>
+<g class="hv" data-node="34" data-crit="0.0000" data-dispatch="879.6140" data-slack="3023.9642" data-hl="#66d9ef" data-nc="#bab8ad" data-prio="low-pri" data-pc="#bab8ad" data-tip="debug_overlay&#10;Exec: mean 205 | P95 208 | σ 2.0 (CV 1.0%) | min/max 204/217 µs&#10;True busy (body+slices+async): mean 205 µs&#10;Critical: in 0.0% of runs&#10;Slack: 3024 µs&#10;Dispatch wait: mean 880 µs&#10;Access: economy: `a6e22eRO`; transforms: `a6e22eRO`&#10;-&gt;|  `a6e22eeconomy`&#10;|-&gt;  `a6e22eflip`">
+<rect x="913.3" y="173.0" width="43.0" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="961.2" y="187.0" font-size="10" font-weight="400" fill="#bab8ad">debug_overlay</text>
+</g>
+<g class="hv" data-node="35" data-crit="0.0000" data-dispatch="9.7410" data-slack="3944.2064" data-hl="#66d9ef" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="cloth&#10;Exec: mean 1233 | P95 1907 | σ 312 (CV 25.3%) | min/max 534/2018 µs&#10;True busy (body+slices+async): mean 2077 µs&#10;Critical: in 0.0% of runs&#10;Slack: 3944 µs&#10;Dispatch wait: mean 9.7 µs&#10;Access: transforms: `a6e22eRO`; cloth: `ff5f45RW`&#10;|-&gt;  `a6e22eflip`">
+<rect x="28.0" y="293.0" width="254.2" height="20" rx="3" fill="#3e3d32" stroke="#66d9ef" stroke-width="1.0"/>
+<text x="155.0" y="307.0" font-size="11" font-weight="400" fill="#a6e22e" text-anchor="middle">cloth</text>
+</g>
+<g class="hv" data-node="36" data-crit="0.9200" data-dispatch="2.1270" data-slack="0.0000" data-hl="#fd971f" data-nc="#a6e22e" data-prio="normal-pri" data-pc="#a6e22e" data-tip="flip&#10;Exec: mean 5.9 | P95 11.6 | σ 3.0 (CV 50.9%) | min/max 2.4/27.3 µs&#10;True busy (body+slices+async): mean 3.1 µs&#10;Critical: in 92.0% of runs&#10;Dispatch wait: mean 2.1 µs&#10;Access: transforms: `ff5f45RW`&#10;-&gt;|  `f92672propagation`, `a6e22efrustum_cull`, `a6e22eocclusion_cull`, `a6e22eshadow`, `a6e22ecmd_record`, `a6e22eparticles`, `a6e22eUI`, `a6e22esubmit`, `a6e22eaudio`, `a6e22evfx`, `a6e22edebug_overlay`, `a6e22ecloth`, `a6e22ecombat`, `a6e22eeconomy`, `a6e22equests`, `a6e22enavigation`, `a6e22eAI`">
+<rect x="1172.9" y="173.0" width="3.0" height="20" rx="3" fill="#3e3d32" stroke="#fd971f" stroke-width="2.5"/>
+<text x="1180.9" y="187.0" font-size="10" font-weight="700" fill="#a6e22e">flip</text>
+</g>
+<g class="hv edge" data-a="11" data-b="12" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;Critical: in 0.0% of runs">
+<path d="M 821.5 303.0 C 856.2 303.0, 854.0 273.0, 888.7 273.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 821.5 303.0 C 856.2 303.0, 854.0 273.0, 888.7 273.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="881.7,269.5 881.7,276.5 888.2,273.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="20" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.9100" data-kind="explicit" data-hl="#f92672" data-tip="explicit ordering&#10;Critical: in 91.0% of runs&#10;Critical wait: 2.3 µs mean&#10;Dead time: 12.9 µs (drawn gap, 91.0% of runs weighted)&#10;Cause: unclassified (no utilization data for this window)&#10;Handoff: back-to-back with the predecessor">
+<circle cx="1171.6" cy="183.0" r="9" fill="transparent"/>
+<circle cx="1171.6" cy="183.0" r="4.5" fill="#f92672"/>
+</g>
+<g class="hv edge" data-a="21" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;&quot;transforms&quot; access&#10;frustum_cull `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 340.1 243.0 C 404.1 243.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 340.1 243.0 C 404.1 243.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="22" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;&quot;transforms&quot; access&#10;occlusion_cull `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 510.6 243.0 C 574.6 243.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 510.6 243.0 C 574.6 243.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="23" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;&quot;transforms&quot; access&#10;shadow `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 170.2 243.0 C 234.2 243.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 170.2 243.0 C 234.2 243.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="24" data-b="27" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;Critical: in 0.0% of runs">
+<path d="M 873.8 243.0 C 916.5 243.0, 906.0 303.0, 948.6 303.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 873.8 243.0 C 916.5 243.0, 906.0 303.0, 948.6 303.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="941.6,299.5 941.6,306.5 948.1,303.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="24" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;Critical: in 0.0% of runs">
+<path d="M 873.8 243.0 C 937.8 243.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 873.8 243.0 C 937.8 243.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="25" data-b="27" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;Critical: in 0.0% of runs">
+<path d="M 255.3 273.0 C 319.3 273.0, 884.6 303.0, 948.6 303.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 255.3 273.0 C 319.3 273.0, 884.6 303.0, 948.6 303.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="941.6,299.5 941.6,306.5 948.1,303.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="25" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;&quot;transforms&quot; access&#10;particles `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 255.3 273.0 C 319.3 273.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 255.3 273.0 C 319.3 273.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="26" data-b="27" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;Critical: in 0.0% of runs">
+<path d="M 867.3 273.0 C 908.4 273.0, 907.5 303.0, 948.6 303.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 867.3 273.0 C 908.4 273.0, 907.5 303.0, 948.6 303.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="941.6,299.5 941.6,306.5 948.1,303.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="26" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;Critical: in 0.0% of runs">
+<path d="M 867.3 273.0 C 931.3 273.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 867.3 273.0 C 931.3 273.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="27" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;&quot;transforms&quot; access&#10;submit `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 1017.0 303.0 C 1081.0 303.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 1017.0 303.0 C 1081.0 303.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="28" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0100" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;&quot;transforms&quot; access&#10;audio `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 1.0% of runs">
+<path d="M 375.5 333.0 C 439.5 333.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 375.5 333.0 C 439.5 333.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="29" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;&quot;transforms&quot; access&#10;vfx `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 442.4 303.0 C 506.4 303.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 442.4 303.0 C 506.4 303.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="34" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;&quot;transforms&quot; access&#10;debug_overlay `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 956.2 183.0 C 1020.2 183.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 956.2 183.0 C 1020.2 183.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="35" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="explicit" data-hl="#a6e22e" data-tip="explicit ordering&#10;&quot;transforms&quot; access&#10;cloth `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 282.1 303.0 C 346.1 303.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 282.1 303.0 C 346.1 303.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="2.0"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="0" data-b="1" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;input&quot; access&#10;input `ff5f45RW` -&gt; camera `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 46.2 183.0 C 110.2 183.0, 105.9 363.0, 169.9 363.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 46.2 183.0 C 110.2 183.0, 105.9 363.0, 169.9 363.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="162.9,359.5 162.9,366.5 169.4,363.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="0" data-b="2" data-op="0.20" opacity="0.20" data-crit="0.0400" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;input&quot; access&#10;input `ff5f45RW` -&gt; networking `a6e22eRO`&#10;Critical: in 4.0% of runs">
+<path d="M 46.2 183.0 C 110.2 183.0, 173.3 363.0, 237.3 363.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 46.2 183.0 C 110.2 183.0, 173.3 363.0, 237.3 363.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="230.3,359.5 230.3,366.5 236.8,363.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="0" data-b="3" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;input&quot; access&#10;input `ff5f45RW` -&gt; scripting `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 46.2 183.0 C 110.2 183.0, 278.3 363.0, 342.3 363.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 46.2 183.0 C 110.2 183.0, 278.3 363.0, 342.3 363.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="335.3,359.5 335.3,366.5 341.8,363.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="0" data-b="4" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;input&quot; access&#10;input `ff5f45RW` -&gt; streaming `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 46.2 183.0 C 110.2 183.0, 208.5 273.0, 272.5 273.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 46.2 183.0 C 110.2 183.0, 208.5 273.0, 272.5 273.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="265.5,269.5 265.5,276.5 272.0,273.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="0" data-b="5" data-op="0.20" opacity="0.20" data-crit="0.9500" data-kind="derived" data-hl="#f92672" data-tip="derived from declared access&#10;&quot;input&quot; access&#10;input `ff5f45RW` -&gt; navmesh_rebuild `a6e22eRO`&#10;Critical: in 95.0% of runs&#10;Critical wait: 53.2 µs mean&#10;Handoff: back-to-back with the predecessor">
+<circle cx="46.4" cy="183.0" r="9" fill="transparent"/>
+<circle cx="46.4" cy="183.0" r="4.5" fill="#f92672"/>
+</g>
+<g class="hv edge" data-a="0" data-b="6" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;input&quot; access&#10;input `ff5f45RW` -&gt; combat `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 46.2 183.0 C 110.2 183.0, 447.3 303.0, 511.3 303.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 46.2 183.0 C 110.2 183.0, 447.3 303.0, 511.3 303.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="504.3,299.5 504.3,306.5 510.8,303.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="0" data-b="7" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;input&quot; access&#10;input `ff5f45RW` -&gt; economy `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 46.2 183.0 C 110.2 183.0, 485.2 333.0, 549.2 333.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 46.2 183.0 C 110.2 183.0, 485.2 333.0, 549.2 333.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="542.2,329.5 542.2,336.5 548.7,333.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="0" data-b="8" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;input&quot; access&#10;input `ff5f45RW` -&gt; quests `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 46.2 183.0 C 110.2 183.0, 406.4 213.0, 470.4 213.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 46.2 183.0 C 110.2 183.0, 406.4 213.0, 470.4 213.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="463.4,209.5 463.4,216.5 469.9,213.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="1" data-b="21" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;camera&quot; access&#10;camera `ff5f45RW` -&gt; frustum_cull `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 186.9 363.0 C 207.1 363.0, 171.7 243.0, 191.9 243.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 186.9 363.0 C 207.1 363.0, 171.7 243.0, 191.9 243.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="184.9,239.5 184.9,246.5 191.4,243.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="2" data-b="3" data-op="0.20" opacity="0.20" data-crit="0.0400" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;net&quot; access&#10;networking `ff5f45RW` -&gt; scripting `a6e22eRO`&#10;Critical: in 4.0% of runs">
+<path d="M 334.5 363.0 C 352.5 363.0, 324.3 363.0, 342.3 363.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 334.5 363.0 C 352.5 363.0, 324.3 363.0, 342.3 363.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="335.3,359.5 335.3,366.5 341.8,363.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="2" data-b="6" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;net&quot; access&#10;networking `ff5f45RW` -&gt; combat `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 334.5 363.0 C 398.5 363.0, 447.3 303.0, 511.3 303.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 334.5 363.0 C 398.5 363.0, 447.3 303.0, 511.3 303.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="504.3,299.5 504.3,306.5 510.8,303.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="2" data-b="7" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;net&quot; access&#10;networking `ff5f45RW` -&gt; economy `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 334.5 363.0 C 398.5 363.0, 485.2 333.0, 549.2 333.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 334.5 363.0 C 398.5 363.0, 485.2 333.0, 549.2 333.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="542.2,329.5 542.2,336.5 548.7,333.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="2" data-b="8" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;net&quot; access&#10;networking `ff5f45RW` -&gt; quests `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 334.5 363.0 C 398.5 363.0, 406.4 213.0, 470.4 213.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 334.5 363.0 C 398.5 363.0, 406.4 213.0, 470.4 213.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="463.4,209.5 463.4,216.5 469.9,213.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="3" data-b="6" data-op="0.20" opacity="0.20" data-crit="0.0400" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;script_events&quot; access&#10;scripting `ff5f45RW` -&gt; combat `a6e22eRO`&#10;Critical: in 4.0% of runs">
+<path d="M 469.7 363.0 C 497.4 363.0, 483.6 303.0, 511.3 303.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 469.7 363.0 C 497.4 363.0, 483.6 303.0, 511.3 303.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="504.3,299.5 504.3,306.5 510.8,303.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="3" data-b="7" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;script_events&quot; access&#10;scripting `ff5f45RW` -&gt; economy `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 469.7 363.0 C 509.9 363.0, 508.9 333.0, 549.2 333.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 469.7 363.0 C 509.9 363.0, 508.9 333.0, 549.2 333.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="542.2,329.5 542.2,336.5 548.7,333.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="3" data-b="8" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;script_events&quot; access&#10;scripting `ff5f45RW` -&gt; quests `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 469.7 363.0 C 492.5 363.0, 447.5 213.0, 470.4 213.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 469.7 363.0 C 492.5 363.0, 447.5 213.0, 470.4 213.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="463.4,209.5 463.4,216.5 469.9,213.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="5" data-b="9" data-op="0.20" opacity="0.20" data-crit="0.9500" data-kind="derived" data-hl="#f92672" data-tip="derived from declared access&#10;&quot;nav_tiles&quot; access&#10;navmesh_rebuild `ff5f45RW` -&gt; navigation `a6e22eRO`&#10;Critical: in 95.0% of runs&#10;Critical wait: 0.9 µs mean&#10;Handoff: back-to-back with the predecessor">
+<circle cx="173.9" cy="183.0" r="9" fill="transparent"/>
+<circle cx="173.9" cy="183.0" r="4.5" fill="#f92672"/>
+</g>
+<g class="hv edge" data-a="6" data-b="11" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;combat&quot; access&#10;combat `ff5f45RW` -&gt; gameplay_snapshot `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 619.2 303.0 C 683.2 303.0, 734.8 303.0, 798.8 303.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 619.2 303.0 C 683.2 303.0, 734.8 303.0, 798.8 303.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="791.8,299.5 791.8,306.5 798.3,303.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="6" data-b="18" data-op="0.20" opacity="0.20" data-crit="0.0400" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;combat&quot; access&#10;combat `ff5f45RW` -&gt; solver `a6e22eRO`&#10;Critical: in 4.0% of runs">
+<path d="M 619.2 303.0 C 640.3 303.0, 615.0 213.0, 636.1 213.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 619.2 303.0 C 640.3 303.0, 615.0 213.0, 636.1 213.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="629.1,209.5 629.1,216.5 635.6,213.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="6" data-b="30" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;combat&quot; access&#10;combat `ff5f45RW` -&gt; replication `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 619.2 303.0 C 683.2 303.0, 798.5 213.0, 862.5 213.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 619.2 303.0 C 683.2 303.0, 798.5 213.0, 862.5 213.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="855.5,209.5 855.5,216.5 862.0,213.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="6" data-b="31" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;combat&quot; access&#10;combat `ff5f45RW` -&gt; stats `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 619.2 303.0 C 683.2 303.0, 850.5 273.0, 914.5 273.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 619.2 303.0 C 683.2 303.0, 850.5 273.0, 914.5 273.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="907.5,269.5 907.5,276.5 914.0,273.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="6" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;transforms&quot; access&#10;combat `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 619.2 303.0 C 683.2 303.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 619.2 303.0 C 683.2 303.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="7" data-b="11" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;economy&quot; access&#10;economy `ff5f45RW` -&gt; gameplay_snapshot `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 698.7 333.0 C 748.2 333.0, 749.2 303.0, 798.8 303.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 698.7 333.0 C 748.2 333.0, 749.2 303.0, 798.8 303.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="791.8,299.5 791.8,306.5 798.3,303.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="7" data-b="30" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;economy&quot; access&#10;economy `ff5f45RW` -&gt; replication `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 698.7 333.0 C 762.7 333.0, 798.5 213.0, 862.5 213.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 698.7 333.0 C 762.7 333.0, 798.5 213.0, 862.5 213.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="855.5,209.5 855.5,216.5 862.0,213.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="7" data-b="31" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;economy&quot; access&#10;economy `ff5f45RW` -&gt; stats `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 698.7 333.0 C 762.7 333.0, 850.5 273.0, 914.5 273.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 698.7 333.0 C 762.7 333.0, 850.5 273.0, 914.5 273.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="907.5,269.5 907.5,276.5 914.0,273.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="7" data-b="34" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;economy&quot; access&#10;economy `ff5f45RW` -&gt; debug_overlay `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 698.7 333.0 C 762.7 333.0, 849.3 183.0, 913.3 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 698.7 333.0 C 762.7 333.0, 849.3 183.0, 913.3 183.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="906.3,179.5 906.3,186.5 912.8,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="7" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;transforms&quot; access&#10;economy `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 698.7 333.0 C 762.7 333.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 698.7 333.0 C 762.7 333.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="8" data-b="11" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;quests&quot; access&#10;quests `ff5f45RW` -&gt; gameplay_snapshot `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 619.8 213.0 C 683.8 213.0, 734.8 303.0, 798.8 303.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 619.8 213.0 C 683.8 213.0, 734.8 303.0, 798.8 303.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="791.8,299.5 791.8,306.5 798.3,303.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="8" data-b="26" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;quests&quot; access&#10;quests `ff5f45RW` -&gt; UI `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 619.8 213.0 C 663.6 213.0, 653.4 273.0, 697.2 273.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 619.8 213.0 C 663.6 213.0, 653.4 273.0, 697.2 273.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="690.2,269.5 690.2,276.5 696.7,273.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="8" data-b="30" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;quests&quot; access&#10;quests `ff5f45RW` -&gt; replication `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 619.8 213.0 C 683.8 213.0, 798.5 213.0, 862.5 213.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 619.8 213.0 C 683.8 213.0, 798.5 213.0, 862.5 213.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="855.5,209.5 855.5,216.5 862.0,213.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="8" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;transforms&quot; access&#10;quests `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 619.8 213.0 C 683.8 213.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 619.8 213.0 C 683.8 213.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="9" data-b="10" data-op="0.20" opacity="0.20" data-crit="0.9500" data-kind="derived" data-hl="#f92672" data-tip="derived from declared access&#10;&quot;paths&quot; access&#10;navigation `ff5f45RW` -&gt; AI `a6e22eRO`&#10;Critical: in 95.0% of runs&#10;Critical wait: 22.3 µs mean&#10;Dead time: 53.6 µs (drawn gap, 95.0% of runs weighted)&#10;Cause: `fd971fcore-bound` (cores 99.8% busy during gap, 99.7-99.9% across buckets)&#10;Lever: add workers or move off-path work out of this window">
+<path d="M 513.8 183.0 C 531.8 183.0, 507.1 183.0, 525.1 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 513.8 183.0 C 531.8 183.0, 507.1 183.0, 525.1 183.0" fill="none" stroke="#f92672" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="518.1,179.5 518.1,186.5 524.6,183.0" fill="#f92672"/>
+</g>
+<g class="hv edge" data-a="9" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;transforms&quot; access&#10;navigation `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 513.8 183.0 C 577.8 183.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 513.8 183.0 C 577.8 183.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="10" data-b="12" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;gameplay&quot; access&#10;AI `a6e22eRO` -&gt; gameplay_flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 843.0 183.0 C 877.1 183.0, 854.6 273.0, 888.7 273.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 843.0 183.0 C 877.1 183.0, 854.6 273.0, 888.7 273.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="881.7,269.5 881.7,276.5 888.2,273.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="10" data-b="13" data-op="0.20" opacity="0.20" data-crit="0.9500" data-kind="derived" data-hl="#f92672" data-tip="derived from declared access&#10;&quot;intents&quot; access&#10;AI `ff5f45RW` -&gt; anim_graph `a6e22eRO`&#10;Critical: in 95.0% of runs&#10;Critical wait: 175 µs mean&#10;Dead time: 217 µs (drawn gap, 95.0% of runs weighted)&#10;Cause: `fd971fcore-bound` (cores 99.8% busy during gap, 99.7-99.9% across buckets)&#10;Lever: add workers or move off-path work out of this window">
+<path d="M 843.0 183.0 C 872.4 183.0, 859.0 243.0, 888.5 243.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 843.0 183.0 C 872.4 183.0, 859.0 243.0, 888.5 243.0" fill="none" stroke="#f92672" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="881.5,239.5 881.5,246.5 888.0,243.0" fill="#f92672"/>
+</g>
+<g class="hv edge" data-a="10" data-b="30" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;intents&quot; access&#10;AI `ff5f45RW` -&gt; replication `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 843.0 183.0 C 861.0 183.0, 844.5 213.0, 862.5 213.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 843.0 183.0 C 861.0 183.0, 844.5 213.0, 862.5 213.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="855.5,209.5 855.5,216.5 862.0,213.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="10" data-b="36" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;transforms&quot; access&#10;AI `a6e22eRO` -&gt; flip `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 843.0 183.0 C 907.0 183.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 843.0 183.0 C 907.0 183.0, 1108.9 183.0, 1172.9 183.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="1165.9,179.5 1165.9,186.5 1172.4,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="13" data-b="14" data-op="0.20" opacity="0.20" data-crit="0.9500" data-kind="derived" data-hl="#f92672" data-tip="derived from declared access&#10;&quot;anim_pose&quot; access&#10;anim_graph `ff5f45RW` -&gt; ik_post `a6e22eRO`&#10;Critical: in 95.0% of runs&#10;Critical wait: 8.1 µs mean&#10;Dead time: 15.6 µs (drawn gap, 95.0% of runs weighted)&#10;Cause: `e6db74mixed` (cores 74.0% busy during gap, 73.9-74.5% across buckets)&#10;Lever: both apply -- part capacity, part dependency">
+<path d="M 1041.0 243.0 C 1059.0 243.0, 1026.3 183.0, 1044.3 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 1041.0 243.0 C 1059.0 243.0, 1026.3 183.0, 1044.3 183.0" fill="none" stroke="#f92672" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="1037.3,179.5 1037.3,186.5 1043.8,183.0" fill="#f92672"/>
+</g>
+<g class="hv edge" data-a="14" data-b="15" data-op="0.20" opacity="0.20" data-crit="0.0700" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;local_xf&quot; access&#10;ik_post `ff5f45RW` -&gt; skinning `a6e22eRO`&#10;Critical: in 7.0% of runs">
+<path d="M 1088.7 183.0 C 1106.7 183.0, 1073.3 213.0, 1091.3 213.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 1088.7 183.0 C 1106.7 183.0, 1073.3 213.0, 1091.3 213.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="1084.3,209.5 1084.3,216.5 1090.8,213.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="14" data-b="20" data-op="0.20" opacity="0.20" data-crit="0.8800" data-kind="derived" data-hl="#f92672" data-tip="derived from declared access&#10;&quot;local_xf&quot; access&#10;ik_post `ff5f45RW` -&gt; propagation `a6e22eRO`&#10;Critical: in 88.0% of runs&#10;Critical wait: 9.2 µs mean&#10;Dead time: 11.1 µs (drawn gap, 88.0% of runs weighted)&#10;Cause: `e6db74mixed` (cores 70.7% busy during gap, 70.7-70.7% across buckets)&#10;Lever: both apply -- part capacity, part dependency&#10;Handoff: back-to-back with the predecessor">
+<circle cx="1089.8" cy="183.0" r="9" fill="transparent"/>
+<circle cx="1089.8" cy="183.0" r="4.5" fill="#f92672"/>
+</g>
+<g class="hv edge" data-a="16" data-b="17" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;broad_pairs&quot; access&#10;broadphase `ff5f45RW` -&gt; narrowphase `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 131.0 213.0 C 149.0 213.0, 118.5 213.0, 136.5 213.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 131.0 213.0 C 149.0 213.0, 118.5 213.0, 136.5 213.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="129.5,209.5 129.5,216.5 136.0,213.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="16" data-b="19" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;bodies&quot; access&#10;broadphase `a6e22eRO` -&gt; finalize `ff5f45RW`&#10;Critical: in 0.0% of runs">
+<path d="M 131.0 213.0 C 195.0 213.0, 782.2 183.0, 846.2 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 131.0 213.0 C 195.0 213.0, 782.2 183.0, 846.2 183.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="839.2,179.5 839.2,186.5 845.7,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="17" data-b="18" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;contacts&quot; access&#10;narrowphase `ff5f45RW` -&gt; solver `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 451.9 213.0 C 515.9 213.0, 572.1 213.0, 636.1 213.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 451.9 213.0 C 515.9 213.0, 572.1 213.0, 636.1 213.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="629.1,209.5 629.1,216.5 635.6,213.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="18" data-b="19" data-op="0.20" opacity="0.20" data-crit="0.0400" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;velocities&quot; access&#10;solver `ff5f45RW` -&gt; finalize `a6e22eRO`&#10;Critical: in 4.0% of runs">
+<path d="M 834.6 213.0 C 852.6 213.0, 828.2 183.0, 846.2 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 834.6 213.0 C 852.6 213.0, 828.2 183.0, 846.2 183.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="839.2,179.5 839.2,186.5 845.7,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="18" data-b="20" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;velocities&quot; access&#10;solver `ff5f45RW` -&gt; propagation `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 834.6 213.0 C 898.6 213.0, 1027.0 183.0, 1091.0 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 834.6 213.0 C 898.6 213.0, 1027.0 183.0, 1091.0 183.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="1084.0,179.5 1084.0,186.5 1090.5,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="19" data-b="20" data-op="0.20" opacity="0.20" data-crit="0.0300" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;bodies&quot; access&#10;finalize `ff5f45RW` -&gt; propagation `a6e22eRO`&#10;Critical: in 3.0% of runs">
+<path d="M 910.0 183.0 C 974.0 183.0, 1027.0 183.0, 1091.0 183.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 910.0 183.0 C 974.0 183.0, 1027.0 183.0, 1091.0 183.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="1084.0,179.5 1084.0,186.5 1090.5,183.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="19" data-b="31" data-op="0.20" opacity="0.20" data-crit="0.0100" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;bodies&quot; access&#10;finalize `ff5f45RW` -&gt; stats `a6e22eRO`&#10;Critical: in 1.0% of runs">
+<path d="M 910.0 183.0 C 928.0 183.0, 896.5 273.0, 914.5 273.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 910.0 183.0 C 928.0 183.0, 896.5 273.0, 914.5 273.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="907.5,269.5 907.5,276.5 914.0,273.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="21" data-b="22" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;visibility&quot; access&#10;frustum_cull `ff5f45RW` -&gt; occlusion_cull `a6e22eRO`&#10;Critical: in 0.0% of runs&#10;Handoff: back-to-back with the predecessor">
+<circle cx="341.1" cy="243.0" r="9" fill="transparent"/>
+<circle cx="341.1" cy="243.0" r="4.5" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="21" data-b="31" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;visibility&quot; access&#10;frustum_cull `ff5f45RW` -&gt; stats `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 340.1 243.0 C 404.1 243.0, 850.5 273.0, 914.5 273.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 340.1 243.0 C 404.1 243.0, 850.5 273.0, 914.5 273.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="907.5,269.5 907.5,276.5 914.0,273.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="22" data-b="24" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;vis_final&quot; access&#10;occlusion_cull `ff5f45RW` -&gt; cmd_record `a6e22eRO`&#10;Critical: in 0.0% of runs&#10;Handoff: back-to-back with the predecessor">
+<circle cx="510.6" cy="243.0" r="9" fill="transparent"/>
+<circle cx="510.6" cy="243.0" r="4.5" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="23" data-b="24" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;shadow_map&quot; access&#10;shadow `ff5f45RW` -&gt; cmd_record `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 170.2 243.0 C 234.2 243.0, 446.6 243.0, 510.6 243.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 170.2 243.0 C 234.2 243.0, 446.6 243.0, 510.6 243.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="503.6,239.5 503.6,246.5 510.1,243.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="25" data-b="29" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;particles&quot; access&#10;particles `ff5f45RW` -&gt; vfx `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 255.3 273.0 C 286.6 273.0, 283.5 303.0, 314.8 303.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 255.3 273.0 C 286.6 273.0, 283.5 303.0, 314.8 303.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="307.8,299.5 307.8,306.5 314.3,303.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="25" data-b="33" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;particles&quot; access&#10;particles `ff5f45RW` -&gt; gc `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 255.3 273.0 C 319.3 273.0, 306.0 393.0, 370.0 393.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 255.3 273.0 C 319.3 273.0, 306.0 393.0, 370.0 393.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="363.0,389.5 363.0,396.5 369.5,393.0" fill="#a6e22e"/>
+</g>
+<g class="hv edge" data-a="32" data-b="33" data-op="0.20" opacity="0.20" data-crit="0.0000" data-kind="derived" data-hl="#a6e22e" data-tip="derived from declared access&#10;&quot;assets&quot; access&#10;asset_commit `ff5f45RW` -&gt; gc `a6e22eRO`&#10;Critical: in 0.0% of runs">
+<path d="M 325.0 393.0 C 345.3 393.0, 349.8 393.0, 370.0 393.0" fill="none" stroke="transparent" stroke-width="9"/>
+<path d="M 325.0 393.0 C 345.3 393.0, 349.8 393.0, 370.0 393.0" fill="none" stroke="#a6e22e" stroke-width="1.5" stroke-dasharray="5,3"/>
+<polygon points="363.0,389.5 363.0,396.5 369.5,393.0" fill="#a6e22e"/>
+</g>
+<style>.hv{cursor:default}.term{cursor:help}</style>
+<script><![CDATA[
+(function(){
+var svg=document.documentElement;
+var NS='http://www.w3.org/2000/svg';
+Array.prototype.forEach.call(document.querySelectorAll('.term'),function(el){
+  var b=el.getBBox();var r=document.createElementNS(NS,'rect');
+  r.setAttribute('x',(b.x-4).toFixed(1));r.setAttribute('y',(b.y+2).toFixed(1));
+  r.setAttribute('width',(b.width+8).toFixed(1));r.setAttribute('height',(b.height).toFixed(1));
+  r.setAttribute('rx','4');r.setAttribute('fill','#4d4436');r.setAttribute('pointer-events','none');
+  r.setAttribute('stroke','#ffffff');r.setAttribute('stroke-width','0.6');r.setAttribute('stroke-opacity','0.35');
+  var tp=el.parentNode;tp.parentNode.insertBefore(r,tp);
+});
+var tt=document.createElementNS(NS,'g');
+tt.setAttribute('visibility','hidden');tt.setAttribute('pointer-events','none');tt.setAttribute('opacity','0.8');
+var bg=document.createElementNS(NS,'rect');
+bg.setAttribute('fill','#1d1e19');bg.setAttribute('fill-opacity','0.96');
+bg.setAttribute('stroke','#66d9ef');bg.setAttribute('rx','4');
+var tx=document.createElementNS(NS,'text');
+tx.setAttribute('font-size','11');tx.setAttribute('font-family',"'Segoe UI', sans-serif");
+tt.appendChild(bg);tt.appendChild(tx);svg.appendChild(tt);
+function segs(parent,text,def){
+  var parts=text.split('`');
+  for(var j=0;j<parts.length;j++){
+    var s=document.createElementNS(NS,'tspan');
+    if(j%2===0){if(!parts[j])continue;s.setAttribute('fill',def);s.textContent=parts[j];}
+    else{var t2=parts[j].slice(6);if(!t2)continue;s.setAttribute('fill','#'+parts[j].slice(0,6));s.textContent=t2;}
+    parent.appendChild(s);
+  }
+}
+function show(el,evt){
+  while(tx.firstChild)tx.removeChild(tx.firstChild);
+  var lines=(el.getAttribute('data-tip')||'').split('\n');
+  var hl=el.getAttribute('data-hl')||'#66d9ef';
+  var nc=el.getAttribute('data-nc')||hl;
+  bg.setAttribute('stroke',hl);
+  var name=null;
+  for(var i=0;i<lines.length;i++){
+    var t=document.createElementNS(NS,'tspan');
+    t.setAttribute('x','8');t.setAttribute('dy',i===0?'17':'14');
+    if(i===0){
+      t.setAttribute('font-weight','700');t.setAttribute('font-size','13');
+      t.setAttribute('fill',nc);t.textContent=lines[i];name=t;
+    }else{
+      var bt=lines[i].indexOf('`');var p=lines[i].indexOf(': ');
+      if(p>0&&(bt<0||bt>p)){
+        var b=document.createElementNS(NS,'tspan');
+        b.setAttribute('font-weight','700');b.setAttribute('fill','#f8f8f2');
+        b.textContent=lines[i].slice(0,p+1);t.appendChild(b);
+        segs(t,' '+lines[i].slice(p+2),'#cfcfc2');
+      }else if(lines[i].indexOf('->|')===0||lines[i].indexOf('|->')===0){
+        var cut=(bt<0?lines[i].length:bt);
+        var mk=document.createElementNS(NS,'tspan');
+        mk.setAttribute('font-weight','700');mk.setAttribute('fill','#cfcfc2');
+        mk.textContent=lines[i].slice(0,cut);t.appendChild(mk);
+        segs(t,lines[i].slice(cut),'#cfcfc2');
+      }else{segs(t,lines[i],'#cfcfc2');}
+    }
+    tx.appendChild(t);
+  }
+  tt.setAttribute('visibility','visible');
+  var prio=el.getAttribute('data-prio');
+  if(prio&&name){
+    var b0=tx.getBBox();var pr=document.createElementNS(NS,'tspan');
+    pr.setAttribute('y','17');pr.setAttribute('font-weight','700');pr.setAttribute('font-size','12');
+    pr.setAttribute('text-anchor','end');pr.setAttribute('fill',el.getAttribute('data-pc')||nc);
+    pr.textContent=prio;tx.appendChild(pr);
+    var rt=Math.max(b0.x+b0.width, 8+name.getComputedTextLength()+18+pr.getComputedTextLength());
+    pr.setAttribute('x',rt);
+  }
+  move(evt);
+}
+function move(evt){
+  var pt=svg.createSVGPoint();pt.x=evt.clientX;pt.y=evt.clientY;
+  var m=svg.getScreenCTM();if(m)pt=pt.matrixTransform(m.inverse());
+  var b=tx.getBBox();var w=b.width+16,h=b.height+12;
+  bg.setAttribute('width',w);bg.setAttribute('height',h);
+  var vb=svg.viewBox.baseVal;
+  var x=pt.x+14,y=pt.y+14;
+  if(x+w>vb.width-4)x=pt.x-w-10;if(x<4)x=4;
+  if(y+h>vb.height-4)y=pt.y-h-10;if(y<4)y=4;
+  tt.setAttribute('transform','translate('+x+','+y+')');
+}
+var edges=document.querySelectorAll('.edge');
+var bars=document.querySelectorAll('.hv[data-node]');
+var anchor=bars.length?bars[0]:null;
+var fg=document.createElementNS(NS,'g');svg.insertBefore(fg,tt);
+function sink(e){if(anchor)anchor.parentNode.insertBefore(e,anchor);}
+if(anchor)Array.prototype.forEach.call(edges,function(e){sink(e);});
+function hiEdges(id){Array.prototype.forEach.call(edges,function(e){if((e.getAttribute('data-a')===id||e.getAttribute('data-b')===id)&&parseFloat(e.getAttribute('data-op'))>0){e.setAttribute('opacity','1');e.setAttribute('pointer-events','none');fg.appendChild(e);}});}
+function loEdges(){while(fg.firstChild){var c=fg.firstChild;c.setAttribute('opacity',c.getAttribute('data-op'));c.setAttribute('pointer-events','auto');sink(c);}}
+Array.prototype.forEach.call(document.querySelectorAll('.hv'),function(el){
+  el.addEventListener('mouseenter',function(e){loEdges();show(el,e);var n=el.getAttribute('data-node');
+    if(n!==null)hiEdges(n);else if(el.getAttribute('data-a')!==null){el.setAttribute('opacity','1');fg.appendChild(el);}});
+  el.addEventListener('mousemove',move);
+  el.addEventListener('mouseleave',function(){tt.setAttribute('visibility','hidden');loEdges();});
+});
+var critView=false,edgesOn=true,kindMode=0,coneMode=false,coneNode=null,deadView=false,metricMode=0;
+var deadbands=document.querySelectorAll('.deadband');
+Array.prototype.forEach.call(edges,function(e){e._op0=parseFloat(e.getAttribute('data-op'));});
+Array.prototype.forEach.call(deadbands,function(r){r._op0=parseFloat(r.getAttribute('opacity'))||0.1;});
+Array.prototype.forEach.call(bars,function(g){var r=g.querySelector('rect');if(r)g._st0=r.getAttribute('stroke');});
+var inAdj={},outAdj={};
+Array.prototype.forEach.call(edges,function(e){var a=e.getAttribute('data-a'),b=e.getAttribute('data-b');(outAdj[a]=outAdj[a]||[]).push(b);(inAdj[b]=inAdj[b]||[]).push(a);});
+function walk(start,adj){var seen={},st=[start];while(st.length){var n=st.pop();var nb=adj[n]||[];for(var i=0;i<nb.length;i++){if(!seen[nb[i]]){seen[nb[i]]=1;st.push(nb[i]);}}}return seen;}
+function cone(id){var s={};s[id]=1;var up=walk(id,inAdj),dn=walk(id,outAdj);for(var k in up)s[k]=1;for(var k2 in dn)s[k2]=1;return s;}
+function ramp(t){t=Math.max(0,Math.min(1,t));var a,b,f;if(t<0.5){a=[0xa6,0xe2,0x2e];b=[0xe6,0xdb,0x74];f=t*2;}else{a=[0xe6,0xdb,0x74];b=[0xff,0x5f,0x45];f=(t-0.5)*2;}var r=Math.round(a[0]+(b[0]-a[0])*f),g=Math.round(a[1]+(b[1]-a[1])*f),c=Math.round(a[2]+(b[2]-a[2])*f);return '#'+((1<<24)+(r<<16)+(g<<8)+c).toString(16).slice(1);}
+function paintMetric(){
+  if(metricMode===0){Array.prototype.forEach.call(bars,function(g){var r=g.querySelector('rect');if(r&&g._st0)r.setAttribute('stroke',g._st0);});return;}
+  var attr=metricMode===1?'data-dispatch':'data-slack';var mx=0;
+  Array.prototype.forEach.call(bars,function(g){mx=Math.max(mx,parseFloat(g.getAttribute(attr))||0);});
+  if(mx<=0)mx=1;
+  Array.prototype.forEach.call(bars,function(g){var v=(parseFloat(g.getAttribute(attr))||0)/mx;var t=metricMode===2?1-v:v;var r=g.querySelector('rect');if(r)r.setAttribute('stroke',ramp(t));});
+}
+function restyle(){
+  var cs=(coneMode&&coneNode!=null)?cone(coneNode):null;
+  Array.prototype.forEach.call(bars,function(g){var op=1;
+    if(critView&&(parseFloat(g.getAttribute('data-crit'))||0)<0.15)op=Math.min(op,0.15);
+    if(cs&&!cs[g.getAttribute('data-node')])op=Math.min(op,0.12);
+    if(deadView)op=Math.min(op,0.30);
+    g.setAttribute('opacity',op);});
+  Array.prototype.forEach.call(edges,function(e){var op=e._op0;
+    var a=e.getAttribute('data-a'),b=e.getAttribute('data-b');
+    if(!edgesOn)op=0;
+    if(kindMode===1&&e.getAttribute('data-kind')!=='explicit')op=0;
+    if(kindMode===2&&e.getAttribute('data-kind')!=='derived')op=0;
+    if(critView&&(parseFloat(e.getAttribute('data-crit'))||0)<0.15)op=Math.min(op,0.03);
+    if(cs&&!(cs[a]&&cs[b]))op=Math.min(op,0.03);
+    if(deadView)op=Math.min(op,0.04);
+    e.setAttribute('data-op',op);if(e.parentNode!==fg)e.setAttribute('opacity',op);});
+  Array.prototype.forEach.call(deadbands,function(r){r.setAttribute('opacity',deadView?Math.min(1,r._op0*3+0.3):r._op0);});
+  paintMetric();
+}
+function setActive(b,on){var r=b.querySelector('rect');if(!r)return;r.setAttribute('fill',on?'#75715e':'#3e3d32');r.setAttribute('stroke',on?'#a6e22e':'#75715e');}
+function setLabel(b,t){var x=b.querySelector('text');if(x)x.textContent=t;}
+Array.prototype.forEach.call(document.querySelectorAll('.btn'),function(b){
+  b.addEventListener('click',function(ev){ev.stopPropagation();var v=b.getAttribute('data-view');
+    if(v==='crit'){critView=!critView;setActive(b,critView);}
+    else if(v==='edges'){edgesOn=!edgesOn;setActive(b,!edgesOn);setLabel(b,'Edges: '+(edgesOn?'on':'off'));}
+    else if(v==='kind'){kindMode=(kindMode+1)%3;setActive(b,kindMode!==0);setLabel(b,'Edge type: '+['all','explicit','derived'][kindMode]);}
+    else if(v==='cone'){coneMode=!coneMode;if(!coneMode)coneNode=null;setActive(b,coneMode);setLabel(b,'Cone: '+(coneMode?'pick':'off'));}
+    else if(v==='dead'){deadView=!deadView;setActive(b,deadView);}
+    else if(v==='metric'){metricMode=(metricMode+1)%3;setActive(b,metricMode!==0);setLabel(b,'Colour: '+['crit','dispatch','slack'][metricMode]);}
+    restyle();});
+});
+var coneBtn=document.querySelector('.btn[data-view="cone"]');
+Array.prototype.forEach.call(bars,function(g){g.addEventListener('click',function(ev){if(coneMode){coneNode=g.getAttribute('data-node');ev.stopPropagation();if(coneBtn)setLabel(coneBtn,'Cone: set');restyle();}});});
+svg.addEventListener('click',function(){if(coneMode&&coneNode!=null){coneNode=null;if(coneBtn)setLabel(coneBtn,'Cone: pick');restyle();}});
+})();
+]]></script>
+</svg>
