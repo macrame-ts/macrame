@@ -198,7 +198,7 @@ Layered and composable — use as much as you need, and in a way that suits you 
 - **`Static_task_graph`** — build-once/run-many DAG whose edges are derived from access conflicts (plus explicit ordering where you want it); a re-run reuses the compiled nodes and allocates only its completion handle. Profiling and visualisation are included, focused on parallelism metrics like "dead time", "critical path" and core utilisation — see the worked profiler-guided optimisation exercise in [docs/example-frame-optimization.md](docs/example-frame-optimization.md). Automatic PGO — WIP.
 - **Design patterns** — `Deferred<T>` / `Versioned<T>` — staged writes: record grant-free from any thread, apply the batch atomically at a defined point; `Versioned` gives readers a whole-frame stable snapshot. Deterministic by construction. Plus `Event_bus`, a lightweight pub/sub built on the same staging machinery.
 
-**v0.1.0** (unreleased) — pre-1.0: the API is stable in shape but not frozen. See [CHANGELOG.md](CHANGELOG.md) for what 0.1.0 contains. Some areas are actively evolving (**WIP**): the allocation/performance campaign, a platform abstraction layer, and benchmark regression tracking. See [docs/TODO.md](docs/TODO.md) for the live roadmap.
+**v0.1.0** (unreleased) — pre-1.0: the API is stable in shape but not frozen. See [CHANGELOG.md](CHANGELOG.md) for what 0.1.0 contains. Some areas are actively evolving (**WIP**): the allocation/performance campaign, a platform abstraction layer, and benchmark regression tracking. See [docs/roadmap.md](docs/roadmap.md) for where it's going.
 
 ---
 
@@ -230,6 +230,7 @@ Running the built driver with no arguments runs everything; `--tests`, `--bench`
 - **[docs/guide.md](docs/guide.md)** — the user guide: concepts, every layer with examples, patterns, when-to-use-what.
 - **[docs/design.md](docs/design.md)** — design rationale: the decisions, the rejected alternatives, the references.
 - **[docs/task-systems-comparison.md](docs/task-systems-comparison.md)** — how it compares to other task systems.
+- **[docs/roadmap.md](docs/roadmap.md)** — where the library is going, by theme and horizon.
 - Deep dives: [task-internals](docs/task-internals.md), [command-buffer-design](docs/command-buffer-design.md), [deferred-versioned-state](docs/deferred-versioned-state.md).
 
 ---
