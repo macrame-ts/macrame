@@ -37,18 +37,17 @@ You can build this by hand with mutexes and/or an existing task library. Quite a
 
 Most task systems schedule *work* and leave *shared-data safety* to you — or offer only **task dependencies** to manage it. Both common answers have problems:
 
-- **Locking** (mutexes around shared state) is the simplest and most popular approach, and it is **error-prone and inefficient**: a forgotten or mis-scoped lock races silently; correct locks serialise access and convoy under contention; correctness lives in scattered conventions that no tool verifies. Many issues are timing dependant and appear only outside of a dev machine.
+- **Locking** (mutexes around shared state) is the simplest and most popular approach, and it is **error-prone and inefficient**: a forgotten or mis-scoped lock races silently; correct locks serialise access and convoy under contention; correctness lives in scattered conventions that no tool verifies. Many issues are timing-dependent and appear only outside the dev machine.
 - **Task dependencies alone are the wrong tool for data sharing.** Dependencies exist to express *ordering*. Retrofitting them to protect shared data means hand-encoding, for every pair of tasks, which access conflicts with which — O(N²) bookkeeping that yields **rigid, over-serialised graphs** and breaks the moment access patterns change. Ordering and data-access governance are different concerns; conflating them is where these systems get brittle.
 
 This framework separates them. You **declare the data your logic accesses and how** — read-only or read/write — and the framework **derives** the ordering and exclusion needed for safety. A **runtime harness** then verifies, as work runs, that nothing touched shared state it did not declare, aborting with a stack trace instead of racing. Dependencies remain available for genuine ordering; they are no longer overloaded to mean "these tasks share data."
 
 ```cpp
-ts::Guarded<Inventory> inventory;
-// The whole model in one line: the parameter's const-ness IS the access declaration.
-inventory.access([](Inventory& inv) { inv.add(sword); }); // T& -> read/write access, exclusive
-inventory.access([](const Inventory& inv) { return inv.count(); }); // const T& -> read-only access, concurrent with other readers
+ts::Guarded<Inventory> inventory{ "inventory" };
+// The whole model at a glance: the parameter's const-ness is the access declaration.
+inventory.access([](Inventory& inv) { inv.add(sword); }).sync(); // T& -> read/write access, exclusive
+auto n = inventory.access([](const Inventory& inv) { return inv.count(); }).sync(); // const T& -> read-only, concurrent with other readers
 ```
-
 
 ---
 
@@ -57,7 +56,7 @@ inventory.access([](const Inventory& inv) { return inv.count(); }); // const T& 
 - **Access orchestration is a first-class, novel feature.** `Guarded<T>` + the runtime harness give you a thread-safe API for a shared object with the safety *checked*, not merely conventional.
 - **State-of-the-art task system**, not a thin wrapper: efficient work-stealing scheduler, coroutine-based composition, cooperative cancellation, priorities, graph-internal inline dispatch, and data-parallel loops.
 - **High-level patterns, built in** — static task graphs, command lists (`Deferred`), double buffering (`Versioned`) and others: the state-sharing idioms provided as primitives.
-- **Extensive harness to detect bugs early**: data access violations are detected and fails fast; runtime deadlock detection.
+- **Extensive harness to detect bugs early**: data access violations are detected and fail fast; runtime deadlock detection.
 
 For a feature-by-feature comparison with Unreal Engine Tasks System, Taskflow, TBB, HPX, Folly, Go, and others, see [docs/task-systems-comparison.md](docs/task-systems-comparison.md).
 
@@ -65,36 +64,37 @@ For a feature-by-feature comparison with Unreal Engine Tasks System, Taskflow, T
 
 ## Examples
 
-Just a glimpse at how it looks in practice.
+Just a glimpse of how it looks in practice.
 
 ### 1. A thread-safe API for one object
 
 Wrap a thread-unsafe object in `Guarded<T>` — you hand it a functor, and the parameter's const-ness declares your access (`T&` = write, exclusive; `const T&` = read, concurrent with other readers):
 
 ```cpp
-ts::Guarded<Inventory> inventory;
+ts::Guarded<Inventory> inventory{ "inventory" };
 
-// `access` -- runs on the calling thread if the object is free right now, otherwise it's
-// scheduled. The no-lock fast path; best for the short functors typical of this API:
-inventory.access([](Inventory& inv) { inv.add(sword); });                     // write
-auto n = inventory.access([](const Inventory& inv) { return inv.count(); });  // read
+// `access` - runs on the calling thread if the object is free right now, otherwise waits
+// its turn. Zero-allocation; best for the short functors typical of this API:
+inventory.access([](Inventory& inv) { inv.add(sword); }).sync(); // write
+auto n = inventory.access([](const Inventory& inv) { return inv.count(); }).sync(); // read
 
-// async -- always scheduled off the calling thread. For a heavy functor you don't want
-// running inline (it would block the caller and hold the object longer):
+// `async` - always scheduled off the calling thread, returns a Task you can await, sync,
+// or drop (fire-and-forget). For a heavy functor you don't want running inline
+// (it would block the caller and hold the object longer):
 inventory.async([](Inventory& inv) { inv.defragment(); });
 ```
 
-`access` is *opportunistic*: when the object is uncontended it skips scheduling entirely and runs the functor "inline" (no dynamic memory allocation, performance comparable to uncontended mutex lock) — so it may briefly block the caller, which is the right trade for a short critical section. `async` is the explicit "not on my thread" form for expensive work.
+`access` is the *attended* verb — the caller stays for the result (`.sync()` from regular code, `co_await` from a coroutine), so the whole operation lives in the returned caller-owned handle and **allocates nothing**. It is also *opportunistic*: when the object is uncontended it skips scheduling entirely and runs the functor "inline" (performance comparable to an uncontended mutex lock) — so it may briefly block the caller, which is the right trade for a short critical section. `async` is the *detached* verb — always scheduled, never blocks the caller — for expensive work.
 
 With coroutines, the same access reads as ordinary linear code — `co_await` suspends until access is granted, then hands you an RAII guard with direct, harness-checked access:
 
 ```cpp
 ts::Task<void> loot(ItemId id)
 {
-    auto inventory = co_await ts::read_write(guarded_inventory); // suspend until EXCLUSIVE access; no thread blocked
+    auto inventory = co_await ts::read_write(guarded_inventory); // suspend until exclusive access; no thread blocked
     inventory->add(id); // direct Inventory& access, harness-checked
     inventory->recompute_weight();
-}   // access released at scope exit
+} // access released at scope exit
 ```
 
 No lock is written, taken, or forgotten; concurrent writes serialise, reads run together, and any code that touches the inventory without a grant faults.
@@ -104,30 +104,31 @@ No lock is written, taken, or forgotten; concurrent writes serialise, reads run 
 Each subsystem is its own `Guarded<T>`. Declare what each node reads and writes; `compile()` derives the schedule from the access conflicts — you add explicit ordering only for "business logic", not to avoid data races:
 
 ```cpp
-ts::Guarded<Physics> physics;
-ts::Guarded<Animation> anim;
-ts::Guarded<Audio> audio;
-ts::Guarded<Renderer> renderer;
+ts::Guarded<Physics> physics{ "physics" };
+ts::Guarded<Animation> anim{ "anim" };
+ts::Guarded<Audio> audio{ "audio" };
+ts::Guarded<Renderer> renderer{ "renderer" };
 
 ts::Static_task_graph frame;
 
 // A node declares, per argument, read (const T&) or write (T&) access to each Guarded it
-// touches -- and may touch several at once.
-frame.add_node([](Physics& p) { p.step(); }, physics);
-frame.add_node([](const Physics& p, Animation& a) { a.pose(p); }, physics, anim);
-auto sfx = frame.add_node([](const Physics& p, Audio& s) { s.mix(p); }, physics, audio);
+// touches - and may touch several at once. The leading name is what diagnostics, graph
+// dumps and traces print.
+frame.add_node("step", [](Physics& p) { p.step(); }, physics);
+frame.add_node("pose", [](const Physics& p, Animation& a) { a.pose(p); }, physics, anim);
+auto sfx = frame.add_node("mix", [](const Physics& p, Audio& s) { s.mix(p); }, physics, audio);
 
-// Reads physics AND anim, writes renderer:
-auto render = frame.add_node(
+// Reads physics and anim, writes renderer:
+auto render = frame.add_node("render",
     [](const Physics& p, const Animation& a, Renderer& r) { r.submit(p, a); },
     physics, anim, renderer);
 
-render.after(sfx);   // explicit ordering, for intent that access alone doesn't capture
+render.after(sfx); // explicit ordering, for intent that access alone doesn't capture
 
-frame.compile();   // edges = access conflicts + explicit after()/before()
+frame.compile(); // edges = access conflicts + explicit after()/before()
 
 // Compile once, execute many: a run reuses the compiled nodes and allocates only its
-// completion handle -- no per-node allocation.
+// completion handle - no per-node allocation.
 for (int f = 0; f < frame_count; ++f)
     frame.execute().sync();
 ```
@@ -139,16 +140,16 @@ The two physics readers (`pose`, `mix`) run in parallel; `render` waits for both
 `Deferred<T>` implements the **command list** pattern (familiar from game engines): instead of mutating shared state directly, each producer *records* its intended changes into a buffer, and a single later step applies them all at once. Recording takes no access to the target — so producers neither block each other nor block anyone reading it:
 
 ```cpp
-ts::Guarded<World> world;
+ts::Guarded<World> world{ "world" };
 ts::Deferred<World> staged{ world };
 
-// Producers record changes into the buffer -- no access taken on `world`, so they run in
+// Producers record changes into the buffer - no access taken on `world`, so they run in
 // parallel and never hold up its readers. Each producer mints its own recorder:
 ts::Recorder<World> rec = staged.recorder();
-rec.stage([e](World& w) { w.apply_damage(e); });   // recorded, not applied yet
+rec.stage([e](World& w) { w.apply_damage(e); }); // recorded, not applied yet
 
-// Meanwhile other work reads `world` freely and concurrently -- recording holds nothing:
-auto hp = world.async([](const World& w) { return w.health_of(player); });
+// Meanwhile other work reads `world` freely and concurrently - recording holds nothing:
+auto hp = world.async([](const World& w) { return w.health_of(player); }); // a Task
 
 // At a chosen point, the whole batch applies as one write, in a deterministic order:
 staged.commit().sync();
@@ -159,17 +160,17 @@ staged.commit().sync();
 `Versioned<T>` implements the **double buffer** pattern: keep two copies of the state — the *published* one that readers see, and a *next* one being prepared — and swap them at a defined point. Readers get a stable, consistent view for the whole frame; producers build the next version without ever holding readers up:
 
 ```cpp
-ts::Versioned<Poses> poses;
+ts::Versioned<Poses> poses{ "poses" };
 
-// Producers build the NEXT version, all frame long, without blocking readers:
+// Producers build the next version, all frame long, without blocking readers:
 ts::Recorder<Poses> rec = poses.recorder();
 rec.stage([id, xf](Poses& p) { p.set(id, xf); });
 
-// Readers see the LAST published version, all frame -- stable and never contended:
-auto n = poses.read([](const Poses& p) { return p.count(); });
+// Readers see the last published version, all frame - stable and never contended:
+auto n = poses.read([](const Poses& p) { return p.count(); }).sync();
 
 // Once per frame, publish: the next version becomes the one readers see. Deterministic by
-// construction -- independent runs are bit-identical:
+// construction - independent runs are bit-identical:
 poses.publish().sync();
 ```
 
@@ -177,15 +178,15 @@ poses.publish().sync();
 
 ## What's in the box
 
-Layered and composable — use as much as you need, and in a way that suits you best. Going from bottom-up:
+Layered and composable — use as much as you need, and in a way that suits you best. From the bottom up:
 
 - **Scheduler** — efficient work-stealing, configurable idle policies, priorities. Minimal API; usable independently of the rest.
 - **Tasks** — `launch` work and compose it as coroutines: `co_await` is the one continuation/join/dependency mechanism, so pipelines read as straight-line code with typed results in scope. Cooperative cancellation (incl. mid-body early-out). Priorities. Awaiting frees the worker, so fork-join of any depth can't deadlock the pool; an in-task blocking wait is caught by the safety harness, and so is the suspended two-object deadlock (a waits-for cycle detector names both tasks and objects).
-- **`parallel_for`** — for the data-parallel work that does live inside a part; caller-participating (nested-safe) and self-balancing. plus **`async_parallel_for`** and **`parallel_for_colored`** for extra flexibility.
+- **`parallel_for`** — for the data-parallel work that does live inside a part; caller-participating (nested-safe) and self-balancing. Plus **`async_parallel_for`** and **`parallel_for_colored`** for extra flexibility.
 - **Coroutines** — `co_await` any task; `co_await ts::read_only/read_write(obj)` yields an RAII access guard; holding one across a suspension is detected and fails fast.
-- **`Guarded<T>`** — a thread-safe API for a shared object: a per-object reader/writer queue (concurrent reads, exclusive writes, FIFO) reached via `access` (opportunistic — runs inline when free) or `async` (always scheduled), plus multi-object operations with deadlock-free ordered acquisition.
-- **`Static_task_graph`** — build-once/run-many DAG whose edges are derived from access conflicts (plus explicit ordering where you want it); a re-run reuses the compiled nodes and allocates only its completion handle. WIP profiler-guided optimisation. Profiling and visualisation is included, focuses on parallelism metrics like "dead time" and "critical path".
-- **Design patterns** — `Deferred<T>` / `Versioned<T>` — staged writes: record grant-free from any thread, apply the batch atomically at a defined point; `Versioned` gives readers a whole-frame stable snapshot. Deterministic by construction.
+- **`Guarded<T>`** — a thread-safe API for a shared object: a per-object reader/writer queue (concurrent reads, exclusive writes, FIFO) reached via `access` (attended and allocation-free — runs inline when free) or `async` (always scheduled), plus multi-object operations with deadlock-free ordered acquisition.
+- **`Static_task_graph`** — build-once/run-many DAG whose edges are derived from access conflicts (plus explicit ordering where you want it); a re-run reuses the compiled nodes and allocates only its completion handle. Profiling and visualisation are included, focused on parallelism metrics like "dead time", "critical path" and core utilisation — see the worked profiler-guided optimisation exercise in [docs/example-frame-optimization.md](docs/example-frame-optimization.md).
+- **Design patterns** — `Deferred<T>` / `Versioned<T>` — staged writes: record grant-free from any thread, apply the batch atomically at a defined point; `Versioned` gives readers a whole-frame stable snapshot. Deterministic by construction. Plus `Event_bus`, a lightweight pub/sub built on the same staging machinery.
 
 **v0.1.0** (unreleased) — pre-1.0: the API is stable in shape but not frozen. See [CHANGELOG.md](CHANGELOG.md) for what 0.1.0 contains. Some areas are actively evolving (**WIP**): the allocation/performance campaign, a platform abstraction layer, and benchmark regression tracking. See [docs/TODO.md](docs/TODO.md) for the live roadmap.
 
@@ -197,7 +198,7 @@ Concurrency claims need evidence, not assertions:
 
 - A **comprehensive test suite**, plus subprocess **death tests** for every fatal path.
 - **ThreadSanitizer** (Linux/clang) and **AddressSanitizer** kept clean.
-- **Deterministic end-to-end samples** that hash-compare independent runs — a 17-system mock engine frame, and a physics module/extract fixture.
+- **Deterministic end-to-end samples** that hash-compare independent runs — a ~30-system mock engine frame, and a physics machine/extract fixture.
 - A **forensic harness** for races and deadlocks.
 
 ---
@@ -207,9 +208,9 @@ Concurrency claims need evidence, not assertions:
 C++23, no external dependencies, exceptions disabled project-wide (failures are fatal-by-design — see the docs). Compilers: MSVC and clang-cl on Windows; clang on Linux.
 
 - **Visual Studio 2022+**: open `task_system.slnx` (x64).
-- **CMake**: presets for `windows-msvc`, `windows-clang-cl`, and `linux-clang` (the ThreadSanitizer stress driver builds on Linux).
+- **CMake**: presets for `windows-msvc`, `windows-clang-cl`, `windows-shipping`, `linux-clang`, and `linux-tsan` (the ThreadSanitizer stress driver).
 
-The driver runs everything; `--tests`, `--bench`, `--stress`, and `--help` isolate parts.
+Running the built driver with no arguments runs everything; `--tests`, `--bench`, and `--stress` isolate parts (`--help` lists the rest).
 
 ---
 
