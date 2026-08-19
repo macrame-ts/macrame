@@ -126,7 +126,7 @@ namespace ts
 // | rule                | what it forbids                              | ship | Relaxed_scope |
 // |---------------------|----------------------------------------------|------|---------------|
 // | `in_task_sync`      | `sync()`/`take()` inside a task              | out  | yes           |
-// | `await_under_guard` | `co_await` while a `Access_guard` is live      | kept | no            |
+// | `await_under_guard` | `co_await` while an `Access_guard` is live   | kept | no            |
 // | `access_rank`       | awaiting an object out of declared rank order| out  | yes           |
 // | `circular_wait`     | a held-grant -> awaited-pipe wait cycle      | out  | yes           |
 // | `deadlock_net`      | quiescence with no possible external wakeup  | out  | no (global)   |

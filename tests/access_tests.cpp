@@ -199,7 +199,7 @@ void run_access_tests()
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: no context", test_death_no_context);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: read-only context + write", test_death_ro_write);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: wrong instance", test_death_wrong_instance);
-    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: context overflow", test_death_context_overflow);
+    run("death: context overflow", test_death_context_overflow);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: stale inherited grant", test_death_stale_grant);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: detached launch undeclared access", test_death_detached_launch);
     run("nested child touches guarded (sanctioned)", test_nested_child_touches_guarded);

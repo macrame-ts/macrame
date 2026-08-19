@@ -36,29 +36,30 @@ void Access_context::add(const void* instance, Access mode,
                          [[maybe_unused]] const std::atomic<std::uint64_t>* epoch,
                          [[maybe_unused]] unsigned rank) noexcept
 {
-#if TS_SAFETY_CHECKS
-    // Silent truncation is a latent footgun: a task declaring more than `max_entries`
-    // objects would lose the overflowing declaration, and a later legitimate access to
-    // that object then faults spuriously in `check` - a false positive surfacing far
-    // from the cause. Fail loud at the declaration instead.
+    // Silent truncation is a latent footgun, in every build: under the harness a lost
+    // declaration makes a later legitimate access fault spuriously in `check` (a false
+    // positive far from the cause), and even with the harness off the nested-run lend
+    // decision (`bind_links_for_run`) consults the context - a truncated entry there
+    // turns into a shipping-only deadlock (the inner node queues behind the caller's
+    // unlent hold). Fail loud at the declaration, unconditionally - a cold path.
     if (count_ == max_entries)
     {
-        ts::fatal("Access_context overflow: more than 8 declared objects in one task; "
-            "raise Access_context::max_entries");
+        char message[160];
+        std::snprintf(message, sizeof message,
+            "Access_context overflow: more than %d declared objects in one task; "
+            "raise Access_context::max_entries", max_entries);
+        ts::fatal(message);
     }
-    if (count_ < max_entries)
-    {
-        entries_[count_++] = { instance, mode, epoch,
-                               epoch ? epoch->load(std::memory_order_relaxed) : 0
+#if TS_SAFETY_CHECKS
+    entries_[count_++] = { instance, mode, epoch,
+                           epoch ? epoch->load(std::memory_order_relaxed) : 0
 #if TS_RULE_ON(TS_RULE_ACCESS_RANK)
-                               , rank
+                           , rank
 #endif
-                             };
-    }
+                         };
 #else
     // Staleness is a harness diagnostic; without the harness an entry is address + mode.
-    if (count_ < max_entries)
-        entries_[count_++] = { instance, mode };
+    entries_[count_++] = { instance, mode };
 #endif
 }
 

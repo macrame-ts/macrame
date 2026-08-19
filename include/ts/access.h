@@ -19,11 +19,7 @@
 #include <optional>
 #include <typeinfo>
 
-#ifndef TS_SAFETY_CHECKS
-#define TS_SAFETY_CHECKS 1
-#endif
-
-// One `TS_SAFETY_CHECKS` value per binary: the macro changes inline-function bodies and
+// One `TS_SAFETY_CHECKS` value per binary (the default comes from rules.h, included above): the macro changes inline-function bodies and
 // class layouts (safety-only fields are fully gated, per the convention in CLAUDE.md), so
 // mixing translation units compiled with different values is an ODR violation. Make the
 // mistake a link error instead of silent corruption: MSVC-family compilers record the
@@ -278,8 +274,9 @@ inline void access_check(const T* self) noexcept
     #define TS_CHECK_ACCESS() ((void)0)
 #endif
 
-// Installed by the pump around each job; RAII save/restore so nested execution
-// stacks contexts correctly.
+// Installs a task's declared access for the duration of its body (the piped body, a graph
+// node's body, the coroutine guards); RAII save/restore so nested execution stacks
+// contexts correctly.
 class Access_scope
 {
 public:
