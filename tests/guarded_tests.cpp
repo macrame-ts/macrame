@@ -814,6 +814,8 @@ void run_guarded_tests()
         []{ TS_CHECK(ts::test::expect_death("access_op_sync_never_started")); });
     run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op double consume",
         []{ TS_CHECK(ts::test::expect_death("access_op_double_consume")); });
+    run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op try_take never started",
+        []{ TS_CHECK(ts::test::expect_death("access_op_try_take_never_started")); });
     run_if(ts::test::with_rule_in_task_sync, "TS_RULE_IN_TASK_SYNC off", "death: op dtor in task",
         []{ TS_CHECK(ts::test::expect_death("access_op_dtor_in_task")); });
 }

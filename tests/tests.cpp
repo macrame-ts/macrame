@@ -457,6 +457,16 @@ void run_death_scenario(const char* name)
         g.compile();
         g.execute().sync();
     }
+    else if (std::strcmp(name, "recorder_outlives_journal") == 0)
+    {
+        ts::Guarded<int> target{ ts::Named{}, 0 };
+        ts::Recorder<int> rec;
+        {
+            ts::Deferred<int> d{ target };
+            rec = d.recorder();   // rec holds a slot in d's journal
+        }   // ~Deferred -> ~Journal while rec still holds a slot -> fatal (before rec's own
+            // dtor would call release_slot on the destroyed journal)
+    }
 #endif
     else if (std::strcmp(name, "recorder_empty_stage") == 0)
     {
@@ -719,6 +729,13 @@ void run_death_scenario(const char* name)
         auto op = d.access([](const int& v) { return v; });   // free pipe: settled inline
         (void)op.take();
         (void)op.take();   // second consume of the same cycle -> fatal (sync() & would be legal)
+    }
+    else if (std::strcmp(name, "access_op_try_take_never_started") == 0)
+    {
+        struct Read_fn { int operator()(const int& v) const { return v; } };
+        ts::Guarded<int> d{ ts::Named{}, 3 };
+        ts::Access_op<int, Read_fn> op(ts::dormant, d, Read_fn{});
+        (void)op.try_take();   // never started: would poll empty forever -> checked fatal
     }
 #endif
 #if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)

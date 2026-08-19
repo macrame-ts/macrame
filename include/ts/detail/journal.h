@@ -74,6 +74,25 @@ public:
     // mint/destroy makes it racy.
     static constexpr std::size_t max_slots = 4096;
 
+#if TS_SAFETY_CHECKS
+    // A `Recorder` outliving its `Deferred`/`Versioned` would call `release_slot` on a
+    // destroyed journal (UAF). Catch it here: `slots_` never shrinks and every slot is
+    // either free-listed or held by a live recorder, so an outstanding count
+    // (`slots_.size() > free_.size()`) at journal destruction means a recorder is still
+    // alive. The journal dies during its owner's member destruction, before the outliving
+    // recorder's own destructor runs, so the fatal precedes the UAF. No live-recorder
+    // state is added - the count is exact from the existing members.
+    ~Journal()
+    {
+        std::lock_guard lock(register_mutex_);
+        if (slots_.size() > free_.size())
+        {
+            fatal("Journal destroyed while a Recorder still holds a slot - a Recorder must not "
+                  "outlive the Deferred/Versioned it was minted from");
+        }
+    }
+#endif
+
     Slot& add_slot()
     {
         std::lock_guard lock(register_mutex_);
@@ -101,21 +120,45 @@ public:
         free_.push_back(&slot);
     }
 
-    // Take everything staged so far, flattened in slot-creation order (FIFO within
-    // a slot). Stages racing the cut land wholly before or wholly after it - a
-    // straggler rides the next cut.
-    std::vector<Command> cut()
+    // Take everything staged so far into `out`, reusing its buffer (cleared first),
+    // flattened in slot-creation order (FIFO within a slot). Stages racing the cut land
+    // wholly before or wholly after it - a straggler rides the next cut. A caller with a
+    // stable batch slot (`Versioned`/`Deferred`) passes it here so steady-state cuts
+    // allocate nothing.
+    void cut(std::vector<Command>& out)
     {
-        std::vector<Command> batch;
+        out.clear();
         std::lock_guard lock(register_mutex_);
+        // `slots_` holds every slot ever created up to the peak; a released one is empty
+        // (in `free_`) but still walked, so the cut cost scales with peak recorder count,
+        // not the live count. Fine for the intended few-long-lived-recorders use.
         for (Slot& slot : slots_)
         {
             std::lock_guard slot_lock(slot.mutex);
             for (Command& cmd : slot.commands)
-                batch.push_back(std::move(cmd));
+                out.push_back(std::move(cmd));
             slot.commands.clear();
         }
+    }
+
+    // Value-returning form: a fresh batch each call, for one-shot callers that keep no
+    // slot to reuse.
+    std::vector<Command> cut()
+    {
+        std::vector<Command> batch;
+        cut(batch);
         return batch;
+    }
+
+    // Drop everything staged without building a batch - the allocation-free `discard()`.
+    void clear_staged()
+    {
+        std::lock_guard lock(register_mutex_);
+        for (Slot& slot : slots_)
+        {
+            std::lock_guard slot_lock(slot.mutex);
+            slot.commands.clear();
+        }
     }
 
     bool has_staged()

@@ -155,7 +155,11 @@ public:
     result_type take() requires (!std::is_void_v<result_type>);
 
     // Never blocks: empty when the access is unsettled or cancelled, else moves the result
-    // out (the last consume). Also legal inside a task, like `Task::try_take`.
+    // out (the last consume). Also legal inside a task, like `Task::try_take`. Unlike `Task`
+    // (which has no unstarted state), an `Access_op` can be unbound/dormant, and a
+    // never-started op can never produce a result - polling it would return empty forever, so
+    // that is a checked fatal, not a silent empty. The never-blocks contract is intact: a
+    // started-but-not-ready op still returns immediately.
     std::optional<result_type> try_take() requires (!std::is_void_v<result_type>);
 
 private:
@@ -268,8 +272,10 @@ void Access_op<T, Body>::State::run(const detail::Task_ptr& c)
     auto prev = std::move(detail::current_task);
     // Borrowed install, not a counted copy: the op provably outlives its own body, and the
     // slot is defused before `prev` is restored - no refcount traffic on the hot path. A
-    // copy taken FROM the slot by body-launched machinery still counts normally (and the
-    // one copier that could outlive the op - `add_nested` - is rejected below).
+    // copy taken FROM the slot by body-launched machinery still counts normally; the one
+    // copier that could outlive the op - `add_nested` - borrows the caller-owned parent the
+    // same way (flag-first release, defuse without a dec; see `Flags::caller_owned`), so it
+    // too holds no ref, and the op's destructor waits the nested run out.
     detail::current_task = detail::Task_ptr(c.get(), detail::Adopt_ref{});
     {
         // The flattened access context: what the heap path's wrapper closure installs, done
@@ -562,6 +568,11 @@ template<typename T, typename Body>
 std::optional<typename Access_op<T, Body>::result_type> Access_op<T, Body>::try_take()
     requires (!std::is_void_v<result_type>)
 {
+#if TS_SAFETY_CHECKS
+    if (!state_.started)
+        ts::fatal("Access_op::try_take() on an op that was never started - start() it first "
+                  "(a never-started op produces no result; try_take would poll empty forever)");
+#endif
     if (!state_.ready.load(std::memory_order_acquire) || state_.cancelled || state_.consumed)
         return std::nullopt;
     state_.consumed = true;

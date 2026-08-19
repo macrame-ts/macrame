@@ -32,6 +32,15 @@ summary + the forward plan.
 - `785fc93` — single-publisher enforcement at flip entry + the
   resync-enqueue-before-gate ordering fix (pre-fix test demonstrated a lost
   write).
+- `ef6cbb7`/`de45b77` — `Versioned::read` became attended (`access` →
+  caller-owned `Access_op`, zero-alloc read-mostly front, copy-out-and-discard
+  correct by construction); publish batch moved to the single `batch_` member
+  slot (removed a `make_shared` per publish).
+- review batch (2026-08-19) — in-place capacity-reusing `Journal::cut(out&)`
+  (steady-state publishes/commits allocate no batch; `Versioned::batch_` +
+  `Deferred::commit_batch_`); allocation-free `discard()` via
+  `Journal::clear_staged()`; `~Journal` fatal on recorder-outliving-journal
+  (contract 8, death test `recorder_outlives_journal`).
 
 ## 2. File map
 
@@ -103,7 +112,13 @@ summary + the forward plan.
    slots (free-list; staged-but-uncut commands survive release); >4096 alive
    recorders is fatal (`Journal::max_slots` — catches mint-and-retain); a
    reused slot keeps its position (observable only to contract-violating
-   programs); recorders must not outlive their `Deferred`/`Versioned`.
+   programs); recorders must not outlive their `Deferred`/`Versioned` — now
+   **enforced**: `~Journal` (under `TS_SAFETY_CHECKS`) fatals if any slot is
+   still outstanding (`slots_.size() > free_.size()`), catching the recorder
+   that would otherwise `release_slot` on a destroyed journal. The journal dies
+   during its owner's member destruction, before the outliving recorder's own
+   dtor runs, so the fatal precedes the UAF. Death test
+   `recorder_outlives_journal`.
 9. **Single publisher, enforced**: a graph/inline publish catching an
    unresolved dynamic publish fatals at flip entry. Legal: dynamic↔dynamic
    (chain), synced-publish-then-run (deterministic — see §4.3), publish
@@ -158,6 +173,19 @@ summary + the forward plan.
    derivation was analyzed and deliberately NOT added (avoidable lattice
    dimension; staging needs no grant at all). Revisit only when the
    completeness hazard bites in practice.
+9. **One reused batch slot, filled in place.** `Versioned` keeps the in-flight
+   publish's cut in a single member (`batch_`); one slot suffices because the
+   publish chain serializes batch lifetimes — `shadow_ready` triggers only
+   after the batch's last use (resync replay / phase-1 apply / the cut itself
+   for the empty and cancelled paths), and the next publish's cut into the slot
+   gates on exactly that signal via `chain_`. The cut is `Journal::cut(out&)`,
+   which clears and refills the caller's buffer instead of returning a fresh
+   vector, so the capacity is genuinely reused and steady-state publishes
+   allocate no batch. `Deferred` does the same through a `commit_batch_` member,
+   clearing it after each apply (it applies once — no replay — so the command
+   captures are released promptly while the buffer is retained). The batch
+   allocation this removed is one vector per publish/commit; the per-command
+   closure allocation (§6 arena work) remains the dominant cost.
 
 ## 5. Verification state
 
@@ -167,7 +195,7 @@ summary + the forward plan.
 - **Death scenarios**: `deferred_drop_staged`, `versioned_drop_staged`,
   `versioned_divergence`, `versioned_wrong_front`, `versioned_mixed_publish`,
   `recorder_empty_stage`, `parallel_recorder_empty_stage`,
-  `journal_slot_overflow`.
+  `journal_slot_overflow`, `recorder_outlives_journal`.
 - **TSan clean on WSL** (clang + libstdc++) including: parallel staging racing
   fire-and-forget commits; stagers + readers + 200 chained publishes with the
   divergence hash reading both replicas; both samples.

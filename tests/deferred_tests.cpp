@@ -442,6 +442,13 @@ void test_commit_nested_grant_is_fatal()
 {
     TS_CHECK(ts::test::expect_death("deferred_commit_nested_grant"));
 }
+
+// A `Recorder` outliving its `Deferred` would call `release_slot` on a destroyed journal;
+// the journal destructor catches the outstanding slot and fatals first.
+void test_recorder_outlives_journal_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("recorder_outlives_journal"));
+}
 #endif
 
 void test_moved_from_recorder_stage_is_fatal()
@@ -486,6 +493,7 @@ void run_deferred_tests()
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "deferred: destroy with commit in flight is fatal", test_dtor_inflight_commit_is_fatal);
 #if TS_SAFETY_CHECKS
     run("deferred: commit from nested inherited grant is fatal", test_commit_nested_grant_is_fatal);
+    run("deferred: recorder outliving the journal is fatal", test_recorder_outlives_journal_is_fatal);
 #endif
     run("deferred: stage on moved-from recorder is fatal", test_moved_from_recorder_stage_is_fatal);
     run("deferred: stage on empty parallel recorder is fatal", test_empty_parallel_recorder_stage_is_fatal);

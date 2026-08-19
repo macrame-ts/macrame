@@ -226,7 +226,7 @@ public:
                 shadow_ready.trigger();
                 return;
             }
-            batch_ = journal_.cut();
+            journal_.cut(batch_);   // in-place: reuses the batch slot's buffer
             if (batch_.empty())
             {
                 swapped.trigger();   // readers keep the current version, which equals the would-be next
@@ -290,7 +290,7 @@ public:
             chain_ = shadow_ready;
         }
 
-        batch_ = journal_.cut();
+        journal_.cut(batch_);   // in-place: reuses the batch slot's buffer
         if (batch_.empty())
         {
             shadow_ready.trigger();   // the chain must still resolve
@@ -321,7 +321,7 @@ public:
     // Drop everything staged so far (teardown escape hatch).
     void discard()
     {
-        journal_.cut();
+        journal_.clear_staged();
     }
 
 private:
@@ -406,11 +406,13 @@ private:
     // serializes batch lifetimes: `shadow_ready` triggers only after the batch's last use
     // (the resync's replay for replay/copy, the phase-1 apply for overwrite, the cut itself
     // for the empty early-out; a cancelled publish never cuts), and the next publish's phase
-    // 1 - the next cut into this slot - gates on exactly that signal (`chain_`; a flip
-    // enforces `chain_.is_done()` at entry). Cleared by the last reader, so captured
-    // resources die with the cycle and the vector's capacity is reused across publishes -
-    // this replaced a make_shared<Batch> per publish. The destructor's chain sync +
-    // pipe drain covers the resync job's `this` capture.
+    // 1 - the next `journal_.cut(batch_)` into this slot - gates on exactly that signal
+    // (`chain_`; a flip enforces `chain_.is_done()` at entry). The in-place cut clears and
+    // refills this buffer rather than move-assigning a fresh one, so the vector's capacity
+    // is genuinely reused across publishes (steady-state publishes allocate no batch); the
+    // last reader clears it, so captured resources die with the cycle. This replaced a
+    // make_shared<Batch> per publish. The destructor's chain sync + pipe drain covers the
+    // resync job's `this` capture.
     Batch batch_;
     Resync policy_;
     T* front_ptr_;

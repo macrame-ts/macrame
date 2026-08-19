@@ -20,9 +20,9 @@ namespace ts
 // writes; after it, all of them.
 //
 // Access control is `Guarded`'s: the commit is an ordinary write, staging touches nothing
-// shared. `commit` called from the task that holds the target's write grant (a graph node's 
-// declared write, an `async`/`access` write body) `commit()` applies inline under that grant, 
-// no second acquisition; called from anywhere else it enqueues an ordinary async write and 
+// shared. Called from the task that holds the target's write grant (a graph node's declared
+// write, an `async`/`access` write body), `commit()` applies inline under that grant, no
+// second acquisition; called from anywhere else it enqueues an ordinary async write and
 // returns a task to await.
 //
 // Use:
@@ -158,7 +158,7 @@ public:
     // Drop everything staged so far, explicitly. The escape hatch for teardown.
     void discard()
     {
-        journal_.cut();
+        journal_.clear_staged();
     }
 
 private:
@@ -170,13 +170,19 @@ private:
 #if TS_SAFETY_CHECKS
         access_check(t);   // requires a read_write grant on the bound object
 #endif
-        auto batch = journal_.cut();
-        for (auto& cmd : batch)
+        journal_.cut(commit_batch_);   // in-place: reuses commit_batch_'s buffer
+        for (auto& cmd : commit_batch_)
             cmd(*t);
+        commit_batch_.clear();   // release the command captures now (applied once, no replay); keep the buffer
     }
 
     Guarded<T>* target_;
     detail::Journal<T> journal_;
+    // Reused batch buffer for `commit()`'s apply. Applies never overlap on one Deferred
+    // (both arms hold the target's exclusive write grant), so one member slot is safe;
+    // cleared after each apply so command captures die promptly while the capacity is
+    // retained across commits (steady-state commits allocate no batch).
+    std::vector<typename detail::Journal<T>::Command> commit_batch_;
     // The most recent enqueued commit's block; the destructor's in-flight check (null
     // until a commit enqueues; inline commits finish in-call and never record). Written
     // under the target pipe's mutex atomically with the enqueue (`pipe_enqueue`'s
