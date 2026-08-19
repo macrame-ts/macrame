@@ -178,9 +178,9 @@ poses.publish().sync();
 
 ### 5. Seeing the frame — the built-in trace
 
-The graph profiles itself: `--trace` runs the bundled ~30-system mock game frame and renders the average run — bars packed into concurrency rows, the measured critical path, dead-time bands. <!-- NOTE: the interactive link below is the FINAL GitHub Pages URL (macrame-ts/macrame, Pages serving
+The graph profiles itself: `--trace` runs the bundled ~30-system mock game frame and renders the **average** run — bars packed into concurrency rows, the measured critical path, dead-time bands. <!-- NOTE: the interactive link below is the FINAL GitHub Pages URL (macrame-ts/macrame, Pages serving
      /docs from master) - dead until the repo moves and Pages is enabled at the flip (docs/going-public.md). -->
-The SVG is interactive — hover tooltips with per-node stats and access declarations, view-toggle buttons — but GitHub strips scripts from images, so the picture below is static. [Open the interactive version](https://macrame-ts.github.io/macrame/media/game_frame_trace.svg) in a browser (or, in a clone, open [the file](docs/media/game_frame_trace.svg) itself):
+The SVG is interactive — hover tooltips with per-node stats and access declarations, view-toggle buttons — but GitHub strips scripts from images, so the picture below is static. [Open the interactive version](https://macrame-ts.github.io/macrame/media/game_frame_trace.svg) in a browser (or, in a clone, open [the file](docs/media/game_frame_trace.svg) itself). Note that it's not a single frame but all frames aggregated, showing the entire session in one high-level picture.
 
 ![Traced game frame](docs/media/game_frame_trace.svg)
 
