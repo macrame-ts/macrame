@@ -1,4 +1,5 @@
-<!-- Quick start. Linked from the README. Project name undecided (placeholder "task_system"). -->
+<!-- Quick start. Linked from the README. Name decided: Macrame; project/file names stay
+     "task_system" until the repo moves to macrame-ts/macrame (docs/going-public.md). -->
 
 # Quick start
 
@@ -7,9 +8,10 @@ Get from zero to a running program. For the full tour of every layer, see the
 
 ## Get the code
 
-No package yet (pre-1.0). Clone the repository and add its `include/` directory
-to your include path — the library is a set of headers (under `include/ts/`)
-plus a few `.cpp` files (under `src/`), no external dependencies.
+No package yet (pre-1.0). Clone the repository, add its `include/` directory
+to your include path, and compile the `src/*.cpp` files into your project — the
+library is a set of headers (under `include/ts/`) plus a few `.cpp` files
+(under `src/`), no external dependencies.
 
 ```
 git clone <repo-url> task_system
@@ -26,7 +28,8 @@ prefer:
 
 - **Visual Studio 2022+**: open `task_system.slnx` (x64), build, run. MSVC or
   clang-cl.
-- **CMake**: presets for `windows-msvc`, `windows-clang-cl`, and `linux-clang`.
+- **CMake**: presets for `windows-msvc`, `windows-clang-cl`, `windows-shipping`,
+  `linux-clang`, and `linux-tsan`.
 
   ```
   cmake --preset windows-msvc
@@ -47,7 +50,7 @@ Launch a unit of work and wait for its result:
 int main()
 {
     ts::Task<int> t = ts::launch([] { return 6 * 7; });
-    std::printf("%d\n", t.sync());   // blocks until done, prints 42
+    std::printf("%d\n", t.sync()); // blocks until done, prints 42
 }
 ```
 
@@ -64,23 +67,25 @@ call only; storing it past the call sidesteps the safety checks
 ([limits.md](limits.md) §2.3):
 
 ```cpp
-ts::Guarded<std::vector<int>> numbers;
+ts::Guarded<std::vector<int>> numbers{ "numbers" }; // the name is for diagnostics and traces
 
-numbers.access([](std::vector<int>& v) { v.push_back(1); });          // write: exclusive
-ts::Task<size_t> n = numbers.access([](const std::vector<int>& v)     // read: concurrent
+numbers.access([](std::vector<int>& v) { v.push_back(1); }).sync(); // write: exclusive
+size_t n = numbers.access([](const std::vector<int>& v) // read: concurrent
 {
     return v.size();
-});
-std::printf("%zu\n", n.sync());
+}).sync();
+std::printf("%zu\n", n);
 ```
 
 Accesses run on the object in submission order: the write runs alone, reads run
 together. `access` is *opportunistic* — if the object is free right now it runs
 your function immediately on the calling thread (no scheduling), otherwise it
-queues; it is the right default for the short functions typical of this API. For
-a heavy function you'd rather not run on the calling thread, use `async(fn)`
-instead — same access rules, but always scheduled onto a worker. Both return a
-`ts::Task<R>`.
+queues; it is the right default for the short functions typical of this API.
+`access` returns a caller-owned operation handle (`ts::Access_op`), so it
+allocates nothing; take the result with `.sync()` — or `co_await` the handle
+from a coroutine. For a heavy function you'd rather not run on the calling
+thread, use `async(fn)` instead — same access rules, but always scheduled onto
+a worker, returning a free-standing `ts::Task<R>`.
 
 ## Make it safe by construction
 
@@ -94,8 +99,8 @@ stray reference, a missed declaration, a task the graph doesn't know about:
 class Inventory
 {
 public:
-    void add(Item i)       { TS_CHECK_ACCESS(); items_.push_back(i); }
-    size_t count() const   { TS_CHECK_ACCESS(); return items_.size(); }
+    void add(Item i) { TS_CHECK_ACCESS(); items_.push_back(i); }
+    size_t count() const { TS_CHECK_ACCESS(); return items_.size(); }
 private:
     std::vector<Item> items_;
 };
