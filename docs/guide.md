@@ -58,7 +58,7 @@ trace and aborts. Most safety checking is gated by `TS_SAFETY_CHECKS`
 Launch a task, get its result:
 
 ```cpp
-#include "task.h"
+#include "ts/task.h"
 
 ts::Task<int> t = ts::launch([] { return 6 * 7; });
 int v = t.sync();   // block until done; returns const& (see §4.3)
@@ -67,22 +67,25 @@ int v = t.sync();   // block until done; returns const& (see §4.3)
 Guard a thread-unsafe object and access it from anywhere:
 
 ```cpp
-#include "guarded.h"
+#include "ts/guarded.h"
 
-ts::Guarded<std::vector<int>> numbers;
+ts::Guarded<std::vector<int>> numbers{ "numbers" };   // the leading name is for diagnostics
 
 // write: functor takes T& -- exclusive
-numbers.access([](std::vector<int>& v) { v.push_back(1); });
+numbers.access([](std::vector<int>& v) { v.push_back(1); }).sync();
 
 // read: functor takes const T& -- concurrent with other reads
-ts::Task<size_t> n = numbers.access([](const std::vector<int>& v) { return v.size(); });
+auto n = numbers.access([](const std::vector<int>& v) { return v.size(); });
 size_t count = n.sync();
 ```
 
 Both accesses run on the object in submission order: the write runs alone, reads
 run concurrently with other reads. `access` is *opportunistic* — it runs the
 functor immediately on the calling thread when the object is free, otherwise it
-queues (see §5); either way you get a `Task<R>` and only `sync()` waits.
+queues (see §5). It returns a caller-owned `Access_op` (zero-allocation), not a
+`Task`: consume the result once with `.sync()` (or `co_await` from a coroutine),
+and don't discard the handle for a write you want to happen — use `async` for
+fire-and-forget (see §5).
 
 The scheduler is a single process-wide instance, started lazily with one worker
 per hardware thread. There are no ad-hoc scheduler objects to construct;
@@ -144,7 +147,7 @@ write; `const T&` declares a read. You saw it in `access` above; the static
 graph (§6) uses the same rule across multiple objects at once:
 
 ```cpp
-graph.add_node([](Physics& p, const Nav& n) { /* writes p, reads n */ },
+graph.add_node("nav_step", [](Physics& p, const Nav& n) { /* writes p, reads n */ },
                physics, nav);
 ```
 
@@ -156,7 +159,7 @@ and `auto&` for a write, and the mode is deduced from the spelling — no
 annotation needed:
 
 ```cpp
-graph.add_node([](const auto& p, auto& a) { a.pose(p); },   // p: read, a: write
+graph.add_node("pose", [](const auto& p, auto& a) { a.pose(p); },   // p: read, a: write
                physics, anim);
 ```
 
@@ -189,7 +192,7 @@ on parameter spelling, tag every object with `ts::as_read_only` /
 one call — that's a compile error):
 
 ```cpp
-graph.add_node([](auto& p, auto& n) { n.query(p); },
+graph.add_node("query", [](auto& p, auto& n) { n.query(p); },
                ts::as_read_write(physics), ts::as_read_only(nav));
 ```
 
@@ -204,7 +207,7 @@ Checking is opt-in per type: you instrument the methods of a guarded type
 with `TS_CHECK_ACCESS()`:
 
 ```cpp
-#include "access.h"
+#include "ts/access.h"
 
 class Nav
 {
@@ -469,16 +472,42 @@ and is the only sanctioned way to touch it across threads. You never hold a
 bare `T&`; you submit accessors with `access` (the default) or `async`:
 
 ```cpp
-ts::Guarded<World> world{ initial_seed };
+ts::Guarded<World> world{ "world", initial_seed };   // leading name, then T's ctor args
 
-world.access([](World& w) { w.step(); });                      // exclusive write
+world.access([](World& w) { w.step(); }).sync();               // exclusive write
 auto pop = world.access([](const World& w) { return w.population(); });  // concurrent read
+int n = pop.sync();
 
 world.async([](World& w) { w.expensive_rebuild(); });          // heavy: always scheduled
 ```
 
-`access` and `async` differ only in *where* the functor may run; both declare
-the same access (write / read, from const-ness) and both return `Task<R>`:
+`access` and `async` differ in *where* the functor may run and in *what they
+return*. Both declare the same access (write / read, from const-ness). `async`
+returns a free-standing `Task<R>` — dispatch it, await it, `sync()` it, or drop
+it (fire-and-forget). `access` returns a caller-owned `Access_op<T, Body>`: the
+whole operation — result storage, body, pipe entry — lives in that handle, so an
+`access` **allocates nothing**. It is *attended* — you consume the result exactly
+once:
+
+- `co_await op` from a coroutine, or `op.sync()` from outside a task — where
+  `op.sync()` on an lvalue is a non-consuming `const R&` peek and on an rvalue
+  (`world.access(fn).sync()`) returns `R` by value, so the temporary stays
+  dangle-free; `op.take()` is the explicit consuming move; `op.try_take()`
+  never blocks (empty until settled, also legal inside a task).
+- The handle is **pinned** — non-copyable and non-movable, because the pipe's
+  FIFO holds its embedded entry's address. Store a `Task<R>` from `async` if you
+  need a movable handle; keep the `Access_op` local otherwise.
+- Destroying an `Access_op` whose access has not settled is a bug the destructor
+  reports (`TS_ENSURE`) and then blocks on. So a *discarded* `access` for a write
+  is only safe when it ran inline; if it may enqueue, either `.sync()` it or use
+  `async`.
+
+For a member that must outlive one call, an `Access_op` also has a deferred
+form: default-construct it unbound, then `bind(target, body)` + `start()`, or
+`Access_op(ts::dormant, target, body)` to store without firing; `start()` refires
+a settled op with the same storage, allocation-free.
+
+Where the functor may run:
 
 - **`access`** is **opportunistic**: when the object is free at call time it
   runs the functor immediately on the *calling* thread — no scheduling — and
@@ -510,13 +539,17 @@ Semantics of the per-object pipe:
 - **Non-blocking**: submission never blocks the caller; completion drives
   admission.
 
-Options are `ts::Access_options` — `{ .token, .priority }` apply to `access`
-and `async` alike (a cancellation token, a scheduling priority). There is no
-`run_inline` option: the verb chooses inline-vs-scheduled. Two notes:
+Options are `ts::Access_options` — `{ .token, .priority, .name, .queued }`. The
+token and priority apply to `access` and `async` alike (a cancellation token, a
+scheduling priority); `.name` attaches a debug label. There is no `run_inline`
+option: the verb chooses inline-vs-scheduled. Two notes:
 
 - Whether a functor may run inline is chosen by the verb (`access` vs `async`),
   not by an option. From inside a graph node, prefer `async` for anything
-  non-trivial — an inline `access` blocks the worker for the body's duration.
+  non-trivial — an inline `access` blocks the worker for the body's duration. If
+  you want the attended `Access_op` result but never the inline arm (a heavy body
+  whose result you still stay for), pass `.queued = true` — it skips only the
+  inline-when-free arm, keeping the reentrant arm that correctness needs.
 - The destructor waits until the pipe drains; the object outlives every
   pending accessor — including the one you just `sync()`ed. A task wakes its
   waiters before it releases the objects it held, so a returned `sync()` means
@@ -657,17 +690,18 @@ message says so and names the rebuild flag.
 To touch several guarded objects in one body, use the free function:
 
 ```cpp
-ts::Guarded<Physics> physics;
-ts::Guarded<Render> render;
+ts::Guarded<Physics> physics{ "physics" };
+ts::Guarded<Render> render{ "render" };
 
 ts::access([](const Physics& p, Render& r) { r.mirror(p); }, physics, render);
 // options-first form: ts::access({ .priority = ts::Priority::high }, fn, objs...)
 ```
 
-The free functions `ts::access` / `ts::async` mirror the member verbs;
-`ts::async` always schedules. (The opportunistic inline fast path is not yet
-implemented across multiple objects, so multi-object `ts::access` currently
-schedules like `ts::async` — **WIP**.) Per-argument modes come from const-ness,
+The free functions `ts::access` / `ts::async` mirror the member verbs and both
+return a `Task<R>` (the multi-object form does not have the single-object
+`Access_op` fast path). `ts::async` always schedules. (The opportunistic inline
+fast path is not yet implemented across multiple objects, so multi-object
+`ts::access` currently schedules like `ts::async` — **WIP**.) Per-argument modes come from const-ness,
 as always. The library acquires the pipes in a canonical global order and holds
 them for the body — the standard deadlock-free discipline, shared with the
 static graph, so dynamic multi-object work and graph nodes can never deadlock
@@ -689,8 +723,9 @@ ts::access([](auto& p, auto& r) { r.mirror(p); },   // same, spelled with tags
 It is not a mutex wrapper: you submit a functor rather than lock/unlock around
 raw access. With `async` (or a contended `access`) the body runs later on a
 worker and the caller keeps going; with an uncontended `access` it runs inline
-right away. Either way you get a `Task<R>`; inside a task, consume it with
-`co_await`; on a blue thread, `sync()` (§4.3, §11.2).
+right away. `async` hands you a `Task<R>` and single-object `access` a caller-owned
+`Access_op` (§5); inside a task, consume either with `co_await`; on a blue thread,
+`sync()` (§4.3, §11.2).
 
 ---
 
@@ -700,18 +735,18 @@ For a fixed frame/pipeline structure, declare the whole thing once and run it
 every iteration:
 
 ```cpp
-ts::Guarded<Input>   input;
-ts::Guarded<Physics> physics;
-ts::Guarded<Anim>    anim;
-ts::Guarded<Render>  render;
+ts::Guarded<Input>   input{ "input" };       // every Guarded and every node takes a
+ts::Guarded<Physics> physics{ "physics" };   // leading name (§6.1) - what the DOT dump,
+ts::Guarded<Anim>    anim{ "anim" };          // trace and diagnostics print
+ts::Guarded<Render>  render{ "render" };
 
 ts::Static_task_graph frame;
 
-frame.add_node([](Input& in)                          { in.poll(); },            input);
-frame.add_node([](const Input& in, Physics& p)        { p.step(in); },           input, physics);
-frame.add_node([](const Input& in, Anim& a)           { a.advance(in); },        input, anim);
-frame.add_node([](const Physics& p, const Anim& a, Render& r)
-                                                      { r.build(p, a); },        physics, anim, render);
+frame.add_node("poll",    [](Input& in)                   { in.poll(); },     input);
+frame.add_node("physics", [](const Input& in, Physics& p) { p.step(in); },    input, physics);
+frame.add_node("anim",    [](const Input& in, Anim& a)    { a.advance(in); }, input, anim);
+frame.add_node("render",  [](const Physics& p, const Anim& a, Render& r)
+                                                          { r.build(p, a); }, physics, anim, render);
 
 frame.compile();
 
@@ -948,10 +983,10 @@ it from whichever node needs it.
 
 ```cpp
 ts::Static_task_graph inner;                     // compiled once, elsewhere
-inner.add_node([](Physics& p) { p.solve(); }, physics);
+inner.add_node("solve", [](Physics& p) { p.solve(); }, physics);
 inner.compile();
 
-outer.add_node([&inner](Physics& p) -> ts::Task<void>
+outer.add_node("step", [&inner](Physics& p) -> ts::Task<void>
 {
     p.begin_step();
     co_await inner.execute();                    // runs under this node's grant
@@ -1116,7 +1151,7 @@ caller's access grants, so a `parallel_for` inside a graph node may touch the
 node's declared objects.
 
 Cross-item mutation (item *i* writing item *j*) is not synchronized by
-`parallel_for` itself — see the WIP note in §12 and the staging tools in §9,
+`parallel_for` itself — see the WIP note in §13 and the staging tools in §9,
 which cover the common cases today. For the case staging cannot serve —
 iterative solvers whose cross-item effects must land *within* the pass
 (physics constraints, relaxation) — use **interaction coloring** with
@@ -1233,8 +1268,8 @@ A relaxation follows the ambient task state rather than the thread: it survives 
 coroutine's suspensions, so a `Relaxed_scope` opened in a coroutine body is still in effect
 when the body resumes on another worker. It is therefore a little wider than the lexical
 scope suggests — deliberately, since a resumed segment inherits the grant and so inherits the
-hazard. A detached `ts::launch` inherits neither the grant nor the relaxation (§ on grant
-inheritance): it is a fresh context, so an opt-out does not follow it. (`parallel_for` helpers
+hazard. A detached `ts::launch` inherits neither the grant nor the relaxation: it is a fresh
+context, so an opt-out does not follow it. (`parallel_for` helpers
 inherit the grant but not the relaxation — a helper that needs an opt-out states it itself.)
 
 Not every rule can be relaxed. `Rule::await_under_guard` (§8.2) protects an invariant the
@@ -1260,7 +1295,7 @@ machinery (a **journal** of staged commands):
 ### 9.1 `Deferred<T>`: batch your writes
 
 ```cpp
-ts::Guarded<Score_board> board;
+ts::Guarded<Score_board> board{ "board" };
 ts::Deferred<Score_board> staged{ board };
 
 // each producer mints ONE recorder (its identity in the apply order) and reuses it
@@ -1325,14 +1360,14 @@ Readers always see the last *published* version; producers stage into the
 next one; `publish()` flips atomically:
 
 ```cpp
-ts::Versioned<Poses> poses;                       // T must be default-constructible & swappable
+ts::Versioned<Poses> poses{ "poses" };            // T must be default-constructible & swappable
 ts::Recorder<Poses> rec = poses.recorder();
 
 // producers, all frame long, grant-free:
 rec.stage([id, xf](Poses& p) { p.set(id, xf); });
 
-// readers, all frame long, see the LAST published version:
-poses.read([](const Poses& p) { draw(p); });
+// readers, all frame long, see the LAST published version (read returns an Access_op):
+poses.read([](const Poses& p) { draw(p); }).sync();
 
 // once per frame:
 poses.publish().sync();                           // completes at the version flip
@@ -1348,9 +1383,9 @@ Key properties:
   address never changes, so graph declarations and the harness see one
   ordinary object.
 - In a static graph, publish is a node:
-  `g.add_node(ts::publish_fn(poses), poses.state())` — declare **read**
-  access on `poses.state()` everywhere else; the publish node is the one
-  writer.
+  `g.add_node("publish", ts::publish_fn(poses), poses.state())` — declare
+  **read** access on `poses.state()` everywhere else; the publish node is the
+  one writer.
 - **Resync policy** (constructor argument): `replay` (default — re-applies
   the batch to the second replica; commands must be deterministic, e.g.
   capture random rolls at stage time), `copy`, or `overwrite` (you promise
@@ -1603,11 +1638,12 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
 - **Platform breadth** — WIP. Developed on Windows (MSVC/clang-cl); the test
   suite also runs on Linux under Clang/TSan. No macOS/console/mobile support
   claims yet.
-- **Benchmarks/CI** — WIP. A benchmark suite exists (`--bench`); regression
-  tracking and public CI are being set up.
+- **Benchmarks/CI** — CI runs the suite (MSVC, clang-cl, Shipping, Linux/TSan);
+  a benchmark suite exists (`--bench`), and benchmark regression tracking is WIP.
 - **Cross-entity mutation inside `parallel_for`** (item *i* writes item *j*)
-  — researched, primitives designed (gather/apply mailboxes, interaction
-  coloring), not yet shipped.
+  — the gather/apply mailbox primitives are researched and designed but not yet
+  shipped. Interaction coloring, the other half of this space, *is* shipped
+  (`ts::parallel_for_colored`, §7).
 - **Generic by-value parameters** (`[](auto v)`) in access-deduced positions
   classify as reads and copy the resource — writes hit the copy, silently.
   Undetectable at the declaration level (§3.1); use references.
