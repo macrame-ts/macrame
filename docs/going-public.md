@@ -79,16 +79,17 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
 - [ ] Set the GitHub description + topics (discoverability).
 - [ ] Confirm Actions runs on the public repo and the README badges render for anonymous viewers.
 - [ ] Optional: branch protection on `master` (require CI green to merge).
-- [ ] Optional: make the README's "interactive version" trace-SVG link click-to-live.
-      GitHub cannot serve it live (the blob page sanitizes to a static image; even raw
-      is served with `CSP: sandbox`, verified 2026-08-19) - needs a non-sandboxed host;
-      both options work only once public. Recommended: **GitHub Pages** (Settings ->
-      Pages -> deploy `/docs` from `master`; link becomes
-      `macrame-ts.github.io/macrame/media/game_frame_trace.svg`, scripts run, and the
-      same setup later hosts a docs site). Zero-setup alternative: jsDelivr
+- [ ] **Enable GitHub Pages** on `macrame-ts/macrame` (Settings -> Pages -> deploy
+      `/docs` from `master`) and verify the README's "interactive version" link goes
+      live. The README already points at the final Pages URL
+      (`macrame-ts.github.io/macrame/media/game_frame_trace.svg`, written as-if-done
+      2026-08-19; a NOTE comment sits next to it) - the link is DEAD until this step.
+      Background: GitHub cannot serve the scripted SVG itself (the blob page sanitizes
+      to a static image; even raw is served with `CSP: sandbox`, verified 2026-08-19);
+      Pages is the self-owned non-sandboxed host and later also hosts a docs site.
+      Zero-setup fallback if Pages is dropped: jsDelivr
       (`cdn.jsdelivr.net/gh/macrame-ts/macrame@<ref>/docs/media/...`, third-party;
-      pin a tag/commit ref - `@master` is CDN-cached for ~12 h). Then swap the README's
-      download instruction for the live link.
+      pin a tag/commit ref - `@master` is CDN-cached for ~12 h).
 - [ ] Tag `v0.1.0` and cut a GitHub release. (Nothing was ever tagged, so the library
       goes public as 0.1.0 — the coroutine-first and pipe transformations are part of
       what 0.1.0 *is*, not a delta against a released predecessor. Author decision,
