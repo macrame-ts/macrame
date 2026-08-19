@@ -9,7 +9,6 @@
 #include <concepts>
 #include <cstddef>
 #include <functional>
-#include <memory>
 #include <mutex>
 #include <source_location>
 #include <type_traits>
@@ -227,14 +226,14 @@ public:
                 shadow_ready.trigger();
                 return;
             }
-            auto batch = std::make_shared<Batch>(journal_.cut());
-            if (batch->empty())
+            batch_ = journal_.cut();
+            if (batch_.empty())
             {
                 swapped.trigger();   // readers keep the current version, which equals the would-be next
                 shadow_ready.trigger();
                 return;
             }
-            apply_to_shadow(*batch);
+            apply_to_shadow(batch_);
 
             // Phase 2: the only write access - swap and get out. The resync is
             // submitted before the phase gate triggers: anything ordered after the
@@ -242,10 +241,10 @@ public:
             // already submitted, so a following writer - including a graph flip's
             // acquire - FIFO-orders behind it. The flip-entry enforcement
             // check relies on exactly this.
-            front_.async([this, batch, swapped, shadow_ready](T& front) mutable
+            front_.async([this, swapped, shadow_ready](T& front) mutable
             {
                 swap_replicas(front);
-                start_resync(std::move(batch), std::move(shadow_ready));
+                start_resync(std::move(shadow_ready));
                 swapped.trigger();
             }, { .priority = opts.priority });
         };
@@ -291,16 +290,16 @@ public:
             chain_ = shadow_ready;
         }
 
-        auto batch = std::make_shared<Batch>(journal_.cut());
-        if (batch->empty())
+        batch_ = journal_.cut();
+        if (batch_.empty())
         {
             shadow_ready.trigger();   // the chain must still resolve
             return;
         }
 
-        apply_to_shadow(*batch);
+        apply_to_shadow(batch_);
         swap_replicas(front);
-        start_resync(std::move(batch), std::move(shadow_ready));
+        start_resync(std::move(shadow_ready));
     }
 
     // Custom copy for `Resync::copy` (dst = shadow, src = front). Optional when T
@@ -353,15 +352,19 @@ private:
 
     // Phase 3: bring the new shadow (old front contents) to the new version, as a
     // read job on the front's pipe - overlapping readers, FIFO-ordered before the
-    // next writer. `overwrite` needs no work (and no job).
-    void start_resync(std::shared_ptr<Batch> batch, Signal shadow_ready)
+    // next writer. `overwrite` needs no work (and no job). The batch lives in the
+    // member slot (`batch_`); this job is its last reader and clears it before
+    // triggering `shadow_ready` - the trigger is what licenses the next publish's
+    // cut into the slot.
+    void start_resync(Signal shadow_ready)
     {
         if (policy_ == Resync::overwrite)
         {
+            batch_.clear();   // last use was the phase-1 apply; commands die with the cycle
             shadow_ready.trigger();
             return;
         }
-        std::as_const(front_).async([this, batch = std::move(batch), shadow_ready](const T& front) mutable
+        std::as_const(front_).async([this, shadow_ready](const T& front) mutable
         {
             {
                 Access_context ctx;
@@ -374,7 +377,7 @@ private:
                     // this second application sees the same pre-state as the first
                     // - deterministic commands land both replicas at bit-identical
                     // version N.
-                    for (auto& cmd : *batch)
+                    for (auto& cmd : batch_)
                         cmd(shadow_);
                 }
                 else   // Resync::copy
@@ -391,6 +394,7 @@ private:
                     fatal("Versioned<T>: replica divergence after replay resync - a staged command is nondeterministic");
 #endif
             }
+            batch_.clear();   // commands (and their captures) die with the cycle; capacity retained
             shadow_ready.trigger();
         });
     }
@@ -398,6 +402,16 @@ private:
     Guarded<T> front_;                // readers' pipe + the published replica
     T shadow_{};                      // the replica the next version is built in (value-init: must equal the front's initial state)
     detail::Journal<T> journal_;
+    // The in-flight publish's batch. ONE member slot suffices because the publish chain
+    // serializes batch lifetimes: `shadow_ready` triggers only after the batch's last use
+    // (the resync's replay for replay/copy, the phase-1 apply for overwrite, the cut itself
+    // for the empty early-out; a cancelled publish never cuts), and the next publish's phase
+    // 1 - the next cut into this slot - gates on exactly that signal (`chain_`; a flip
+    // enforces `chain_.is_done()` at entry). Cleared by the last reader, so captured
+    // resources die with the cycle and the vector's capacity is reused across publishes -
+    // this replaced a make_shared<Batch> per publish. The destructor's chain sync +
+    // pipe drain covers the resync job's `this` capture.
+    Batch batch_;
     Resync policy_;
     T* front_ptr_;
     std::mutex seq_mutex_;            // guards `chain_` handoff between publishes
