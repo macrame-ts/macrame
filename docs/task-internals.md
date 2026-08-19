@@ -282,40 +282,51 @@ spawned.
   execution start — and, for a coroutine, re-installed around every resumed
   segment (companion to the `thread_local current_worker_index` and the
   per-task `Access_context`).
-- Registration (`detail::add_nested`, spelled `ts::nested` publicly): the
-  nested task `++`s the parent's `num_locks` and records the parent in its
-  `nested_parent` slot, so its settle releases the parent; the parent completes only
-  once all nested tasks do (§4). In a coroutine segment the child is also
-  recorded in the frame's implicit scope list, so `co_await ts::join_nested()`
-  can await the children mid-body; `ts::Task_scope` is the explicit-scope
-  variant (its own list, `co_await scope.join()`, fatal if dropped unjoined).
+- Registration (`detail::add_nested`, graph-internal — there is no public
+  `ts::nested`): the nested task `++`s the parent's `num_locks` and records the
+  parent in its `nested_parent` slot, so its settle releases the parent; the
+  parent completes only once all nested tasks do (§4). Its two current callers are
+  a coroutine graph-node body (the node completes when the frame completes) and a
+  nested graph run (`co_await inner.execute()`). The frame's implicit-scope list
+  is retained solely so the non-quiet-scope lending check (§10) can see a
+  still-running nested run — it is no longer user-reachable.
 - `parallel_for` chunks are a degenerate nested task ("subtasks inherit the
   parent node's context"); the default cheap `parallel_for` stays on the
   group-latch tier (§1).
 
+  The scoped-launch verbs that once exposed this — `ts::nested`, `ts::Task_scope`,
+  `co_await ts::join_nested()` — were removed 2026-08: a concurrent grant-inheriting
+  child can race its parent on shared mutable state where the declaration-based
+  harness cannot see it (design.md §4.5). Fan out over a node's owned data with
+  `ts::parallel_for` (grant-inheriting, synchronous join) instead.
+
 ### 7.1 Nested tasks inside a graph node
 
-A `Static_task_graph` node can spawn nested tasks (`ts::nested`) — needed for
-dynamic, data-dependent fan-out a static `parallel_for` can't express (e.g. a
-physics node discovering N runtime islands and solving them in parallel). This
-required making a graph node a **real task block**, not a bare closure:
-`run_node` builds the node body as an `Executable<Body,void>` and submits
-`execute` on the run's scheduler, so `Executable::run` installs `current_task`
-and the `execution_flag` self-lock (§4) around the body — exactly the state
-`add_nested` needs. The node's graph post-logic (early release, successor
-release, run completion) fires only after the body *and* all nested tasks
+A `Static_task_graph` node can host completion-gated sub-work — a coroutine node
+body that `co_await`s, or a nested graph run — needed for dynamic, data-dependent
+composition a static `parallel_for` can't express (e.g. a physics node running an
+inner solver graph). This required making a graph node a **real task block**, not
+a bare closure: `run_graph_node` runs the node through its block so `current_task`
+and the `execution_flag` self-lock (§4) are installed around the body — exactly the
+state `add_nested` needs. The node's graph post-logic (early release, successor
+release, run completion) fires only after the body *and* all gated sub-work
 settle — the §8 invariant, structurally. A **coroutine node body** (returning
-`Task<void>`) rides the same mechanism: the returned frame is attached as a
-nested child of the node block, so the node completes when the frame completes
-— suspension neither completes the node nor releases its grants.
+`Task<void>`) rides this mechanism: the returned frame is attached via `add_nested`
+as a child of the node block, so the node completes when the frame completes
+— suspension neither completes the node nor releases its grants. (Grant-inheriting
+data-parallel fan-out over the node's own objects is `ts::parallel_for`, which
+joins synchronously inside the body; the old `ts::nested` spelling is gone, §7.)
 
-This is a **scoped** version of "graph nodes are blocks": nodes get a block for
-their *execution / nesting / completion* only. Scheduling stays as it was — data
-prerequisites via `remaining_deps` + the lazy reservation via `remaining_objects`
-(§10), *not* folded into `num_locks`. So `num_locks` on a node block is used only
-in its `execution_flag` (post-execution) mode; the intricate part of a full rebase
-(folding prerequisite counting into `num_locks` against the lazy reservation) is
-avoided.
+Data prerequisites and pipe turns are counted separately. Cross-node ordering
+edges stay in `remaining_deps` (seeded per run from each node's `indegree`); the
+0-transition calls `on_data_ready`. Pipe turns, since the rebase, ride the block's
+`num_locks` in its below-`execution_flag` mode: `on_data_ready` seeds `num_locks`
+to the node's `pipe_count` and calls `pipe_enter_first`, the same canonical
+pipe-address cascade multi-object `async` uses (§10), and the last admission drops
+`num_locks` to 0 and dispatches. After dispatch the same counter flips to its
+`execution_flag` (post-execution) mode for the body/sub-work gate. So a node block
+uses `num_locks` in *both* modes; the older two-counter reservation
+(`remaining_objects`) is gone with the pipe rebase.
 
 **Allocation-free re-runs.** The node block is a `Graph_node_block` (the
 `Task_control_block` + a `graph`/`index` back-pointer), **allocated once at
@@ -340,18 +351,20 @@ under TSan). The graph is movable (build-and-return, e.g. `build_frame_graph`);
 `execute()` refreshes the blocks' `graph` back-pointers, so a moved graph is valid
 on its next run.
 
-**Access inheritance.** For nested sub-work to touch the node's *owned* guarded
-data (the point of fanning out over it), it must run under the node's grant. A
-worker running a nested task otherwise has no `Access_context` → the harness fires.
-So `ts::launch` (and thus `ts::nested`) now snapshots the launcher's
-`Access_context` **by value** (`detail::snapshot_access()`) and installs it around
-the body (`Inherited_access_scope`). By value, not by pointer: the node's context
-is a stack local in the body, and body-return ≠ completion — the nested task may
-run after the body unwinds, so a pointer would dangle. The copy is bounded to the
-node's declared instances, so a nested task touching an *undeclared* object still
+**Access inheritance.** For sub-work to touch the node's *owned* guarded data
+(the point of fanning out over it), it must run under the node's grant. A worker
+running it otherwise has no `Access_context` → the harness fires. Grant
+inheritance is therefore attached to the two sub-work mechanisms that stay inside
+the node's window, not to the detached `ts::launch` (which inherits no grant):
+a `parallel_for` helper snapshots the node's `Access_context` **by value**
+(`detail::snapshot_access()` + `Inherited_access_scope`), and a coroutine frame
+carries the creator's context on its promise. By value, not by pointer: the node's
+context is a stack local in the body, and body-return ≠ completion — the sub-work
+may run after the body unwinds, so a pointer would dangle. The copy is bounded to
+the node's declared instances, so sub-work touching an *undeclared* object still
 faults (completeness hazard preserved). Consistent with the reservation: the
-node's objects stay reserved until its block completes (post-nested), and the
-nested tasks run under the node's grant on those same objects.
+node's objects stay held until its block completes (post-sub-work), and the
+sub-work runs under the node's grant on those same objects.
 
 ---
 
@@ -405,32 +418,39 @@ comparison hard.
 
 ---
 
-## 10. Graph ↔ dynamic access coexistence (pipe reservation)
+## 10. Graph ↔ dynamic access coexistence (the shared pipe cascade)
 
-Graph nodes access their objects **directly** (bypassing the pipe), ordered among
-themselves by conflict edges. `Guarded` access (`access`/`async`) goes through the
-**pipe**. Two independent serializers over one object → a node and an access on the same object
-would run concurrently → **data race**. The access harness does **not** catch this:
-both sides hold a valid declared `Access_context`, and the harness only catches
-*undeclared* access, never two-declared-concurrent. So the race is silent
-(TSan/ASan only) — which is exactly why it needs a structural fix.
+Graph nodes reach their objects **directly**, bypassing per-call dispatch (not the
+pipe), ordered among themselves by conflict edges. `Guarded` access (`access`/`async`)
+goes through the **pipe**. If these were two independent serializers over one object,
+a node and an access on the same object could run concurrently → **data race**. The
+access harness does **not** catch this: both sides hold a valid declared
+`Access_context`, and the harness only catches *undeclared* access, never
+two-declared-concurrent. So the fix has to be structural, and it is: **a node takes a
+pipe turn on every object it declares**, through the same cascade multi-object `async`
+uses. A concurrent `Guarded::async` on the same object queues behind the node that
+holds it rather than racing it.
 
-**Mechanism (implemented):** per-node **mode-aware acquire/release**. `pipe_acquire(pipe,
-mode, on_acquired)` holds a pipe in `mode` without auto-completing — a `read_only` holder
-joins concurrent readers, a `read_write` holder is exclusive; admissible at the front (FIFO
-+ reader/writer rules) → acquired synchronously (returns true), else it queues and
-`on_acquired` fires when admitted. `pipe_release(pipe, mode)` drops the hold (mode-aware) and
-re-dispatches. A node acquires each object it touches before running and releases it at
-completion, so an object is held only over each accessor's `[acquire, complete]` window —
-free in between. Async on a graph object thus coexists **per node**: it can't overlap a node
-holding the object incompatibly (a writer node is exclusive), a read async overlaps a read
-node, and any async runs in the gaps. Generalises the old writer-only whole-run `pipe_reserve`.
+**Mechanism (implemented), since the pipe rebase.** Each node's `Pipe_link`s live in a
+contiguous `compile()`-time slab (`node_links_`), one per declared object, bound in
+ascending pipe-address (canonical) order and re-armed per run. When a node becomes
+data-ready (`on_data_ready`), its `num_locks` is seeded to `pipe_count` and
+`pipe_enter_first` enters link 0; each admitted turn fires `release(owner)`, which
+enters the *next* link — the sequential canonical cascade — and the last admission
+drops `num_locks` to 0 and dispatches the body (`dispatch_ready`). At completion,
+`advance_pipe_links` releases the held links, mode-aware. A `read_only` turn joins
+concurrent readers; a `read_write` turn is exclusive. This is one cascade, shared with
+dynamic multi-object `async` — the rebase deleted the node-specific `Multi_async_state`,
+`acquire_next`, `preheld`/`handoff_target`, and the explicit write handoff. An object is
+held only over each accessor's `[first turn, completion]` window — free in between — so
+async on a graph object coexists **per node**: it can't overlap a node holding the object
+incompatibly (a writer node is exclusive), a read async overlaps a reader node, and any
+async runs in the gaps.
 
 **Access inline (`pipe_try_inline`).** `Guarded::access(fn)` (the opportunistic verb;
 `async(fn)` always schedules) runs the body *synchronously on the calling thread* instead
 of a worker hop when the pipe is free at call time.
-`pipe_try_inline(pipe, mode, fn)` is the sibling of `pipe_reserve`'s try-acquire, but
-mode-aware and run-then-release: under the pipe mutex it admits the job only if the pipe is
+`pipe_try_inline(pipe, mode, fn)` is mode-aware and run-then-release: under the pipe mutex it admits the job only if the pipe is
 immediately free for that mode — no queued jobs (FIFO preserved) and the reader/writer rules
 allow (`read_only` joins as a concurrent reader, `read_write` as an exclusive writer) — then
 runs `fn()` inline (the body installs its own access scope), re-locks, releases, `dispatch`es
@@ -439,27 +459,23 @@ the normal `pipe_enqueue`. Caveats (documented, not enforced): it **blocks the c
 the body's duration and **stacks the access scope** on the caller's thread — so opting in from
 inside a graph node (or any worker you can't afford to block) is the anti-pattern above.
 
-Acquire is **per node, mode-aware, canonical-order incremental**, so an object is held
-only over each accessor's `[acquire, complete]` window — not the whole run:
+A node's turns are **canonical-order sequential**, so an object is held only over each
+accessor's `[first turn, completion]` window — not the whole run:
 
 - **Per object, not up front.** A node runs once **two** gates are open: its data
-  prerequisites (`remaining_deps`) *and* all its objects acquired. When it becomes data-ready
-  (`on_data_ready`) it walks its objects in ascending pipe-index (canonical) order —
-  `acquire_next` holds each: an immediate acquire recurses on synchronously, a contended one
-  defers to `pipe_acquire`'s callback (fires when the object frees). Once the last is held it
-  runs (`run_node`); at completion (`node_complete`, after any nested sub-work) it releases
-  them all (`pipe_release`, mode-aware). No per-pipe run-level bookkeeping — each node owns
-  its own acquire/release.
-- **Handoff (elide the round-trip).** A serial chain on one object — node writes X, successor
-  writes X — would otherwise release X and immediately re-acquire it. `node_complete` instead
-  **hands X directly** to the sole ready successor that takes it in the *same* mode: it skips
-  the release, and a per-node `preheld` bitmask (position in the successor's `pipe_indices`)
-  makes that successor's `acquire_next` skip the object (no pipe op — the pipe state, a held
-  writer or a reader-count slot, is already right for it). Unique for a writer by the conflict
-  edges (two writers of one object are ordered, never both ready). The handed object stays held
-  across the edge (no gap), which is fine: the successor just went ready and runs immediately.
-  Any object *not* handed off is released — the gap-freeing above. The mask is set (before the
-  successor is triggered, so single-writer + happens-before via the trigger) and cleared per run.
+  prerequisites (`remaining_deps`) *and* all its pipe turns granted. When it becomes
+  data-ready (`on_data_ready`) the cascade enters its links in ascending pipe-address
+  (canonical) order — `pipe_enter_first` then a `release`-driven walk, each admitted turn
+  entering the next link. Once the last is granted `num_locks` hits 0 and it dispatches; at
+  completion (after any gated sub-work) `advance_pipe_links` releases them all, mode-aware.
+  No per-pipe run-level bookkeeping — each node's links carry its own turns.
+- **Handoff survives only opportunistically.** The rebase deleted the explicit write handoff
+  (`preheld`/`handoff_target`): a serial chain on one object no longer skips the
+  release/re-acquire round-trip by design. The optimization survives when a successor's link
+  is *already queued* at the predecessor's release, so the release and the successor's next
+  admission happen in one mutex pass (`collect_admissions` gathers the granted links under the
+  lock, `fire_granted` fires them after unlock). It is now a property of admission timing, not
+  a dedicated mechanism.
 - **Gaps are free.** An object touched by an early node and a late node with a gap node
   between is released after the early node and re-acquired only at the late node — free
   during the gap. (The old `[first accessor, last accessor]` reservation held it continuously
@@ -469,50 +485,44 @@ only over each accessor's `[acquire, complete]` window — not the whole run:
   reader node and an async reader — overlap; a writer node is exclusive. (The old reservation
   was writer-only, blocking even a read async for the whole run.)
 
-**Deadlock-freedom** comes from **canonical order** — a node acquires objects in ascending
-pipe-index order, holding as it goes (the classic ordered-acquisition result), not from
-atomicity. In the graph it's belt-and-suspenders: conflict edges serialise every conflicting
-node pair, so no two *concurrent* nodes ever contend an object, and single-object async holds
-one object and waits for none — no wait-cycle can form regardless. Canonical order becomes
-load-bearing only once multi-object `async` (a second class of multi-object acquirer) lands;
-it's baked in now (pipe index = canonical id) for that.
+**Deadlock-freedom** comes from **canonical order** — the cascade enters links in ascending
+pipe-address order (the classic ordered-acquisition result), not from atomicity. In the graph
+it's belt-and-suspenders: conflict edges serialise every conflicting node pair, so no two
+*concurrent* nodes ever contend an object, and single-object async holds one object and waits
+for none — no wait-cycle can form regardless. Canonical order is load-bearing for multi-object
+`async` (the second class of multi-object acquirer), which enters the *same* cascade in the
+*same* order — so nodes and multi-object asyncs can never deadlock against each other.
 
-**Inline node dispatch (opt-in, `Graph_node::set_inline`).** The per-node acquire makes the
-inline hand-off natural: when a node's last prerequisite completes on some thread, that thread
-runs `acquire_next` for the successor. `acquire_next` threads a `synchronous` flag — true while
-the chain stays on that thread, flipped false the moment any acquire *defers* to a
-`pipe_acquire` callback (a contended object). At the end, an inline node that stayed
-`synchronous` dispatches through the shared `dispatch_ready` trampoline (its block's
-`run_inline` bit is set, so the inline path runs it on this thread, bounded/iterative like the
-task inline path); otherwise it goes through the queue (`run_node` on the run's scheduler). So
-an inline node runs on the settling thread **only if it can acquire all its objects there and
-then** — a contended object (async grabbed it in a gap) defers it to the queue, exactly the
-"revoke the predecessor's access, acquire the successor's, else defer" hand-off. A chain of
-inline nodes on one object trampolines: each releases the object at completion, the next
-acquires it synchronously and dispatches inline. Caveats: it runs on a nondeterministic
-thread (the caller for a root), bypasses priority, and must not block; an all-inline
-graph runs synchronously on the `execute()` caller.
+**Inline node dispatch (opt-in, `Graph_node::set_inline`).** When a node's last prerequisite
+completes and all its pipe turns are grantable on that thread, the last cascade admission
+dispatches it through the shared `dispatch_ready` trampoline with its block's inline bit set,
+so it runs on the settling thread (bounded/iterative, like the task inline path) rather than
+going through the queue. A contended object (async grabbed it in a gap) leaves the turn
+pending, and the node dispatches from the granting thread when the turn is admitted — so an
+inline node runs on the settling thread only when it can take all its turns there and then. A
+chain of inline nodes on one object trampolines. Caveats: it runs on a nondeterministic thread
+(the caller for a root), bypasses priority, and must not block; an all-inline graph runs
+synchronously on the `execute()` caller.
 
-**Multi-object `ts::access` / `ts::async`** reuses the *same* acquire primitive outside the
-graph: the free function `ts::access(fn, objs...)` (or `ts::async`, always scheduled) runs
-`fn(*objs...)` over several `Guarded`s at once. It
-acquires each object's pipe mode-aware, in canonical (pipe-address) order, holding all
-(`multi_acquire`, the acquire chain), runs the body under an `Access_context` declaring every
-object, then releases at completion (a continuation `attach`ed to the block). Because the
-graph's `distinct_pipes_` is address-sorted, graph nodes and multi-object asyncs acquire in
-the **same** canonical order — so the two classes of multi-object acquirer can't deadlock
-against each other (this is where canonical order stops being belt-and-suspenders and becomes
-load-bearing). A repeated object is deduped write-wins. Options are passed first
+**Multi-object `ts::access` / `ts::async`** is the *same* cascade outside the graph: the free
+function `ts::access(fn, objs...)` (or `ts::async`, always scheduled — and `ts::access`
+currently forwards to it) runs `fn(*objs...)` over several `Guarded`s at once. The block
+carries one embedded `Pipe_link` per object (`make_piped_executable`), seeds `num_locks` to the
+object count, and enters the links in canonical (pipe-address) order via `pipe_enter_first`,
+each admitted turn entering the next; the body runs under an `Access_context` declaring every
+object, and `advance_pipe_links` releases at completion. Graph nodes bind their `node_links_`
+slab in the same address order, so nodes and multi-object asyncs enter the same cascade in the
+same order and can never deadlock against each other. A repeated object is **fatal** (declare
+each once; relaxable to write-wins dedup on demand, 2026-08-18). Options are passed first
 (`ts::async({.priority=p}, fn, objs...)`) since a parameter pack can't precede a defaulted
-argument; `run_inline` is ignored (multi-object inline is a follow-up).
+argument; the single-object inline fast path is not yet implemented across multiple objects.
 
 Note there is **no** class of objects that async can't reach: `async()` is public on
 every `Guarded`, so any graph object is potentially async-reachable — you can't
-statically skip reservation for "async-free" objects. A per-object user assertion
+statically skip a node's pipe turn for "async-free" objects. A per-object user assertion
 ("graph-exclusive, never async'd during a run") could skip it, but that trades the
-safety guarantee for ~2 mutex ops per object per run (the reservation cost on an idle
-pipe) and reintroduces the silent race if violated — not worth it. If the overhead
-ever matters, make the idle-pipe reserve lock-free rather than skipping it.
+safety guarantee for the turn's cost on an idle pipe (one mutex pass) and reintroduces
+the silent race if violated — not worth it.
 
 ### Scenarios where the model can still break
 
@@ -564,7 +574,7 @@ Cooperative, no exceptions. `Cancellation_source` owns an `atomic<bool>` flag; i
 `token()` is handed to `async` / `launch` / `execute`. **Cancellation is a completion
 state**, not a separate channel: a settled task is either completed or cancelled.
 
-- **Checked when work is about to run.** `async`'s body and each graph `run_node`
+- **Checked when work is about to run.** `async`'s body and each graph `run_graph_node`
   check the token first; if cancelled, the body is **skipped** and the block settles
   as cancelled. Already-running work is *not* interrupted. So cancellation skips
   *not-yet-started* work.
@@ -642,11 +652,11 @@ TSan): the block settles exactly once, either way.
   **done** (2026-08): the nested case is supported via the lend, the same-graph concurrent
   case is a fatal, and the different-graph concurrent case turned out to be safe all along
   (§10 scenario 2/3) — nothing hangs any more.
-- **Fold graph scheduling onto the block's lock-counter** — graph nodes run as task
-  blocks for execution/nesting/completion (§7.1), but scheduling still uses
-  `remaining_deps` + the lazy reservation (`remaining_objects`) rather than
-  `num_locks`; the prerequisite half is deliberately not folded in, because the lazy
-  reservation needs a separate data-ready signal. Folding the scheduling half is the
-  remaining work.
+- **Fold graph scheduling onto the block's lock-counter** — the object-acquisition
+  half is **done** (the pipe rebase): a node's pipe turns are its `num_locks` in
+  below-`execution_flag` mode, entered through the shared cascade (§7.1, §10), and the
+  old two-counter reservation (`remaining_objects`) is gone. The data-prerequisite half
+  stays in `remaining_deps`, deliberately not folded in, because cross-node ordering
+  needs a data-ready signal separate from the pipe turns.
 - Group latch tier for the default `parallel_for`.
 - Pooled block allocator + the one microbenchmark.

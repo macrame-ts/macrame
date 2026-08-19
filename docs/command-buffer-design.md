@@ -3,6 +3,13 @@
 (User-facing usage: [guide.md](guide.md) §9; condensed rationale:
 [design.md](design.md) §6. This is the full design study.)
 
+> **Current operational state and API live in
+> [deferred-versioned-state.md](deferred-versioned-state.md).** This is the design
+> study that produced `Deferred`/`Versioned`; §7 below records the 2026-07 ship and
+> has since drifted in one place — the two-verb `commit`/`commit_async` split it
+> describes was later unified into a single auto-dispatching `commit()` (see
+> deferred-versioned-state.md §7a).
+
 Status: **implemented** (2026-07) — design 4 shipped as `Deferred<T>` (`deferred.h`)
 plus its versioned-state sibling `Versioned<T>` (`versioned.h`); the physics sample
 (`sample/physics.cpp`) is the second fixture. See §7 for the outcome, the decisions
@@ -507,12 +514,16 @@ implementation detail a triple-buffer upgrade shouldn't rename).
 **`Deferred<T>`** (`deferred.h`): binds to a `Guarded<T>`; `recorder()` mints
 move-only producer identities; `stage(closure)` appends to private per-recorder
 storage (`detail::Journal<T>` — shared with `Versioned`), no grant on the
-target; `commit_async(opts)` is one ordinary pipe write amortized over the
-batch (cut at execution time — a cancelled commit retains its commands);
-`commit()` applies to the bound object under a grant the caller already holds
-(the graph-node form; also the physics sample's "commit at the sim boundary"). Apply order:
+target; the batch applies as one ordinary pipe write amortized over its commands
+(cut at execution time — a cancelled commit retains its commands). Apply order:
 recorder-creation order, FIFO within — deterministic regardless of thread
 timing, exactly the §3.2 claim.
+
+*(Since shipped: the `commit_async(opts)` / `commit()` split this section
+describes was unified 2026-08 into a single auto-dispatching `commit(opts)` — it
+applies inline when the calling task already holds the target's write grant, and
+enqueues an ordinary async write otherwise. See
+[deferred-versioned-state.md](deferred-versioned-state.md) §7a.)*
 
 **`Versioned<T>`** (`versioned.h`): journal + two replicas behind one `Guarded`
 front. The swap exchanges the replicas' *contents*, so the front's address is
