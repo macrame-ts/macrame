@@ -37,13 +37,38 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
 - [x] **Finalize the library name** — decided 2026-08-19: **Macrame** (`macrame`
       functional, `é` branding-only; org `macrame-ts`, target `github.com/macrame-ts/macrame`;
       see `docs/naming.md`).
-- [ ] **Name rollout** (repo-local, before or at the move):
-      - `--version` product string in `src/main.cpp` (`task_system %s` → `macrame %s`);
-        `version.h` macros stay `TS_*` (namespace decided, below).
-      - [x] Namespace decided (author, 2026-08-19): **stays `ts::`** (the org suffix echoes it).
-      - Decide whether project/file names (`task_system.slnx`, `task_system.vcxproj`,
-        CMake `project(task_system)`, the built exe, `tsan/run.sh`, CI yml, docs that
-        spell `task_system --trace`) rename to `macrame` now or stay as working names.
+- [ ] **Name rollout** (repo-local; 73 `task_system` occurrences across 19 tracked
+      files + 3 tracked files to rename, scoped 2026-08-20). Namespace **stays `ts::`**
+      (author, 2026-08-19), so `include/ts/`, `TS_*` macros and `version.h` are UNCHANGED.
+      Groups A-E are one local, CI-testable batch; do them together (a missed CI/exe path
+      turns CI red). Verify: `cmake --preset windows-msvc` build → run `macrame.exe --tests`
+      → `git grep task_system` returns only intended history (CHANGELOG) → push → 4 CI jobs green.
+      - **A. Physical renames** (`git mv`): `task_system.slnx` → `macrame.slnx` (fix its
+        internal `<Project Path="task_system.vcxproj">` → `macrame.vcxproj`),
+        `task_system.vcxproj` → `macrame.vcxproj`, `task_system.vcxproj.filters` →
+        `macrame.vcxproj.filters`. **Keep the vcxproj Project GUID** (`8acc9866-...`) so the
+        local `.args.json` binding survives.
+      - **B. Build identity**: `CMakeLists.txt` `project(macrame)` + `add_executable(macrame)`
+        + every `target_*(macrame)` + comments (output exe auto-becomes `macrame.exe`);
+        `macrame.vcxproj` `<RootNamespace>` `tasksystem` → `macrame` (cosmetic).
+      - **C. Code strings**: `src/main.cpp` `--version`/usage banner `task_system` → `macrame`;
+        `src/fatal.cpp` `task_system_crash.dmp` → `macrame_crash.dmp`.
+      - **D. CI + scripts** (must move with B): `.github/workflows/ci.yml` all
+        `.../task_system.exe`/`.pdb` → `macrame.*`, artifact `task_system_crash.dmp` →
+        `macrame_crash.dmp`, log strings (all 4 jobs); `show_graph.bat`, `tsan/run.sh`,
+        `tsan/README.md` command/path refs.
+      - **E. Docs** (user-facing command name `task_system --X` → `macrame --X`, `.slnx` name):
+        `README.md`, `guide.md`, `quickstart.md`, `CONTRIBUTING.md`, `example-frame-optimization.md`,
+        `.github` issue/PR templates, and internal `CLAUDE.md` (VS Project section) /
+        `graph-viz-handoff.md` / this file.
+      - **Preserve local VS config** (untracked, plain `mv` not `git mv`, content unchanged):
+        `task_system.vcxproj.user` → `macrame.vcxproj.user` and `task_system.args.json` →
+        `macrame.args.json` (holds the `--tests` debug launch args + history; VS keys `.user`
+        by the vcxproj basename, so a rename without these silently loses the config). The
+        generic `.gitignore` patterns (`*.user`, `*.args.json`) already cover the new names.
+      - **Cleanup leftovers** (all untracked/ignored, local): delete the `task_system/` build
+        dir, `task_system_crash.dmp`, and `build/windows-msvc/` (stale `task_system.exe`);
+        reconfigure CMake clean so no old-named artifact lingers beside `macrame.exe`.
       - `README.md` header comment + `CONTRIBUTING.md` note already point at the move.
 - [ ] **GitHub side** (author): ~~create the `macrame-ts` org~~ — registered (2026-08-19).
       Remaining: transfer `Andriy06/task_system` → `macrame-ts/macrame` (a transfer keeps
