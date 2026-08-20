@@ -67,8 +67,9 @@ inline constexpr double rank_min_share = 0.05;
 
 // Aggregated runtime trace for a `Static_task_graph`: attach with
 // `graph.set_trace(&trace)` (after `compile()`), run any number of times, then
-// `write_SVG(path)` renders the average run - node bars packed into anonymous
-// concurrency rows (row occupancy over time = the average frame's concurrency; workers
+// `write_SVG(path)` renders the average run - node bars in a spine-plus-fill layout:
+// row 0 is the critical chain drawn straight across, the rest greedy-pack into rows 1+
+// (row 0's gaps are critical dead time, rows 1+ occupancy is the parallel fill; workers
 // are interchangeable, so rows carry no worker identity), dependency edges between them,
 // per-node stats in hover tooltips.
 //
@@ -862,15 +863,15 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
     }
 
-    // Concurrency rows: workers are interchangeable and the node->worker assignment
-    // reshuffles every run, so per-worker lanes misrepresent the aggregate - a lane can
-    // look idle while every real run had that worker busy, with its nodes drawn on their
-    // own modal lanes. Instead all bars pack greedily into anonymous rows by interval
-    // overlap (bar-start order; first row whose last bar has ended, else a new row). Row
-    // occupancy over time is the average frame's concurrency: free vertical space means
-    // genuinely unused capacity in the average, not a projection artifact. The per-worker
-    // histogram survives for stats (off-modal share, external runs); it no longer drives
-    // layout.
+    // Layout rows: workers are interchangeable and the node->worker assignment reshuffles
+    // every run, so per-worker lanes misrepresent the aggregate - a lane can look idle while
+    // every real run had that worker busy. Instead the layout is a spine-plus-fill: row 0 is
+    // reserved for the critical chain (see the packing loop) drawn straight across, and every
+    // other bar greedy-packs into rows 1+ by interval overlap (bar-start order; first free
+    // row, else a new one). So rows 1+ occupancy over time is the parallel fill around the
+    // spine - free vertical space there is genuinely unused capacity in the average; row 0's
+    // gaps are the critical chain's dead time, not idle cores. The per-worker histogram
+    // survives for stats (off-modal share, external runs); it no longer drives layout.
     int workers_seen = 0;
     for (int i = 0; i < count; ++i)
         workers_seen = std::max(workers_seen, static_cast<int>(nodes_[static_cast<size_t>(i)].worker_runs.size()));
@@ -882,15 +883,31 @@ inline bool Graph_trace::write_SVG(const char* path) const
     {
         return bar_start[static_cast<size_t>(a)] < bar_start[static_cast<size_t>(b)];
     });
+    // Row 0 is the reserved critical spine: CPM zero-slack nodes go there in start order.
+    // The meet-point clamping above guarantees consecutive critical bars do not overlap, so
+    // the whole chain fits one lane and reads straight across instead of hopping rows; its
+    // gaps are the chain's dead-time waits (drawn as hatched bands), not idle cores. A
+    // critical node that would still overlap row 0's occupant - a rare parallel-critical
+    // tie - falls back to normal packing. Everything else greedy-packs into rows 1+.
+    constexpr double slack_eps = 1.0;   // µs; a CPM-critical node's slack is exactly 0
     std::vector<int> row_of(static_cast<size_t>(count), 0);
-    std::vector<double> row_last_end;
+    std::vector<double> row_last_end(1, 0.0);   // row 0 exists up front - the spine lane
     for (int nidx : pack_order)
     {
-        size_t r = 0;
-        while (r < row_last_end.size() && bar_start[static_cast<size_t>(nidx)] < row_last_end[r] - 1e-9)
-            ++r;
-        if (r == row_last_end.size())
-            row_last_end.push_back(0.0);
+        bool critical = slack[static_cast<size_t>(nidx)] <= slack_eps;
+        size_t r;
+        if (critical && bar_start[static_cast<size_t>(nidx)] >= row_last_end[0] - 1e-9)
+        {
+            r = 0;
+        }
+        else
+        {
+            r = 1;   // non-critical never claims the spine lane, even across its gaps
+            while (r < row_last_end.size() && bar_start[static_cast<size_t>(nidx)] < row_last_end[r] - 1e-9)
+                ++r;
+            if (r == row_last_end.size())
+                row_last_end.push_back(0.0);
+        }
         row_last_end[r] = bar_end[static_cast<size_t>(nidx)];
         row_of[static_cast<size_t>(nidx)] = static_cast<int>(r);
     }
@@ -1503,8 +1520,9 @@ inline bool Graph_trace::write_SVG(const char* path) const
         }
     }
 
-    // No row separators or labels: rows are anonymous concurrency slots, not workers -
-    // there is nothing true to label them with.
+    // No row separators or labels: rows 1+ are anonymous fill slots (not workers - nothing
+    // true to label them with), and row 0's spine is identified by the critical highlight on
+    // its bars, not a lane label.
 
     // Multi-line tooltip data: each line escaped, joined with a literal `&#10;` character
     // reference - a raw newline in an attribute value would be normalized to a space by
