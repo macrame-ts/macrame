@@ -131,7 +131,7 @@
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{8acc9866-6f71-4bc6-8ff6-55dcde578818}</ProjectGuid>
-    <RootNamespace>tasksystem</RootNamespace>
+    <RootNamespace>macrame</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />

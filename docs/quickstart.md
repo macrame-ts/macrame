@@ -1,5 +1,6 @@
-<!-- Quick start. Linked from the README. Name decided: Macrame; project/file names stay
-     "task_system" until the repo moves to macrame-ts/macrame (docs/going-public.md). -->
+<!-- Quick start. Linked from the README. Name decided: Macrame; project and file names are
+     now `macrame`. Only the GitHub repo and URLs stay `Andriy06/task_system` until the repo
+     moves to macrame-ts/macrame (docs/going-public.md). -->
 
 # Quick start
 
@@ -14,7 +15,7 @@ library is a set of headers (under `include/ts/`) plus a few `.cpp` files
 (under `src/`), no external dependencies.
 
 ```
-git clone <repo-url> task_system
+git clone <repo-url> macrame
 ```
 
 Include everything through the umbrella header, or the individual headers if you
@@ -26,7 +27,7 @@ prefer:
 
 ## Build
 
-- **Visual Studio 2022+**: open `task_system.slnx` (x64), build, run. MSVC or
+- **Visual Studio 2022+**: open `macrame.slnx` (x64), build, run. MSVC or
   clang-cl.
 - **CMake**: presets for `windows-msvc`, `windows-clang-cl`, `windows-shipping`,
   `linux-clang`, and `linux-tsan`.

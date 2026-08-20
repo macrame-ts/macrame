@@ -203,7 +203,7 @@ LONG WINAPI crash_filter(EXCEPTION_POINTERS* info) noexcept
         std::to_string(std::stacktrace::current()).c_str());
 #endif
 
-    const char* dump_path = "task_system_crash.dmp";
+    const char* dump_path = "macrame_crash.dmp";
     HANDLE file = CreateFileA(dump_path, GENERIC_WRITE, 0, nullptr,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file != INVALID_HANDLE_VALUE)

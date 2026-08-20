@@ -17,9 +17,9 @@ jobs:
         run: cmake --build --preset windows-msvc
       - name: Tests
         run: |
-          build/windows-msvc/Release/task_system.exe --tests
+          build/windows-msvc/Release/macrame.exe --tests
           $code = $LASTEXITCODE
-          Write-Host "task_system exit code: $code (0x$('{0:X8}' -f $code))"
+          Write-Host "macrame exit code: $code (0x$('{0:X8}' -f $code))"
           if ($code -ne 0) { exit $code }
       - name: Upload crash artifacts
         if: failure()
@@ -27,9 +27,9 @@ jobs:
         with:
           name: msvc-crash
           path: |
-            build/windows-msvc/Release/task_system.exe
-            build/windows-msvc/Release/task_system.pdb
-            task_system_crash.dmp
+            build/windows-msvc/Release/macrame.exe
+            build/windows-msvc/Release/macrame.pdb
+            macrame_crash.dmp
           if-no-files-found: ignore
 
   windows-clang-cl:
@@ -43,9 +43,9 @@ jobs:
         run: cmake --build --preset windows-clang-cl
       - name: Tests
         run: |
-          build/windows-clang-cl/Release/task_system.exe --tests
+          build/windows-clang-cl/Release/macrame.exe --tests
           $code = $LASTEXITCODE
-          Write-Host "task_system exit code: $code (0x$('{0:X8}' -f $code))"
+          Write-Host "macrame exit code: $code (0x$('{0:X8}' -f $code))"
           if ($code -ne 0) { exit $code }
       - name: Upload crash artifacts
         if: failure()
@@ -53,9 +53,9 @@ jobs:
         with:
           name: clang-cl-crash
           path: |
-            build/windows-clang-cl/Release/task_system.exe
-            build/windows-clang-cl/Release/task_system.pdb
-            task_system_crash.dmp
+            build/windows-clang-cl/Release/macrame.exe
+            build/windows-clang-cl/Release/macrame.pdb
+            macrame_crash.dmp
           if-no-files-found: ignore
 
   # The shipping shape (harness + profiling compiled out) is a genuinely different binary:
@@ -73,9 +73,9 @@ jobs:
         run: cmake --build --preset windows-shipping
       - name: Tests
         run: |
-          build/windows-shipping/Release/task_system.exe --tests
+          build/windows-shipping/Release/macrame.exe --tests
           $code = $LASTEXITCODE
-          Write-Host "task_system exit code: $code (0x$('{0:X8}' -f $code))"
+          Write-Host "macrame exit code: $code (0x$('{0:X8}' -f $code))"
           if ($code -ne 0) { exit $code }
       - name: Upload crash artifacts
         if: failure()
@@ -83,9 +83,9 @@ jobs:
         with:
           name: shipping-crash
           path: |
-            build/windows-shipping/Release/task_system.exe
-            build/windows-shipping/Release/task_system.pdb
-            task_system_crash.dmp
+            build/windows-shipping/Release/macrame.exe
+            build/windows-shipping/Release/macrame.pdb
+            macrame_crash.dmp
           if-no-files-found: ignore
 
   linux-tsan:

@@ -34,7 +34,7 @@ git config core.hooksPath tools/hooks
 
 ## The driver in the Windows build
 
-`task_system.vcxproj` compiles `tsan/tsan_main.cpp` with
+`macrame.vcxproj` compiles `tsan/tsan_main.cpp` with
 `TS_TSAN_NO_MAIN` defined, purely as an API-drift tripwire: an API-tightening
 change now fails the developer's own build instead of at commit time or in a
 Linux CI job. Everything in the driver lives in an anonymous namespace, so
@@ -56,7 +56,7 @@ From Windows (PowerShell), invoke a **non-interactive** shell — never `-lic`
 (an interactive login shell blocks on a tty and never runs the script):
 
 ```powershell
-wsl.exe -e bash -c "bash /mnt/c/path/to/task_system/tsan/run.sh"
+wsl.exe -e bash -c "bash /mnt/c/path/to/macrame/tsan/run.sh"
 ```
 
 Clean exit + `tsan: done (no races)` = no races found. A race prints a report

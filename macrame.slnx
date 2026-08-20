@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="task_system.vcxproj" Id="8acc9866-6f71-4bc6-8ff6-55dcde578818" />
+  <Project Path="macrame.vcxproj" Id="8acc9866-6f71-4bc6-8ff6-55dcde578818" />
 </Solution>

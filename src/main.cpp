@@ -54,15 +54,15 @@ int main(int argc, char** argv)
 
     if (argc >= 2 && (std::strcmp(argv[1], "--version") == 0 || std::strcmp(argv[1], "-v") == 0))
     {
-        std::printf("task_system %s\n", TS_VERSION_STRING);
+        std::printf("macrame %s\n", TS_VERSION_STRING);
         return 0;
     }
 
     if (argc >= 2 && (std::strcmp(argv[1], "--help") == 0 || std::strcmp(argv[1], "-h") == 0))
     {
         std::printf(
-            "task_system %s - test/benchmark/sample driver\n\n"
-            "usage: task_system [MODE]\n\n"
+            "macrame %s - test/benchmark/sample driver\n\n"
+            "usage: macrame [MODE]\n\n"
             "  (no args)      run the test suite, all samples, and the benchmarks\n"
             "  --tests        run the test suite only; exit code = failure count\n"
             "  --bench        run the benchmarks only\n"

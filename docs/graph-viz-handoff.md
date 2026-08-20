@@ -122,8 +122,8 @@ granularity + scheduling overhead (~70 slice-tasks/frame on 12 workers).
   allocation/contention added to hot paths. The graph run currently allocates
   only its `done` handle — keep it that way when capture is off.
 - **Verification gate** for anything touching graph/scheduler paths: clean
-  MSBuild Debug x64 (`"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" task_system.vcxproj /p:Configuration=Debug /p:Platform=x64`)
-  + `x64\Debug\task_system.exe --tests` → **369 checks, 0 failures**; CMake
+  MSBuild Debug x64 (`"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" macrame.vcxproj /p:Configuration=Debug /p:Platform=x64`)
+  + `x64\Debug\macrame.exe --tests` → **369 checks, 0 failures**; CMake
   presets `windows-msvc`/`windows-clang-cl` for clean cross-compiler builds
   (stale objects have masked MSVC-only breakage before — clean builds); TSan
   via `wsl.exe -e bash -c "cd /mnt/c/src/task_system && CXX=clang++-21 bash tsan/run.sh"`
@@ -142,9 +142,9 @@ granularity + scheduling overhead (~70 slice-tasks/frame on 12 workers).
   suppress it; a fatal in the main process does not). `Start-Process`'s
   `$p.ExitCode` reads `$null` on success — use direct invocation or `cmd /c`.
 - **Vcxproj is manually maintained** — new files must be added to
-  `task_system.vcxproj` (+ `.filters`) AND `CMakeLists.txt` AND (if compiled on
+  `macrame.vcxproj` (+ `.filters`) AND `CMakeLists.txt` AND (if compiled on
   Linux) `tsan/run.sh`'s `SRC` list.
-- **Library name is an undecided placeholder** (`task_system`, `ts::`) — see
+- **Library name is now decided**: `macrame` (namespace stays `ts::`) — see
   `docs/naming.md`; don't invent branding.
 
 ## 6. Coordination

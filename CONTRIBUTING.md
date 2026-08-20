@@ -4,15 +4,15 @@ Thanks for your interest in the project. It is an open-source C++23 task system 
 parallelisation framework; contributions of all sizes are welcome — bug reports,
 docs, tests, and code.
 
-> The library is **Macrame**; project and file names keep the working name
-> "task_system" until the repository moves to `macrame-ts/macrame`. The
-> namespace is `ts`.
+> The library is **Macrame**; the project and file names are now `macrame`.
+> Only the GitHub repo and URLs stay `Andriy06/task_system` until the repository
+> moves to `macrame-ts/macrame`. The namespace is `ts`.
 
 ## Building
 
 C++23, no external dependencies, exceptions disabled project-wide.
 
-- **Visual Studio 2022+** — open `task_system.slnx` (x64). Configurations:
+- **Visual Studio 2022+** — open `macrame.slnx` (x64). Configurations:
   `Debug`, `Release`, and `Shipping` (Release with the safety harness compiled
   out — see below).
 - **CMake** — presets `windows-msvc`, `windows-clang-cl`, `windows-shipping`,
@@ -25,14 +25,14 @@ C++23, no external dependencies, exceptions disabled project-wide.
 The build produces a single driver executable:
 
 ```
-task_system --help       # list modes
-task_system --tests      # the test suite; exit code = failure count
-task_system --version
+macrame --help       # list modes
+macrame --tests      # the test suite; exit code = failure count
+macrame --version
 ```
 
 ## Running the tests
 
-`task_system --tests` prints a check total ending in `0 failures` (the check
+`macrame --tests` prints a check total ending in `0 failures` (the check
 count grows as tests are added; the failure count must stay 0). Fatal paths are
 exercised as subprocess *death tests* from the same binary.
 
@@ -47,7 +47,7 @@ CXX=clang++-21 bash tsan/run.sh      # expects "tsan: done (no races)"
 ```
 
 On Windows, AddressSanitizer (`/p:EnableASAN=true`) plus stress loops
-(`task_system --stress`) are the fallback — they catch memory bugs and UAF, not
+(`macrame --stress`) are the fallback — they catch memory bugs and UAF, not
 pure data races.
 
 ## The safety harness
@@ -89,9 +89,9 @@ A `.clang-format` at the repo root encodes the house style. In short:
 Visual Studio does not auto-discover files. When you add a `.cpp` or `.h`, keep
 **three lists** identical:
 
-- `task_system.vcxproj` — a `<ClCompile>` (for `.cpp`) or `<ClInclude>` (for `.h`)
+- `macrame.vcxproj` — a `<ClCompile>` (for `.cpp`) or `<ClInclude>` (for `.h`)
   entry, path-including-subfolder. Controls what *builds*.
-- `task_system.vcxproj.filters` — the same entry with a `<Filter>` matching its
+- `macrame.vcxproj.filters` — the same entry with a `<Filter>` matching its
   directory. Controls the Solution Explorer tree; a file added only to the
   `.vcxproj` builds fine but lands ungrouped at the project root.
 - `CMakeLists.txt` — the source list. CI builds via CMake, not the `.vcxproj`, so

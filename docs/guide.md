@@ -969,7 +969,7 @@ different rows by construction of the packing.
 Tracing costs two clock reads per node per run when attached, one branch when
 not, and nothing at all with `TS_PROFILING=0`. Cancelled runs are not folded.
 
-The sample wires this up as `task_system --trace [frames]`, tracing two
+The sample wires this up as `macrame --trace [frames]`, tracing two
 variants of the same ~34-system frame on an 8-worker scheduler — a `baseline`
 and an `optimised` version tuned by reading the baseline's own trace —
 writing `sample_game_frame_avg_baseline.svg` and

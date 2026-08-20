@@ -28,7 +28,7 @@ Minimal steps or a small code snippet that triggers it:
 - **Build configuration:** Debug / Release / Shipping
 - **Compiler + version:** (MSVC / clang-cl / clang; e.g. clang 21)
 - **OS:** (Windows 11 / Ubuntu 24.04 / ...)
-- **Commit / version:** (`task_system --version`, or the git SHA)
+- **Commit / version:** (`macrame --version`, or the git SHA)
 
 ## Sanitizer / diagnostic output
 

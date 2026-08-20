@@ -1,7 +1,7 @@
-# CMake build for task_system, alongside the Visual Studio solution (task_system.slnx /
-# task_system.vcxproj -- both stay authoritative for VS-IDE work; keep the file lists in
+# CMake build for macrame, alongside the Visual Studio solution (macrame.slnx /
+# macrame.vcxproj -- both stay authoritative for VS-IDE work; keep the file lists in
 # sync when adding sources). Two targets:
-#   - task_system (Windows): the full driver -- tests + benchmarks + samples via main.cpp
+#   - macrame (Windows): the full driver -- tests + benchmarks + samples via main.cpp
 #     (the test harness, tests/harness.cpp, is Windows-only: <windows.h> death tests).
 #   - ts_tsan (non-Windows): the portable ThreadSanitizer stress driver from
 #     tsan/tsan_main.cpp, mirroring tsan/run.sh (which remains the canonical way to run it;
@@ -9,7 +9,7 @@
 # Exceptions are disabled project-wide (ts::fatal instead); see CLAUDE.md.
 
 cmake_minimum_required(VERSION 3.25)
-project(task_system VERSION 0.1.0 LANGUAGES CXX)
+project(macrame VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -54,7 +54,7 @@ if(WIN32)
         set(CMAKE_CXX23_EXTENSION_COMPILE_OPTION "-std:c++latest")
     endif()
 
-    add_executable(task_system
+    add_executable(macrame
         ${TS_CORE_SOURCES}
         ${TS_SAMPLE_SOURCES}
         src/main.cpp
@@ -83,30 +83,30 @@ if(WIN32)
         tests/tests.cpp
         tests/versioned_tests.cpp
     )
-    target_include_directories(task_system PRIVATE include tests benchmarks sample tools)
-    target_compile_definitions(task_system PRIVATE _CONSOLE _HAS_EXCEPTIONS=0)
+    target_include_directories(macrame PRIVATE include tests benchmarks sample tools)
+    target_compile_definitions(macrame PRIVATE _CONSOLE _HAS_EXCEPTIONS=0)
     if(NOT TS_SAFETY_CHECKS)
-        target_compile_definitions(task_system PRIVATE TS_SAFETY_CHECKS=0)
+        target_compile_definitions(macrame PRIVATE TS_SAFETY_CHECKS=0)
     endif()
     if(NOT TS_PROFILING)
-        target_compile_definitions(task_system PRIVATE TS_PROFILING=0)
+        target_compile_definitions(macrame PRIVATE TS_PROFILING=0)
     endif()
     # Exceptions off: strip CMake's default /EHsc.
     string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
     if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
         # Match the vcxproj: ConformanceMode + NO /EH flag (ExceptionHandling=false). An explicit
         # /EHs-c- makes cl's <type_traits> mis-specialize invoke_result for the sample's lambdas.
-        target_compile_options(task_system PRIVATE /permissive- /Zc:__cplusplus)
+        target_compile_options(macrame PRIVATE /permissive- /Zc:__cplusplus)
     else()
         # clang-cl: disable exceptions explicitly.
-        target_compile_options(task_system PRIVATE /EHs-c-)
+        target_compile_options(macrame PRIVATE /EHs-c-)
     endif()
     # Emit debug info even in Release so std::stacktrace and MiniDumpWriteDump resolve symbols
-    # (the CI runner otherwise shows only `task_system+0xHEX`). /Zi + /DEBUG produces a PDB next
+    # (the CI runner otherwise shows only `macrame+0xHEX`). /Zi + /DEBUG produces a PDB next
     # to the exe; /OPT:REF,ICF restores the Release code-folding that /DEBUG turns off, so this
     # keeps optimized codegen -- only debug info is added. Applies to cl and clang-cl.
-    target_compile_options(task_system PRIVATE /Zi)
-    target_link_options(task_system PRIVATE /DEBUG /OPT:REF /OPT:ICF)
+    target_compile_options(macrame PRIVATE /Zi)
+    target_link_options(macrame PRIVATE /DEBUG /OPT:REF /OPT:ICF)
 else()
     # The portable stress driver (Linux/macOS; TSan has no Windows runtime).
     option(TS_TSAN "Build the stress driver with ThreadSanitizer" ON)

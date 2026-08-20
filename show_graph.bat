@@ -4,7 +4,7 @@ rem Render a Graphviz .dot file to .svg (next to it) and open it with the defaul
 rem Usage:  show_graph.bat [path\to\graph.dot]
 rem No argument: renders sample_game_frame.dot AND opens the average-run trace SVGs
 rem (sample_game_frame_avg_baseline.svg / _optimised.svg) if present -- the set
-rem task_system --dot / --trace produces.
+rem macrame --dot / --trace produces.
 rem If Graphviz is missing, offers to install it via winget.
 
 set "DOTFILE=%~1"
@@ -20,7 +20,7 @@ if errorlevel 1 exit /b 1
 :have_dot
 
 if not exist "%DOTFILE%" (
-    echo '%DOTFILE%' not found; generate it with: task_system --dot
+    echo '%DOTFILE%' not found; generate it with: macrame --dot
     exit /b 1
 )
 

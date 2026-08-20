@@ -8,7 +8,7 @@
 #   bash tsan/run.sh
 # From Windows (PowerShell), invoke a NON-interactive shell -- do NOT use `-lic`,
 # an interactive login shell blocks on a tty and never runs:
-#   wsl.exe -e bash -c "bash /mnt/c/path/to/task_system/tsan/run.sh"
+#   wsl.exe -e bash -c "bash /mnt/c/path/to/macrame/tsan/run.sh"
 # Check the exit code directly; do NOT pipe through `tail` etc. when you need it
 # (a pipeline returns the LAST command's status and hides a failure/kill here).
 set -euo pipefail

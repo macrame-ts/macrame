@@ -1,4 +1,4 @@
-<!-- Name decided: Macrame (see docs/naming.md). Project/file names stay "task_system" until the repo moves to macrame-ts/macrame - the rollout list is in docs/going-public.md. -->
+<!-- Name decided: Macrame (see docs/naming.md). Project and file names are now `macrame`; only the GitHub repo and CI-badge URLs stay `Andriy06/task_system` until the repo moves to macrame-ts/macrame - the rollout list is in docs/going-public.md. -->
 
 # Macrame
 ###### *Threads, knotted on purpose.*
@@ -214,7 +214,7 @@ Concurrency claims need evidence, not assertions:
 
 C++23, no external dependencies, exceptions disabled project-wide (failures are fatal-by-design — see the docs). Compilers: MSVC and clang-cl on Windows; clang on Linux.
 
-- **Visual Studio 2022+**: open `task_system.slnx` (x64).
+- **Visual Studio 2022+**: open `macrame.slnx` (x64).
 - **CMake**: presets for `windows-msvc`, `windows-clang-cl`, `windows-shipping`, `linux-clang`, and `linux-tsan` (the ThreadSanitizer stress driver).
 
 Running the built driver with no arguments runs everything; `--tests`, `--bench`, and `--stress` isolate parts (`--help` lists the rest).
