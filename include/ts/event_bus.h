@@ -27,8 +27,12 @@
 //
 // Contract:
 //  - Delivery is batched: a subscription observes every event in the first cut that
-//    contains its install, so subscribe-then-publish from one thread is always delivered.
-//    Cross-producer order is arbitrary (the journal contract); per-producer order is FIFO.
+//    contains its install, so subscribe-then-publish on one thread with no suspension
+//    between the two calls is always delivered (both land FIFO in the same staging lane).
+//    A task that suspends between the subscribe and the publish may resume on a different
+//    worker, splitting them across lanes whose relative apply order is arbitrary - stage
+//    both before any co_await if same-cut delivery matters. Cross-producer order is
+//    arbitrary (the journal contract); per-producer order is FIFO.
 //  - Pinned subscriptions (`subscribe(owner, ...)`) weak-lock the owner around each call:
 //    a dying owner is skipped and reaped - no unsubscribe needed. The handler receives the
 //    locked owner as its first parameter. If the pin is the last reference, the owner
@@ -47,6 +51,7 @@
 #include "ts/access.h"
 #include "ts/deferred.h"
 #include "ts/guarded.h"
+#include "ts/detail/ref_count.h"
 
 #include <atomic>
 #include <cstdint>
@@ -66,8 +71,12 @@ class Event_bus
 private:
     // Shared between a `Connection` and its (possibly not-yet-applied) staged
     // install: `disconnect` tombstones it; the install checks it at apply, the
-    // dispatch loop skips and reaps entries it marks.
-    struct Sub_control
+    // dispatch loop skips and reaps entries it marks. Intrusively ref-counted -
+    // held with independent lifetimes by the Connection, the staged closure, and
+    // the installed entry (the pre-apply-disconnect race needs it to outlive the
+    // Connection), so shared ownership is required; `Ref_ptr` gives it in one
+    // allocation with a one-pointer handle.
+    struct Sub_control : detail::Ref_counted<Sub_control>
     {
         std::atomic<bool> dead{ false };
     };
@@ -88,7 +97,7 @@ private:
             bool pinned = false;
             std::weak_ptr<void> owner;                    // pinned only
             std::function<void(void*, const E&)> invoke;  // void* = the locked owner (null when unpinned)
-            std::shared_ptr<Sub_control> control;
+            detail::Ref_ptr<Sub_control> control;
         };
 
         std::vector<E> events;
@@ -96,18 +105,25 @@ private:
 
         void dispatch_and_clear() override
         {
-            for (const E& e : events)
+            // Subscriber-major: each subscriber is checked (and, if pinned, its owner
+            // locked) once for the whole cut, not once per event. Fewer weak_ptr locks
+            // when a hot event type has many subscribers, and a subscriber sees all of
+            // this cut's events or none - a pinned owner cannot expire mid-batch. Handlers
+            // defer their effects (async/publish/stage), so this ordering is unobservable
+            // to well-behaved handlers.
+            for (Subscription& s : subs)
             {
-                for (Subscription& s : subs)
+                if (s.control->dead.load(std::memory_order_acquire))
+                    continue;
+                if (!s.pinned)
                 {
-                    if (s.control->dead.load(std::memory_order_acquire))
-                        continue;
-                    if (!s.pinned)
-                    {
+                    for (const E& e : events)
                         s.invoke(nullptr, e);
-                        continue;
-                    }
-                    if (std::shared_ptr<void> pin = s.owner.lock())  // owner alive for the whole call
+                    continue;
+                }
+                if (std::shared_ptr<void> pin = s.owner.lock())  // owner alive for the whole batch
+                {
+                    for (const E& e : events)
                         s.invoke(pin.get(), e);
                 }
             }
@@ -231,7 +247,7 @@ public:
     private:
         friend class Event_bus;
 
-        Connection(Event_bus* bus, std::type_index type, std::uint64_t id, std::shared_ptr<Sub_control> control)
+        Connection(Event_bus* bus, std::type_index type, std::uint64_t id, detail::Ref_ptr<Sub_control> control)
             : bus_(bus), type_(type), id_(id), control_(std::move(control))
         {
         }
@@ -239,7 +255,7 @@ public:
         Event_bus* bus_ = nullptr;
         std::type_index type_{ typeid(void) };
         std::uint64_t id_ = 0;
-        std::shared_ptr<Sub_control> control_;
+        detail::Ref_ptr<Sub_control> control_;
     };
 
     explicit Event_bus(Named name = {})
@@ -302,7 +318,7 @@ private:
     Connection add_subscription(bool pinned, std::weak_ptr<void> owner, std::function<void(void*, const E&)> invoke)
     {
         std::uint64_t id = next_id_++;
-        auto control = std::make_shared<Sub_control>();
+        auto control = detail::make_ref<Sub_control>();
         // Installed like a publish: staged into the journal, applied at the
         // dispatch node's cut before handlers run - grant-free, legal from any
         // thread or task, no join. A disconnect that raced ahead already
