@@ -70,6 +70,37 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
         dir, `task_system_crash.dmp`, and `build/windows-msvc/` (stale `task_system.exe`);
         reconfigure CMake clean so no old-named artifact lingers beside `macrame.exe`.
       - `README.md` header comment + `CONTRIBUTING.md` note already point at the move.
+      - **Exe-name note**: the library-extraction item below claims the `macrame` name for the
+        *library* target; the driver exe then needs a distinct name (e.g. `macrame_driver`).
+        Sequence the extraction and this rename together, or the rename's "exe becomes
+        `macrame.exe`" collides with the library target.
+- [ ] **Extract the library from the driver executable** (going-public structure).
+      Today one monolithic target compiles the 6 `TS_CORE_SOURCES` + headers *and* the whole
+      driver (`main.cpp`, samples, benchmarks, tests) into one exe (`CMakeLists.txt`); a
+      consumer cannot link the library without building the test harness. Split into:
+      - **A library target** — `add_library(macrame STATIC ${TS_CORE_SOURCES})` (the 6 `src/*.cpp`
+        + `include/ts`), alias `macrame::macrame`, with
+        `target_include_directories(macrame PUBLIC $<BUILD_INTERFACE:...include> $<INSTALL_INTERFACE:include>)`
+        and `target_compile_features(macrame PUBLIC cxx_std_23)`. The library is a compiled
+        static lib, not header-only (real implementation in scheduler/pipe/graph `.cpp`).
+      - **A driver executable** — `main.cpp` + samples + benchmarks + tests, linking the
+        library. Needs a name distinct from the `macrame` library target (`macrame_driver` /
+        `macrame_tests`); it is a dev/test artifact, not shipped.
+      - **Config-consistency (load-bearing)**: `TS_SAFETY_CHECKS` / `TS_PROFILING` must be
+        **INTERFACE/PUBLIC** compile definitions on the library so a consumer compiles its own
+        TUs with the same values the library was built with — mixed config is an ODR violation,
+        and the `access.h` link-time tripwire (`detect_mismatch`) will fire (CLAUDE.md code-style
+        note). Decide the default-config story a consumer inherits.
+      - **Consumability (decide depth)**: minimal = `add_subdirectory()` works
+        (`target_link_libraries(app macrame::macrame)`); fuller = `install(TARGETS ... EXPORT)`
+        + `install(DIRECTORY include/ts ...)` + a generated `macrame-config.cmake` so
+        `find_package(macrame)` works, then optionally vcpkg/Conan later. Near-term: at least the
+        target split + `add_subdirectory`; the export/find_package layer can trail public.
+      - **VS solution mirror**: split `macrame.vcxproj` into a library project + a driver
+        project (or keep CMake as the packaging authority and the single vcxproj as the driver).
+      - **CI**: build both targets; add a tiny consumer smoke-build against the exported/added
+        library so a broken include-interface or export set fails CI, not a downstream user.
+      - Keep the three-list sync rule (`.vcxproj` / `.filters` / `CMakeLists`) across the split.
 - [ ] **GitHub side** (author): ~~create the `macrame-ts` org~~ — registered (2026-08-19).
       Remaining: transfer `Andriy06/task_system` → `macrame-ts/macrame` (a transfer keeps
       redirects; do it BEFORE the flip so badges/links are final), set the repo
