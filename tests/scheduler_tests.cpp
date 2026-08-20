@@ -293,4 +293,10 @@ void run_scheduler_tests()
     run("single-threaded: inline at submit", test_single_threaded_inline);
     run("single-threaded: FIFO chain order", test_single_threaded_chain_order);
     run("stress 100k", test_stress);
+    run("death: second create_scheduler is fatal (singleton)",
+        []{ TS_CHECK(ts::test::expect_death("scheduler_double_create")); });
+    run("death: global_scheduler with none running",
+        []{ TS_CHECK(ts::test::expect_death("scheduler_use_after_destroy")); });
+    run("death: destroy_scheduler with none running",
+        []{ TS_CHECK(ts::test::expect_death("scheduler_destroy_twice")); });
 }

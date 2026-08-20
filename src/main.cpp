@@ -3,6 +3,7 @@
 #include "mem_profile.h"
 #include "harness.h"
 #include "ts/fatal.h"
+#include "ts/scheduler.h"
 #include "ts/version.h"
 
 // Single-file samples (by design - no headers): the mock game-engine frame
@@ -78,6 +79,10 @@ int main(int argc, char** argv)
             TS_VERSION_STRING);
         return 0;
     }
+
+    // Every mode below runs scheduled work, so bring the process-wide scheduler up here (after
+    // the no-op --version/--help paths). Torn down at program exit by the holder's safety net.
+    ts::create_scheduler();
 
     // Death-test child: run one fatal scenario (it is expected to abort).
     if (argc >= 3 && std::strcmp(argv[1], "--death") == 0)

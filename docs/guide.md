@@ -87,26 +87,30 @@ queues (see §5). It returns a caller-owned `Access_op` (zero-allocation), not a
 and don't discard the handle for a write you want to happen — use `async` for
 fire-and-forget (see §5).
 
-The scheduler is a single process-wide instance, started lazily with one worker
-per hardware thread. There are no ad-hoc scheduler objects to construct;
-reconfigure the one global — a coarse teardown+recreate for startup or between
-phases (not while work is in flight):
+The scheduler is a single process-wide instance, brought up **explicitly** — a
+scheduler is heavy, so it never starts lazily. Create it once at startup, before
+any scheduled work; a second one is fatal (there is exactly one):
 
 ```cpp
-ts::configure_scheduler({ .num_threads = 4 });
+ts::create_scheduler({ .num_threads = 4 });   // once, at startup
+// ... graph.execute(), ts::launch(...), etc. all run on it ...
+ts::destroy_scheduler();                        // or omit — torn down at program exit
 ```
 
-or run a block on a specific pool and restore the previous config on exit:
+There are no ad-hoc scheduler objects to construct; you never hold an instance
+(nothing needs one). For a bounded region on a specific worker count, `Scheduler_scope`
+(RAII) brings one up — or reconfigures a running one (teardown+recreate) — and
+restores the previous config on exit:
 
 ```cpp
 {
-    ts::Scheduler_scope pool{ { .num_threads = 4 } };
-    // graph.execute(), ts::launch(...), etc. run on the 4-worker pool here
-}   // previous config restored
+    ts::Scheduler_scope sched{ { .num_threads = 4 } };
+    // graph.execute(), ts::launch(...), etc. run on the 4-worker scheduler here
+}   // previous config restored (or torn down if none was running)
 ```
 
-`graph.execute()` and `ts::launch`/`async` all use this one global scheduler;
-nothing takes a scheduler argument.
+`graph.execute()` and `ts::launch`/`async` all use this one scheduler; nothing
+takes a scheduler argument. Calling any of them with no scheduler running is fatal.
 
 ### 2.1 Single-threaded (worker-less) mode
 
@@ -1461,22 +1465,24 @@ starvation).
 
 ### 10.2 Scheduler configuration
 
-There is one process-wide scheduler; you reconfigure it rather than
-constructing your own. `configure_scheduler` tears the current pool down
-(joins its workers) and builds a new one — a coarse lifecycle operation for a
-quiescent point, not a per-call knob:
+There is one process-wide scheduler, brought up explicitly with
+`create_scheduler` and configured there — you never construct or hold an
+instance. It is heavy, so it never starts lazily; create it once at startup
+and it services every task until `destroy_scheduler` (or program exit):
 
 ```cpp
-ts::configure_scheduler({
+ts::create_scheduler({
     .num_threads = 0,                                // 0 = hardware concurrency
     .idle_policy = ts::Idle_policy::spin_then_block, // the default
     .spin_cycles = 64,
 });
 ```
 
-For a bounded region, `ts::Scheduler_scope` (RAII) reconfigures on entry and
-restores the previous config on exit — the way to run a block on a specific
-pool.
+Creating a second while one is running is fatal (exactly one per process); using
+the scheduler with none running is fatal (no lazy spawn). For a bounded region,
+`ts::Scheduler_scope` (RAII) brings one up — or reconfigures a running one
+(teardown+recreate) — and restores the previous config on exit, the way to run a
+block on a specific worker count.
 
 Idle policies decide what a worker does when it finds no work: `spin` (never
 sleeps — lowest latency, burns idle cores), `spin_then_block` (default: spin
@@ -1630,11 +1636,11 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
   (one control block per task; journal commands heap past a small-buffer
   threshold). Several planned optimizations (pools, arenas, a typed command
   tier) are designed but not landed.
-- **Scheduler selection** — partial. There is one process-wide scheduler;
-  `configure_scheduler` / `ts::Scheduler_scope` reconfigure it (teardown +
-  recreate) so a scoped block runs on a chosen pool. What remains WIP is
-  *ambient per-call* selection — running two live pools at once and routing
-  individual `launch`/`async`/`execute` calls between them.
+- **Scheduler selection** — partial. There is one process-wide scheduler,
+  created explicitly (`create_scheduler`); `ts::Scheduler_scope` reconfigures it
+  (teardown + recreate) so a scoped block runs on a chosen worker count. What
+  remains WIP is *ambient per-call* selection — running two live schedulers at
+  once and routing individual `launch`/`async`/`execute` calls between them.
 - **Platform breadth** — WIP. Developed on Windows (MSVC/clang-cl); the test
   suite also runs on Linux under Clang/TSan. No macOS/console/mobile support
   claims yet.

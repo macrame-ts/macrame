@@ -400,12 +400,14 @@ the planned serial-baseline lane for the profiler-guided-optimization cost
 model. Priorities and idle policies are inert in this mode by design.
 
 **Exactly one worker pool, ever.** There is a single process-wide scheduler,
-reconfigured by teardown+recreate (`configure_scheduler` / the RAII
-`Scheduler_scope`), never a set of coexisting pools. This is an invariant, not
-a default: `Scheduler`'s constructor is private, and the sole way to build one
-is a `detail::make_scheduler` factory (it returns a `unique_ptr`, the type
-being non-movable) reserved for the global holder — so ad-hoc `Scheduler s{cfg}`
-does not compile. Two things fall out. First, a whole degree of freedom
+brought up explicitly with `create_scheduler` (never lazily — a scheduler is
+heavy) and reconfigured by teardown+recreate (the RAII `Scheduler_scope`), never
+a set of coexisting pools. This is an invariant, not a default: `Scheduler`'s
+constructor is private, and the sole way to build one is a `detail::make_scheduler`
+factory (it returns a `unique_ptr`, the type being non-movable) reserved for the
+global holder, which enforces the single-instance rule — so ad-hoc
+`Scheduler s{cfg}` does not compile, and a second `create_scheduler` while one is
+running is fatal. Two things fall out. First, a whole degree of freedom
 disappears: with one pool there is no "which scheduler" question, so the
 former `thread_local current_scheduler` selector is gone and `current_worker_index >= 0`
 is the only worker-vs-external test — which removed a recurring bug class where

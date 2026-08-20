@@ -112,7 +112,17 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
       - **CI**: build both targets; add a tiny consumer smoke-build against the exported/added
         library so a broken include-interface or export set fails CI, not a downstream user.
       - Keep the three-list sync rule (`.vcxproj` / `.filters` / `CMakeLists`) across the split.
-- [ ] **Decide: keep the process-global scheduler, or give the user ownership of its lifetime.**
+- [x] **Decide: keep the process-global scheduler, or give the user ownership of its lifetime.**
+      DONE (2026-08-20): chose option 2, user-owned single instance, via explicit subsystem-init
+      functions rather than a held handle (the user never uses a Scheduler instance, so a handle
+      is ceremony + an accidental-early-teardown footgun). New API: `ts::create_scheduler(config)`
+      / `ts::destroy_scheduler()` (SDL_Init/SDL_Quit shape), `scheduler_running()`; no lazy
+      construction (a scheduler is heavy - `global_scheduler()` fatals if none); exactly one per
+      process (a second `create_scheduler` is fatal); the private ctor + `detail::make_scheduler`
+      stay, the holder enforces the singleton; `Scheduler_scope` reframed to create/reconfigure;
+      `configure_scheduler` retired. Clean-shutdown safety net at program exit. 3 death tests
+      (double-create, use/destroy-when-none). Suite 749/0; guide/design/quickstart updated.
+      *(Original analysis retained below for context.)*
       An API-shape call best locked pre-1.0 (cheap now, breaking later). Today there is exactly
       one process-wide instance behind `global_scheduler()`, spun up lazily on first use; the
       `Scheduler` ctor is factory-gated (private + `detail::make_scheduler`), so ad-hoc

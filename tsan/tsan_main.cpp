@@ -1075,6 +1075,7 @@ int main()
 #endif
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // unbuffered: last stage is visible if it hangs
+    ts::create_scheduler();   // ambient scheduler for the stress stages; the Scheduler_scope ones reconfigure it
     std::puts("tsan: scheduler stress");   stress_scheduler();
     std::puts("tsan: thread_safe stress");  stress_thread_safe();
     std::puts("tsan: pipe rw stress");       stress_pipe_rw();

@@ -49,13 +49,16 @@ Launch a unit of work and wait for its result:
 
 int main()
 {
+    ts::create_scheduler();        // once, at startup — one worker per hardware thread
     ts::Task<int> t = ts::launch([] { return 6 * 7; });
     std::printf("%d\n", t.sync()); // blocks until done, prints 42
 }
 ```
 
-The scheduler starts lazily — one worker thread per hardware thread. `sync()` is
-the only call that blocks; launching never does.
+Bring the scheduler up explicitly with `ts::create_scheduler()` before any work
+(it is heavy, so it never starts lazily; a default gives one worker per hardware
+thread). It is torn down at program exit, or call `ts::destroy_scheduler()`.
+`sync()` is the only call that blocks; launching never does.
 
 ## Guard a shared object
 

@@ -15,12 +15,12 @@ namespace ts
 
 namespace
 {
-// The one process-wide scheduler, reconfigurable via `configure_scheduler`. A `unique_ptr`
-// in a namespace static so program exit destroys it (joins its workers) - clean shutdown,
-// as the old Meyers static gave. `g_fast` is a lock-free read cache for the hot path (every
-// `global_scheduler()` from an external thread); the mutex guards lazy init + the
-// teardown/recreate swap. Reconfigure racing concurrent use is undefined (documented) - the
-// `g_fast` reset before teardown is belt-and-suspenders, not a use-vs-reconfigure guarantee.
+// The one process-wide scheduler, brought up explicitly by `create_scheduler`. A `unique_ptr`
+// in a namespace static so program exit destroys it (joins its workers) even if the user
+// never calls `destroy_scheduler` - the clean-shutdown safety net. `g_fast` is a lock-free
+// read cache for the hot path (every `global_scheduler()` from an external thread); the mutex
+// guards create/destroy. Create/destroy racing concurrent use is undefined (documented) - the
+// `g_fast` reset before teardown is belt-and-suspenders, not a use-vs-destroy guarantee.
 std::mutex g_sched_mutex;
 std::unique_ptr<Scheduler> g_scheduler;
 Scheduler_config g_config;
@@ -31,29 +31,60 @@ Scheduler& global_scheduler()
 {
     if (Scheduler* s = g_fast.load(std::memory_order_acquire))
         return *s;
+    ts::fatal("no Scheduler is running - call ts::create_scheduler() at startup before any "
+              "scheduled work (a scheduler is never brought up lazily)");
+}
+
+void create_scheduler(Scheduler_config config)
+{
+    std::lock_guard lock(g_sched_mutex);
+    if (g_scheduler)
+    {
+        ts::fatal("a Scheduler is already running - exactly one exists per process; call "
+                  "destroy_scheduler() before creating another");
+    }
+    g_config = config;
+    g_scheduler = detail::make_scheduler(config);
+    g_fast.store(g_scheduler.get(), std::memory_order_release);
+}
+
+void destroy_scheduler()
+{
     std::lock_guard lock(g_sched_mutex);
     if (!g_scheduler)
-    {
-        g_scheduler = detail::make_scheduler(g_config);
-        g_fast.store(g_scheduler.get(), std::memory_order_release);
-    }
-    return *g_scheduler;
+        ts::fatal("destroy_scheduler(): no Scheduler is running");
+    g_fast.store(nullptr, std::memory_order_release);
+    g_scheduler.reset();   // dtor: quit + join workers, drain queued tasks
+}
+
+bool scheduler_running() noexcept
+{
+    return g_fast.load(std::memory_order_acquire) != nullptr;
 }
 
 Scheduler_config current_scheduler_config()
 {
     std::lock_guard lock(g_sched_mutex);
+    if (!g_scheduler)
+        ts::fatal("current_scheduler_config(): no Scheduler is running");
     return g_config;
 }
 
-void configure_scheduler(Scheduler_config config)
+Scheduler_scope::Scheduler_scope(Scheduler_config config)
 {
-    std::lock_guard lock(g_sched_mutex);
-    g_fast.store(nullptr, std::memory_order_release);
-    g_scheduler.reset();   // dtor: quit + join workers, drain queued tasks
-    g_config = config;
-    g_scheduler = detail::make_scheduler(config);
-    g_fast.store(g_scheduler.get(), std::memory_order_release);
+    if (scheduler_running())
+    {
+        prev_ = current_scheduler_config();   // reconfigure: restore this on exit
+        destroy_scheduler();
+    }
+    create_scheduler(config);
+}
+
+Scheduler_scope::~Scheduler_scope()
+{
+    destroy_scheduler();
+    if (prev_)
+        create_scheduler(*prev_);
 }
 
 namespace detail

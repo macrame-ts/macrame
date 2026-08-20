@@ -2,6 +2,7 @@
 #include "test_util.h"
 #include "ts/access.h"
 #include "ts/guarded.h"
+#include "ts/scheduler.h"
 #include "ts/static_task_graph.h"
 
 #include "ts/coroutine_support.h"
@@ -756,5 +757,22 @@ void run_death_scenario(const char* name)
         }).sync();   // -> fatal on the worker at op's destruction
     }
 #endif
+    // Scheduler lifecycle fatals (unconditional - not TS_SAFETY_CHECKS-gated). The death child
+    // already created a scheduler in main(), so a second create is the singleton violation, and
+    // destroying then using/destroying again exercises the no-lazy "none running" fatals.
+    else if (std::strcmp(name, "scheduler_double_create") == 0)
+    {
+        ts::create_scheduler();   // one is already running (created in main) -> fatal
+    }
+    else if (std::strcmp(name, "scheduler_use_after_destroy") == 0)
+    {
+        ts::destroy_scheduler();
+        (void)ts::global_scheduler();   // none running, no lazy spawn -> fatal
+    }
+    else if (std::strcmp(name, "scheduler_destroy_twice") == 0)
+    {
+        ts::destroy_scheduler();
+        ts::destroy_scheduler();   // none running -> fatal
+    }
     // unknown scenario: return without dying -> parent's expect_death fails
 }

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 // Profiling instrumentation (canonical default; `static_task_graph.h` repeats the same
@@ -69,34 +70,45 @@ struct Scheduler_config
     bool single_threaded = false;
 };
 
-// The library runs one process-wide scheduler (`global_scheduler()`, declared in guarded.h).
-// It is reconfigurable: `configure_scheduler` tears the current one down (signals quit, JOINs
-// its workers, drains) and builds a new one with `config`. This is a coarse lifecycle
-// operation for quiescent points (startup, between frames/phases) - it is not thread-safe
-// against concurrent use: calling it while tasks are in flight from other threads is
-// undefined. `current_scheduler_config` returns the config currently in effect.
-void configure_scheduler(Scheduler_config config);
+// The library runs exactly one scheduler per process (`global_scheduler()`, declared in
+// guarded.h), brought up EXPLICITLY and never lazily - a scheduler is heavy, so you choose
+// when its worker threads start. This is the subsystem-init shape (SDL_Init/SDL_Quit,
+// glfwInit/glfwTerminate): bring it up once at startup, and it services every task, graph
+// run, and `parallel_for` until you tear it down.
+
+// Bring up the process-wide scheduler with `config`. Call once at startup, before any
+// scheduled work. Fatal if one is already running (there is exactly one per process). If you
+// never call `destroy_scheduler`, the scheduler is torn down cleanly at program exit.
+void create_scheduler(Scheduler_config config = {});
+
+// Tear the scheduler down: signal quit, JOIN its workers, drain queued tasks. A coarse
+// lifecycle operation for a quiescent point (shutdown, between phases) - not thread-safe
+// against concurrent use: destroying it while tasks are in flight from other threads is
+// undefined. Fatal if none is running.
+void destroy_scheduler();
+
+// Whether a scheduler is currently running (created and not yet destroyed).
+bool scheduler_running() noexcept;
+
+// The config the running scheduler was created with. Fatal if none is running.
 Scheduler_config current_scheduler_config();
 
-// RAII: reconfigure the global scheduler for a scope, restoring the previous config on exit.
-// The single-global way to run a block on a specific pool (e.g. a sample tracing on a fixed
-// worker count) - there are no ad-hoc `Scheduler` instances to construct. Same coarse
-// teardown+recreate semantics as `configure_scheduler`; use at quiescent points only.
+// RAII sugar over create/destroy for scope-bound use (main, tests, a sample tracing on a
+// fixed worker count). On entry it brings the scheduler up with `config`; if one is already
+// running it reconfigures - teardown + recreate - and restores the previous config on exit.
+// The single-instance way to run a block on a specific worker count. Same coarse
+// teardown+recreate semantics as the free functions; use at quiescent points only.
 class Scheduler_scope
 {
 public:
-    explicit Scheduler_scope(Scheduler_config config)
-        : prev_(current_scheduler_config())
-    {
-        configure_scheduler(config);
-    }
-    ~Scheduler_scope() { configure_scheduler(prev_); }
+    explicit Scheduler_scope(Scheduler_config config);
+    ~Scheduler_scope();
 
     Scheduler_scope(const Scheduler_scope&) = delete;
     Scheduler_scope& operator=(const Scheduler_scope&) = delete;
 
 private:
-    Scheduler_config prev_;
+    std::optional<Scheduler_config> prev_;   // the config to restore on exit, if one was running
 };
 
 using Task_func_ptr = void(*)(void* data);
@@ -125,19 +137,18 @@ inline constexpr std::size_t priority_count = 3;
 
 class Scheduler;
 
-// The one process-wide scheduler (defined in guarded.cpp, where the reconfigurable holder
-// lives). Declared here so the ambient/global API - `Scheduler_scope`, `configure_scheduler`,
-// and every caller that reconfigures then submits to the running pool - is reachable from
-// `scheduler.h` alone.
+// The one process-wide scheduler (defined in guarded.cpp, where the holder lives). Fatal if
+// none is running - bring one up with `create_scheduler` first. Declared here so the global
+// lifecycle API (`create_scheduler`/`destroy_scheduler`/`Scheduler_scope`) and every caller
+// that submits to the running scheduler is reachable from `scheduler.h` alone.
 Scheduler& global_scheduler();
 
 namespace detail
 {
-// The only sanctioned way to construct a `Scheduler`. The constructor is private, so ad-hoc
-// `ts::Scheduler s{cfg}` no longer compiles - construction is reserved to the process-wide
-// holder in guarded.cpp (and any legitimately-isolated, non-competing object-unit test).
-// Returns a `unique_ptr` because `Scheduler` is non-movable. This upholds the single-pool
-// invariant at the type level: you cannot casually stand up a second worker pool.
+// Constructs a `Scheduler` (the ctor is private, so ad-hoc `ts::Scheduler s{cfg}` does not
+// compile). Used only by `create_scheduler` in the process-wide holder (guarded.cpp), which
+// enforces the single-instance invariant; the public way to bring a scheduler up is
+// `create_scheduler`. Returns a `unique_ptr` because `Scheduler` is non-movable.
 std::unique_ptr<Scheduler> make_scheduler(Scheduler_config config = {});
 }
 
@@ -338,9 +349,9 @@ public:
 #endif
 
 private:
-    // Construct via `detail::make_scheduler` only (the process-wide holder). Private so ad-hoc
-    // `Scheduler s{cfg}` does not compile; `Scheduler` is non-movable, so the factory returns a
-    // `unique_ptr`. Enforces the single-pool invariant at the type level.
+    // Private: the public way to bring the scheduler up is `create_scheduler`. Built via
+    // `detail::make_scheduler` in the process-wide holder; ad-hoc `Scheduler s{cfg}` does not
+    // compile, so a second instance cannot be stood up by construction. Non-movable.
     explicit Scheduler(Scheduler_config config = {});
 
     // Find one task for worker `worker_index`, scanning: global high -> its own local deque
