@@ -825,6 +825,31 @@ void test_frame_gate_idle_open()
     TS_CHECK(woke_at.load() == 5);
 }
 
+// A non-default release priority still delivers the boundary. The priority's effect on
+// scheduling order is not deterministically observable (idle workers run every priority
+// at once), so this guards the store/read + launch-at-priority path against regression.
+void test_frame_gate_release_priority()
+{
+    ts::Frame_gate gate;
+    gate.set_release_priority(ts::Priority::high);
+
+    std::atomic<int> frame{ 3 }, woke_at{ -1 };
+    ts::Task<void> waiter = gate_waiter(gate, woke_at, frame);
+    TS_CHECK(!waiter.is_done());
+    gate.open();
+    waiter.sync();
+    TS_CHECK(woke_at.load() == 3);
+
+    // Re-set at another priority and confirm the gate stays usable.
+    gate.set_release_priority(ts::Priority::normal);
+    std::atomic<int> woke2{ -1 };
+    frame.store(4, std::memory_order_release);
+    ts::Task<void> second = gate_waiter(gate, woke2, frame);
+    gate.open();
+    second.sync();
+    TS_CHECK(woke2.load() == 4);
+}
+
 } // namespace
 
 void run_coroutine_tests()
@@ -875,4 +900,5 @@ void run_coroutine_tests()
     run("frame gate releases at next boundary", test_frame_gate_releases_at_next_boundary);
     run("frame gate many waiters", test_frame_gate_many_waiters);
     run("frame gate idle open", test_frame_gate_idle_open);
+    run("frame gate release priority", test_frame_gate_release_priority);
 }

@@ -2,6 +2,7 @@
 
 #include "ts/task.h"
 
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -76,20 +77,22 @@ public:
             opening = std::exchange(current_, Signal{});
             pending_.reset();   // this frame's external wakeup has arrived
         }
-        ts::launch([opening]() mutable { opening.trigger(); }, { .priority = priority_ });
+        ts::launch([opening]() mutable { opening.trigger(); },
+            { .priority = priority_.load(std::memory_order_relaxed) });
     }
 
     // Priority of the release task. `low` (the default) keeps resumed cross-frame work behind
     // the frame's own critical path - the documented default for work that waited whole
-    // frames already and can wait a few more microseconds.
-    void set_release_priority(Priority priority) { priority_ = priority; }
+    // frames already and can wait a few more microseconds. Atomic so setting it does not race
+    // an `open()` on another thread (the class advertises cross-thread `open()`).
+    void set_release_priority(Priority priority) { priority_.store(priority, std::memory_order_relaxed); }
 
 private:
     std::mutex mutex_;
     Signal current_;
     // Live while someone has taken this frame's gate and `open()` has not yet come.
     std::optional<External_wait> pending_;
-    Priority priority_ = Priority::low;
+    std::atomic<Priority> priority_{ Priority::low };
 };
 
 } // namespace ts
