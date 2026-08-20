@@ -74,7 +74,16 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
         *library* target; the driver exe then needs a distinct name (e.g. `macrame_driver`).
         Sequence the extraction and this rename together, or the rename's "exe becomes
         `macrame.exe`" collides with the library target.
-- [ ] **Extract the library from the driver executable** (going-public structure).
+- [x] **Extract the library from the driver executable** (going-public structure). DONE
+      (2026-08-20): static library `macrame` (`macrame::macrame`) split from the driver exe,
+      now `macrame_playground`. CMake: `add_library(macrame STATIC ${TS_CORE_SOURCES})` +
+      install/export + generated `macrame-config.cmake` so `find_package(macrame CONFIG)` works;
+      config defs (`TS_SAFETY_CHECKS`/`TS_PROFILING`/`_HAS_EXCEPTIONS=0`) are PUBLIC for
+      ODR-consistency; `tests/consumer/` smoke-test + a `windows-consumer` CI job prove
+      find_package from outside the tree. VS: `macrame.slnx` split into the `macrame` static-lib
+      project and the `macrame_playground` driver project (ProjectReference). Static only - no
+      dynamic library (author, 2026-08-20). Verified: CMake lib+playground build, playground
+      --tests 749/0, consumer runs; VS both projects build. Deferred detail below kept for history.
       Today one monolithic target compiles the 6 `TS_CORE_SOURCES` + headers *and* the whole
       driver (`main.cpp`, samples, benchmarks, tests) into one exe (`CMakeLists.txt`); a
       consumer cannot link the library without building the test harness. Split into:

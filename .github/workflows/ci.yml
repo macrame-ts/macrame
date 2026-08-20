@@ -17,7 +17,7 @@ jobs:
         run: cmake --build --preset windows-msvc
       - name: Tests
         run: |
-          build/windows-msvc/Release/macrame.exe --tests
+          build/windows-msvc/Release/macrame_playground.exe --tests
           $code = $LASTEXITCODE
           Write-Host "macrame exit code: $code (0x$('{0:X8}' -f $code))"
           if ($code -ne 0) { exit $code }
@@ -27,8 +27,8 @@ jobs:
         with:
           name: msvc-crash
           path: |
-            build/windows-msvc/Release/macrame.exe
-            build/windows-msvc/Release/macrame.pdb
+            build/windows-msvc/Release/macrame_playground.exe
+            build/windows-msvc/Release/macrame_playground.pdb
             macrame_crash.dmp
           if-no-files-found: ignore
 
@@ -43,7 +43,7 @@ jobs:
         run: cmake --build --preset windows-clang-cl
       - name: Tests
         run: |
-          build/windows-clang-cl/Release/macrame.exe --tests
+          build/windows-clang-cl/Release/macrame_playground.exe --tests
           $code = $LASTEXITCODE
           Write-Host "macrame exit code: $code (0x$('{0:X8}' -f $code))"
           if ($code -ne 0) { exit $code }
@@ -53,8 +53,8 @@ jobs:
         with:
           name: clang-cl-crash
           path: |
-            build/windows-clang-cl/Release/macrame.exe
-            build/windows-clang-cl/Release/macrame.pdb
+            build/windows-clang-cl/Release/macrame_playground.exe
+            build/windows-clang-cl/Release/macrame_playground.pdb
             macrame_crash.dmp
           if-no-files-found: ignore
 
@@ -73,7 +73,7 @@ jobs:
         run: cmake --build --preset windows-shipping
       - name: Tests
         run: |
-          build/windows-shipping/Release/macrame.exe --tests
+          build/windows-shipping/Release/macrame_playground.exe --tests
           $code = $LASTEXITCODE
           Write-Host "macrame exit code: $code (0x$('{0:X8}' -f $code))"
           if ($code -ne 0) { exit $code }
@@ -83,10 +83,30 @@ jobs:
         with:
           name: shipping-crash
           path: |
-            build/windows-shipping/Release/macrame.exe
-            build/windows-shipping/Release/macrame.pdb
+            build/windows-shipping/Release/macrame_playground.exe
+            build/windows-shipping/Release/macrame_playground.pdb
             macrame_crash.dmp
           if-no-files-found: ignore
+
+  # Prove the library is consumable from outside the tree: install it, then a standalone
+  # project (tests/consumer) pulls it in via find_package(macrame) and links macrame::macrame.
+  # Catches a broken public include-interface or export set here, not at a downstream user.
+  windows-consumer:
+    name: Windows / MSVC / consumer (find_package)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build + install the library
+        run: |
+          cmake --preset windows-msvc
+          cmake --build --preset windows-msvc --target macrame
+          cmake --install build/windows-msvc --prefix ${{ github.workspace }}/_install --config Release
+      - name: Consumer find_package + build + run
+        run: |
+          cmake -S tests/consumer -B _consumer "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/_install"
+          cmake --build _consumer --config Release
+          & "_consumer/Release/macrame_consumer.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   linux-tsan:
     name: Linux / clang-21 / ThreadSanitizer

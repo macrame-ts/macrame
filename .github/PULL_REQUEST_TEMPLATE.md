@@ -4,7 +4,7 @@ What this change does and why.
 
 ## Checklist
 
-- [ ] `macrame --tests` passes (`N checks, 0 failures`).
+- [ ] `macrame_playground --tests` passes (`N checks, 0 failures`).
 - [ ] For concurrency changes (scheduler, `Guarded` pipe, graph, `parallel_for`):
       ThreadSanitizer is clean (`CXX=clang++-21 bash tsan/run.sh` → no races).
 - [ ] Public API / behavior / design changes update `docs/guide.md` and

@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="tests">
+      <UniqueIdentifier>{a1111111-1111-1111-1111-111111111111}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="benchmarks">
+      <UniqueIdentifier>{b2222222-2222-2222-2222-222222222222}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="sample">
+      <UniqueIdentifier>{c3333333-3333-3333-3333-333333333333}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src">
+      <UniqueIdentifier>{d4444444-4444-4444-4444-444444444444}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tsan">
+      <UniqueIdentifier>{a8888888-8888-8888-8888-888888888888}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mem_profile.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="benchmarks\benchmarks.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="benchmarks\features_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="benchmarks\game_frame_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="benchmarks\production_contention_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="benchmarks\production_contention_lib_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="benchmarks\scheduler_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="benchmarks\staged_commands_bench.cpp">
+      <Filter>benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="sample\blackboard.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
+    <ClCompile Include="sample\coloring.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
+    <ClCompile Include="sample\events.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
+    <ClCompile Include="sample\game_frame.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
+    <ClCompile Include="sample\physics.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
+    <ClCompile Include="sample\scope_access.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
+    <ClCompile Include="tsan\tsan_main.cpp">
+      <Filter>tsan</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\access_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\coroutine_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\deferred_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\event_bus_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\graph_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\guarded_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\harness.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\integration_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\parallel_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\scheduler_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\task_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\versioned_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\named_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\pipe_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\rules_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>

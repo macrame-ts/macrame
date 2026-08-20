@@ -12,7 +12,9 @@ docs, tests, and code.
 
 C++23, no external dependencies, exceptions disabled project-wide.
 
-- **Visual Studio 2022+** — open `macrame.slnx` (x64). Configurations:
+- **Visual Studio 2022+** — open `macrame.slnx` (x64): two projects, `macrame`
+  (the static library) and `macrame_playground` (the dev driver that links it —
+  set it as the startup project to run the tests/samples). Configurations:
   `Debug`, `Release`, and `Shipping` (Release with the safety harness compiled
   out — see below).
 - **CMake** — presets `windows-msvc`, `windows-clang-cl`, `windows-shipping`,
@@ -22,17 +24,18 @@ C++23, no external dependencies, exceptions disabled project-wide.
   cmake --build --preset windows-msvc
   ```
 
-The build produces a single driver executable:
+The library is `macrame` (static, consumed as `macrame::macrame`); the dev driver
+that runs the tests, samples, and benchmarks is `macrame_playground`:
 
 ```
-macrame --help       # list modes
-macrame --tests      # the test suite; exit code = failure count
-macrame --version
+macrame_playground --help       # list modes
+macrame_playground --tests      # the test suite; exit code = failure count
+macrame_playground --version
 ```
 
 ## Running the tests
 
-`macrame --tests` prints a check total ending in `0 failures` (the check
+`macrame_playground --tests` prints a check total ending in `0 failures` (the check
 count grows as tests are added; the failure count must stay 0). Fatal paths are
 exercised as subprocess *death tests* from the same binary.
 
@@ -47,7 +50,7 @@ CXX=clang++-21 bash tsan/run.sh      # expects "tsan: done (no races)"
 ```
 
 On Windows, AddressSanitizer (`/p:EnableASAN=true`) plus stress loops
-(`macrame --stress`) are the fallback — they catch memory bugs and UAF, not
+(`macrame_playground --stress`) are the fallback — they catch memory bugs and UAF, not
 pure data races.
 
 ## The safety harness
@@ -84,18 +87,24 @@ A `.clang-format` at the repo root encodes the house style. In short:
   `dur_P50`; file names stay lower snake_case (`dot_writer.h`).
 - In comments, wrap code identifiers in backticks: `pipe_enqueue`, `current_access`.
 
-## Keeping the Visual Studio project in sync
+## Keeping the Visual Studio projects in sync
 
-Visual Studio does not auto-discover files. When you add a `.cpp` or `.h`, keep
-**three lists** identical:
+Visual Studio does not auto-discover files, and the build is split across two
+projects. When you add a `.cpp` or `.h`, add it to the **right project** and keep
+its lists identical with CMake:
 
-- `macrame.vcxproj` — a `<ClCompile>` (for `.cpp`) or `<ClInclude>` (for `.h`)
-  entry, path-including-subfolder. Controls what *builds*.
-- `macrame.vcxproj.filters` — the same entry with a `<Filter>` matching its
-  directory. Controls the Solution Explorer tree; a file added only to the
-  `.vcxproj` builds fine but lands ungrouped at the project root.
-- `CMakeLists.txt` — the source list. CI builds via CMake, not the `.vcxproj`, so
-  a `.cpp` missing here links fine locally but fails CI with unresolved externals.
+- Pick the project by what the file is: a **core** `src/*.cpp` or a public/detail
+  header (`include/ts/**`, `tools/**`) goes in **`macrame.vcxproj`** (the library);
+  a **test / sample / benchmark** `.cpp` goes in **`macrame_playground.vcxproj`**
+  (the driver). Add a `<ClCompile>` (for `.cpp`) or `<ClInclude>` (for `.h`) entry,
+  path-including-subfolder — this controls what *builds*.
+- Add the same entry to that project's **`.filters`** with a `<Filter>` matching
+  its directory (controls the Solution Explorer tree; a file added only to the
+  `.vcxproj` builds fine but lands ungrouped at the project root).
+- Add it to the matching list in **`CMakeLists.txt`** (`TS_CORE_SOURCES` for a
+  core `.cpp`, `TS_SAMPLE_SOURCES` / `TS_DRIVER_SOURCES` for a driver `.cpp`). CI
+  builds via CMake, not the `.vcxproj`, so a `.cpp` missing here links fine
+  locally but fails CI with unresolved externals.
 
 ## Documentation
 

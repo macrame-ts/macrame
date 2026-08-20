@@ -36,7 +36,7 @@ two variants of the same ~30-system frame, built from the *same* system bodies:
 Generate both traces (on an 8-worker scheduler) plus the structure dump with:
 
 ```
-macrame --trace 200
+macrame_playground --trace 200
 show_graph.bat            # renders the DOT and opens both average-run SVGs
 ```
 

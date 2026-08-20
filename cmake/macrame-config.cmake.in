@@ -1,0 +1,9 @@
+@PACKAGE_INIT@
+
+# macrame is a static, exceptions-off, C++23 library. A consumer's own translation units must
+# be compiled with the same TS_SAFETY_CHECKS / TS_PROFILING values the library was built with
+# (propagated as PUBLIC defs on the imported target) and with exceptions disabled - see the
+# guide. This config just imports the target; the usage requirements ride on it.
+include("${CMAKE_CURRENT_LIST_DIR}/macrame-targets.cmake")
+
+check_required_components(macrame)

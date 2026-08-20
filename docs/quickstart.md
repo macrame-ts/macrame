@@ -9,14 +9,22 @@ Get from zero to a running program. For the full tour of every layer, see the
 
 ## Get the code
 
-No package yet (pre-1.0). Clone the repository, add its `include/` directory
-to your include path, and compile the `src/*.cpp` files into your project — the
-library is a set of headers (under `include/ts/`) plus a few `.cpp` files
-(under `src/`), no external dependencies.
+No package registry yet (pre-1.0), but macrame builds as a normal CMake **static
+library** with no external dependencies. Clone it, then consume it either way:
 
 ```
 git clone <repo-url> macrame
 ```
+
+- **CMake** — `add_subdirectory(macrame)` and link `macrame::macrame`; or install
+  it (`cmake --install`) and `find_package(macrame CONFIG REQUIRED)` + link
+  `macrame::macrame`.
+- **By hand** — add `include/` to your include path and compile the six
+  `src/*.cpp` into your build (headers under `include/ts/`, six `.cpp` under `src/`).
+
+C++23, exceptions disabled: build your own translation units the same way — the
+library is exceptions-off, and a consumer must match (the config rides on the
+`macrame::macrame` target).
 
 Include everything through the umbrella header, or the individual headers if you
 prefer:
