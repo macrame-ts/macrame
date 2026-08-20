@@ -295,25 +295,25 @@ struct World
 namespace budget
 {
 // frame head + streaming + navmesh rebuild
-constexpr double input = 0.1, camera = 0.1, networking = 0.5, scripting = 0.6, streaming = 1.5, navmesh_rebuild = 0.6;
+constexpr double input = 0.315, camera = 0.315, networking = 1.575, scripting = 1.89, streaming = 4.725, navmesh_rebuild = 1.89;
 // gameplay trio
-constexpr double combat = 0.8, economy = 0.7, quests = 0.7;
+constexpr double combat = 2.52, economy = 2.205, quests = 2.205;
 // navigation + AI (the snapshot is optimised-only, outside the baseline serial budget)
-constexpr double navigation = 2.5, AI = 1.5, gameplay_snapshot = 0.1;
+constexpr double navigation = 7.875, AI = 4.725, gameplay_snapshot = 0.315;
 // animation chain
-constexpr double anim_graph = 2.5, ik_post = 0.8, skinning = 1.0;
+constexpr double anim_graph = 7.875, ik_post = 2.52, skinning = 3.15;
 // physics pipeline
-constexpr double broadphase = 0.8, narrowphase = 1.5, solver = 2.8, finalize = 0.4;
+constexpr double broadphase = 2.52, narrowphase = 4.725, solver = 8.82, finalize = 1.26;
 // transform propagation
-constexpr double propagation = 1.0;
+constexpr double propagation = 3.15;
 // render pipeline
-constexpr double frustum_cull = 0.9, occlusion_cull = 0.9, shadow = 1.0, cmd_record = 3.0, submit = 0.8;
+constexpr double frustum_cull = 2.835, occlusion_cull = 2.835, shadow = 3.15, cmd_record = 9.45, submit = 2.52;
 // post-flip reader + audio/vfx
-constexpr double cloth = 2.0, audio = 1.6, vfx = 0.6;
+constexpr double cloth = 6.3, audio = 5.04, vfx = 1.89;
 // draw producers
-constexpr double particles = 2.0, UI = 1.5;
+constexpr double particles = 6.3, UI = 4.725;
 // terminal leaves
-constexpr double replication = 0.4, stats = 0.3, gc = 1.0, debug_overlay = 0.2;
+constexpr double replication = 1.26, stats = 0.945, gc = 3.15, debug_overlay = 0.63;
 } // namespace budget
 
 // --- the systems: index -----------------------------------------------------------
