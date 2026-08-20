@@ -96,11 +96,53 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
         + `install(DIRECTORY include/ts ...)` + a generated `macrame-config.cmake` so
         `find_package(macrame)` works, then optionally vcpkg/Conan later. Near-term: at least the
         target split + `add_subdirectory`; the export/find_package layer can trail public.
+      - **Static vs shared** (recommendation, 2026-08-20): **static by default; no supported
+        Windows DLL for 1.0.** The API is template-heavy with no stable ABI (consumers
+        instantiate `Guarded<T>`/`Task<R>`/`Access_op` and bake `Task_control_block`'s layout
+        into their own binary), the compiled core is tiny (6 `.cpp`), and `TS_SAFETY_CHECKS`
+        config must match — so a DLL delivers little and costs export annotations + an ABI
+        promise the pre-1.0 API can't make. Keep the door open cheaply: `add_library(macrame ...)`
+        without hardcoding `STATIC` (respects `-DBUILD_SHARED_LIBS=ON`) + `POSITION_INDEPENDENT_CODE ON`;
+        document shared as experimental (Linux/macOS only) until there's demand and a stable-ABI
+        story. The one case a single shared `.dll` is the *right* answer is a plugin host where
+        host + plugins must share one scheduler and one TLS universe (see the scheduler-ownership
+        item) - revisit if that becomes a target.
       - **VS solution mirror**: split `macrame.vcxproj` into a library project + a driver
         project (or keep CMake as the packaging authority and the single vcxproj as the driver).
       - **CI**: build both targets; add a tiny consumer smoke-build against the exported/added
         library so a broken include-interface or export set fails CI, not a downstream user.
       - Keep the three-list sync rule (`.vcxproj` / `.filters` / `CMakeLists`) across the split.
+- [ ] **Decide: keep the process-global scheduler, or give the user ownership of its lifetime.**
+      An API-shape call best locked pre-1.0 (cheap now, breaking later). Today there is exactly
+      one process-wide instance behind `global_scheduler()`, spun up lazily on first use; the
+      `Scheduler` ctor is factory-gated (private + `detail::make_scheduler`), so ad-hoc
+      construction does not compile, and reconfiguration is teardown+recreate
+      (`configure_scheduler` / `Scheduler_scope`). This was a deliberate 2026-07/08 hardening:
+      the single-pool invariant is what let `current_scheduler` (the thread_local "which
+      scheduler" selector) be retired, `execute()` drop its `Scheduler&` param, and every call
+      site resolve `global_scheduler()` directly.
+      - **Why it matters for public/embedders**: a library (post-extraction) with a *hidden*
+        process-global singleton that lazily spawns threads is awkward for embedding - no
+        control over startup/shutdown ordering, DLL-unload teardown, or test isolation, and
+        surprising for a host that wants to own thread lifetime. Public users will hit this.
+      - **Option ladder** (increasing cost/blast radius):
+        1. **Status quo** - hidden global + `configure_scheduler`/`Scheduler_scope`. Zero work;
+           keeps the clean single-pool internals.
+        2. **User-owned single instance** - the user constructs one `Scheduler` at startup and
+           installs it (RAII/handle), still exactly one live at a time. Restores explicit
+           lifetime control (init order, shutdown, embedding, tests) *without* reintroducing the
+           "which scheduler" question or `current_scheduler`. Middle ground; ungates the ctor
+           but keeps the single-pool invariant.
+        3. **Full multi-scheduler / ambient selection** - multiple live pools, per-call routing
+           (`launch`/`async`/`execute`). Reintroduces `current_scheduler` and threads a target
+           through the API the single-global explicitly removed. This is the roadmap's
+           exploratory item (theme 2 / guide §13), demand-gated - the plugin-host shared-`.dll`
+           case (extraction item) is one motivation.
+      - **Recommendation to weigh**: option 2 is the likely sweet spot for a public library -
+        it removes the embedder-hostile hidden global and the surprising lazy thread spawn while
+        preserving the single-pool simplicity that made the rest of the design tractable; option
+        3 stays a post-1.0, demand-gated exploration. Cross-refs: the library-extraction item
+        (embeddability) and roadmap theme 2.
 - [ ] **GitHub side** (author): ~~create the `macrame-ts` org~~ — registered (2026-08-19).
       Remaining: transfer `Andriy06/task_system` → `macrame-ts/macrame` (a transfer keeps
       redirects; do it BEFORE the flip so badges/links are final), set the repo
