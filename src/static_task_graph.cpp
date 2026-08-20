@@ -276,10 +276,17 @@ void Static_task_graph::compile(const char* DOT_path)
         }
     }
 
-    // The raw per-argument pipe capture is fully consumed above, and the graph is
-    // build-once - release it.
+    // The raw per-argument pipe capture is fully consumed by the link build above; release it
+    // when nothing else will read it. Under TS_PROFILING the tooling consumers (the DOT dump
+    // and the trace arm, via graph_introspect.h's `object_labels`) read each pipe's debug name
+    // on every `export_structure` - including a `set_trace()` after `compile()` - so the
+    // capture is kept for the graph's lifetime there. Reading a cleared `pipes` is a size-0
+    // subscript: benign in release (MSVC retains the buffer, the pipes are still alive), but a
+    // fatal `_ITERATOR_DEBUG_LEVEL` assertion in debug.
+#if !TS_PROFILING
     for (Node& node : nodes_)
         node.pipes = {};
+#endif
 
     // Reused per-run state: values are reset each execute(), vector capacity persists, so
     // a run allocates only its completion handle (`done`). Rebuilt here since node/pipe
