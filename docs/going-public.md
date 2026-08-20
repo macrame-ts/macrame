@@ -181,7 +181,14 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
 - [ ] **Badges** in `README.md`: add/enable the CI-status and license badges with the FINAL
       owner/repo in the URL (the CI badge URL embeds `owner/repo`, so it must be refreshed if
       the repo is renamed or moved to an org).
-- [ ] **Clean-clone build/run smoke test** (final local gate; run AFTER the rename and the
+- [x] **Clean-clone build/run smoke test** — DONE (2026-08-20): fresh `git clone` of origin
+      (committed files only, no `.user`/build dir) built and ran on every path -- CMake
+      `windows-msvc` (`macrame_playground --tests` 749/0) + `windows-shipping`; the VS path via
+      MSBuild of both `.vcxproj` (macrame.lib + macrame_playground.exe through the
+      ProjectReference); and the consumer path (install -> `find_package(macrame)` -> build ->
+      run, counter=42 launch=42). No untracked-state reliance, no vcxproj/CMake drift. (Re-run on
+      a second machine / fresh profile stays ideal before the flip.) Original notes below.
+      (final local gate; run AFTER the rename and the
       library extraction, since both change the build). Prove a fresh checkout builds and runs
       from committed files alone — the catch is anything that works locally only because of
       untracked/uncommitted state (build artifacts, the `.vcxproj.user`, a source in the
@@ -204,8 +211,8 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
       - Ideally on a **second machine / fresh user profile** (no VS caches, no `%TEMP%` state)
         to catch machine-local assumptions; at minimum a clean directory.
 - [ ] **Confirm CI green** on the final repo.
-- [ ] **Decide whether `CLAUDE.md` ships** — it is tracked, so it will appear in the public
-      repo. It is the internal, LLM-oriented dev doc; common to ship, but a conscious call.
+- [x] **Decide whether `CLAUDE.md` ships** — YES, it ships (author, 2026-08-20). It stays
+      tracked and appears in the public repo (the internal, LLM-oriented dev doc).
 - [ ] **Remove the internal planning docs before the flip** (decided, author, 2026-08-19):
       delete this file and `docs/naming.md`, and scrub the references to them — the
       `README.md` header comment and the CI-badge NOTE comment point here, so drop or
