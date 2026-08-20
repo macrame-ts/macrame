@@ -294,6 +294,76 @@ void test_parallel_for_current_scheduler()
     TS_CHECK(max_w < 2);         // ...and only its 2 workers (not the wider default pool)
 }
 
+// --- parallel_for_colored (interaction coloring) -------------------------------------
+
+// Each item of each band runs once per round: rounds passes over the bands.
+void test_colored_counts()
+{
+    constexpr int n = 6;
+    std::vector<std::atomic<int>> hits(n);   // C++20 value-inits atomics to 0
+    std::vector<std::vector<int>> bands = { { 0, 2, 4 }, { 1, 3 }, { 5 } };
+    ts::parallel_for_colored(bands, 3, [&hits](int i) { hits[i].fetch_add(1, std::memory_order_relaxed); },
+        { .concurrency = 4 });
+    for (int i = 0; i < n; ++i)
+        TS_CHECK(hits[i].load() == 3);
+}
+
+// A 1D relaxation: values along a line, constraints (ci, ci+1) 2-colored even/odd. Each band's
+// constraints touch disjoint particles, so a band's result is chunking-independent; bands run
+// sequentially, so the field depends on band order but NOT on worker count. Same bands + rounds
+// must give a bit-identical field at any concurrency - the property the design exists for.
+std::vector<float> relax_chain(int m, int rounds, int conc)
+{
+    std::vector<float> v(static_cast<std::size_t>(m));
+    for (int i = 0; i < m; ++i)
+        v[i] = static_cast<float>(i);   // deterministic init
+    std::vector<std::vector<int>> bands(2);
+    for (int ci = 0; ci + 1 < m; ++ci)
+        bands[ci & 1].push_back(ci);    // ci connects particles ci and ci+1
+    ts::parallel_for_colored(bands, rounds, [&v](int ci)
+    {
+        float mid = 0.5f * (v[ci] + v[ci + 1]);
+        v[ci] = mid;
+        v[ci + 1] = mid;
+    }, { .concurrency = conc });
+    return v;
+}
+
+// Bit-determinism across chunking/worker count, and repeatability at a fixed concurrency.
+void test_colored_determinism()
+{
+    std::vector<float> serial = relax_chain(64, 5, 1);
+    TS_CHECK(serial == relax_chain(64, 5, 2));
+    std::vector<float> wide = relax_chain(64, 5, 8);
+    TS_CHECK(serial == wide);
+    TS_CHECK(wide == relax_chain(64, 5, 8));   // repeatable at the same (high) concurrency
+}
+
+// The no-op early-outs and the capping/late-helper paths, from a blue thread (no grant needed -
+// the body touches no guarded state).
+void test_colored_edges()
+{
+    std::atomic<int> calls{ 0 };
+    auto body = [&calls](int) { calls.fetch_add(1, std::memory_order_relaxed); };
+
+    ts::parallel_for_colored({ { 0, 1 } }, 0, body);        // rounds <= 0
+    ts::parallel_for_colored({ {}, {} }, 5, body);          // all bands empty
+    ts::parallel_for_colored({}, 5, body);                  // no bands
+    TS_CHECK(calls.load() == 0);
+
+    calls.store(0);
+    ts::parallel_for_colored({ { 7 } }, 4, body, { .concurrency = 1 });   // single item, serial
+    TS_CHECK(calls.load() == 4);
+
+    calls.store(0);
+    ts::parallel_for_colored({ { 0, 1 } }, 2, body, { .concurrency = 8 }); // band narrower than conc
+    TS_CHECK(calls.load() == 4);   // 2 items x 2 rounds; surplus executors find nothing, no hang
+
+    calls.store(0);
+    ts::parallel_for_colored({ { 0 }, {}, { 2 } }, 3, body, { .concurrency = 4 }); // interior empty band filtered
+    TS_CHECK(calls.load() == 6);   // 2 non-empty items x 3 rounds
+}
+
 } // namespace
 
 void run_parallel_tests()
@@ -311,4 +381,7 @@ void run_parallel_tests()
     run("parallel_for priority inheritance", test_parallel_for_priority_inheritance);
     run("parallel_for priority order", test_parallel_for_priority_order);
     run("parallel_for current scheduler", test_parallel_for_current_scheduler);
+    run("parallel_for_colored counts", test_colored_counts);
+    run("parallel_for_colored determinism across concurrency", test_colored_determinism);
+    run("parallel_for_colored edges", test_colored_edges);
 }

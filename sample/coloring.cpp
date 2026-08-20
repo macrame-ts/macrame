@@ -30,6 +30,7 @@
 // converged (max stretch within tolerance).
 
 #include "ts/access.h"
+#include "ts/fatal.h"
 #include "ts/guarded.h"
 #include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
@@ -169,8 +170,15 @@ std::vector<std::vector<int>> color_constraints(const std::vector<Constraint>& c
     {
         unsigned taken = used[cs[ci].a] | used[cs[ci].b];
         int color = 0;
-        while (taken & (1u << color))
+        while (color < 32 && (taken & (1u << color)))
             ++color;
+        if (color >= 32)
+        {
+            // The bitmask is 32-bit, so `1u << color` past 31 is undefined - a graph this
+            // dense is outside this greedy pass's remit (a grid needs <= 7). A production
+            // colorer would use a growable structure.
+            ts::fatal("color_constraints: constraint graph needs more than 32 colors");
+        }
         if (color >= static_cast<int>(bands.size()))
             bands.resize(color + 1);
         bands[color].push_back(ci);
