@@ -120,6 +120,28 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
 - [ ] **Badges** in `README.md`: add/enable the CI-status and license badges with the FINAL
       owner/repo in the URL (the CI badge URL embeds `owner/repo`, so it must be refreshed if
       the repo is renamed or moved to an org).
+- [ ] **Clean-clone build/run smoke test** (final local gate; run AFTER the rename and the
+      library extraction, since both change the build). Prove a fresh checkout builds and runs
+      from committed files alone — the catch is anything that works locally only because of
+      untracked/uncommitted state (build artifacts, the `.vcxproj.user`, a source in the
+      `.vcxproj` but missing from `CMakeLists.txt` — the documented CI-break class — or a
+      hardcoded local path).
+      - Get a pristine tree with **no local state**: clone to a scratch dir
+        (`git clone . /tmp/macrame-clean` or clone the remote), or `git archive HEAD | tar -x`
+        into an empty dir. Do NOT copy the working tree (it carries `build/`, `.user`, dumps).
+      - **CMake path** (CI's authority): each preset configures + builds clean —
+        `windows-msvc`, `windows-clang-cl`, `windows-shipping`, `linux-clang`; then run the
+        driver: `--tests` (exit 0), `--bench`, `--stress`, `--dot`, `--trace`. Shipping runs
+        `--tests` too (harness-dependent cases report skipped).
+      - **VS path** (what a VS user does): open `macrame.slnx` on a machine/dir with no prior
+        build output, build x64 Release + Shipping, run the driver. Catches vcxproj-only drift
+        that CMake would not.
+      - **Consumer path** (once the library is extracted): a throwaway project does
+        `add_subdirectory` (and, if the export layer landed, `find_package(macrame)`) and links
+        `macrame::macrame` against a 5-line `co_await`/`Guarded` program — proves the public
+        include interface and any export set work from outside the tree.
+      - Ideally on a **second machine / fresh user profile** (no VS caches, no `%TEMP%` state)
+        to catch machine-local assumptions; at minimum a clean directory.
 - [ ] **Confirm CI green** on the final repo.
 - [ ] **Decide whether `CLAUDE.md` ships** — it is tracked, so it will appear in the public
       repo. It is the internal, LLM-oriented dev doc; common to ship, but a conscious call.
