@@ -1,14 +1,22 @@
 <!-- Name decided: Macrame (see docs/naming.md). Project/file names stay "task_system" until the repo moves to macrame-ts/macrame - the rollout list is in docs/going-public.md. -->
 
 # Macrame
+###### *Threads, knotted on purpose.*
 
-*Threads, knotted on purpose.*
+Macrame is a C++23 high-level parallelisation framework built around controlled access to shared resources.
 
-**A C++23 high-level parallelisation framework built around controlled access to shared resources.**
+It's a comprehensive task system with a work-stealing scheduler, dependency graphs, coroutines, cancellation, and data-parallel loops. But most importantly the resources each task touches are declared explicitly, with the framework deriving safe parallelism from the declarations with a runtime harness catching any violations.
 
-A comprehensive task system — work-stealing scheduler, dependency graphs, coroutines, cancellation, data-parallel loops — with data access control at its centre: **you declare which shared resources each piece of work touches, and the framework derives safe parallelism from those declarations**, backed by a runtime harness that catches violations.
+Inspired by game engines that need high performance, low latency, soft real-time frame budgets, and many interacting subsystems sharing state. Built to fit any system with similar requirements. No external dependencies.
 
-Inspired by game engines — high performance, low latency, soft real-time frame budgets, many interacting subsystems sharing state — but built to fit any system with similar requirements. No external dependencies.
+#### How it differs from existing task systems
+
+- Combining `Guarded<T>` with the runtime harness provides a thread-safe API for shared objects. Safety is actively checked at runtime rather than relying on convention.
+- It is a fully featured task system rather than a thin wrapper, including an efficient work-stealing scheduler, coroutine-based composition, cooperative cancellation, task priorities, graph-internal inline dispatch, and data-parallel loops.
+- Common state-sharing idioms are provided as built-in primitives. These include static task graphs, command lists (`Deferred`), and double buffering (`Versioned`).
+- The runtime harness is designed to catch issues early. Data access violations fail fast, and deadlocks are detected at runtime.
+
+For a feature-by-feature comparison with Unreal Engine Tasks System, Taskflow, TBB, HPX, Folly, Go, and others, see [docs/task-systems-comparison.md](docs/task-systems-comparison.md).
 
 [![CI](https://github.com/Andriy06/task_system/actions/workflows/ci.yml/badge.svg)](https://github.com/Andriy06/task_system/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -50,17 +58,6 @@ ts::Guarded<Inventory> inventory{ "inventory" };
 inventory.access([](Inventory& inv) { inv.add(sword); }).sync(); // T& -> read/write access, exclusive
 auto n = inventory.access([](const Inventory& inv) { return inv.count(); }).sync(); // const T& -> read-only, concurrent with other readers
 ```
-
----
-
-## How it differs from existing task systems
-
-- **Access orchestration is a first-class, novel feature.** `Guarded<T>` + the runtime harness give you a thread-safe API for a shared object with the safety *checked*, not merely conventional.
-- **State-of-the-art task system**, not a thin wrapper: efficient work-stealing scheduler, coroutine-based composition, cooperative cancellation, priorities, graph-internal inline dispatch, and data-parallel loops.
-- **High-level patterns, built in** — static task graphs, command lists (`Deferred`), double buffering (`Versioned`) and others: the state-sharing idioms provided as primitives.
-- **Extensive harness to detect bugs early**: data access violations are detected and fail fast; runtime deadlock detection.
-
-For a feature-by-feature comparison with Unreal Engine Tasks System, Taskflow, TBB, HPX, Folly, Go, and others, see [docs/task-systems-comparison.md](docs/task-systems-comparison.md).
 
 ---
 
@@ -178,7 +175,7 @@ poses.publish().sync();
 
 ### 5. Seeing the frame — the built-in trace
 
-The graph profiles itself: `--trace` runs the bundled ~30-system mock game frame and renders the **average** run — the measured critical path pinned to the top lane, the parallel work packed into the rows below it, dead-time bands marking where the critical chain waited. <!-- NOTE: the interactive link below is the FINAL GitHub Pages URL (macrame-ts/macrame, Pages serving
+The graph profiles itself: `--trace` runs the bundled ~30-system mock game frame and renders the **average** run — bars packed into concurrency rows, the measured critical path, dead-time bands. <!-- NOTE: the interactive link below is the FINAL GitHub Pages URL (macrame-ts/macrame, Pages serving
      /docs from master) - dead until the repo moves and Pages is enabled at the flip (docs/going-public.md). -->
 The SVG is interactive — hover tooltips with per-node stats and access declarations, view-toggle buttons — but GitHub strips scripts from images, so the picture below is static. [Open the interactive version](https://macrame-ts.github.io/macrame/media/game_frame_trace.svg) in a browser (or, in a clone, open [the file](docs/media/game_frame_trace.svg) itself). Note that it's not a single frame but all frames aggregated, showing the entire session in one high-level picture.
 
