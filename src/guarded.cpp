@@ -19,8 +19,8 @@ namespace
 // in a namespace static so program exit destroys it (joins its workers) even if the user
 // never calls `destroy_scheduler` - the clean-shutdown safety net. `g_fast` is a lock-free
 // read cache for the hot path (every `global_scheduler()` from an external thread); the mutex
-// guards create/destroy. Create/destroy racing concurrent use is undefined (documented) - the
-// `g_fast` reset before teardown is belt-and-suspenders, not a use-vs-destroy guarantee.
+// guards create/destroy. Create/destroy racing concurrent use is undefined (documented), but
+// `g_fast` stays published until the workers are joined, so a live worker can always resolve it.
 std::mutex g_sched_mutex;
 std::unique_ptr<Scheduler> g_scheduler;
 Scheduler_config g_config;
@@ -53,8 +53,13 @@ void destroy_scheduler()
     std::lock_guard lock(g_sched_mutex);
     if (!g_scheduler)
         ts::fatal("destroy_scheduler(): no Scheduler is running");
-    g_fast.store(nullptr, std::memory_order_release);
+    // Join first, publish "none running" second. `~Scheduler` joins the workers in its own
+    // body, before any member is torn down, so the object stays fully valid for exactly as
+    // long as a worker can still be executing. Clearing `g_fast` first opened a window where
+    // a live worker resolved `global_scheduler()` and hit the no-scheduler fatal - a late
+    // `parallel_for` helper draining its trace scopes on the way out is the path that caught it.
     g_scheduler.reset();   // dtor: quit + join workers, drain queued tasks
+    g_fast.store(nullptr, std::memory_order_release);
 }
 
 bool scheduler_running() noexcept
