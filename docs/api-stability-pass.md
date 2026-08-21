@@ -184,6 +184,33 @@ it cannot be done cheaply after.
 
 ---
 
+### M10 - `Event_bus`'s defaulted `Named` captures the library header
+
+**Defect.** `explicit Event_bus(Named name = {})` (`event_bus.h:261`). A default argument is
+evaluated at its *declaration* site, so `Named`'s own defaulted `source_location::current()`
+resolves to that line in `event_bus.h` - never to the user's construction site. Every unnamed
+bus in a program reports the same identity.
+
+This is precisely the failure mode `named.h` states as the load-bearing rule: "an inner helper
+with its own defaulted parameter captures the library header instead, and the name is
+worthless". `tests/named_tests.cpp` asserts that captured names point into the test file and
+calls itself "the whole guarantee" - and it does not cover `Event_bus`, which is why the one
+type that breaks the rule is also the one type the test does not check.
+
+**Options.**
+
+- **(a) Require the name**, as `Guarded` and `Versioned` already do -
+  `explicit Event_bus(Named)`. One keystroke per construction site, and the naming rule
+  becomes uniform across every named entity kind. Breaking for existing call sites.
+- **(b) Keep the default, capture correctly** - take
+  `std::source_location site = std::source_location::current()` on the ctor itself and build
+  the `Named` from it. Source-compatible; unnamed buses start reporting their real site.
+
+Either way, add an `Event_bus` case to `named_tests.cpp`.
+
+**Recommendation:** (a), for uniformity with the other required-name types - unless you would
+rather not touch call sites, in which case (b) fixes the identity without an API change.
+
 ### S2 - priority inheritance is inconsistent between the option structs
 
 **Defect.** `Parallel_options::priority` is `std::optional<Priority>` meaning
