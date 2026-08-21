@@ -193,8 +193,13 @@ directly (default on; priority-respecting fallback to the queue).
 Fire I/O, `co_await` a `Signal`, resume frames later, re-enter the schedule via `Deferred`
 staging — zero workers held while suspended. Rules: no grants across the wait (the guard
 fatal enforces), never gate a node/run on cross-frame work (nested is gone, so the footgun
-is unexpressible), captures own their data, carry a token. Sugar TODOs: Signal-from-OS
-helper (6.6), per-frame gate idiom (6.7), low-priority resumption default (doc).
+is unexpressible), captures own their data, carry a token. The re-entry point shipped as
+`ts::Frame_gate` (`ts/frame_gate.h`): `co_await gate.next()` parks a task that resumed at an
+arbitrary moment until the frame loop's next `open()`, which releases the parked waiters
+through the scheduler at `Priority::low` (`set_release_priority` overrides) rather than
+running them inline on the frame loop's thread. Remaining sugar TODOs: the Signal-from-OS
+helper (6.6, still a design note — the bridge is one line, the open question is who owns the
+waiting) and a low-priority resumption default (doc).
 
 ### 4.8 Nested graph runs (author-revised: lending instead of a fatal)
 
@@ -294,8 +299,10 @@ them.
    context/token + resumption reinstall; symmetric transfer; awaiting-cancelled semantics;
    frame/block fusion (§5.1); the in-task-`sync()` fatal (+ matrix rows 1); awaitable
    access verb incl. reentrant `await_ready` (+ row 2 companion).
-2. **Replacement capabilities** — `Task_scope` (+ row 4); coroutine graph nodes (§4.4);
-   per-frame gate + Signal helpers as thin utilities.
+2. **Replacement capabilities** — coroutine graph nodes (§4.4); the per-frame gate
+   (`ts::Frame_gate`) + Signal helpers as thin utilities. A `Task_scope` was planned in this
+   stage and dropped instead of built (§4.3): `ts::parallel_for`, detached `ts::launch` and
+   `co_await` cover its shapes without a concurrent grant-inheriting child.
 3. **Migration** — samples (`game_frame` streaming + HUD to coroutines; physics;
    blackboard) and the test suite off `then`/`when_all`/nested/builder onto coroutine
    forms. Largest mechanical stage; determinism checks must hold.
@@ -426,7 +433,7 @@ Not blockers; to be worked through while the stages land:
    its cost is that enforcement is runtime-only, so shipping builds would race silently
    on the mistake the split makes unrepresentable. Note only; no action for now.
 5. ~~**Library without static graphs**~~ — **ANSWERED (2026-08), with a measurement.**
-   `sample/game_frame.cpp` now carries a third composition of the same ~34-system frame,
+   `sample/game_frame.cpp` now carries a third composition of the same ~30-system frame,
    `run_frame_graph_free` (same `World`, same `tick_*` bodies, no `Static_task_graph`):
    every system is a multi-object `ts::async`, every edge a `co_await`. Findings, in
    `docs/guide.md` §6.4:
@@ -440,10 +447,11 @@ Not blockers; to be worked through while the stages land:
      ones and a later launch overtakes it. Launching the sample's node list in declaration
      order with no explicit awaits mis-orders `frustum_cull` before `camera` and `submit`
      before `cmd_record` (a frame of draw commands lost), silently — every declaration
-     correct, harness quiet, and 7.6% faster for it. `compile()` derives 69 edges here;
-     by hand that is 17 chain coroutines and 42 `co_await`s.
+     correct, harness quiet, and 7.6% faster for it. Every edge `compile()` derives here
+     is, by hand, an explicit `co_await` in one of the chain coroutines the frame is cut
+     into, plus the joins that fold them back together.
    - **The graph's perf advantage is NOT allocation amortization**, contrary to the
-     standing assumption. Graph-free costs +95 allocations/frame (134 vs 38) — under 2 µs
+     standing assumption. Graph-free costs ~95 more allocations/frame — under 2 µs
      at ~17 ns each — but +64 µs/frame on a 4.1 ms frame and +131 µs on a 0.45 ms one
      (+1.6% / +28.7%). The gap is ~50 coroutine suspend/resume round trips at ~1.8 µs
      (`coro chn`): the graph dispatches a successor on the thread that settled its last

@@ -190,18 +190,28 @@ substantially, which is itself evidence for the same conclusion.
 
 ## 1. Goal and non-goal
 
-Replace the mutex-guarded reader/writer deque (`detail::Pipe`, `src/guarded.cpp`) with a
-lock-free tail-chain where pipe ordering IS dependency edges on the existing block
-machinery (`Task_control_block`), and add an always-on grant-ownership field. The payoff
-is architectural — inline-safety (nothing dispatches under a lock), feature unlocks
-(auto-dispatching `publish`/`commit`, reentrant `access`, writer retraction), and code
-simplification (the `Deferred::commit_mutex_` class of external-ordering hazard
-dissolves). Perf goal is **non-regression only** (per-object mutex contention is naturally
-low; R10).
+The original goal was to replace the mutex-guarded reader/writer deque (`detail::Pipe`,
+`src/guarded.cpp`) with a lock-free tail-chain. **That chain was built, stress-tested and
+retired on its own perf gate** — 22 producers on one pipe measured 798 ns/op against
+~1050 ns/op uncontended, so the per-object mutex was never the bottleneck (§0.1). What
+ships is the evolved mutex pipe of §0.2; §4–§5 below are the engineering record of the
+withdrawn chain, not the current design.
 
-Non-goal for v1: the auto-dispatch verbs, writer retraction, and the graph/`when_all`
-rebase onto `num_locks`. Those are follow-ups this rebase ENABLES; v1 lands the pipe core
-+ the `writer_owner` field behind the unchanged pipe seam.
+The rest of the goal list is independent of the chain, and landed:
+
+- Pipe ordering as dependency edges on the existing block machinery — shipped as pipe turns
+  counted in `num_locks` (`release()`'s `pipe_count` trigger driving the canonical cascade),
+  on the mutex pipe.
+- An always-on grant-ownership field — shipped (`Pipe::writer_owner`).
+- Inline-safety: nothing dispatches under the pipe mutex — shipped (`collect_admissions`
+  under the lock, `fire_granted` after it), which is what makes worker-less mode possible.
+- The feature unlocks: auto-dispatching `Deferred::commit()` and reentrant `access` shipped
+  (§8); writer retraction stays parked (§12).
+- Code simplification: `Deferred::commit_mutex_` is gone, replaced by the enqueue-and-record
+  seam (§0.2, §11).
+
+Perf goal was **non-regression only** (per-object mutex contention is naturally low; R10) —
+and R10 is what settled the chain's fate.
 
 ## 2. What we replace
 
@@ -766,10 +776,14 @@ This is the always-on, behavior-relevant half of the "hybrid harness" (the diagn
 — `write_epoch`, `graph_refs`, full `Access_context` — stays `TS_SAFETY_CHECKS`-gated). It
 must be correct on every path: graph handoff (transfer), inline `access` (owner = the
 inline block for its duration), multi-object holds (per-pipe owner), worker-less/retraction
-(owner = whatever block runs, on whatever thread). Tests F1–F4 (Wave 2). It UNLOCKS
-(follow-up PRs) auto-dispatching `publish()`/`commit()`, reentrant `access`, and the
-scheduler avoiding the same-object blocking-sync deadlock by running-inline when the owner
-is the waiter.
+(owner = whatever block runs, on whatever thread). Tests F1–F4 (Wave 2).
+
+Both unlocks it was written for have shipped on top of it: the single auto-dispatching
+`Deferred::commit()` (§0.2's ladder — inline under the held grant when
+`writer_owner == current_task`, an ordinary async write otherwise, fatal from a
+grant-inheriting child), and the reentrant arm of `Guarded::access` (same test, body runs
+under the held grant with no pipe interaction). `Versioned::publish()` still has its own
+three-phase path rather than riding the ladder, and writer retraction stays parked (§12).
 
 ## 9. R9 — push-UAF bracket
 
@@ -781,21 +795,30 @@ every queued predecessor alive. Test G3.
 
 ## 10. The seam (narrowed by design)
 
-Surviving: `Pipe::wait_until_idle()`, `pipe_epoch(pipe)`, `pipe_try_inline` (single-object
-`access` fast path). DELETED flag-on: `pipe_enqueue` as a generic entry (the `async`
-factory binds links and calls `pipe_enter_first`), and `pipe_acquire`/`pipe_release`
-entirely (§6 — reservations dissolved; the graph talks to the pipe only through links).
-The mutex-pipe versions remain under `!TS_PIPE_TAIL` until the default flips.
-`Deferred`/`Versioned` are untouched (they use `Guarded::async`/`access`); the
-tail-as-last-write handle (§11) stays a follow-up.
+The shipped seam (`include/ts/detail/pipe.h`, implementation in `src/guarded.cpp`):
+`Pipe::wait_until_idle()`, `pipe_epoch`/`pipe_rank`, `pipe_try_inline` (the single-object
+`access` fast path), the link protocol `bind_pipe_link` / `pipe_enter_first` /
+`advance_pipe_links` / `pipe_links_on_complete`, and `pipe_acquire`/`pipe_release` for the
+coroutine hold guards. `pipe_enqueue` as a generic entry is gone — the `async` factory binds
+links and calls `pipe_enter_first`, and the graph talks to the pipe only through links.
+`pipe_acquire`/`pipe_release` survived the rebase (§6 planned to dissolve them with the
+reservations; the hold guards still need a mode-aware acquire that is not a queued task).
+There is no build flag: the mutex pipe is the only pipe.
+`Deferred`/`Versioned` reach it through `Guarded::async`/`access` plus the last-write record
+of §11.
 
-## 11. R8 — Deferred/Versioned ordering (follow-up)
+## 11. R8 — Deferred/Versioned ordering (shipped)
 
-The atomic tail IS the last-job handle. Expose the WRITE-push's returned handle (captured
-at `commit_async` time, not re-read from the tail later — the tail may be a reader sentinel
-by then), so `Deferred` records its last commit unambiguously and the `commit_mutex_`
-load+store race is dissolved. `Versioned`'s phase-3 resync becomes a read representative on
-the tail (already is, effectively). Internals-only; the public API/contracts do not change.
+Solved by the enqueue-and-record seam rather than by a general last-write facility on the
+pipe (§0.2 rejected `Pipe::last_write`: an unrelated later async write pollutes it).
+`pipe_enter_first` takes an optional `Task_ptr* record`; `Guarded_access::commit_write`
+passes `&Deferred::last_commit_`, and the link enter stores the new write's block into it
+while still holding the pipe mutex — so the record can never lag FIFO order. The destructor
+reads it back through `detail::pipe_locked_snapshot` (same mutex) and checks whether that
+block has settled. That is what made the external `Deferred::commit_mutex_` deletable: the
+load+store race it existed to close cannot occur when enqueue and record are one atomic
+step. `Versioned`'s phase-3 resync is an ordinary pipe read job on the same object.
+Internals-only; the public API and contracts did not change.
 
 ## 12. R4 — writer retraction (parked)
 

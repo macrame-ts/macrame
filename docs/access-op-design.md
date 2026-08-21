@@ -222,9 +222,17 @@ integration for pending requests. Not in v1.
    `pipe_acquire` reduced to the link-enter protocol.
 3. **Multi-object `Access_op`** (N embedded links through the same canonical
    cascade) - closes TODO 1.2 (multi-object inline arm) as a side effect.
-4. **The §10 lifecycle** - `start()` refire, default-ctor unbound, `bind()`,
-   `ts::dormant`, the §10.1 state machine and its checks; the erased-body
-   member spelling rides the `Function<Sig, N>` work (TODO 4.2).
+4. **The §10 lifecycle** - shipped (`include/ts/guarded.h`): the default
+   constructor leaves the op **unbound**, `Access_op(ts::dormant, target,
+   body, opts)` constructs it bound-but-dormant, `bind(target, body)`
+   constructs the body in raw storage without firing, and `start()` is the
+   only verb that touches the pipe (first fire on a dormant op, refire on a
+   settled one; fatal unbound and fatal in flight). The §10.1 checks are all
+   in: `wait_settled()` fatals on a never-started op, `try_take()` fatals on
+   one rather than polling empty forever, a second consume in the same cycle
+   fatals, and the destructor reports an unsettled op through `TS_ENSURE`
+   before waiting it out. Still open: the erased-body member spelling (tier 3
+   of §10), which waits on the `Function<Sig, N>` work (TODO 4.2).
 5. **`async` rebased on the same machinery** - a heap-placed op with
    self-ownership; one code path, two ownership modes (pure refactor, no
    behavior change).

@@ -96,15 +96,17 @@ grants already follow:
   body is therefore still in effect after the body resumes on another worker, and does not
   leak onto that worker. Restoring a saved *value* is thread-agnostic, which is what makes
   this correct where `Access_guard`'s saved *pointer* is not (§3).
-- **Into gated sub-work.** `with_inherited_access` captures the launcher's relaxation
-  alongside its grant snapshot, so the structurally-gated launches — `ts::nested` and
-  `Task_scope` children — run under it. A detached `ts::launch` inherits neither the grant
-  nor the relaxation: it is a fresh context (docs/coroutine-first.md §2), so an opt-out opened
-  in the launcher does not silently follow a child that outlives the launcher's scope.
+- **Not onto other threads.** A detached `ts::launch` inherits neither the grant nor the
+  relaxation: it is a fresh context (docs/coroutine-first.md §2), so an opt-out opened in the
+  launcher does not silently follow a child that outlives the launcher's scope. The same holds
+  for a `parallel_for` helper on another worker: `Parallel_base` snapshots the caller's
+  `Access_context` and trace owner, not `detail::relaxed_rules`, so the helpers run checked
+  even when the caller relaxed a rule (the participating caller runs the loop inline, so its
+  own share stays under the scope). Nothing carries the bits across an ordinary submit.
 
-The second is wider than the lexical scope suggests, and that is deliberate: a gated child
-inherits the grant, therefore it inherits the hazard the opt-out speaks for. The asymmetry —
-grants inherited but the claim about them not — would be the more surprising design.
+Coroutine carriage is the whole of the reach, and it is the case that matters: a
+`Relaxed_scope` is a claim about *this* logical task, and a frame stays one logical task
+across its segments even as it migrates between workers.
 
 ## 5. The global default
 

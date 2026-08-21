@@ -67,8 +67,10 @@ accidentally: pass a guarded resource to a function that no longer knows it
 is guarded, and it can innocently stash and use it. Unity partially catches
 the analogue only because its container *views carry their safety state* (a
 version-stamped handle inside the view struct — a stale escaped view fails
-its next check); we do not, today (TODO 1.13 investigates importing that
-idea). The fundamental floor: raw-`T&` extraction can always launder the
+its next check); we do not, today (TODO 1.13 analyzed importing that idea
+and shelved it — see [escaped-refs-hardening.md](escaped-refs-hardening.md);
+escaped-reference coverage stays ThreadSanitizer's job). The fundamental
+floor: raw-`T&` extraction can always launder the
 check away — only a language (Rust) closes this completely.
 
 **§2.4 — Sub-object escapes.** A method legitimately returns a span or
@@ -78,13 +80,20 @@ range harness (TODO 1.6) is the designed answer; today the grant covers the
 object, not the handed-out interior, so interior access after the method
 returns is unchecked.
 
-**§2.5 — Stale inherited grants (CLOSED, 2026-07).** This was a real gap:
-`ts::launch` snapshots the launcher's grant set with no validity window, so
-a non-nested task could run after its origin scope released the objects,
-harness silent. Fixed (TODO 1.11): every context entry declared under a
-pipe grant captures the pipe's write-epoch; a snapshot that outlives its
-grant window fails the comparison at the next instrumented access and
-faults with a stale-grant diagnostic. Residual within this item: the check
+**§2.5 — Stale inherited grants (CLOSED, 2026-07).** This was a real gap: a
+launched task snapshotted the launcher's grant set with no validity window,
+so it could run on after its origin scope released the objects, harness
+silent. Two things close it. `ts::launch` now inherits *nothing* — its body
+runs under an empty access context, so a touch of the launcher's guarded
+data faults deterministically as undeclared access instead of racing the
+launcher's closing grant window (the launch is detached; its handle may be
+dropped, so the grant cannot be guaranteed to outlive the child). The
+snapshots that *are* still inherited — a `parallel_for` helper's copy of its
+node's context, a coroutine segment's re-installed one — carry a validity
+window (TODO 1.11): every context entry declared under a pipe grant captures
+the pipe's write-epoch, and a snapshot that outlives its grant window fails
+the comparison at the next instrumented access and faults with a stale-grant
+diagnostic. Residual within this item: the check
 fires at *instrumented* access only (§2.1–2.4 still apply), and detection
 of a window closing mid-access is advisory (an epoch read races the close
 by nature — the harness is diagnostics, not arbitration).
@@ -133,12 +142,15 @@ can offer here.
 **§3.2 — Deadlock via misuse.** Blocking `sync()` inside a graph node or
 access body, or a wait cycle across `Signal`s (A waits on a signal B will
 trigger, B waits on A), is a liveness bug, not a data race — the harness
-does not model it. Retraction and caller-participation make the *sanctioned*
-patterns deadlock-free (design.md §4.4), and blocking `sync()` under an
-active grant is now diagnosed (TODO 1.12, shipped 2026-07: a `TS_ENSURE`
-failure — debugger break + report, once per site — with a sharp message for
-the certain-deadlock same-object shape), but a determined misuse can still
-hang. Rust's studies are again
+does not model it. `co_await` and caller-participation make the *sanctioned*
+patterns deadlock-free (design.md §4.4), and an in-task blocking `sync()` is
+now **fatal** under safety checks (checked at the call rather than when the
+wait would park — with a sharp message for the certain-deadlock same-object
+shape). The gap has since shrunk further: the waiting rules in `rules.h` add
+a held-grant/awaited-pipe cycle detector, a declared lock order, and a
+quiescence net that reports a stalled run with nothing left to wake it — see
+[waiting-rule-policy.md](waiting-rule-policy.md). A determined misuse can
+still hang. Rust's studies are again
 instructive: its ownership model *introduced* a new deadlock idiom (implicit
 scope-end unlock → double-lock), so a safety model removing one class can
 add another.
@@ -195,5 +207,8 @@ less than a proof.
 - The design position (why runtime oracle over compile-time proof):
   design.md §2.2, §7.9.
 - Roadmap items that shrink these gaps: TODO 1.4 (completeness clang-tidy),
-  1.6 (range harness), 1.11 (grant-generation), 1.12 (blocking-sync check),
-  1.13 (escaped-ref hardening).
+  1.6 (range harness), 1.11 (grant-generation, done), 1.12 (blocking-sync
+  check, done). TODO 1.13 (escaped-ref hardening) is shelved — see
+  [escaped-refs-hardening.md](escaped-refs-hardening.md) for the decision.
+- The waiting rules, the deadlock report's three tiers, and `ts::Rank`:
+  [waiting-rule-policy.md](waiting-rule-policy.md).

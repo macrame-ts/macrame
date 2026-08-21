@@ -232,10 +232,10 @@ Clang/TSan. Broader reach is wanted but unclaimed until it is real.
 Verification is a first-class concern; the gaps are automation and depth of the
 built-in profiling.
 
-- **Near-term** - gate the Shipping configuration (`TS_SAFETY_CHECKS=0`) on every
-  push, so a mis-gated safety field fails CI rather than the next release; and a
-  benchmark regression baseline (store medians, flag regressions, assert
-  allocation-free graph re-runs).
+- **Near-term** - a benchmark regression baseline (store medians, flag regressions,
+  assert allocation-free graph re-runs). CI already builds and runs the Shipping
+  configuration (`TS_SAFETY_CHECKS=0`) on every push, so a mis-gated safety field
+  fails there rather than in the next release.
 - **Mid-term** - deeper internal profiling: decompose framework overhead into named
   phases (acquire, completion, queue-lock wait) to price the next scheduler
   redesign before doing it; a serial-baseline trace lane giving the cleanest per-node

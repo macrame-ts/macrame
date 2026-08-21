@@ -68,7 +68,7 @@ Guard a thread-unsafe object and access it from anywhere:
 ```cpp
 #include "ts/guarded.h"
 
-ts::Guarded<std::vector<int>> numbers{ "numbers" };   // the leading name is for diagnostics
+ts::Guarded<std::vector<int>> numbers{ ts::Named{"numbers"} };   // the leading name is for diagnostics
 
 // write: functor takes T& -- exclusive
 numbers.access([](std::vector<int>& v) { v.push_back(1); }).sync();
@@ -475,7 +475,7 @@ and is the only sanctioned way to touch it across threads. You never hold a
 bare `T&`; you submit accessors with `access` (the default) or `async`:
 
 ```cpp
-ts::Guarded<World> world{ "world", initial_seed };   // leading name, then T's ctor args
+ts::Guarded<World> world{ ts::Named{"world"}, initial_seed };   // leading name, then T's ctor args
 
 world.access([](World& w) { w.step(); }).sync();               // exclusive write
 auto pop = world.access([](const World& w) { return w.population(); });  // concurrent read
@@ -683,9 +683,10 @@ deadlock: waiting on task 'frame.cpp:212', but every worker has been idle …
 The middle block comes free from the circular-wait machinery and covers tasks
 suspended while holding something. The full list — including tasks suspended on
 a plain `co_await` while holding nothing, which the first block cannot see — is
-the **suspension registry**, `TS_SUSPENSION_REGISTRY`. It is on in checked builds
-and off in shipping; it costs about 30 ns per suspension and nothing measurable
-on real frames. If you are looking at a report from a build without it, the
+the **suspension registry**, `TS_SUSPENSION_REGISTRY`. It defaults on in debug
+builds only (checked builds with `NDEBUG` undefined) and off everywhere else;
+define `TS_SUSPENSION_REGISTRY=1` to turn it on in any configuration. It costs
+about 30 ns per suspension and nothing measurable on real frames. If you are looking at a report from a build without it, the
 message says so and names the rebuild flag.
 
 ### 5.1 Multi-object access
@@ -693,8 +694,8 @@ message says so and names the rebuild flag.
 To touch several guarded objects in one body, use the free function:
 
 ```cpp
-ts::Guarded<Physics> physics{ "physics" };
-ts::Guarded<Render> render{ "render" };
+ts::Guarded<Physics> physics{ ts::Named{"physics"} };
+ts::Guarded<Render> render{ ts::Named{"render"} };
 
 ts::access([](const Physics& p, Render& r) { r.mirror(p); }, physics, render);
 // options-first form: ts::access({ .priority = ts::Priority::high }, fn, objs...)
@@ -738,10 +739,10 @@ For a fixed frame/pipeline structure, declare the whole thing once and run it
 every iteration:
 
 ```cpp
-ts::Guarded<Input>   input{ "input" };       // every Guarded and every node takes a
-ts::Guarded<Physics> physics{ "physics" };   // leading name (§6.1) - what the DOT dump,
-ts::Guarded<Anim>    anim{ "anim" };          // trace and diagnostics print
-ts::Guarded<Render>  render{ "render" };
+ts::Guarded<Input>   input{ ts::Named{"input"} };       // every Guarded and every node takes a
+ts::Guarded<Physics> physics{ ts::Named{"physics"} };   // leading name (§6.1) - what the DOT dump,
+ts::Guarded<Anim>    anim{ ts::Named{"anim"} };         // trace and diagnostics print
+ts::Guarded<Render>  render{ ts::Named{"render"} };
 
 ts::Static_task_graph frame;
 
@@ -855,7 +856,7 @@ or deferral (`Deferred`).
 
 The dump (and all profiling instrumentation) compiles out with
 `TS_PROFILING=0`; the `compile(DOT_path)` parameter remains and becomes a
-no-op. Node names are kept in all builds — they are one pointer per node and
+no-op. Node names are kept in all builds — they are three words per node and
 pay for themselves in debugging.
 
 ### 6.2 Runtime traces: the average run
@@ -969,7 +970,7 @@ Tracing costs two clock reads per node per run when attached, one branch when
 not, and nothing at all with `TS_PROFILING=0`. Cancelled runs are not folded.
 
 The sample wires this up as `macrame_playground --trace [frames]`, tracing two
-variants of the same ~34-system frame on an 8-worker scheduler — a `baseline`
+variants of the same ~30-system frame on an 8-worker scheduler — a `baseline`
 and an `optimised` version tuned by reading the baseline's own trace —
 writing `sample_game_frame_avg_baseline.svg` and
 `sample_game_frame_avg_optimised.svg` plus `sample_game_frame.dot`; a
@@ -1036,7 +1037,7 @@ Three mistakes are caught with a fatal in checked builds:
 Nothing forces you to build one. The access verbs plus `co_await` compose the
 same work: launch each system with `ts::async(fn, objs…)`, hold the returned
 `Task<void>` handles, and `co_await` a system's producers before launching it.
-The sample carries both spellings of one ~34-system frame — `build_frame_graph`
+The sample carries both spellings of one ~30-system frame — `build_frame_graph`
 and `run_frame_graph_free` in `sample/game_frame.cpp` — over the same `World`
 and the same system bodies, so the difference is only in how the schedule is
 produced. What the comparison shows:
@@ -1046,12 +1047,13 @@ mode-aware turn on every object it declares, so two conflicting systems never
 overlap and the harness still fatals on an undeclared touch. Dropping the graph
 costs you nothing here.
 
-**Order is the graph's.** `compile()` derives 69 edges from those 34 nodes'
-declarations. Written by hand that frame is 17 chain coroutines and 42
-`co_await`s. Do not expect the pipe's FIFO to stand in for the conflict edges:
-a multi-object access enters its links one at a time in canonical order, so a
-system blocked on its first object has not yet taken its slot on the later ones
-and a system launched after it walks straight past. Launching the sample's node
+**Order is the graph's.** `compile()` derives every conflict edge from the
+declarations the nodes already carry. Written by hand, each of those edges is an
+explicit `co_await` somewhere in the chain coroutines the frame is cut into, plus
+the joins that fold them back together. Do not expect the pipe's FIFO to stand in
+for the conflict edges: a multi-object access enters its links one at a time in
+canonical order, so a system blocked on its first object has not yet taken its
+slot on the later ones and a system launched after it walks straight past. Launching the sample's node
 list in declaration order with no explicit awaits runs `frustum_cull` before
 `camera` and lets `submit` clear the draw queue before `cmd_record` reaches it —
 losing a frame of draw commands, with every declaration correct, the harness
@@ -1065,9 +1067,9 @@ that frame (22 hardware threads, `--bench` reports both):
 | | µs/frame | allocs/frame |
 | --- | --- | --- |
 | graph, heavy systems (~4.1 ms frame) | 4102–4110 | 38 |
-| graph-free, same frame | +1.4–1.6% (+56–64 µs) | 134 |
+| graph-free, same frame | +1.4–1.6% (+56–64 µs) | +95 |
 | graph, light systems (~0.46 ms frame) | 457–470 | 38 |
-| graph-free, same frame | +19–29% (+89–131 µs) | 134 |
+| graph-free, same frame | +19–29% (+89–131 µs) | +95 |
 
 The graph-free composition costs ~95 extra allocations per frame, but at ~17 ns
 each that is under 2 µs — a rounding error against the 56–131 µs it actually
@@ -1298,7 +1300,7 @@ machinery (a **journal** of staged commands):
 ### 9.1 `Deferred<T>`: batch your writes
 
 ```cpp
-ts::Guarded<Score_board> board{ "board" };
+ts::Guarded<Score_board> board{ ts::Named{"board"} };
 ts::Deferred<Score_board> staged{ board };
 
 // each producer mints ONE recorder (its identity in the apply order) and reuses it
@@ -1363,7 +1365,7 @@ Readers always see the last *published* version; producers stage into the
 next one; `publish()` flips atomically:
 
 ```cpp
-ts::Versioned<Poses> poses{ "poses" };            // T must be default-constructible & swappable
+ts::Versioned<Poses> poses{ ts::Named{"poses"} };  // T must be default-constructible & swappable
 ts::Recorder<Poses> rec = poses.recorder();
 
 // producers, all frame long, grant-free:
@@ -1379,8 +1381,8 @@ poses.publish().sync();                           // completes at the version fl
 Key properties:
 
 - **No read-your-writes**: staged outputs arrive as the *next* version.
-  Readers wanting the new version order themselves after the publish (e.g.
-  `.after(publish_task)`, or a graph edge).
+  Readers wanting the new version order themselves after the publish (`co_await`
+  the task `publish()` returns, or a graph edge from the publish node).
 - The flip holds the write access for nanoseconds (a content swap); applying
   the batch and re-syncing the second replica overlap readers. The front's
   address never changes, so graph declarations and the harness see one

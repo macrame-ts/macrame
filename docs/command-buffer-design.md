@@ -8,7 +8,7 @@
 > study that produced `Deferred`/`Versioned`; §7 below records the 2026-07 ship and
 > has since drifted in one place — the two-verb `commit`/`commit_async` split it
 > describes was later unified into a single auto-dispatching `commit()` (see
-> deferred-versioned-state.md §7a).
+> deferred-versioned-state.md §3, contract 7a).
 
 Status: **implemented** (2026-07) — design 4 shipped as `Deferred<T>` (`deferred.h`)
 plus its versioned-state sibling `Versioned<T>` (`versioned.h`); the physics sample
@@ -225,7 +225,7 @@ by construction (separate storage), instead of by relaxing an
 order-preserving structure.
 
 **(c) Per-command cost and the closure ceiling.** A recorded write is a full
-pipe job: one `Task_control_block` (288 B, refcounted, mutex+CV inside) + a
+pipe job: one `Task_control_block` (248 B, refcounted, mutex+CV inside) + a
 mutex-guarded `deque` node + an indirect dispatch at flush — per command. The
 commands are opaque closures, so there is no merge/sort/dedup surface (Flecs
 merges per-entity commands; Unity sorts by `sortKey` — impossible over
@@ -277,7 +277,7 @@ stays the only arbitration mechanism.
   `EntityCommandBuffer`).
 
 Cost picture per command: bump-pointer alloc + a POD store (typed tier) vs
-design 1's 288 B block + refcount + deque node + indirect call — roughly two
+design 1's 248 B block + refcount + deque node + indirect call — roughly two
 orders of magnitude, before counting the eliminated pipe-mutex contention.
 
 ### 3.3 Design 3 — status quo / hand-rolled
@@ -336,7 +336,7 @@ queues around the flush like around any writer.
 | **New API surface** | none (a ctor mode) | ctor mode + per-instance read relaxation | 1 type (`Command_buffer`, `Recorder`) | none | 1 type + `Access::append` + `add_flush_node` |
 | **Semantic clarity** | poor: same `async`, different latency per instance; `sync()`/dtor/inline muddied | worst: two coupled mode switches; pipe ordering silently revoked | good: recording vs access split by type; flush = normal write | good (nothing to confuse) | best: append access is declared and visible in the graph |
 | **Reader parallelism while recording** | **none** (FIFO blocks readers behind parked writes) | yes, by weakening pipe semantics | yes, by construction (no grant taken) | yes | yes |
-| **Per-command cost** | task block (288 B) + refcount + deque node + pipe mutex + indirect call | same | bump alloc + POD store (typed); arena'd closure (untyped) | vector push (good), gather copy (extra) | same as 2 |
+| **Per-command cost** | task block (248 B) + refcount + deque node + pipe mutex + indirect call | same | bump alloc + POD store (typed); arena'd closure (untyped) | vector push (good), gather copy (extra) | same as 2 |
 | **Merge/sort/dedup** | no (opaque closures) | no | yes (typed tier; flush-time hooks) | by hand | yes |
 | **Deterministic apply order** | no — cross-thread mutex-acquisition order | no | yes — producer-keyed sub-buffers, splice order fixed at flush | by hand | yes, keyed by node index |
 | **Graph integration** | flush node by hand; no derived record→flush edges (recording isn't declared) | same | flush = `async` or hand-wired node | all by hand (completeness hazard) | flush = derived node; append→flush + write→read edges all derived |
@@ -419,7 +419,7 @@ state — the stable snapshot, by construction.
 
 **The same frame on design 1**, for contrast: `animate` would issue one
 `render_queue.async([cmd](Render_queue& q){ q.submit(cmd); })` **per draw** —
-one 288 B task block and one pipe-mutex hit each, ~thousands per frame; the
+one 248 B task block and one pipe-mutex hit each, ~thousands per frame; the
 producers all contend on the one pipe mutex they were meant to escape; the HUD
 reader either parks behind every queued draw until the flush (pure lazy) or
 must opt into reads-passing-writes; and the flush node has no derived edges
@@ -522,7 +522,7 @@ timing, exactly the §3.2 claim.
 describes was unified 2026-08 into a single auto-dispatching `commit(opts)` — it
 applies inline when the calling task already holds the target's write grant, and
 enqueues an ordinary async write otherwise. See
-[deferred-versioned-state.md](deferred-versioned-state.md) §7a.)*
+[deferred-versioned-state.md](deferred-versioned-state.md) §3, contract 7a.)*
 
 **`Versioned<T>`** (`versioned.h`): journal + two replicas behind one `Guarded`
 front. The swap exchanges the replicas' *contents*, so the front's address is
@@ -574,7 +574,7 @@ version the output extract, not the machine.**
    at all), and producer→commit/flip ordering is hand-wired `after` for now.
    Append-edge derivation remains available as later sugar; it was never a
    correctness requirement.
-4. *Flush coalescing*: explicit `commit_async` / `publish` / flip node only; no
+4. *Flush coalescing*: explicit `commit` / `publish` / flip node only; no
    auto-materialization.
 5. *Unflushed at destruction*: `ts::fatal` under `TS_SAFETY_CHECKS` (a lost
    write, same severity as undeclared access); `discard()` is the explicit
@@ -582,8 +582,9 @@ version the output extract, not the machine.**
 6. *Skipped-flush semantics*: carry — a cancelled commit/publish leaves the
    commands staged for the next one (cut happens at execution, not submission).
    A cancelled `publish` token completes the returned task (it is a phase gate,
-   not the skipped work); a cancelled `commit_async` settles cancelled like any
-   pipe job.
+   not the skipped work); a cancelled `commit` settles cancelled either way — the
+   enqueued write like any pipe job, the inline arm by checking the token before
+   it applies.
 7. *Cross-target commands*: deferred, unchanged. The physics sample suggests
    the practical answer is decomposition (two buffers), not a multi-target CB.
 8. *Storage convergence*: `detail::Journal<T>` is the shared layer (`Deferred`
@@ -688,8 +689,8 @@ The mapping:
   library rule *is* UE's blackboard discipline — specific systems own specific
   keys. Genuine multi-writer last-wins is the typed tier's dedup-by-key hook.
 - **Key-change notification** (UE's blackboard observers) decomposes into two
-  existing pieces: *when* = a dispatch node ordered after the flip (or `.then`
-  on the publish task); *what changed* = value diff against a per-subscriber
+  existing pieces: *when* = a dispatch node ordered after the flip (or a
+  `co_await` on the publish task); *what changed* = value diff against a per-subscriber
   cache (polling-diff). With closure commands the journal cannot report which
   keys a batch touched; the typed tier's `Set_cmd` stream is the dirty set for
   free (§7.3) and upgrades polling-diff to push. Callbacks run under the

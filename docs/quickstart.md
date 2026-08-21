@@ -19,8 +19,11 @@ git clone <repo-url> macrame
 - **CMake** — `add_subdirectory(macrame)` and link `macrame::macrame`; or install
   it (`cmake --install`) and `find_package(macrame CONFIG REQUIRED)` + link
   `macrame::macrame`.
-- **By hand** — add `include/` to your include path and compile the six
-  `src/*.cpp` into your build (headers under `include/ts/`, six `.cpp` under `src/`).
+- **By hand** — add `include/` to your include path and compile the six library
+  `.cpp` under `src/` into your build (`access`, `fatal`, `guarded`, `scheduler`,
+  `static_task_graph`, `worker_thread`; headers under `include/ts/`). The other
+  `src/*.cpp` — `main.cpp`, `mem_profile.cpp` — belong to the dev driver, not the
+  library.
 
 C++23, exceptions disabled. Build your own translation units the same way: the
 library is exceptions-off, and a consumer must match (the config rides on the
@@ -79,7 +82,7 @@ that call only. Storing it past the call sidesteps the safety checks
 ([limits.md](limits.md) §2.3):
 
 ```cpp
-ts::Guarded<std::vector<int>> numbers{ "numbers" }; // the name is for diagnostics and traces
+ts::Guarded<std::vector<int>> numbers{ ts::Named{"numbers"} }; // the name is for diagnostics and traces
 
 numbers.access([](std::vector<int>& v) { v.push_back(1); }).sync(); // write: exclusive
 size_t n = numbers.access([](const std::vector<int>& v) // read: concurrent

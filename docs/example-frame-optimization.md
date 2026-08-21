@@ -175,7 +175,7 @@ The baseline is already busy but **chain-bound**: utilization is high, yet the
 frame is limited by the *length* of its critical chain, so the headroom that is
 left can only be recovered by shortening that chain — not by filling cores. The
 levers do exactly that, and utilization climbs toward saturation: the optimised
-frame is **core-bound**, cores nearly full (≈ 95 %), and what waiting remains is
+frame is **core-bound**, cores nearly full (≈ 96 %), and what waiting remains is
 the critical path waiting for a *free core* rather than a missing dependency. In
 the picture the single long critical spine has fragmented — no node is critical
 in a large majority of runs, because the binding path now bounces between

@@ -243,7 +243,7 @@ wait".
 
 The graph is optional — the access verbs and `co_await` compose the same work —
 so the library owes an answer to "what does declaring it buy". `sample/game_frame.cpp`
-carries both spellings of one ~34-system frame over the same `World` and the
+carries both spellings of one ~30-system frame over the same `World` and the
 same system bodies (`build_frame_graph` vs `run_frame_graph_free`), so the
 answer can be measured. Three results, none of them the
 expected one:
@@ -263,13 +263,14 @@ lets `submit` clear the draw queue before `cmd_record` reaches it — a frame of
 draw commands lost, silently, with every declaration correct and the frame 7.6%
 *faster* for the missing edges. This is the completeness hazard's twin: the
 harness is an oracle for undeclared access, and there is no oracle for
-mis-ordered *declared* access. `compile()` derives 69 edges for those 34 nodes;
-by hand the same frame is 17 chain coroutines and 42 `co_await`s.
+mis-ordered *declared* access. Every edge `compile()` derives from those
+declarations is, by hand, an explicit `co_await` in one of the chain coroutines
+the frame is cut into, plus the joins that fold them back together.
 
 **The performance advantage is resume locality, not allocation amortization.**
 The standing assumption was that near-zero-alloc re-runs were the graph's
-measurable edge. They are not: graph-free costs +95 allocations per frame (134
-vs 38) which at ~17 ns each is under 2 µs, against a measured +56–64 µs/frame on a
+measurable edge. They are not: graph-free costs ~95 more allocations per frame,
+which at ~17 ns each is under 2 µs, against a measured +56–64 µs/frame on a
 4.1 ms frame and +89–131 µs on a 0.46 ms one (+1.4–1.6% / +19–29%). The gap is ~50
 coroutine suspend/resume round trips at ~1.8 µs each. The graph dispatches a
 successor directly on the thread that settled its last predecessor; an awaited
@@ -284,7 +285,8 @@ The coroutine-first graph unified each node's dispatch onto the same
 ownership-carrying block path as every other task, and that was not free: it cost
 roughly **9% more per node** than the pre-transformation block (in frame terms,
 under 1% of wall time — framework overhead is only ~4–10% of a real `game_frame`,
-§2.4). This section records the *measured* cause, because the intuitive one is
+see [profiler-guided-optimization.md](profiler-guided-optimization.md)). This
+section records the *measured* cause, because the intuitive one is
 wrong — and the recovery, which not only erased the regression but took the
 per-node machinery *below* the old block by slimming a completion cost both
 versions shared.
@@ -722,8 +724,8 @@ foundation (the coroutine-first transformation, `docs/coroutine-first.md`):
 composition *is* coroutines, and the callback vocabulary is gone (§4.3). The
 main design points:
 
-- **Fused frame and block.** The promise embeds the `Task_control_block`
-  (first-member aliasing, the `Executable` pattern), so a coroutine task is
+- **Fused frame and block.** The promise derives from the `Task_control_block`
+  (the `Executable` pattern — recovery is a standard derived cast), so a coroutine task is
   one allocation and is an ordinary `Task<R>` to everyone else. The frame
   holds a running self-reference; awaiters, handles, and any gated completion
   it awaits (a nested graph run) hold refs, so a fire-and-forget frame lives
