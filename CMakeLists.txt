@@ -81,15 +81,6 @@ set(TS_DRIVER_SOURCES
     tests/versioned_tests.cpp
 )
 
-# Real MSVC (cl): the STL's invoke_result SFINAE fails under /std:c++23preview -- which is what
-# CMAKE_CXX_STANDARD 23 maps to on cl -- but works under /std:c++latest (what the vcxproj uses,
-# LanguageStandard=stdcpplatest). Override the C++23 flag mapping to c++latest for cl only;
-# clang-cl (COMPILER_ID Clang) keeps CMake's default. Must be set before any target.
-if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-    set(CMAKE_CXX23_STANDARD_COMPILE_OPTION "-std:c++latest")
-    set(CMAKE_CXX23_EXTENSION_COMPILE_OPTION "-std:c++latest")
-endif()
-
 # Exceptions are the consumer's choice. macrame contains no throw, try or catch: failures go
 # to ts::fatal, and an exception escaping a user body is fatal at the seam that invokes it
 # (detail::invoke_user_body). The library is therefore correct either way, and by default it is
