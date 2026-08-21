@@ -52,6 +52,7 @@
     ],
     "buildPresets": [
         { "name": "windows-msvc", "configurePreset": "windows-msvc", "configuration": "Release" },
+        { "name": "windows-msvc-debug", "configurePreset": "windows-msvc", "configuration": "Debug" },
         { "name": "windows-clang-cl", "configurePreset": "windows-clang-cl", "configuration": "Release" },
         { "name": "windows-shipping", "configurePreset": "windows-shipping", "configuration": "Release" },
         { "name": "linux-clang", "configurePreset": "linux-clang" },

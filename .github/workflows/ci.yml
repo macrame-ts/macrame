@@ -32,6 +32,37 @@ jobs:
             macrame_crash.dmp
           if-no-files-found: ignore
 
+  # Debug is a genuinely different binary: MSVC's debug CRT compiles in _ITERATOR_DEBUG_LEVEL=2
+  # (checked iterators, hardened container asserts) that Release and shipping do not. A compile-DOT
+  # use-after-free was benign UB in Release (a retained buffer) but tripped the debug iterator
+  # assert -- and no CI ran Debug, so it shipped. This job runs the suite under those checks.
+  windows-msvc-debug:
+    name: Windows / MSVC / Debug (iterator debugging)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset windows-msvc
+      - name: Build (Debug)
+        run: cmake --build --preset windows-msvc-debug
+      - name: Tests
+        run: |
+          build/windows-msvc/Debug/macrame_playground.exe --tests
+          $code = $LASTEXITCODE
+          Write-Host "macrame exit code: $code (0x$('{0:X8}' -f $code))"
+          if ($code -ne 0) { exit $code }
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msvc-debug-crash
+          path: |
+            build/windows-msvc/Debug/macrame_playground.exe
+            build/windows-msvc/Debug/macrame_playground.pdb
+            macrame_crash.dmp
+          if-no-files-found: ignore
+
   windows-clang-cl:
     name: Windows / clang-cl / tests
     runs-on: windows-latest
