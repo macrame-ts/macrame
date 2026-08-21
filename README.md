@@ -1,5 +1,3 @@
-<!-- Name decided: Macrame (see docs/naming.md). Project and file names are now `macrame`; only the GitHub repo and CI-badge URLs stay `Andriy06/task_system` until the repo moves to macrame-ts/macrame - the rollout list is in docs/going-public.md. -->
-
 # Macrame
 ###### *Threads, knotted on purpose.*
 
@@ -18,10 +16,9 @@ Inspired by game engines that need high performance, low latency, soft real-time
 
 For a feature-by-feature comparison with Unreal Engine Tasks System, Taskflow, TBB, HPX, Folly, Go, and others, see [docs/task-systems-comparison.md](docs/task-systems-comparison.md).
 
-[![CI](https://github.com/Andriy06/task_system/actions/workflows/ci.yml/badge.svg)](https://github.com/Andriy06/task_system/actions/workflows/ci.yml)
+[![CI](https://github.com/macrame-ts/macrame/actions/workflows/ci.yml/badge.svg)](https://github.com/macrame-ts/macrame/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![C++23](https://img.shields.io/badge/C%2B%2B-23-blue.svg)
-<!-- NOTE: the CI badge URL embeds the owner/repo (Andriy06/task_system) -- refresh it if the repo is renamed or moved (see docs/going-public.md). -->
 
 **[Quick start](docs/quickstart.md)**
 
@@ -175,8 +172,8 @@ poses.publish().sync();
 
 ### 5. Seeing the frame — the built-in trace
 
-The graph profiles itself: `--trace` runs the bundled ~30-system mock game frame and renders the **average** run — bars packed into concurrency rows, the measured critical path, dead-time bands. <!-- NOTE: the interactive link below is the FINAL GitHub Pages URL (macrame-ts/macrame, Pages serving
-     /docs from master) - dead until the repo moves and Pages is enabled at the flip (docs/going-public.md). -->
+The graph profiles itself: `--trace` runs the bundled ~30-system mock game frame and renders the **average** run — bars packed into concurrency rows, the measured critical path, dead-time bands. <!-- NOTE: the interactive link below is the GitHub Pages URL (Pages serving /docs from
+     master) - dead until Pages is enabled at the flip (docs/going-public.md). -->
 The SVG is interactive — hover tooltips with per-node stats and access declarations, view-toggle buttons — but GitHub strips scripts from images, so the picture below is static. [Open the interactive version](https://macrame-ts.github.io/macrame/media/game_frame_trace.svg) in a browser (or, in a clone, open [the file](docs/media/game_frame_trace.svg) itself). Note that it's not a single frame but all frames aggregated, showing the entire session in one high-level picture.
 
 ![Traced game frame](docs/media/game_frame_trace.svg)

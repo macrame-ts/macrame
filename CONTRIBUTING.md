@@ -4,9 +4,8 @@ Thanks for your interest in the project. It is an open-source C++23 task system 
 parallelisation framework; contributions of all sizes are welcome — bug reports,
 docs, tests, and code.
 
-> The library is **Macrame**; the project and file names are now `macrame`.
-> Only the GitHub repo and URLs stay `Andriy06/task_system` until the repository
-> moves to `macrame-ts/macrame`. The namespace is `ts`.
+> The library is **Macrame**; the project and file names are `macrame`. The
+> namespace is `ts`.
 
 ## Building
 
