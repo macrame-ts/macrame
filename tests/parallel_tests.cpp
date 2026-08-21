@@ -3,13 +3,17 @@
 #include "harness.h"
 #include "test_util.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <memory>
 #include <numeric>
 #include <thread>
 #include <vector>
 
 using ts::test::run;
+using ts::test::run_if;
+using ts::test::with_rule_in_task_sync;
 using tests::wait_until;
 
 namespace
@@ -120,6 +124,41 @@ void test_parallel_for_inherits_grant()
         return s.sum();
     }).sync();
     TS_CHECK(total == n);
+}
+
+// A helper chunk inherits the caller's relaxation along with the caller's grant. Without
+// that, enforcement depends on which chunk a thread happened to claim: the caller's own
+// share runs inline (so it is relaxed) while helpers on other workers are not.
+void test_parallel_for_inherits_relaxation()
+{
+    constexpr int n = 20000;
+    std::vector<char> saw_relaxed(n, 0);
+    std::vector<std::thread::id> ran_on(n);
+
+    {
+        ts::Relaxed_scope relaxed{ ts::Rule::in_task_sync };
+        ts::parallel_for(n, [&](int i)
+        {
+            saw_relaxed[i] = ts::rule_relaxed(ts::Rule::in_task_sync) ? char(1) : char(0);
+            ran_on[i] = std::this_thread::get_id();
+        });
+    }
+
+    int relaxed_count = 0;
+    for (int i = 0; i < n; ++i)
+        relaxed_count += saw_relaxed[i];
+    TS_CHECK(relaxed_count == n);
+
+    // The assertion above only bites when helpers actually ran; report it so a run where
+    // the caller claimed every chunk cannot pass as coverage it did not provide.
+    std::vector<std::thread::id> distinct(ran_on);
+    std::sort(distinct.begin(), distinct.end());
+    distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+    if (distinct.size() < 2 && ts::global_scheduler().worker_count() > 1)
+        std::printf("    (note: caller claimed every chunk; helper path not exercised)\n");
+
+    // Leaving the scope restores the caller, and no helper leaked its install onto a worker.
+    TS_CHECK(!ts::rule_relaxed(ts::Rule::in_task_sync));
 }
 
 // Correctness is priority-independent: every item runs exactly once at each explicit class,
@@ -377,6 +416,8 @@ void run_parallel_tests()
     run("async_parallel_for", test_async_parallel_for);
     run("parallel_for nested", test_parallel_for_nested);
     run("parallel_for inherits grant", test_parallel_for_inherits_grant);
+    run_if(with_rule_in_task_sync, "TS_RULE_IN_TASK_SYNC off",
+           "parallel_for inherits relaxation", test_parallel_for_inherits_relaxation);
     run("parallel_for priorities", test_parallel_for_priorities);
     run("parallel_for priority inheritance", test_parallel_for_priority_inheritance);
     run("parallel_for priority order", test_parallel_for_priority_order);

@@ -85,10 +85,16 @@ struct Parallel_base : Task_control_block
     Balance balance;
     std::optional<Access_context> inherited_ctx;
     int inherited_owner;       // trace owner (graph node index), snapshotted like inherited_ctx
+#if TS_RULES_ANY
+    unsigned inherited_relaxed;   // the caller's `Relaxed_scope` opt-outs, snapshotted alike
+#endif
 
     Parallel_base(Body b, int conc, Balance bal)
         : body(std::move(b)), concurrency(conc), balance(bal)
         , inherited_ctx(snapshot_access()), inherited_owner(trace_owner())
+#if TS_RULES_ANY
+        , inherited_relaxed(snapshot_relaxed())
+#endif
     {
     }
 };
@@ -219,10 +225,10 @@ void run_loop(Colored_state<Body>* st)
 
 // --- shared scaffolding --------------------------------------------------------------
 
-// Raw scheduler entry for a helper of either flavor: install the caller's inherited grant
-// and trace owner, run the flavor's loop, then drop this helper's refcount (may free the
-// state if the work already completed and the handle is gone). A late-queued helper finds
-// nothing to claim (or the terminal phase), does no work, and just releases its ref.
+// Raw scheduler entry for a helper of either flavor: install the caller's inherited grant,
+// relaxation and trace owner, run the flavor's loop, then drop this helper's refcount (may
+// free the state if the work already completed and the handle is gone). A late-queued helper
+// finds nothing to claim (or the terminal phase), does no work, and just releases its ref.
 // (The participating caller needs no install - its context is already the live one.)
 template<typename State>
 void helper_entry(void* p)
@@ -230,6 +236,12 @@ void helper_entry(void* p)
     auto* st = static_cast<State*>(p);
     {
         Inherited_access_scope scope(st->inherited_ctx);
+        // A helper runs the caller's body inside the caller's grant window, so it also runs
+        // under the caller's rule opt-outs - otherwise enforcement would depend on which
+        // chunk a thread claimed, since the caller's own share runs inline and relaxed.
+#if TS_RULES_ANY
+        Inherited_relaxed_scope relaxed_scope(st->inherited_relaxed);
+#endif
         // Attribute this helper's chunk time to the owning graph node (trace true-busy),
         // the same inheritance as the access grant. No-op untraced.
         Trace_owner_scope trace_owner_scope(st->inherited_owner);

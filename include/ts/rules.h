@@ -300,6 +300,54 @@ struct Relaxed_carrier
 #endif
 };
 
+// The calling thread's relaxation, snapshotted where sub-work is created.
+inline unsigned snapshot_relaxed() noexcept
+{
+#if TS_RULES_ANY
+    return relaxed_rules;
+#else
+    return 0;
+#endif
+}
+
+// Installs a relaxation snapshot around structurally gated sub-work - a `parallel_for`
+// helper chunk running the caller's body on another worker. The helper inherits the
+// caller's grant, so it inherits the caller's opt-outs with it: without this the same body
+// enforces differently depending on which chunk a thread happened to claim, since the
+// caller's share runs inline (already relaxed) while the helpers do not.
+//
+// One-way, unlike `Relaxed_carrier`: there is no write-back, because a helper is a leaf. A
+// `Relaxed_scope` opened inside the body governs that chunk only and must not escape into
+// the caller.
+class Inherited_relaxed_scope
+{
+public:
+    explicit Inherited_relaxed_scope(unsigned bits) noexcept
+    {
+#if TS_RULES_ANY
+        prev_ = relaxed_rules;
+        relaxed_rules = bits;
+#else
+        (void)bits;
+#endif
+    }
+
+    ~Inherited_relaxed_scope()
+    {
+#if TS_RULES_ANY
+        relaxed_rules = prev_;
+#endif
+    }
+
+    Inherited_relaxed_scope(const Inherited_relaxed_scope&) = delete;
+    Inherited_relaxed_scope& operator=(const Inherited_relaxed_scope&) = delete;
+
+private:
+#if TS_RULES_ANY
+    unsigned prev_ = 0;
+#endif
+};
+
 } // namespace detail
 
 } // namespace ts
