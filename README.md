@@ -35,9 +35,9 @@ This framework targets soft real-time systems with **complex concurrency**:
 - **Intensive communication and data sharing** between those parts.
 - A need to give each part a **thread-safe API** so the rest of the system can drive it concurrently and correctly.
 
-You can build this by hand with mutexes and/or an existing task library. Quite a daunting task even for a specialist. The goal here is to make it **safe and straightforward** — to remove a large, recurring class of data-race and ordering bugs, and the effort of policing them, from that work.
+You can build this by hand with mutexes and an existing task library, but it is hard to get right and hard to keep right. Macrame's goal is to make it safe and straightforward: to remove a large, recurring class of data-race and ordering bugs, and the effort of policing them.
 
-**The high-level-parallelism bet.** Express parallelism where the *surface area is smallest* — between coarse parts, not deep inside every algorithm. Once enough parallelism is expressed at that level to keep all CPU cores busy, low-level parallelisation stops paying off. Less low-level threading means far less complexity, less code to maintain, and fewer bugs.
+**High-level parallelism.** Express parallelism between coarse parts, not deep inside every algorithm. Once there is enough of it to keep all CPU cores busy, low-level parallelisation stops paying off — and less low-level multithreading means less complexity.
 
 **Probably not for you** if your problem is a single tight data-parallel kernel, one shared container, or fully independent jobs with no shared state — `std::for_each(par)` will serve you better and simpler.
 
@@ -63,7 +63,7 @@ auto n = inventory.access([](const Inventory& inv) { return inv.count(); }).sync
 
 ## Examples
 
-Just a glimpse of how it looks in practice.
+A few examples.
 
 ### 1. A thread-safe API for one object
 
@@ -83,7 +83,7 @@ auto n = inventory.access([](const Inventory& inv) { return inv.count(); }).sync
 inventory.async([](Inventory& inv) { inv.defragment(); });
 ```
 
-`access` is the *attended* verb — the caller stays for the result (`.sync()` from regular code, `co_await` from a coroutine), so the whole operation lives in the returned caller-owned handle and **allocates nothing**. It is also *opportunistic*: when the object is uncontended it skips scheduling entirely and runs the functor "inline" (performance comparable to an uncontended mutex lock) — so it may briefly block the caller, which is the right trade for a short critical section. `async` is the *detached* verb — always scheduled, never blocks the caller — for expensive work.
+`access` is the *attended* verb: the caller stays for the result (`.sync()` from regular code, `co_await` from a coroutine). The whole operation lives in the returned caller-owned handle, so it **allocates nothing**. It is also *opportunistic* — when the object is uncontended it skips scheduling and runs the functor inline, at a cost comparable to an uncontended mutex lock. That can briefly block the caller, which is the right trade for a short critical section. `async` is the *detached* verb: always scheduled, never blocks the caller, for expensive work.
 
 With coroutines, the same access reads as ordinary linear code — `co_await` suspends until access is granted, then hands you an RAII guard with direct, harness-checked access:
 
@@ -96,7 +96,7 @@ ts::Task<void> loot(ItemId id)
 } // access released at scope exit
 ```
 
-No lock is written, taken, or forgotten; concurrent writes serialise, reads run together, and any code that touches the inventory without a grant faults — the check is one macro line (`TS_CHECK_ACCESS()`) at the top of each `Inventory` method, ~1 ns per call.
+You write no locks. Concurrent writes serialise, reads run together, and any code that touches the inventory without a grant faults. The check is one macro line — `TS_CHECK_ACCESS()` at the top of each `Inventory` method, ~1 ns per call.
 
 ### 2. A game frame as a graph — edges derived from access
 
@@ -132,7 +132,7 @@ for (int f = 0; f < frame_count; ++f)
     frame.execute().sync();
 ```
 
-The two physics readers (`pose`, `mix`) run in parallel; `render` waits for both its inputs and for `sfx`. Change a node's access and the schedule changes with it — you never hand-maintain the derived edges.
+The two physics readers (`pose`, `mix`) run in parallel. `render` waits for both its inputs and for `sfx`. Change a node's access and the schedule changes with it — you never hand-maintain the derived edges.
 
 ### 3. Many producers, one atomic apply — `Deferred<T>`
 
@@ -185,14 +185,14 @@ The SVG is interactive — hover tooltips with per-node stats and access declara
 
 ## What's in the box
 
-Layered and composable — use as much as you need, and in a way that suits you best. From the bottom up:
+Layered and composable — use as much as you need. From the bottom up:
 
 - **Scheduler** — efficient work-stealing, configurable idle policies, priorities. Minimal API; usable independently of the rest.
-- **Tasks** — `launch` work and compose it as coroutines: `co_await` is the one continuation/join/dependency mechanism, so pipelines read as straight-line code with typed results in scope. Cooperative cancellation (incl. mid-body early-out). Priorities. Awaiting frees the worker, so fork-join of any depth can't deadlock the pool; an in-task blocking wait is caught by the safety harness, and so is the suspended two-object deadlock (a waits-for cycle detector names both tasks and objects).
+- **Tasks** — `launch` work and compose it with coroutines: `co_await` is the one mechanism for continuation, join, and dependency, so pipelines read as straight-line code with typed results in scope. Awaiting frees the worker, so fork-join of any depth can't deadlock the pool. Also cooperative cancellation (including mid-body early-out) and priorities. The harness catches an in-task blocking wait, and a waits-for cycle detector catches the suspended two-object deadlock — naming both the tasks and the objects.
 - **`parallel_for`** — for the data-parallel work that does live inside a part; caller-participating (nested-safe) and self-balancing. Plus **`async_parallel_for`** and **`parallel_for_colored`** for extra flexibility.
 - **Coroutines** — `co_await` any task; `co_await ts::read_only/read_write(obj)` yields an RAII access guard; holding one across a suspension is detected and fails fast.
 - **`Guarded<T>`** — a thread-safe API for a shared object: a per-object reader/writer queue (concurrent reads, exclusive writes, FIFO) reached via `access` (attended and allocation-free — runs inline when free) or `async` (always scheduled), plus multi-object operations with deadlock-free ordered acquisition.
-- **`Static_task_graph`** — build-once/run-many DAG whose edges are derived from access conflicts (plus explicit ordering where you want it); a re-run reuses the compiled nodes and allocates only its completion handle. Profiling and visualisation are included, focused on parallelism metrics like "dead time", "critical path" and core utilisation — see the worked profiler-guided optimisation exercise in [docs/example-frame-optimization.md](docs/example-frame-optimization.md). Automatic PGO — WIP.
+- **`Static_task_graph`** — build-once/run-many DAG whose edges are derived from access conflicts (plus explicit ordering where you want it); a re-run reuses the compiled nodes and allocates only its completion handle. Profiling and visualisation are included, focused on parallelism metrics like "dead time", "critical path", and core utilisation — see the worked profiler-guided optimisation exercise in [docs/example-frame-optimization.md](docs/example-frame-optimization.md).
 - **Design patterns** — `Deferred<T>` / `Versioned<T>` — staged writes: record grant-free from any thread, apply the batch atomically at a defined point; `Versioned` gives readers a whole-frame stable snapshot. Deterministic by construction. Plus `Event_bus`, a lightweight pub/sub built on the same staging machinery.
 
 **v0.1.0** (unreleased) — pre-1.0: the API is stable in shape but not frozen. See [CHANGELOG.md](CHANGELOG.md) for what 0.1.0 contains. Some areas are actively evolving (**WIP**): the allocation/performance campaign, a platform abstraction layer, and benchmark regression tracking. See [docs/roadmap.md](docs/roadmap.md) for where it's going.
@@ -201,12 +201,12 @@ Layered and composable — use as much as you need, and in a way that suits you 
 
 ## Verification
 
-Concurrency claims need evidence, not assertions:
+The concurrency behaviour is checked several ways:
 
 - A **comprehensive test suite**, plus subprocess **death tests** for every fatal path.
 - **ThreadSanitizer** (Linux/clang) and **AddressSanitizer** kept clean.
 - **Deterministic end-to-end samples** that hash-compare independent runs — a ~30-system mock engine frame, and a physics machine/extract fixture.
-- A **forensic harness** for races and deadlocks.
+- A runtime harness that reports races and deadlocks with a stack trace, not a silent corruption.
 
 ---
 
