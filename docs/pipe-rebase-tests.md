@@ -146,7 +146,7 @@ Each entry: id, `[bb]`/`[wb]`, one line of WHAT, one line of HOW.
 ### C. Reader-group sentinel / join-close (`pipe_tests`) — R1 core
 - **C1** `[bb]` join an open group. *How:* a 2nd/3rd reader joins while the 1st still
   runs; `Parallel_gate` proves the join produced real concurrency.
-- **C2** `[bb+wb]` join-vs-close stress (marquee). *How:* high thread count, one pipe,
+- **C2** `[bb+wb]` join-vs-close stress (primary). *How:* high thread count, one pipe,
   tiny bodies, randomized reader/writer arrivals, long iterations, `Rw_probe` + payload,
   race-delay hooks armed (Wave 2). Targets the tentative-register / re-validate / backout
   window.
@@ -239,7 +239,7 @@ Note: the `commit_mutex_` removal + `last_write()` exposure is a Wave-2 / follow
 - **J2** `[bb]` cancellation down a pipe chain. *How:* overlaps G4.
 
 ### TSan stages (`tsan/tsan_main.cpp`)
-- **`stress_pipe_rw`** — the interleaved readers/writers marquee: N threads, one
+- **`stress_pipe_rw`** — the interleaved readers/writers stress test: N threads, one
   `Guarded`, randomized async/access read/write, tiny bodies, `Rw_probe` + payload +
   hooks; plus a worker-less variant.
 - **`stress_pipe_lifetime`** — churn create/destroy `Guarded`s with in-flight work

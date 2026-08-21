@@ -16,8 +16,7 @@ areas marked **WIP** below are actively evolving.
 
 A C++23 task system: a work-stealing thread-pool scheduler plus the layers a
 real application needs on top of it — dependencies, cancellation, coroutines,
-data-parallel loops, and (the distinctive part) **access-declared
-concurrency**:
+data-parallel loops, and **access-declared concurrency**:
 
 > You declare which shared data each piece of work reads or writes. The
 > library schedules around the conflicts, and a runtime harness catches any
@@ -132,11 +131,11 @@ runs in a deterministic order. Use it for:
 - **Platforms or builds without threads**, and very small workloads where
   worker wake-up costs more than the parallelism returns.
 
-Semantics to be aware of: a task body runs *before* `launch`/`async` returns
-(so launching while holding your own lock runs the body under that lock);
-priorities are inert; work triggered from another thread (an external
+Semantics to be aware of. A task body runs *before* `launch`/`async` returns,
+so launching while holding your own lock runs the body under that lock.
+Priorities are inert. Work triggered from another thread (an external
 callback completing a `Signal`) runs on *that* thread — "single-threaded"
-means no workers, not one blessed thread. A body that blocks waiting for
+means no workers, not one special thread. A body that blocks waiting for
 something only another thread could produce will deadlock, exactly as in any
 single-threaded program.
 
@@ -183,8 +182,8 @@ multi-object `ts::access`/`ts::async`, and `add_node`):
 | `auto&&` | read | compile error (read bodies receive `const T&`) |
 | `auto` by value | read | silent copy — avoid this spelling |
 
-Two of those rows deserve a word. A **by-value** resource parameter is rejected
-outright because it would copy the resource and silently discard writes — the
+Two rows need explanation. A **by-value** resource parameter is rejected
+outright because it would copy the resource and silently discard writes. The
 one spelling the library cannot police is the *generic* by-value `auto`, which
 is indistinguishable from `const auto&` at the declaration level; don't write
 it. And every **read** position hands the body `const T&`, so mutating under a
@@ -236,21 +235,21 @@ reference it shouldn't have — aborts with the type name, the required mode,
 and a stack trace. The check costs about a nanosecond; with
 `TS_SAFETY_CHECKS=0` it compiles out entirely.
 
-**Stronger than race detection.** Conventional tools — ThreadSanitizer, or a
+**Checks intent, not collisions.** Conventional tools — ThreadSanitizer, or a
 game engine's access detector such as Unreal's `FRWAccessDetector` — catch a data
 race only when it actually *happens*: two threads touching the data in the same
 window. A dormant violation that didn't happen to race on a given run stays
 invisible until the timing shifts (a different core count, a production build, a
-slower frame). The harness checks something different, and stronger: not "is
+slower frame). The harness checks something different: not "is
 another thread touching this right now?" but "did the running task *declare* this
 access?". An undeclared access therefore faults the first time its code path runs
 — deterministically, whether or not a real race occurred at that moment — so a
 latent bug surfaces at the point of the violation instead of waiting for unlucky
 timing. You are validating *intent* (the declared grant) rather than observing
-*collisions*, which is why a single test run over a code path is enough to catch
+*collisions*. That is why a single test run over a code path is enough to catch
 what a race detector would only find under the right schedule.
 
-### 3.3 The trust model, honestly
+### 3.3 The trust model
 
 Two limits you should understand:
 
@@ -610,8 +609,8 @@ rule that avoids the shape in the first place).
 Everything the graph acquires in a batch — a node's declared set, a multi-object
 `ts::access` — is taken in one canonical order, all-or-nothing, so it cannot
 deadlock however many objects it names. What nothing orders is a grant a task
-already *holds* against an object it `co_await`s **later**. That single missing
-constraint is the whole suspended-deadlock hole, and a lock rank closes it: if
+already *holds* against an object it `co_await`s **later**. That missing
+constraint is the suspended-deadlock hole, and a lock rank closes it: if
 every dynamic await must strictly climb, a wait cycle cannot be written.
 
 ```cpp
@@ -632,7 +631,7 @@ a rank; a graph that never awaits outside its declared sets never sees this rule
 The rejection is deterministic — it fires on the first offending await, not when
 two halves of a cycle happen to interleave. That is the difference between this
 and the circular-wait detector (§5.0.1), which needs the race to actually happen.
-The honest cost is the standard one for a lock hierarchy: a strict order rejects
+The cost is the standard one for a lock hierarchy: a strict order rejects
 some correct programs. The escapes, in preference order, are to restructure
 (declare the object on the node; read a `Versioned` snapshot; stage through
 `Deferred`), then `ts::Relaxed_scope{ts::Rule::access_rank}` for a claim the
@@ -884,10 +883,10 @@ dashed = derived). Edges are uniformly faint by default so the picture reads as
 bars first (critical edges keep their pink colour but no extra prominence —
 critical structure at rest is carried by the orange node borders and labels);
 hovering a node brightens its incident edges to full so you can trace its exact
-dependencies. Hovering a bar raises a formatted tooltip — the node name
+dependencies. Hovering a bar raises a formatted tooltip. It shows the node name
 coloured by its queue priority (red = high, green = normal, grey = low; the
 same colouring as the name on the bar), with its priority tag right-aligned on
-that line, then the stats: mean / P95 / σ / CV / min/max execution time; its
+that line. Then the stats: mean / P95 / σ / CV / min/max execution time; its
 **true busy** (body + `parallel_for` slices + async fan-out — for a parallel
 node this exceeds the bar, which is wall time, because the bar shows elapsed
 while true busy is core time summed across the fan-out); the declared accesses
@@ -918,10 +917,10 @@ thread outside any task and scale with node count — is a distinct fourth bucke
 visible without inflating the framework-overhead figure. Alongside it the headline prints
 a **serial floor**: the same frame traced once worker-less (single-threaded),
 where the whole frame runs serially with no idle to confound it, so
-`(total − body) / total` is the *complete* framework cost by pure subtraction —
-every phase, no blind spot. The **gap** between the
+`(total − body) / total` is the *complete* framework cost by pure subtraction.
+The **gap** between the
 multi-worker overhead and the serial floor is the framework overhead only workers pay —
-cross-thread dispatch, pipe hand-off, park/wake — i.e. the price of the
+cross-thread dispatch, pipe hand-off, park/wake — the cost of the
 parallelism, not a measurement error. Overhead is an upper bound: it is
 measured with tracing on, which adds a per-task clock bracket, so cross-check
 against the untraced task throughput if it matters. Each significant chain wait is also drawn in place:
@@ -932,8 +931,8 @@ belongs to the chain, not to any row. Behind the bars, a faint full-height
 **core-utilization wash** colours each time slice by how busy the machine was
 there (green all cores busy → yellow half → red idle) — sampled from
 per-worker busy time bucketed over the run, so every task counts at its real
-time (a `parallel_for` node's fan-out across cores registers fully). The green
-stretches saturate the cores; the red valleys are idle capacity. A panel below
+time (a `parallel_for` node's fan-out across cores registers fully). Green
+stretches are saturated cores; red gaps are idle capacity. A panel below
 shows the global numbers: run count, frame time mean/min/max (ms),
 **critical path** — the CPM dependency lower bound on frame time (median
 durations, no scheduling waits) — worker count, **tasks** (total across
@@ -1235,7 +1234,7 @@ reference via structured bindings), or the callback `co_await
 ts::access(fn, a, b)` — each acquiring in one canonically-ordered step rather
 than nesting guards.
 
-There is exactly one exemption, and it is stated rather than emergent: an access
+There is exactly one exemption: an access
 to an object *this task already holds the write grant on* runs inline under that
 grant (waiting rule (b)), so it is settled before the `co_await` is evaluated and
 cannot suspend by construction.
@@ -1317,7 +1316,7 @@ the target's write grant — a graph node that declared the write, an
 `async`/`access` write body — it applies **inline under that grant**, no second
 access acquisition, and returns an already-settled task. Called from anywhere
 else, it enqueues one ordinary async write on the target and returns that
-write's completion. One verb, both worlds; the old `commit_async` is gone.
+write's completion. One verb covers both cases; the old `commit_async` is gone.
 
 Contracts, briefly (full statements live in
 [deferred-versioned-state.md](deferred-versioned-state.md)):
@@ -1332,7 +1331,7 @@ Contracts, briefly (full statements live in
   order is fixed and reproducible but *arbitrary* — never encode meaning in
   it. If two producers write the same key, that is a design conflict; give
   the key one producer or make the commands commutative.
-- **Lost writes are loud**: destroying a `Deferred` with staged, uncommitted
+- **Lost writes are caught**: destroying a `Deferred` with staged, uncommitted
   commands is fatal (under `TS_SAFETY_CHECKS`); `discard()` is the explicit
   escape.
 - **Sync before destroying**: destroying a `Deferred` while an enqueued
@@ -1417,7 +1416,7 @@ in `sample/blackboard.cpp`. Both are deterministic and verify themselves.
 ### 9.4 `Event_bus` — pub/sub on staged writes
 
 `ts::Event_bus` (`ts/event_bus.h`) packages the staged-write machinery into
-UE-delegate-simple pub/sub: the event struct is the topic, firing is one
+pub/sub: the event struct is the topic, firing is one
 grant-free line from anywhere, delivery is a batch at a per-domain dispatch
 point.
 
@@ -1512,7 +1511,7 @@ re-arming an un-triggered signal is fatal).
 A `Signal` is also the bridge for completions that come from outside the task
 system entirely — an overlapped I/O callback, an `io_uring` completion, a GPU
 fence. The handle is refcounted, so the callback captures one by value and
-triggers it. One caveat is worth internalizing: **triggering releases the
+triggers it. One caveat: **triggering releases the
 awaiting coroutines on the triggering thread.** In an OS callback context —
 an APC, an IOCP worker, a driver callback — that is the last place you want
 arbitrary user code to run, so hop first:
@@ -1523,7 +1522,7 @@ ts::launch([done]() mutable { done.trigger(); });   // release on a worker, retu
 ```
 
 The library deliberately provides no I/O reactor (see §13); this idiom is the
-whole integration story, and it is the same reason `Frame_gate::open()` below
+integration path, and it is the same reason `Frame_gate::open()` below
 releases through the scheduler rather than inline.
 
 ### 10.4 `Frame_gate` — realigning cross-frame work

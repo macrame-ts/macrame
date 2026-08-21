@@ -112,7 +112,7 @@ Median Frame* — jump to a real captured frame ([Unity how-to](https://unity.co
 Our average-run SVG deliberately synthesizes; the complement is retaining ONE real
 run's raw stamps (O(nodes), a second `Trace_stamps`-sized buffer) chosen by policy —
 e.g. the run closest to the median makespan, or the worst run — and rendering it as
-an optional second timeline (or overlay) for outlier forensics. This does not
+an optional second timeline (or overlay) for outlier diagnosis. This does not
 violate the no-samples philosophy: memory stays O(nodes), independent of run count;
 it is one exemplar, not a trace. The design questions are the retention policy
 (closest-to-median needs a two-pass or an accept-if-closer heuristic; worst-run is
@@ -263,8 +263,8 @@ O(nodes).
 ### 16. Intra-node folding (BSC folding)
 
 Folding reconstructs time-resolved detail inside a repeated region from sparse
-samples across many repetitions ([BSC](https://tools.bsc.es/folding)) — elegant,
-but it requires a sampling mechanism (timer interrupts or progress markers inside
+samples across many repetitions ([BSC](https://tools.bsc.es/folding)) — but it
+requires a sampling mechanism (timer interrupts or progress markers inside
 node bodies) that we deliberately don't have; nodes are opaque between `start` and
 `end` stamps. Adopting it means either OS-level sampling machinery or a user-facing
 intra-node marker API — both large surfaces for a diagnostic we haven't needed.

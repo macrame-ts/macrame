@@ -43,11 +43,10 @@ show_graph.bat            # renders the DOT and opens both average-run SVGs
 producing `sample_game_frame_avg_baseline.svg`,
 `sample_game_frame_avg_optimised.svg`, and `sample_game_frame.dot`.
 
-The point of the exercise is not the exact percentage it ends up saving; it is
-*which* optimisations the trace tells you are worth trying, and — just as valuable —
-which ones it tells you not to bother with. It ends by showing what a *finished*
+The point of the exercise is not the exact percentage it ends up saving. It is
+*which* optimisations the trace says are worth trying, and which ones it says to skip. It ends by showing what a *finished*
 optimisation looks like: the frame stops being limited by its dependency chain
-and starts being limited by its core count, and the picture says so at a glance.
+and starts being limited by its core count, and the trace shows it.
 
 ## 1. The frame
 
@@ -182,7 +181,7 @@ the picture the single long critical spine has fragmented — no node is critica
 in a large majority of runs, because the binding path now bounces between
 whichever ready node is waiting on a core.
 
-(On the pre-fix leaked-pool trace this flip looked far more dramatic — baseline
+(On the pre-fix leaked-pool trace this flip looked far larger — baseline
 60 % util / 5 % dead → optimised 85 % util / 19 % dead — because the secret ~12
 cores made the baseline read half-idle and pushed the optimised chain into heavy
 core contention. The honest 8-core picture is a milder version of the same

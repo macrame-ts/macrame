@@ -100,7 +100,7 @@ ergonomics baseline.
 GPU resources they read/write/create; the graph is *redeclared every frame*,
 compiled (cull unused passes, place barriers, alias transient memory), then
 executed. "Access-declared scheduling" for GPU work — the closest published
-relative of our thesis, from a different domain. Details in §4 and §13.
+relative of our argument, from a different domain. Details in §4 and §13.
 
 **§1.9 — Unreal RDG (Render Dependency Graph).** Unreal Engine's FrameGraph
 equivalent: passes declare resource access via parameter structs; the graph
@@ -708,7 +708,7 @@ counter, and it is also the footgun: a node with both strong and weak
 in-edges from concurrently active paths can fire twice, or race its own
 second invocation; Taskflow's docs carry explicit warnings. Cycles are
 allowed (a condition task returning 0 to loop back re-fires the loop body).
-Powerful, and semantically sharp-edged — the reason TODO 2.6 deliberately
+Semantically sharp-edged — the reason TODO 2.6 deliberately
 stops at predicates.
 
 **§8.3 — CUDA conditional nodes, mechanically.** CUDA 12.3+ adds IF and
@@ -1119,7 +1119,7 @@ architectural pattern itself — stable declared skeleton, dynamic content —
 is the de-facto shipping consensus: Destiny's frame is "job strings"
 structuring the main loop with data-parallel jobs inside (their GDC talk
 also describes a runtime access tracker — the closest shipped cousin of our
-whole thesis); UE's tick groups + TaskGraph fill; Bevy's schedule +
+whole argument); UE's tick groups + TaskGraph fill; Bevy's schedule +
 one-shot systems; Taskflow's explicit selling point is "the same API for
 static and dynamic tasking" (subflows); OpenTimer's stated reason for
 adopting Taskflow was "model both static and dynamic task dependencies."
@@ -1163,7 +1163,7 @@ access model. Nothing declares what a Tick touches, so the engine cannot
 safely default anything off the game thread; `bRunOnAnyThread` is opt-in
 precisely because safety is by unchecked convention, and adoption follows
 the completeness hazard (one undeclared touch = a shipping race). This is
-the cleanest possible statement of our thesis: **UE has the graph shape and
+the cleanest possible statement of our position: **UE has the graph shape and
 the dynamic runtime; what it lacks is the declared-access layer that would
 make the static structure safely parallelizable** — this library exists to
 supply exactly the missing piece. Consider this framing for design.md's
@@ -1233,7 +1233,7 @@ declared and safe (this is the designed data plane, and why the pressure is
 lower for us than for Taskflow) — but *per-run scalar outputs* (frame
 stats, a convergence residual, "did the query hit") don't deserve a
 `Guarded` each; today they become ad-hoc members captured by reference,
-which is precisely the undeclared mutable state our thesis frowns on. So
+which is precisely the undeclared mutable state our argument frowns on. So
 typed chaining (TODO 2.1: a node minting a per-run `Task<R>`) is not
 convenience — it closes the last sanctioned-but-undeclared data path in the
 graph model. Your suspicion is half right though: it's a P1 for hygiene,
@@ -1277,7 +1277,7 @@ drift vs 5–10% lever effects in our own experiment).
 
 ## 19. Course corrections: what this pass changes
 
-**§19.1 — Confirmations (no change).** The layering thesis (coarse static
+**§19.1 — Confirmations (no change).** The layering argument (coarse static
 skeleton + dynamic fill + one access model) matches where every surveyed
 ecosystem converged from both directions (§15.1); the granularity position
 (§3.4) is defensible and evidence-backed; declaration-derived edges with a

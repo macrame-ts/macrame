@@ -66,7 +66,7 @@ Everything below is a point in a small number of dimensions. Naming them up fron
 
 **Popularity/success.** Ships in Unreal Engine — ~28% of Steam releases (2024) but **31% of revenue** and the dominant AAA/console engine (~83% of Sony first-party titles cited). Battle-tested at the highest fidelity tier. (The author of this project designed and implemented this system at Epic.)
 
-**My read.** This is, by source inspection, the most complete design in the survey: per-worker work-stealing deques + lock-free global overflow, foreground/background pools with affinity, spin-then-park EventCount idling, oversubscription for safe waiting, and zero-alloc intrusive cache-line tasks with cancellation. Strengths: essentially every lesson in §6 is already implemented here, plus pipes as an elegant lock-avoidance primitive. Weaknesses: inseparable from the engine and its types (`FTask`, `TCHAR`, container/allocator stack); the breadth (cancellation states, two pools, oversubscription, named-thread legacy) is a lot of surface; reference-counted high-level handles add traffic the very leanest competitors (enkiTS) avoid.
+**My read.** This is, by source inspection, the most complete design in the survey: per-worker work-stealing deques + lock-free global overflow, foreground/background pools with affinity, spin-then-park EventCount idling, oversubscription for safe waiting, and zero-alloc intrusive cache-line tasks with cancellation. Strengths: essentially every lesson in §6 is already implemented here, plus pipes as a lock-avoidance primitive. Weaknesses: inseparable from the engine and its types (`FTask`, `TCHAR`, container/allocator stack); the breadth (cancellation states, two pools, oversubscription, named-thread legacy) is a lot of surface; reference-counted high-level handles add traffic the very leanest competitors (enkiTS) avoid.
 
 ### 2.2 Unity — C# Job System + Burst + DOTS
 
@@ -162,7 +162,7 @@ Everything below is a point in a small number of dimensions. Naming them up fron
 
 - **Cilk / Cilk Plus** — the academic origin of practical **work-stealing** ("work-first" principle, `spawn`/`sync`). Dead as a product (dropped from GCC/Clang) but its scheduler theory underlies TBB, Rayon, Taskflow, and UE's deques.
 - **OpenMP tasks** — `#pragma omp task`/`taskloop` with a `depend` clause for DAGs. Ubiquitous in HPC/scientific code; compiler-directive ergonomics, less control than a library.
-- **HPX** — standards-conforming parallelism extended to **distributed** memory (futures/continuations, global address space). Powerful in HPC, overkill for a single-node engine.
+- **HPX** — standards-conforming parallelism extended to **distributed** memory (futures/continuations, global address space). Strong in HPC, overkill for a single-node engine.
 - **Microsoft PPL** (Concurrency Runtime) — `task_group`, `parallel_for`, `concurrency::task` continuations; Windows-centric, conceptually close to TBB.
 - **Folly** executors / **Boost.Asio** `thread_pool` / `Boost.Fiber` — production C++ building blocks for future-based pools, I/O dispatch, and fibers respectively.
 - **.NET TPL** (Task Parallel Library, `ForkJoinPool`-style work-stealing) and **Java `ForkJoinPool`** — the managed-runtime incarnations; mature work-stealing job managers that shaped a generation of API expectations (`Task.WhenAll`, `CompletableFuture`).
@@ -208,9 +208,9 @@ Roughly easiest → hardest to use correctly:
 3. **Taskflow** — declarative DAGs read well; great profiler.
 4. **UE Tasks** — pleasant *inside* UE; prerequisites + pipes are intuitive; the named-thread legacy is the wrinkle.
 5. **enkiTS** — tiny API, but you assemble higher-level patterns yourself.
-6. **oneTBB** — powerful but ceremonious; flow graph has a learning curve.
+6. **oneTBB** — capable but ceremonious; flow graph has a learning curve.
 7. **Marl / fiber systems** — linear code, but fiber footguns (TLS, debuggers, stack sizing) bite.
-8. **`std::execution`** — the most composable and the most to learn; brutal compile errors today.
+8. **`std::execution`** — the most composable and the most to learn; cryptic compile errors today.
 
 **General principle:** ease of use comes from one of two places — *removing a decision* (GCD: no scheduler to configure) or *removing a failure mode* (Unity: races can't compile/run). Expressiveness (TBB, senders) trades against approachability.
 

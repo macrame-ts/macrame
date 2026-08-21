@@ -8,16 +8,9 @@ internal detail, cross-references and rejected alternatives live in
 [docs/TODO.md](TODO.md) and the pattern review [docs/pattern-farming.md](pattern-farming.md).
 
 **What already ships** is in [CHANGELOG.md](../CHANGELOG.md) and the
-[user guide](guide.md), not repeated here. The work-stealing scheduler,
-coroutine-first composition, the per-object reader/writer pipe, `Guarded` access
-control (with the zero-allocation attended `Access_op` path) and its runtime
-harness, static task graphs, `Deferred`/`Versioned`,
-`Event_bus`, `parallel_for` (including colouring), cooperative cancellation (with
-non-blocking and optional-on-cancel result accessors), and the deadlock/waits-for
-detectors are **done** and are not roadmap items.
+[user guide](guide.md), not repeated here.
 
-**Stability.** The library goes public as **v0.1.0**: the API is stable in shape
-but not frozen, and the areas below are where it will still move before 1.0. The
+**Stability.** the API is stable in shape but not frozen. The
 core safety model - declared access, derived schedules, the harness - is settled;
 most remaining work is performance, breadth, new composition vocabulary and
 diagnostics rather than redesign.

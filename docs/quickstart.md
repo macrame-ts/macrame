@@ -4,8 +4,8 @@
 
 # Quick start
 
-Get from zero to a running program. For the full tour of every layer, see the
-[user guide](guide.md).
+How to get it running. The [user guide](guide.md) has the full tour of every
+layer.
 
 ## Get the code
 
@@ -22,7 +22,7 @@ git clone <repo-url> macrame
 - **By hand** — add `include/` to your include path and compile the six
   `src/*.cpp` into your build (headers under `include/ts/`, six `.cpp` under `src/`).
 
-C++23, exceptions disabled: build your own translation units the same way — the
+C++23, exceptions disabled. Build your own translation units the same way: the
 library is exceptions-off, and a consumer must match (the config rides on the
 `macrame::macrame` target).
 
@@ -72,10 +72,10 @@ thread). It is torn down at program exit, or call `ts::destroy_scheduler()`.
 ## Guard a shared object
 
 Wrap a thread-unsafe object in `Guarded<T>`. The only way in is handing a
-function to `access`, and the parameter's const-ness declares what you do — a
+function to `access`. The parameter's const-ness declares what you do: a
 non-`const` parameter is a write (exclusive), a `const` parameter is a read
-(concurrent with other reads). The reference your function receives is for that
-call only; storing it past the call sidesteps the safety checks
+(concurrent with other reads). The reference your function receives is valid for
+that call only. Storing it past the call sidesteps the safety checks
 ([limits.md](limits.md) §2.3):
 
 ```cpp
@@ -90,13 +90,13 @@ std::printf("%zu\n", n);
 ```
 
 Accesses run on the object in submission order: the write runs alone, reads run
-together. `access` is *opportunistic* — if the object is free right now it runs
-your function immediately on the calling thread (no scheduling), otherwise it
-queues; it is the right default for the short functions typical of this API.
-`access` returns a caller-owned operation handle (`ts::Access_op`), so it
-allocates nothing; take the result with `.sync()` — or `co_await` the handle
+together. `access` is *opportunistic*. If the object is free right now it runs
+your function immediately on the calling thread (no scheduling); otherwise it
+queues. That makes it the right default for the short functions typical of this
+API. `access` returns a caller-owned operation handle (`ts::Access_op`), so it
+allocates nothing. Take the result with `.sync()`, or `co_await` the handle
 from a coroutine. For a heavy function you'd rather not run on the calling
-thread, use `async(fn)` instead — same access rules, but always scheduled onto
+thread, use `async(fn)` instead: same access rules, but always scheduled onto
 a worker, returning a free-standing `ts::Task<R>`.
 
 ## Make it safe by construction

@@ -135,7 +135,7 @@ evidence is ECS schedulers:
   misses.
 - **StarPU / OpenMP `depend` / PaRSEC DTD**: the whole STF family exists because
   inferring the DAG from sequential submission order + declared access modes is
-  dramatically less error-prone than explicit wiring
+  far less error-prone than explicit wiring
   ([StarPU](https://www.researchgate.net/publication/29605829_STARPU_A_Unified_Platform_for_Task_Scheduling_on_Heterogeneous_Multicore_Architectures)).
 - **Unity's container safety system** (survey §2.2) runtime-enforces declared job
   access — the best-regarded ease-of-use feature in the whole space.

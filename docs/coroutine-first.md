@@ -88,7 +88,7 @@ grant-inheriting child were **removed 2026-08** — see §4.3.)
 | `when_all(...)` + `Join_state` + tuple traits | sequential `co_await`s (tasks already run eagerly; last one gates) |
 | the `execution_flag` counting mode as USER fan-out; `ts::nested`, `Task_scope`, `ts::join_nested`, `with_inherited_access` (**removed 2026-08 — see §4.3**) | fan out with `ts::parallel_for` (its helpers inherit the caller's grant, join synchronously) or acquire fresh via `obj.async` / `co_await obj.access`. `detail::add_nested`-on-`num_locks` SURVIVES as graph-internal plumbing (a coroutine node's frame and a nested graph run gate their completion through it) |
 | `Task_builder`, `after()`, `add_prerequisite`, frozen-at-launch enforcement | `co_await x; co_await y;` at the top of the coroutine (dynamic edges become code) |
-| retraction: deep `retract`, `retractable`, hints, `retract_or_wait`, the claim/generation reuse machinery (`run_state` fusion, monotonic-max `dispatch_arg`, release-time gen capture, reuse forensics) | waits are suspensions — pool exhaustion is structurally gone; the inline-execution optimization survives as eager start + symmetric transfer (§5.2) |
+| retraction: deep `retract`, `retractable`, hints, `retract_or_wait`, the claim/generation reuse machinery (`run_state` fusion, monotonic-max `dispatch_arg`, release-time gen capture, reuse diagnostics) | waits are suspensions — pool exhaustion is structurally gone; the inline-execution optimization survives as eager start + symmetric transfer (§5.2) |
 | reusable executable tasks (`Task_builder::reset`) | call the coroutine again (frames are one-shot); `Signal::reset` stays |
 | inline dispatch: `set_inline`, `run_inline`, the `inline_pending` trampoline — **partially: removed from the DYNAMIC surface only** (as landed, 2026-08; `Graph_node::set_inline` and the `dispatch_ready`/`inline_pending` machinery survive graph-internal, see TODO 6.4) | symmetric transfer — the settling thread resumes the awaiting frame directly, tail-call bounded |
 | `access()` vs `async()` as behavioral split | one awaitable access verb + one eager fire verb (§4.2) |
@@ -196,7 +196,7 @@ fatal enforces), never gate a node/run on cross-frame work (nested is gone, so t
 is unexpressible), captures own their data, carry a token. Sugar TODOs: Signal-from-OS
 helper (6.6), per-frame gate idiom (6.7), low-priority resumption default (doc).
 
-### 4.8 Nested graph runs (author-revised: lend, don't fatal)
+### 4.8 Nested graph runs (author-revised: lending instead of a fatal)
 
 **Status: IMPLEMENTED (2026-08), as designed below.** The lend is applied by
 `Static_task_graph::bind_links_for_run` (src/static_task_graph.cpp) at every `execute()`:
@@ -256,7 +256,7 @@ v1 rule: one instance per concurrent user (compile a clone, or order the parents
 edges); the relaxation is run-queueing / pipelined runs — existing TODO 2.3, not new
 machinery.
 
-## 5. Performance workstream (the price and its payment)
+## 5. Performance workstream (the added cost and the plan to reduce it)
 
 1. **Frame/block fusion first** (TODO 6.2, promoted to the critical path): one allocation
    per coroutine task — the promise embeds the shared-completion state; `operator new`

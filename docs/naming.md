@@ -70,7 +70,7 @@ taken username blocks the matching org.
    (short enough to stand alone) or `pts::`.
 4. **Roundabout** — *a one-way circulatory road junction; each entrant yields,
    no one stops* — the lock-free intersection vs traffic-lights-as-locks;
-   everyday, warm, explains the non-blocking thesis. **Downgraded**: crates.io
+   everyday, warm, explains the non-blocking idea. **Downgraded**: crates.io
    `roundabout` is already "a message-oriented concurrent runtime" — a direct
    in-domain collision (a different concurrency runtime with the exact name),
    and `rts::` reads as Real-Time Strategy to the gamedev audience. Keep only if
@@ -87,9 +87,9 @@ registrable-mark risk, but common words are also hard to *protect*).
   a passed physical mutex token (cf. the 1889 single-track railway token). Short,
   memorable, clean (only a bare GitHub topic). Encodes exclusive-access-via-token.
 - **PACT** — backronym *Parallel Access, Coordinated Tasks*; the word itself is
-  the thesis (parties agree on who may touch what). Short, clean-ish.
+  the idea (parties agree on who may touch what). Short, clean-ish.
 - **Valence** — an atom's bonding capacity = a task's edges/dependencies;
-  elegant, uncommon as a software name. Points at connectivity, not access.
+  uncommon as a software name. Points at connectivity, not access.
 - **Interlock** — railway interlocking makes conflicting routes physically
   impossible = `compile()` deriving safe order from conflicts; engineering
   gravitas. Some collisions; semi-generic token.
@@ -155,7 +155,7 @@ registrable-mark risk, but common words are also hard to *protect*).
 - **Cadre** — a small core group; taken (Modal Labs config service, ML frameworks).
 - **Quorum** — semantically colonized ("distributed consensus": JPMorgan/ConsenSys/Certora).
 - **Turnstile** — taken in-domain (a Go concurrency manager / rate limiter).
-- **Pauli** — exclusion principle = mutual exclusion (elegant), but crowded in quantum SDKs.
+- **Pauli** — exclusion principle = mutual exclusion, but crowded in quantum SDKs.
 - **Concord / Cadence / Chord** — Concord crowded (jet/place/grape); Cadence =
   Cadence Design Systems (large EDA trademark); Chord = the famous DHT.
 
@@ -202,7 +202,7 @@ coherent state, docs, hygiene. Status of that track:
   `tsan/run.sh` but unverified (WSL lacks cmake).
 
 **Pending — blocked on the name**
-- README.md — full draft written and reviewed in-session (thesis-first pitch,
+- README.md — full draft written and reviewed in-session (argument-first pitch,
   30-sec Guarded+graph example, verification section, WIP/status, build/docs
   links). Embeds the project name, so parked until the name is chosen. Open calls
   at draft time: display name, keep the UE-lineage sentence in the opener?,

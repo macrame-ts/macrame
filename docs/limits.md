@@ -16,8 +16,8 @@ exactly these gaps. Paragraphs numbered §N.M.*
 on, an instrumented method of a `Guarded<T>` faults if the running task does
 not hold a matching grant for that object. That is: it catches *undeclared
 access to an instrumented object through an instrumented method, on a path
-that actually executes in a checked build*. Every word is load-bearing, and
-every word is also a boundary — the sections below walk each one.
+that actually executes in a checked build*. Each qualifier is also a boundary —
+the sections below walk each one.
 
 **§1.2 — What it is not.** It is not a proof, not a compile-time guarantee,
 and not a total race detector. It is a **sampling oracle**: it fires only

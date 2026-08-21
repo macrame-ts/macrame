@@ -1,8 +1,8 @@
 # Design rationale
 
-This document explains *why* the library is shaped the way it is: the thesis,
-the decisions behind each layer, and — deliberately — the alternatives that
-were tried or analyzed and rejected. It assumes you know game-engine
+This document explains *why* the library is shaped the way it is: the central
+idea, the decisions behind each layer, and the alternatives that were tried or
+analyzed and rejected. It assumes you know game-engine
 architecture (frame graphs, job systems, the render/game thread split) and
 concurrent programming in depth. The user-facing companion is
 [guide.md](guide.md); four deeper documents are linked throughout and listed
@@ -10,7 +10,7 @@ at the [end](#appendices--references).
 
 ---
 
-## 1. Thesis and lineage
+## 1. Central idea and lineage
 
 The author designed and implemented Unreal Engine's Tasks System. This
 library keeps what that system proved — work-stealing scheduling, ordered
@@ -37,10 +37,10 @@ The nearest relatives each hold two of the three pieces:
 
 No production system we surveyed combines *per-object-instance* granularity,
 *derived* scheduling, and a *runtime oracle* in a general-purpose C++
-library. That intersection is the bet this library makes. The full survey is
+library. That intersection is what this library provides. The full survey is
 in [task-systems-comparison.md](task-systems-comparison.md).
 
-Two positioning facts sharpen the bet
+Two positioning facts sharpen the position
 ([research-deepdive.md](research-deepdive.md) §15, §2). First, the industry
 already ships static frame skeletons: Unreal's tick system (`ETickingGroup`
 phases, per-function tick prerequisites, opt-in `bRunOnAnyThread`) is a
@@ -136,7 +136,7 @@ and going don't bump), which is the actual safety condition, not the
 origin reader's own lifetime. Nested-gated sub-work is structurally never
 stale — the parent's completion, and so its release, waits for it.
 
-### 2.3 Introspection: the graph knows its own structure
+### 2.3 Introspection: reading back the derived structure
 
 A derived schedule the user never wrote down needs a way to be read back —
 tuning a graph means seeing which edges exist and why. `compile(DOT_path)`
@@ -244,8 +244,8 @@ wait".
 The graph is optional — the access verbs and `co_await` compose the same work —
 so the library owes an answer to "what does declaring it buy". `sample/game_frame.cpp`
 carries both spellings of one ~34-system frame over the same `World` and the
-same system bodies (`build_frame_graph` vs `run_frame_graph_free`), which makes
-the answer measurable rather than rhetorical. Three results, none of them the
+same system bodies (`build_frame_graph` vs `run_frame_graph_free`), so the
+answer can be measured. Three results, none of them the
 expected one:
 
 **Safety is not what it buys.** Every claim the harness enforces comes from the
@@ -307,7 +307,7 @@ it) and an unconditional `advance_pipe_links` on object-free nodes.
 
 What the unified path buys is real — one dispatch/cascade code path shared by
 dynamic multi-object `async`, coroutine node frames, and nested `execute()`
-lends, and correct block ownership when a node body genuinely outlives its
+lends, and correct block ownership when a node body outlives its
 synchronous return (a `co_await`). And most of the cost has now been **recovered**
 on the common case that does *not* need block ownership, all measured on the same
 harness (a re-measured baseline of **662 ins/node** on the current toolchain):
@@ -419,7 +419,7 @@ spins. Tests and benchmarks that want a specific worker count or idle policy
 reconfigure the global for their scope rather than standing up a rival pool.
 
 **Scheduler as one implementation behind the `Task` API, not a plugin
-zoo.** The intent is at most two or three interchangeable scheduler
+framework.** The intent is at most two or three interchangeable scheduler
 implementations sharing the `Task`/`Guarded`/graph surface — the current
 work-stealing pool, and (roadmap) a foreground/background two-pool variant
 whose background band runs on OS-low-priority oversubscribed threads so the
@@ -482,7 +482,7 @@ Current counts: `launch` and `async` allocate exactly one block per
 operation; a coroutine chain allocates one frame per coroutine. The measured
 conclusion worth recording: allocation is a *secondary* cost here —
 cross-thread scheduling latency dominates rich operations — so the remaining
-pooling/arena work is scheduled as WIP, not emergency.
+pooling/arena work is scheduled as WIP rather than urgent.
 
 ### 4.2 Results: `const&` by default, `take()` to move
 
@@ -559,9 +559,8 @@ the same `reset()` scalar re-arm the builder once used.
 The old answer to "what if `sync()` is called with all workers busy?" was
 **retraction**: a blocking `sync()` on a not-yet-started task ran it — and
 its un-started prerequisite subtree — inline on the waiting thread, gated by
-an atomic one-runner claim. It genuinely worked, and it was genuinely
-subtle: the reuse×retraction corner produced the two hardest bugs in the
-project's history (§4.5).
+an atomic one-runner claim. It worked, and it was subtle: the reuse×retraction
+corner produced the two hardest bugs in the project's history (§4.5).
 
 Coroutine-first dissolves the question instead of answering it. Threads
 split into task threads and **blue threads** (main, dedicated engine
@@ -576,8 +575,8 @@ bounded, deadlock-free, no retraction needed. With no retraction there is
 also exactly one dispatch per run, which collapsed the claim/generation
 machinery to a plain store plus a safety-check assert.
 
-**Check the rule, not the incident.** Both of the checks guarding this
-boundary — the in-task `sync()` fatal and the no-await-under-a-guard fatal —
+**Trigger a check at the call, not when the hazard materializes.** Both of the
+checks guarding this boundary — the in-task `sync()` fatal and the no-await-under-a-guard fatal —
 were originally written at the point where the hazard would *materialize*: the
 first fired only when the wait was about to park, the second only when the
 `co_await` actually suspended. That is the wrong trigger, and the reason is
@@ -641,7 +640,7 @@ hot path, because the observer is a boundary waiter that is already blocked.
 And *the third clause is what Go lacks*: Go's check has a documented blind spot
 where any live background thread masks a partial deadlock, precisely because a
 goroutine cannot declare "this wait is legitimate". `ts::External_wait` is that
-declaration. Its failure mode is the honest one — a forgotten registration
+declaration. Its failure mode is a false positive — a forgotten registration
 reports a correct program as deadlocked — so the fatal names the escape in its
 own message, and the window is measured *continuously* over seconds rather than
 sampled once, so a slow-but-legitimate handoff between two of the program's own
@@ -710,9 +709,9 @@ now house rules: **capture state before the RMW that grants you rights over
 it** (reading after is a TOCTOU; the generation capture in `release()` still
 follows this rule today); **"only reproduces under TSan" does not mean TSan
 artifact** — pin to two cores to amplify preemption windows; and
-**capture-and-continue forensics beat theorem-proving** — the bug fell to an
+**capture-and-continue beats theorem-proving** — the bug fell to an
 event-ring instrumented build in one session. The racing machinery and the
-forensic ring were both deleted with retraction; the lessons were not.
+event ring were both deleted with retraction; the lessons were not.
 
 ---
 
@@ -721,7 +720,7 @@ forensic ring were both deleted with retraction; the lessons were not.
 Coroutine support began as an additive layer and was then made the
 foundation (the coroutine-first transformation, `docs/coroutine-first.md`):
 composition *is* coroutines, and the callback vocabulary is gone (§4.3). The
-design points that carry the weight:
+main design points:
 
 - **Fused frame and block.** The promise embeds the `Task_control_block`
   (first-member aliasing, the `Executable` pattern), so a coroutine task is
@@ -744,15 +743,15 @@ design points that carry the weight:
 - **The pipe is already an async reader/writer lock**, so
   `co_await ts::read_write(obj)` yields an RAII guard with direct object access —
   `folly::coro::Mutex::co_scoped_lock`'s shape on top of machinery that
-  existed anyway. The canonical coroutine footgun — suspending while holding
-  a lock — is *detected*: a `co_await` under a live guard is fatal.
+  existed anyway. The canonical coroutine hazard — suspending while holding
+  a lock — is detected: a `co_await` under a live guard is fatal.
 - **The suspended deadlock is detected too.** Two frames that each hold a
   grant and await the other's object deadlock with *no thread parked* — the
   failure mode a blocked-thread diagnostic can never see. Under safety
   checks every suspension-on-a-pipe records wait edges (held grants →
   awaited pipe) in a global registry, cleared at resume, cycle-checked on
   insert; the closing edge faults, naming both tasks and both objects. This
-  is what makes awaited dynamic cross-object access a *blessable* residual
+  is what makes awaited dynamic cross-object access a sanctioned residual
   pattern rather than a documented hazard.
 - **Cancellation is value-based** because exceptions are off project-wide: a
   cancelled await resumes with cancelled state to inspect (fatal for a value
@@ -764,7 +763,7 @@ proven to 50k depth), destruction through another (a deep chain of fused
 frames releases iteratively), and both retain capacity — no steady-state
 allocation.
 
-### 5.1 Nested graph runs: lend, don't re-acquire
+### 5.1 Nested graph runs: the lend protocol
 
 Coroutine nodes make `co_await inner.execute()` expressible, and composing a
 frame out of pre-compiled sub-graphs is the obvious use. The obvious
@@ -777,11 +776,11 @@ caller's grant window, so the caller's exclusion is already exactly what the
 inner run needs. At the nested `execute()` we intersect the inner graph's
 compiled access set with the caller's `Access_context`; every overlap whose
 held mode covers the inner mode is **lent** for that run, and the inner nodes
-simply do not take turns on it. Recursion needs no extra rule — a grand-inner
+do not take turns on it. Recursion needs no extra rule — a grand-inner
 graph intersects against its own caller's context, which already carries the
 lent entries.
 
-Three properties make this cheap rather than clever:
+Three properties make this cheap:
 
 - **Binding is the mechanism.** Node pipe links live in a `compile()`-time
   slab; lending re-binds the surviving links compactly and shortens each
@@ -807,13 +806,13 @@ external work. Un-awaited runs otherwise join the caller's scope, which makes
 "fire an inner run and forget it" safe by construction rather than by
 discipline.
 
-One limitation falls out and is worth stating rather than hiding: a graph runs
+One limitation falls out: a graph runs
 one execution at a time, so a sub-graph shared between two concurrently
 running parents collides. That was previously an unguarded corruption; it is
 now a fatal naming the fix (an instance per caller), and the general
 relaxation — queued or pipelined runs — is roadmap work, not new machinery.
 
-### 5.2 Rule policy: every check needs an escape and a shipping answer
+### 5.2 Rule policy: per-rule opt-out and compile-out
 
 The waiting rules are enforced by checks that abort. A user can uphold a rule
 by means we cannot see, so a check can be a false positive; and a shipping
@@ -868,7 +867,7 @@ applies inline under the grant it already has, while any other caller's
 commit becomes one enqueued write. The alternative — two spellings, the
 under-grant `commit()` and an acquiring `commit_async()` — pushed a
 scheduling decision onto the user that the pipe can answer itself, and made
-the common "call it from wherever the frame logic sits" case a foot-gun
+the common "call it from wherever the frame logic sits" case error-prone
 (the wrong spelling either double-acquires or deadlocks). Ownership is
 behavior-bearing state, so it lives outside `TS_SAFETY_CHECKS`; the
 diagnostic-only grant machinery stays gated.
@@ -876,8 +875,8 @@ diagnostic-only grant machinery stays gated.
 The rejected alternative here was a **"lazy `Guarded`"** — a mode where
 `async` writes queue but don't execute until a flush node runs. It fails on
 its own FIFO: parked writes at the queue's front either block every later
-reader until the flush (semantically clean, zero reader parallelism — clean
-and pointless) or readers must overtake queued writes (the value-changing
+reader until the flush (semantically clean, zero reader parallelism) or
+readers must overtake queued writes (the value-changing
 relaxation of §3, now as an instance mode). Per-command cost is a full task
 block instead of a journal append, and recording is undeclared so no graph
 edges can be derived from it. UE's own architecture agrees from the other
@@ -902,8 +901,7 @@ staged; `publish()` flips atomically. The load-bearing choices:
   opt-in divergence check (bitwise replica compare after replay) turns a
   violation into an immediate fatal rather than a drifting heisenbug.
 - **No read-your-writes**: a version's outputs arrive as the next version.
-  This is the honest cost of stable snapshots, stated as a contract rather
-  than hidden.
+  This is the cost of stable snapshots, stated as a contract.
 - Ordering: FIFO within a recorder is semantic; across recorders it is
   arbitrary-but-reproducible (fixed drain order), and building semantics on
   it is declared a bug. `Parallel_recorder` (per-worker slots for staging
@@ -916,7 +914,7 @@ linear-allocated coarse queue and splice-in-submit-order parallel recording
 slot-order contract; `FRHICommandList`'s POD commands from a per-list linear
 allocator is the planned typed-command/arena tier; the Render Dependency
 Graph — passes declaring resource access, order derived — is production
-validation of this library's central thesis, applied to GPU resources.
+validation of this library's central premise, applied to GPU resources.
 
 ---
 
@@ -972,9 +970,9 @@ see §4.5). Verifiability outranks micro-optimization of fence placement.
 compile-time operation-state composition contradicts the monomorphic-block
 decision (§4.1), doesn't help fire-and-forget work, and P2300 is still
 settling. Two ideas are kept on the shelf: `Task`/`Scheduler` as
-sender/scheduler adapters for interop, and — the genuinely interesting one —
-carrying the access context through receiver environments instead of
-thread-locals, which could open compile-time access checking.
+sender/scheduler adapters for interop, and carrying the access context through
+receiver environments instead of thread-locals, which could open compile-time
+access checking.
 
 **7.8 `Access::append` edge derivation for staging.** Analyzed while
 building `Deferred`: recording needs no grant at all, so adding an access
@@ -1009,17 +1007,16 @@ host's custom presentation (its own attach dialog, say — the library ships
 none deliberately) can never hide a failure: the test harness fails on
 failures no test explicitly consumed, and the bench/stress drivers fail
 their exit code on any — a tripped ensure cannot pass CI by virtue of the
-program having survived it. (The mechanism's first user — the blocking-sync
-warning — was later *promoted to fatal* when coroutine-first made an in-task
-`sync()` a bug by definition rather than a hazard: the check lives at the
-one chokepoint every blocking wait passes through (`sync_wait`) and fires
-unconditionally when a task calls it — whether or not the target has already
-settled, since the rule, not the wait's timing, is the hazard (§4.4) — and
-distinguishes the certain-deadlock shape — the target is an access to an object the
-waiting task holds, matched by comparing the target pipe's epoch address
-against the context's captured epoch sources — from the general never-block
-violation. `parallel_for` joins through its own counter and is structurally
-exempt.)
+program having survived it. (The mechanism's first user was the blocking-sync
+warning. Coroutine-first later *promoted it to fatal*: an in-task `sync()` is
+a bug by definition, not a hazard. The check sits at the one chokepoint every
+blocking wait passes through, `sync_wait`, and fires whenever a task calls it
+— settled target or not, since the rule is the hazard, not the wait's timing
+(§4.4). It separates two shapes: the certain-deadlock case, where the target
+is an access to an object the waiting task already holds (matched by comparing
+the target pipe's epoch address against the context's captured epoch sources);
+and the general never-block violation. `parallel_for` joins through its own
+counter and is exempt.)
 
 **7.10 Requiring copyable `T` / `.copy()` accessors.** `folly::Synchronized`
 offers lock-and-copy-out; here the guarded objects are whole subsystems
@@ -1043,7 +1040,7 @@ it:
 - **Determinism as a test**: both engine samples run twice and compare
   results bitwise — which is what caught a replica-divergence bug on day
   one of `Versioned` and motivated the built-in divergence check.
-- **Forensics on demand**: the event-ring harness that cracked the TOCTOU
+- **Instrumentation on demand**: the event-ring harness that found the TOCTOU
   (§4.5) was purpose-built, kept until the machinery it instrumented was
   deleted, then deleted with it; the deterministic allocation profiler
   remains in-tree.

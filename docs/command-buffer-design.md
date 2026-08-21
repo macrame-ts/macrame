@@ -137,9 +137,8 @@ render-thread pipeline, which is why §2 reads the UE source first.
   setup, and a dedicated `FRDGAllocator` — a TLS `MemStack` linear allocator
   that owns passes, parameter structs, and the pass lambdas themselves).
 - Structurally this is `Static_task_graph` for GPU resources, shipped in
-  production at enormous scale: **the access-derived-ordering thesis of this
-  library is UE's production answer for the hardest scheduling domain they
-  have.** Their per-frame rebuild also validates our build-once/run-many
+  production: **the access-derived-ordering approach of this library is UE's
+  production answer for GPU-resource scheduling.** Their per-frame rebuild also validates our build-once/run-many
   choice by contrast — RDG's setup cost is a constant fight (culling exists
   partly to claw it back).
 
@@ -197,7 +196,7 @@ mean before anyone flushes (deadlock unless retracted — and pipe blocks are
 deliberately *not* retractable); what does `wait_until_idle` in the destructor
 mean; does `run_inline` bypass laziness?
 
-**(b) FIFO blocks readers — the fork that breaks it.** The pipe is FIFO
+**(b) FIFO blocks readers.** The pipe is FIFO
 (`dispatch()` in `guarded.cpp` stops at the first inadmissible front job; a
 front writer holds back everything behind it). Park an unflushed write at the
 front and **every later reader queues behind it until the flush**. Two ways

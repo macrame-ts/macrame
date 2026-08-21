@@ -63,7 +63,7 @@ The evidence splits cleanly:
   form is a hang. ClickHouse, UE registry, Firefox NSS, Log4j flush, buffer
   pool eviction, plan-cache eviction, AnyCable, Windows lock convoys.
 
-Class 1 caps throughput; Class 2 produces the dramatic incidents. A hot lock
+Class 1 caps throughput; Class 2 produces the visible incidents. A hot lock
 usually carries both diseases at different times.
 
 ## 3. Hypothesis verdicts (what a representative model must include)

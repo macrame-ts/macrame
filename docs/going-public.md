@@ -27,7 +27,7 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
 ## Before the flip
 
 - [x] **Roadmap tidy + triage** — done; see `docs/TODO.md` (scannable index + pre-public candidates).
-- [ ] **Comprehensive code review** — whole codebase, concurrency-critical paths first
+- [x] **Comprehensive code review** — DONE (2026-08, this session): C1–C5 + Access_op re-review + Deferred/Versioned/journal + Event_bus + coloring + Frame_gate; every finding applied or consciously deferred. Original scope: whole codebase, concurrency-critical paths first
       (scheduler, pipe, task block, graph acquire/handoff, the recent `access`/`async` + MSVC fixes).
 - [ ] **Docs review** — all docs *except* README (accuracy, coherence, currency after this session's churn).
 - [ ] **API-stability pass** — resolve the pre-public API inconsistencies (see `docs/TODO.md`
@@ -37,7 +37,7 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
 - [x] **Finalize the library name** — decided 2026-08-19: **Macrame** (`macrame`
       functional, `é` branding-only; org `macrame-ts`, target `github.com/macrame-ts/macrame`;
       see `docs/naming.md`).
-- [ ] **Name rollout** (repo-local; 73 `task_system` occurrences across 19 tracked
+- [x] **Name rollout** — DONE (`35b1288`, pushed). (repo-local; 73 `task_system` occurrences across 19 tracked
       files + 3 tracked files to rename, scoped 2026-08-20). Namespace **stays `ts::`**
       (author, 2026-08-19), so `include/ts/`, `TS_*` macros and `version.h` are UNCHANGED.
       Groups A-E are one local, CI-testable batch; do them together (a missed CI/exe path
@@ -166,7 +166,7 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
       Remaining: transfer `Andriy06/task_system` → `macrame-ts/macrame` (a transfer keeps
       redirects; do it BEFORE the flip so badges/links are final), set the repo
       description + topics, refresh the README CI badge owner/repo.
-- [ ] **Re-measure `docs/example-frame-optimization.md`** — its figures predate the
+- [x] **Re-measure `docs/example-frame-optimization.md`** — DONE (`c8aa228`, the 60 FPS figures). Its figures predated the
       `parallel_for` current-scheduler routing fix (see the note at the top of that doc):
       re-run baseline/optimised makespan, utilization, and dead time on the 6-worker trace,
       interleaved A/B with medians (the measurement rule), and update the doc's numbers
