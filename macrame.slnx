@@ -1,7 +1,6 @@
 <Solution>
   <Configurations>
     <Platform Name="x64" />
-    <Platform Name="x86" />
   </Configurations>
   <Project Path="macrame.vcxproj" Id="8acc9866-6f71-4bc6-8ff6-55dcde578818" />
   <Project Path="macrame_playground.vcxproj" Id="9b2e4d17-3c8a-4f6e-b1d2-7a0c5e9f8a34" />
