@@ -43,6 +43,14 @@ void fatal(const char* message) noexcept
     if (detail::is_debugger_present())
         detail::debug_break();
 #endif
+#if defined(_WIN32)
+    // Die fast rather than modally. The message and the stack are already on stderr, so the
+    // CRT `abort()` box and the WER dialog add no diagnostic value - and on a headless host
+    // (CI, a server, a spawned death-test child) nothing dismisses them, which turns a crash
+    // into an indefinite hang. Scoped to the imminent abort; the AV/stack-overflow minidump
+    // path runs through `install_crash_handler`'s unhandled-exception filter and is untouched.
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
     std::abort();
 }
 
