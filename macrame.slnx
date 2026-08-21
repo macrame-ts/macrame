@@ -1,5 +1,8 @@
 <Solution>
   <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Release" />
+    <BuildType Name="Shipping" />
     <Platform Name="x64" />
   </Configurations>
   <Project Path="macrame.vcxproj" Id="8acc9866-6f71-4bc6-8ff6-55dcde578818" />
