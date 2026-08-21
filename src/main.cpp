@@ -62,7 +62,7 @@ int main(int argc, char** argv)
     {
         std::printf(
             "macrame %s - test/benchmark/sample driver\n\n"
-            "usage: macrame [MODE]\n\n"
+            "usage: macrame_playground [MODE]\n\n"
             "  (no args)      run the test suite, all samples, and the benchmarks\n"
             "  --tests        run the test suite only; exit code = failure count\n"
             "  --bench        run the benchmarks only\n"
@@ -70,9 +70,9 @@ int main(int argc, char** argv)
             "  --dot [path]   write the game_frame graph structure as Graphviz DOT\n"
             "                 (default sample_game_frame.dot; render with show_graph.bat)\n"
             "  --trace [n]    run the game_frame sample n frames (default 200) with an\n"
-            "                 aggregating trace, on the default scheduler and on a\n"
-            "                 4-worker one; writes sample_game_frame_avg.svg and\n"
-            "                 sample_game_frame_avg_4workers.svg plus sample_game_frame.dot\n"
+            "                 aggregating trace, for the baseline and optimised variants\n"
+            "                 on 8 workers; writes sample_game_frame_avg_baseline.svg and\n"
+            "                 sample_game_frame_avg_optimised.svg plus sample_game_frame.dot\n"
             "  --memprofile   run the allocation profiler (needs a TS_MEM_PROFILE build)\n"
             "  --version, -v  print the version\n"
             "  --help, -h     show this message\n",

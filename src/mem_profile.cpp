@@ -248,7 +248,7 @@ void run_mem_profile()
         });
     }
 
-    std::printf("\ngame frame (sample/game_frame.cpp, 1000 entities, ~34 systems):\n");
+    std::printf("\ngame frame (sample/game_frame.cpp, 1000 entities, ~30 systems):\n");
     measure_frame("frame graph", &sample::game_frame_stats);
     measure_frame("frame graph-free", &sample::game_frame_free_stats);
 
