@@ -119,7 +119,9 @@ namespace detail
 // A queued task: the func + its data. Priority is not a field - it is the queue the
 // task lives in (one lock-free MPMC queue per priority, scanned high->low). must stay 16 bytes
 // (two words): the work-stealing deque stores cells as `std::atomic<Task_entry>`, lock-free only
-// while the element is double-word-CAS-able. A block dispatch fits here as `{trampoline, block}` -
+// while the element is double-word-CAS-able - which is why the build asks for the instruction
+// where the compiler does not assume it (`macrame_atomic_flags`, CMakeLists.txt). A block
+// dispatch fits here as `{trampoline, block}` -
 // the block is the payload (it carries its own body, priority, and claim), so nothing else rides
 // in this entry.
 struct Task_entry

@@ -155,6 +155,28 @@ jobs:
           & "_consumer_noexc/Release/macrame_consumer.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  # The plain (non-sanitized) Linux build. It is not redundant with linux-tsan: TSan lowers every
+  # atomic to a __tsan_atomic call, so that job cannot see whether the 16-byte deque cells
+  # actually link - a missing double-word CAS stayed invisible until this job existed.
+  linux-clang:
+    name: Linux / clang-21 / build + stress
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang 21
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lsb-release wget software-properties-common gnupg
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 21
+      - name: Configure + build
+        run: |
+          cmake --preset linux-clang -DCMAKE_CXX_COMPILER=clang++-21
+          cmake --build --preset linux-clang
+      - name: Stress
+        run: build/linux-clang/ts_tsan
+
   linux-tsan:
     name: Linux / clang-21 / ThreadSanitizer
     runs-on: ubuntu-latest

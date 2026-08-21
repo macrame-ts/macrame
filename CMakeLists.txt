@@ -109,6 +109,49 @@ if(MACRAME_NO_EXCEPTIONS)
     string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 endif()
 
+include(CheckCXXSourceCompiles)
+
+# What `macrame_atomic_flags` below probes with: the deque cell, in miniature.
+set(macrame_atomic_probe [=[
+#include <atomic>
+struct Pair { void* a; void* b; };
+int main() { std::atomic<Pair> cell; Pair v = cell.load(); cell.store(v); return 0; }
+]=])
+
+# The work-stealing deque stores cells as `std::atomic<Task_entry>` - 16 bytes, lock-free only
+# where the target has a double-word CAS (`detail::Task_entry`, scheduler.h). MSVC assumes
+# cmpxchg16b on x64; baseline x86-64 for GCC/clang does not, so without -mcx16 the compiler
+# lowers those loads and stores to libatomic calls that take a lock - the cells stop being
+# lock-free, and the link fails outright unless libatomic is present. Ask for the instruction
+# where the architecture has it, and fall back to libatomic where the libcalls remain anyway.
+# PUBLIC: a consumer's own TUs instantiate the same atomics.
+function(macrame_atomic_flags target)
+    if(MSVC)
+        return()
+    endif()
+    set(extra_flags "")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+        set(extra_flags "-mcx16")
+        target_compile_options(${target} PUBLIC -mcx16)
+    endif()
+    # Whether the libcalls remain anyway is a property of the target, so ask the compiler
+    # rather than guessing: link a 16-byte atomic as configured, and only if that fails try
+    # again with -latomic. Asking the driver for the library beats locating the file - the
+    # linker-visible libatomic.so is absent on distributions that ship only the runtime.
+    set(CMAKE_REQUIRED_FLAGS "${extra_flags}")
+    check_cxx_source_compiles("${macrame_atomic_probe}" MACRAME_ATOMIC16_LINKS)
+    if(NOT MACRAME_ATOMIC16_LINKS)
+        set(CMAKE_REQUIRED_LIBRARIES atomic)
+        check_cxx_source_compiles("${macrame_atomic_probe}" MACRAME_ATOMIC16_NEEDS_LIBATOMIC)
+        if(MACRAME_ATOMIC16_NEEDS_LIBATOMIC)
+            target_link_libraries(${target} PUBLIC atomic)
+        else()
+            message(WARNING "macrame: a 16-byte std::atomic does not link on this target; "
+                            "the scheduler's work-stealing deque needs one")
+        endif()
+    endif()
+endfunction()
+
 # Common private build flags for our own targets (not propagated to consumers).
 function(macrame_private_flags target)
     if(WIN32)
@@ -157,6 +200,7 @@ if(MACRAME_NO_EXCEPTIONS)
 endif()
 
 macrame_private_flags(macrame)
+macrame_atomic_flags(macrame)
 
 # ThreadSanitizer instrumentation lives on the library too, so ts_tsan catches races in the
 # scheduler/pipe core (non-Windows; TSan has no Windows runtime).
