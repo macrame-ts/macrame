@@ -69,26 +69,7 @@
     <ClInclude Include="include\ts\versioned.h" />
     <ClInclude Include="include\ts\detail\work_stealing_deque.h" />
     <ClInclude Include="include\ts\detail\worker_thread.h" />
-    <ClInclude Include="benchmarks\bench_harness.h" />
-    <ClInclude Include="benchmarks\benchmarks.h" />
-    <ClInclude Include="tests\access_tests.h" />
-    <ClInclude Include="tests\rules_tests.h" />
-    <ClInclude Include="tests\named_tests.h" />
     <ClInclude Include="include\ts\named.h" />
-    <ClInclude Include="tests\graph_tests.h" />
-    <ClInclude Include="tests\parallel_tests.h" />
-    <ClInclude Include="tests\coroutine_tests.h" />
-    <ClInclude Include="tests\harness.h" />
-    <ClInclude Include="tests\integration_tests.h" />
-    <ClInclude Include="tests\scheduler_tests.h" />
-    <ClInclude Include="tests\task_tests.h" />
-    <ClInclude Include="tests\tests.h" />
-    <ClInclude Include="tests\test_util.h" />
-    <ClInclude Include="tests\guarded_tests.h" />
-    <ClInclude Include="tests\pipe_tests.h" />
-    <ClInclude Include="tests\deferred_tests.h" />
-    <ClInclude Include="tests\event_bus_tests.h" />
-    <ClInclude Include="tests\versioned_tests.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>

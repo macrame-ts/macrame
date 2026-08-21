@@ -115,4 +115,63 @@
       <Filter>tests</Filter>
     </ClCompile>
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="benchmarks\bench_harness.h">
+      <Filter>benchmarks</Filter>
+    </ClInclude>
+    <ClInclude Include="benchmarks\benchmarks.h">
+      <Filter>benchmarks</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\access_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\coroutine_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\deferred_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\event_bus_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\graph_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\guarded_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\harness.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\integration_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\named_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\parallel_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\pipe_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\rules_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\scheduler_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\task_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\test_util.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\versioned_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+  </ItemGroup>
 </Project>
