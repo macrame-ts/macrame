@@ -130,6 +130,62 @@ void test_relaxed_scope_across_suspension()
 #endif
 }
 
+// 4c. Reach, part 3: the relaxation must be read from the RESUMING thread's thread-local
+// block. A guard living across a suspension invites the compiler to materialize the
+// thread-local's address once, in the coroutine frame, and reuse it after the resume - which
+// is the suspending thread's block. MSVC (19.51) does exactly that when `Relaxed_scope`'s
+// constructor is inlined into the frame, so an inlined read of `relaxed_rules` returned the
+// value the frame was suspended with while an out-of-line read of the same variable returned
+// the live one. The two must agree; disagreement means a stale block, and every rule check
+// (plus anything else the body reads out of a thread-local) is answering for the wrong thread.
+#if TS_RULES_ANY
+#if defined(_MSC_VER) && !defined(__clang__)
+#define TS_TEST_NOINLINE __declspec(noinline)
+#else
+#define TS_TEST_NOINLINE [[gnu::noinline]]
+#endif
+
+TS_TEST_NOINLINE unsigned relaxed_bits_out_of_line()
+{
+    return ts::detail::relaxed_rules;
+}
+
+TS_TEST_NOINLINE bool rule_relaxed_out_of_line()
+{
+    return ts::rule_relaxed(Rule::in_task_sync);
+}
+
+// Reads the same thread-local on both sides of the suspension, which is what makes the
+// compiler want to keep the block pointer in the frame.
+ts::Task<bool> co_relaxed_tls_freshness(ts::Signal& gate, std::atomic<unsigned>& before,
+                                        std::atomic<unsigned>& after)
+{
+    ts::Relaxed_scope relax{ Rule::in_task_sync };
+    before.store(ts::detail::relaxed_rules, std::memory_order_relaxed);
+    co_await gate;
+    unsigned inlined_bits = ts::detail::relaxed_rules;
+    bool inlined_predicate = ts::rule_relaxed(Rule::in_task_sync);
+    after.store(inlined_bits, std::memory_order_relaxed);
+    co_return inlined_bits == relaxed_bits_out_of_line()
+        && inlined_predicate == rule_relaxed_out_of_line()
+        && inlined_predicate;
+}
+#endif
+
+void test_relaxed_scope_tls_freshness()
+{
+#if TS_RULES_ANY
+    ts::Signal gate;
+    std::atomic<unsigned> before{ 0 };
+    std::atomic<unsigned> after{ 0 };
+    ts::Task<bool> t = co_relaxed_tls_freshness(gate, before, after);
+    std::thread resumer([&gate] { gate.trigger(); });
+    resumer.join();
+    TS_CHECK(before.load(std::memory_order_relaxed) != 0);   // the scope did take effect
+    TS_CHECK(t.sync());
+#endif
+}
+
 // 5. The process-wide default: OR-ed into every lookup, and masked to advisory rules like
 // the scoped form.
 void test_default_relaxed_rules()
@@ -306,6 +362,7 @@ void run_rules_tests()
     run("rules relaxed scope refuses structural", test_relaxed_scope_refuses_structural);
     run("rules relaxed scope inherited by child", test_relaxed_scope_inherited_by_child);
     run("rules relaxed scope across suspension", test_relaxed_scope_across_suspension);
+    run("rules relaxed scope reads the resuming thread", test_relaxed_scope_tls_freshness);
     run("rules default relaxed set", test_default_relaxed_rules);
     run("rules access rank climb", test_access_rank_climb);
     run("rules access rank relaxed", test_access_rank_relaxed);

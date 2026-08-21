@@ -173,6 +173,20 @@ constexpr bool rule_compiled_in(Rule rule) noexcept
     return any(rule & static_cast<Rule>(TS_RULES_EFFECTIVE));
 }
 
+// Keeps a thread-local access out of the caller's frame. A coroutine frame holding a scope
+// guard across a suspension invites the compiler to resolve the thread-local's block address
+// once and reuse it after the resume - which is the address on the thread that suspended,
+// not the one that resumed. MSVC (19.51) does this: it spills the block pointer into the
+// coroutine frame at `Relaxed_scope`'s constructor and reloads it for every later access,
+// so the resumed body reads the suspending thread's relaxation. Out of line, the block is
+// resolved where the access happens. Regression test: "rules relaxed scope reads the
+// resuming thread" in tests/rules_tests.cpp.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define TS_DETAIL_NO_INLINE __declspec(noinline)
+#else
+#define TS_DETAIL_NO_INLINE [[gnu::noinline]]
+#endif
+
 namespace detail
 {
 
@@ -183,6 +197,12 @@ namespace detail
 inline thread_local unsigned relaxed_rules = 0;
 // Process-wide baseline, or-ed into every lookup ("the rules as advice" setting).
 inline std::atomic<unsigned> default_relaxed_rules_bits{ 0 };
+
+// The whole lookup, scope bits or process baseline, read on the thread that asks.
+TS_DETAIL_NO_INLINE inline unsigned relaxed_bits() noexcept
+{
+    return relaxed_rules | default_relaxed_rules_bits.load(std::memory_order_relaxed);
+}
 #endif
 
 } // namespace detail
@@ -192,9 +212,7 @@ inline std::atomic<unsigned> default_relaxed_rules_bits{ 0 };
 inline bool rule_relaxed(Rule rule) noexcept
 {
 #if TS_RULES_ANY
-    unsigned bits = detail::relaxed_rules
-        | detail::default_relaxed_rules_bits.load(std::memory_order_relaxed);
-    return any(static_cast<Rule>(bits) & rule & Rule::advisory);
+    return any(static_cast<Rule>(detail::relaxed_bits()) & rule & Rule::advisory);
 #else
     (void)rule;
     return false;
@@ -242,23 +260,8 @@ inline Rule default_relaxed_rules() noexcept
 class Relaxed_scope
 {
 public:
-    explicit Relaxed_scope(Rule rules) noexcept
-    {
-        TS_ENSURE(!any(rules & ~Rule::advisory),
-            "ts::Relaxed_scope: only advisory rules can be relaxed at runtime; a structural "
-            "rule is compile-out-only (TS_ENABLED_RULES) and the quiescence net is global");
-#if TS_RULES_ANY
-        prev_ = detail::relaxed_rules;
-        detail::relaxed_rules = prev_ | static_cast<unsigned>(rules & Rule::advisory);
-#endif
-    }
-
-    ~Relaxed_scope()
-    {
-#if TS_RULES_ANY
-        detail::relaxed_rules = prev_;
-#endif
-    }
+    explicit Relaxed_scope(Rule rules) noexcept;
+    ~Relaxed_scope();
 
     Relaxed_scope(const Relaxed_scope&) = delete;
     Relaxed_scope& operator=(const Relaxed_scope&) = delete;
@@ -268,6 +271,27 @@ private:
     unsigned prev_ = 0;
 #endif
 };
+
+// The guard is what lives across a suspension, so its thread-local access is the one the
+// compiler is most tempted to keep in the frame (see `TS_DETAIL_NO_INLINE`). Both ends stay
+// out of line, which a scope entry can afford: it marks a claim, it is not a hot path.
+TS_DETAIL_NO_INLINE inline Relaxed_scope::Relaxed_scope(Rule rules) noexcept
+{
+    TS_ENSURE(!any(rules & ~Rule::advisory),
+        "ts::Relaxed_scope: only advisory rules can be relaxed at runtime; a structural "
+        "rule is compile-out-only (TS_ENABLED_RULES) and the quiescence net is global");
+#if TS_RULES_ANY
+    prev_ = detail::relaxed_rules;
+    detail::relaxed_rules = prev_ | static_cast<unsigned>(rules & Rule::advisory);
+#endif
+}
+
+TS_DETAIL_NO_INLINE inline Relaxed_scope::~Relaxed_scope()
+{
+#if TS_RULES_ANY
+    detail::relaxed_rules = prev_;
+#endif
+}
 
 namespace detail
 {

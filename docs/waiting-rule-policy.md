@@ -108,6 +108,34 @@ Coroutine carriage is the whole of the reach, and it is the case that matters: a
 `Relaxed_scope` is a claim about *this* logical task, and a frame stays one logical task
 across its segments even as it migrates between workers.
 
+### 4.1 The lookup is out of line on purpose
+
+Carriage puts the right bits in the resuming thread's `detail::relaxed_rules`. Reading them
+back is a separate problem. A coroutine frame that holds a `Relaxed_scope` across a
+suspension invites the compiler to resolve the thread-local's block address once, keep it in
+the frame, and reuse it for every later access — including the accesses that run after the
+frame has resumed on another thread. MSVC 19.51 (VS 18) does exactly that: it spills the
+block pointer at the guard's constructor and reloads it after the resume, so the body reads
+the relaxation belonging to the thread that suspended. The carriage is not at fault there —
+the value is installed correctly and read from the wrong place.
+
+Both ends of the access are therefore kept out of line (`TS_DETAIL_NO_INLINE` in `rules.h`):
+`Relaxed_scope`'s constructor and destructor, so the address never enters the frame, and
+`detail::relaxed_bits()`, so a lookup resolves the block where it is read. clang-cl 22
+recomputes the address either way. The regression test is "rules relaxed scope reads the
+resuming thread" in `tests/rules_tests.cpp`: after a cross-thread resume it compares an
+inlined read of `relaxed_rules` against an out-of-line read of the same variable, and the two
+disagreeing is the signature of a cached block. It was found in an exceptions-enabled build,
+where the codegen differs enough to trigger the spill; the exceptions-off build compiles the
+same source without it, so this is a hazard the configuration masks rather than one it lacks.
+
+A guard holding a thread-local across a suspension is the shape that triggers this.
+`Access_guard` is the only other guard with it, and it cannot span a `co_await` at all
+(`await_under_guard`). The remaining thread-locals — `current_task`, `current_access`,
+`current_worker_index`, the trace owner — are read either from library functions the body
+calls or on paths with no guard alive to force the spill; a probe reading each of them
+inlined and out of line across a cross-thread resume found no disagreement.
+
 ## 5. The global default
 
 `ts::set_default_relaxed_rules(Rule)` OR-s into every lookup, process-wide. It exists for
@@ -231,10 +259,10 @@ be retrofitted, which is how the always-on `await_under_guard` fatal happened.
 
 ## 9. Cost discipline
 
-The relaxation lookup is one thread-local load, one relaxed atomic load and a mask. That is
-cheap but not free, and it must never sit on the path every call takes. The pattern at every
-site is: test the hazard condition first, and consult the policy only on the branch that is
-about to fatal.
+The relaxation lookup is one thread-local load, one relaxed atomic load and a mask, behind a
+call the compiler is not allowed to inline (§4.1). That is cheap but not free, and it must
+never sit on the path every call takes. The pattern at every site is: test the hazard
+condition first, and consult the policy only on the branch that is about to fatal.
 
 ```cpp
 if (access_guard_depth > 0 && rule_enforced(Rule::await_under_guard))
