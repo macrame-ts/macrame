@@ -715,6 +715,60 @@ artifact** — pin to two cores to amplify preemption windows; and
 event-ring instrumented build in one session. The racing machinery and the
 event ring were both deleted with retraction; the lessons were not.
 
+### 4.6 Exceptions: agnostic library, fatal boundary
+
+The library uses no exceptions — failures are `ts::fatal`, cancellation is a
+value, results come back through `sync()` / `co_await`. That is a property of
+the source, not of a compiler flag, so the question left over is what the
+*build* should require, and the answer that matters to a consumer is: nothing.
+macrame compiles with or without exception support, and a program embedding it
+picks for itself.
+
+Getting there costs one rule, because a user body is library-adjacent code
+running inside library frames. A worker's dispatch loop, a pipe release and a
+coroutine resume all hold state — grants, lock counts, refcounts, a pipe's FIFO
+position — that unwinding would leave half updated, and in an exceptions-off
+build those frames have no unwind paths at all. Three ways to answer that:
+
+1. **Propagate**, `std::future`-style: capture into an `exception_ptr`, rethrow
+   at the consume point. Every grant release, link advance and counter
+   transition becomes an exception-safety obligation, and a throwing graph node
+   needs a defined meaning that interacts with cancellation. It buys a feature
+   the library's own error model does not use.
+2. **Do nothing**, which is what an exceptions-off library linked against an
+   exceptions-on consumer did: the throw unwound into `macrame.lib` frames
+   compiled with no landing pads. Measured result on MSVC — process fail-fast
+   (`0xC0000409`), no message, no stack trace.
+3. **Report and abort at the seam.** Every path that invokes a user body does
+   so through one place (`detail::invoke_user_body`, plus the coroutine
+   promise's `unhandled_exception` for the frame arm), which catches, reports
+   and aborts.
+
+(3), for the same reason the rest of the library is fatal-by-design: the
+condition is a program error, and the diagnostic is worth more than a recovery
+path nobody could use correctly. The seams live in headers, so they compile
+with the *consumer's* exception setting — the handler exists exactly where
+there is something to catch, and compiles to the bare invocation where there is
+not.
+
+What the report has to carry follows from where it runs. A handler runs after
+unwinding, so `ts::fatal`'s stack trace starts at the seam and the throw site is
+already gone — the two things that locate the fault are the running task's
+identity, which the library already tracks for every other diagnostic
+(`Named`, or the call site that created the task), and the exception's own
+`what()` where it derives from `std::exception`. Both go in the message, which
+is why the seam's handler delegates to a function in the library
+(`escaped_exception_diagnose`) rather than formatting inline in a header.
+
+What remains genuinely whole-program is MSVC's `_HAS_EXCEPTIONS=0`: it rewrites
+standard-library declarations, so it cannot be a private choice of the library
+build. It is therefore tied to one option (`MACRAME_NO_EXCEPTIONS`), exported as
+a usage requirement when that option is on, and covered by the same
+`detect_mismatch` link tripwire that guards `TS_SAFETY_CHECKS`. Elsewhere no
+tripwire is warranted: libstdc++ and libc++ support linking `-fno-exceptions`
+and `-fexceptions` objects provided nothing propagates across the boundary,
+which is exactly what the seams guarantee.
+
 ---
 
 ## 5. Coroutines: the composition model
@@ -755,10 +809,10 @@ main design points:
   insert; the closing edge faults, naming both tasks and both objects. This
   is what makes awaited dynamic cross-object access a sanctioned residual
   pattern rather than a documented hazard.
-- **Cancellation is value-based** because exceptions are off project-wide: a
-  cancelled await resumes with cancelled state to inspect (fatal for a value
-  task — check first), never a throw. Forced by the no-exceptions
-  constraint; turned out cleaner — control flow stays visible.
+- **Cancellation is value-based** because the library does not use exceptions:
+  a cancelled await resumes with cancelled state to inspect (fatal for a value
+  task — check first), never a throw. Forced by that constraint; turned out
+  cleaner — control flow stays visible.
 
 Resumes run through a bounded trampoline (deep cascades resume iteratively,
 proven to 50k depth), destruction through another (a deep chain of fused

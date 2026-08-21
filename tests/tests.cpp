@@ -2,6 +2,7 @@
 #include "test_util.h"
 #include "ts/access.h"
 #include "ts/guarded.h"
+#include "ts/parallel_for.h"
 #include "ts/scheduler.h"
 #include "ts/static_task_graph.h"
 
@@ -29,6 +30,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -120,6 +122,16 @@ static ts::Task<void> await_signal(ts::Signal s)
 {
     co_await s;
 }
+
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+// Death scenario body (`body_throws_coroutine`): the promise's `unhandled_exception` is the
+// coroutine arm of the same boundary the functor seams enforce.
+static ts::Task<void> throwing_coroutine()
+{
+    throw 1;
+    co_return;
+}
+#endif
 
 void run_death_scenario(const char* name)
 {
@@ -774,5 +786,39 @@ void run_death_scenario(const char* name)
         ts::destroy_scheduler();
         ts::destroy_scheduler();   // none running -> fatal
     }
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    // The body boundary (`detail::invoke_user_body`): an exception must not leave a body, on
+    // any of the paths that invoke one. Each of these dies in the seam, not by unwinding into
+    // the library. Compiled only where the build can throw at all; registered through
+    // `with_exceptions` so an exceptions-off build skips rather than hangs.
+    else if (std::strcmp(name, "body_throws_launch") == 0)
+    {
+        ts::launch([] { throw 1; }).sync();
+    }
+    else if (std::strcmp(name, "body_throws_access") == 0)
+    {
+        // A `std::exception`, so this one also covers the arm that reports `what()`; the
+        // others throw a bare int, which lands in the catch-all.
+        ts::Guarded<Counter> counter{ ts::Named{ "counter" } };
+        counter.async([](Counter&) { throw std::runtime_error("from an async write body"); }).sync();
+    }
+    else if (std::strcmp(name, "body_throws_node") == 0)
+    {
+        ts::Guarded<Counter> counter{ ts::Named{ "counter" } };
+        ts::Static_task_graph graph;
+        graph.add_node("thrower", [](Counter&) { throw 1; }, counter);
+        graph.compile();
+        graph.execute().sync();
+    }
+    else if (std::strcmp(name, "body_throws_parallel_for") == 0)
+    {
+        ts::Guarded<Counter> counter{ ts::Named{ "counter" } };
+        counter.async([](Counter&) { ts::parallel_for(64, [](int) { throw 1; }); }).sync();
+    }
+    else if (std::strcmp(name, "body_throws_coroutine") == 0)
+    {
+        throwing_coroutine().sync();
+    }
+#endif
     // unknown scenario: return without dying -> parent's expect_death fails
 }

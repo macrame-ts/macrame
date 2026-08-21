@@ -122,6 +122,8 @@ jobs:
   # Prove the library is consumable from outside the tree: install it, then a standalone
   # project (tests/consumer) pulls it in via find_package(macrame) and links macrame::macrame.
   # Catches a broken public include-interface or export set here, not at a downstream user.
+  # The consumer project carries no copy of the library's build setup, so what it compiles
+  # with is whatever the package actually exports.
   windows-consumer:
     name: Windows / MSVC / consumer (find_package)
     runs-on: windows-latest
@@ -137,6 +139,20 @@ jobs:
           cmake -S tests/consumer -B _consumer "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/_install"
           cmake --build _consumer --config Release
           & "_consumer/Release/macrame_consumer.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # The exceptions-off package is where usage requirements have to carry something: the
+      # consumer's TUs must get _HAS_EXCEPTIONS=0 from the package alone, or the STL
+      # declarations diverge and the access.h tripwire fails the link.
+      - name: Build + install the library (MACRAME_NO_EXCEPTIONS)
+        run: |
+          cmake -S . -B _noexc -A x64 -DMACRAME_NO_EXCEPTIONS=ON -DMACRAME_BUILD_DRIVER=OFF
+          cmake --build _noexc --config Release --target macrame
+          cmake --install _noexc --prefix ${{ github.workspace }}/_install_noexc --config Release
+      - name: Consumer find_package + build + run (against the exceptions-off package)
+        run: |
+          cmake -S tests/consumer -B _consumer_noexc "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/_install_noexc"
+          cmake --build _consumer_noexc --config Release
+          & "_consumer_noexc/Release/macrame_consumer.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   linux-tsan:

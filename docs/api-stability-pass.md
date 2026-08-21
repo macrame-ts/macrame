@@ -294,9 +294,33 @@ three option structs. Rename to `set_priority()`? Breaking, cheap, tag-gated.
 
 ---
 
-### A2 - the exceptions configuration does not reach consumers
+### A2 - the exceptions configuration does not reach consumers - DONE (2026-08-21)
 
-**Defect.** The library is exceptions-off, and `CMakeLists.txt` states that
+**Resolved differently from the options below: the configuration stopped being
+something a consumer has to match.** macrame contains no `throw`/`try`/`catch`,
+so nothing forced it to be built exceptions-off; what did was the assumption
+that a body might throw into library frames. That is now a stated contract with
+a checked boundary - `detail::invoke_user_body` and the coroutine promise report
+an escaping exception through `escaped_exception_diagnose` and abort - and the
+library builds either way, with exceptions ON by default so a consumer's own
+translation units are free.
+
+What remains genuinely whole-program is MSVC's `_HAS_EXCEPTIONS=0`, which
+rewrites STL declarations. It is now tied to one option,
+`MACRAME_NO_EXCEPTIONS` (default OFF), exported as a usage requirement when on
+(with `/EHs-c-` / `-fno-exceptions` where a flag can express it), and covered by
+a `detect_mismatch` tripwire in `access.h` - verified: a mixed link fails with
+`LNK2038: mismatch detected for '_HAS_EXCEPTIONS'`. Option (b), the `#error`
+guard, was rejected on the way: it would have made the consumer's exception
+setting the library's business, which is the thing this item was complaining
+about. Option (a) landed inside the new option; `tests/consumer` dropped its
+hand-copied flags, and the consumer CI job now also builds against an
+exceptions-off package. Rationale: `docs/design.md` §4.6; user contract:
+`docs/guide.md` §10.5.
+
+The original write-up follows.
+
+**Defect.** The library was exceptions-off, and `CMakeLists.txt` stated that
 config consistency is load-bearing ("a consumer's own TUs must compile with the
 SAME values the library was built with, or the layouts diverge"). But only *half*
 the configuration is exported:
@@ -389,7 +413,7 @@ S2, S6, S9, S10. These land before `v0.1.0` or not at all.
 the meaning of existing valid code, so it belongs in the same batch even though
 it is technically additive.
 
-**Free, any time:** S3, S8, S11, S13, A2(b).
+**Free, any time:** S3, S8, S11, S13. (A2 is done.)
 
 Two are worth taking regardless of the rest: **M7** (a silent dangling reference
 in the most-typed spelling in the library) and **M5** (Shipping does not compile

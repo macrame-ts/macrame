@@ -32,6 +32,19 @@
 #define TS_DETAIL_STRINGIZE2(x) #x
 #define TS_DETAIL_STRINGIZE(x) TS_DETAIL_STRINGIZE2(x)
 #pragma detect_mismatch("TS_SAFETY_CHECKS", TS_DETAIL_STRINGIZE(TS_SAFETY_CHECKS))
+
+// `_HAS_EXCEPTIONS` gets the same treatment, for the same reason: it rewrites MSVC STL
+// declarations, so a program built exceptions-off (MACRAME_NO_EXCEPTIONS) must be built that
+// way throughout, and linking a library half against a consumer half that disagrees is the
+// silent-corruption case this tripwire exists for. `<atomic>` above has already fixed the
+// value, so this reads what the TU actually compiled with. There is no equivalent anchor
+// elsewhere by design: libstdc++ and libc++ support linking `-fno-exceptions` and
+// `-fexceptions` objects as long as nothing propagates across the boundary, which is exactly
+// the contract macrame's body seams enforce, so a link error there would reject a legitimate
+// build.
+#if defined(_HAS_EXCEPTIONS)
+#pragma detect_mismatch("_HAS_EXCEPTIONS", TS_DETAIL_STRINGIZE(_HAS_EXCEPTIONS))
+#endif
 #endif
 
 namespace ts

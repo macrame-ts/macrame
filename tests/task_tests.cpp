@@ -501,6 +501,18 @@ void test_death_signal_reset_awaited()
     TS_CHECK(ts::test::expect_death("signal_reset_awaited"));
 }
 
+// The body boundary, one case per path that invokes a user body (`detail::invoke_user_body`,
+// and the coroutine promise's `unhandled_exception` for the frame arm). An exception leaving a
+// body would unwind through the library's own frames - a worker's dispatch loop, a pipe
+// release - past the grants, lock counts and refcounts they hold, so it is reported and the
+// process aborts instead. The library is exception-agnostic: these fatals are what let a
+// consumer compile their own translation units either way.
+void test_death_body_throws_launch()   { TS_CHECK(ts::test::expect_death("body_throws_launch")); }
+void test_death_body_throws_access()   { TS_CHECK(ts::test::expect_death("body_throws_access")); }
+void test_death_body_throws_node()     { TS_CHECK(ts::test::expect_death("body_throws_node")); }
+void test_death_body_throws_parallel() { TS_CHECK(ts::test::expect_death("body_throws_parallel_for")); }
+void test_death_body_throws_coroutine(){ TS_CHECK(ts::test::expect_death("body_throws_coroutine")); }
+
 } // namespace
 
 void run_task_tests()
@@ -544,4 +556,14 @@ void run_task_tests()
     run("signal reset", test_signal_reset);
     run("death: reset unsettled", test_death_reset_unsettled);
     run("death: signal reset while awaited", test_death_signal_reset_awaited);
+    run_if(with_exceptions, "built without exceptions", "death: body throws (launch)",
+           test_death_body_throws_launch);
+    run_if(with_exceptions, "built without exceptions", "death: body throws (access)",
+           test_death_body_throws_access);
+    run_if(with_exceptions, "built without exceptions", "death: body throws (graph node)",
+           test_death_body_throws_node);
+    run_if(with_exceptions, "built without exceptions", "death: body throws (parallel_for)",
+           test_death_body_throws_parallel);
+    run_if(with_exceptions, "built without exceptions", "death: body throws (coroutine)",
+           test_death_body_throws_coroutine);
 }

@@ -22,6 +22,9 @@
 #include <concepts>
 #include <condition_variable>
 #include <cstdint>
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+#include <exception>   // the body seam reports `what()` when there is one (`invoke_user_body`)
+#endif
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -66,6 +69,18 @@ struct Task_control_block;
 // in-task call, settled target or not (TODO 6.10).
 [[noreturn]] void blocking_sync_diagnose(const Task_control_block* blk) noexcept;
 #endif
+
+// Report a body that let an exception escape (see `invoke_user_body`) - fatal. A handler runs
+// after unwinding, so the throwing frames are already gone: the stack trace starts at the seam,
+// and what locates the fault is the running task's identity plus the exception's own text
+// (`what`; null when it does not derive from `std::exception`).
+//
+// Out of line for cost, not for layering - unlike `blocking_sync_diagnose` it needs nothing
+// this header lacks. It is a cold path whose message formatting would otherwise be emitted
+// into every seam instantiation, and it would put <cstdio> in a header every translation unit
+// includes. The block layer is header-only, so the definition lives in guarded.cpp with the
+// other diagnostics.
+[[noreturn]] void escaped_exception_diagnose(const char* what) noexcept;
 
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
 // Work that only a non-worker thread can complete, currently outstanding (see
@@ -733,6 +748,38 @@ inline void Task_control_block::sync_wait(const Task_ptr& blk)
 template<typename R> struct Result_storage { std::optional<R> result; };
 template<> struct Result_storage<void> {};
 
+// Invokes a user body at a task boundary. macrame itself never throws, and it does not carry
+// an exception out of a body in any direction: the frames a body returns into are the
+// library's own - a worker's dispatch loop, a pipe release, a coroutine resume - holding
+// grants, lock counts and refcounts that unwinding would leave half updated, and they may be
+// compiled with no exception support at all. An escaping exception is therefore reported and
+// fatal. A body is free to use exceptions internally; it must handle them before returning.
+//
+// The handlers exist only where the calling translation unit has exceptions enabled; with them
+// off this compiles to the invocation alone. If a program mixes both, the linker may keep
+// either copy of an inlined seam, and the whole of that risk is which diagnostic a throwing
+// body produces - this one, or the runtime's own bare terminate.
+template<typename Fn, typename... Args>
+decltype(auto) invoke_user_body(Fn&& fn, Args&&... args) noexcept
+{
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    try
+    {
+        return std::forward<Fn>(fn)(std::forward<Args>(args)...);
+    }
+    catch (const std::exception& e)
+    {
+        escaped_exception_diagnose(e.what());
+    }
+    catch (...)
+    {
+        escaped_exception_diagnose(nullptr);
+    }
+#else
+    return std::forward<Fn>(fn)(std::forward<Args>(args)...);
+#endif
+}
+
 // An executable task: the monomorphic block as a base subobject (`Block_backed`, so a
 // `Task_control_block*` recovers the wrapper with a `static_cast`) + result storage +
 // the body + a token. `run` is wired into the block's `execute`; the scheduler/pipe
@@ -802,16 +849,16 @@ struct Executable : Block_backed<Executable<Body, R>>
         if constexpr (std::is_void_v<R>)
         {
             if constexpr (std::is_invocable_v<Body&, const Cancellation_token&>)
-                self->body(c->token);
+                invoke_user_body(self->body, c->token);
             else
-                self->body();
+                invoke_user_body(self->body);
         }
         else
         {
             if constexpr (std::is_invocable_v<Body&, const Cancellation_token&>)
-                self->storage.result.emplace(self->body(c->token));
+                self->storage.result.emplace(invoke_user_body(self->body, c->token));
             else
-                self->storage.result.emplace(self->body());
+                self->storage.result.emplace(invoke_user_body(self->body));
             c->result_ptr = &*self->storage.result;
         }
 

@@ -436,25 +436,25 @@ void Static_task_graph::fill_node_modes(Node& node, std::index_sequence<I...>, F
         // `Cancellation_token`) receives the run's token - by value into a coroutine
         // body's frame - and may return cooperatively mid-body (the node then settles
         // completed, not cancelled, exactly like `Executable::run`'s model).
-        auto invoke_body = [&]() -> decltype(auto)
+        auto call_body = [&]() -> decltype(auto)
         {
             if constexpr (Takes_token)
                 return fn(detail::mode_ref<Modes>(std::get<I>(instances))..., token);
             else
                 return fn(detail::mode_ref<Modes>(std::get<I>(instances))...);
         };
-        if constexpr (std::is_same_v<decltype(invoke_body()), Task<void>>)
+        if constexpr (std::is_same_v<decltype(call_body()), Task<void>>)
         {
             // A coroutine node body (docs/coroutine-first.md §4.4): the returned frame's
             // task gates the node's completion via the nested mechanism - the node
             // completes (releasing grants and successors) when the frame completes, not
             // at the first suspension. The frame inherits the node's grant snapshot at
             // creation, so resumed segments keep the declared accesses.
-            detail::add_nested(detail::core_of(invoke_body()));
+            detail::add_nested(detail::core_of(detail::invoke_user_body(call_body)));
         }
         else
         {
-            invoke_body();
+            detail::invoke_user_body(call_body);
         }
     };
 }

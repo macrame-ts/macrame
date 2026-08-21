@@ -1276,10 +1276,11 @@ work from stealing *unrelated* tasks (a subtle TLS/locality bug). Our
 never-block-in-a-task rule (`co_await` suspends and frees the worker rather than
 stealing) is a stronger *static* version — nothing to add.
 
-#### 5.5 `co_awaitTry` / `Try<T>` result channel — N/A (exceptions disabled)
+#### 5.5 `co_awaitTry` / `Try<T>` result channel — N/A (the library does not use exceptions)
 
 folly `co_awaitTry`, Cobalt `gather` capture completion as a value-or-error object
-instead of throwing. Exceptions are disabled project-wide; our error model is
+instead of throwing. macrame never throws and never carries an exception across a
+task boundary (an escaping one is fatal at the seam); our error model is
 `ts::fatal` + cancellation-as-completion-state, so the throwing/`Try` machinery has
 no analogue. The *pattern* that maps is a fan-out returning each child's
 completion state (completed vs cancelled) without one child's cancellation forcing

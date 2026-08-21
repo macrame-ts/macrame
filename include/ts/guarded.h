@@ -287,16 +287,16 @@ void Access_op<T, Body>::State::run(const detail::Task_ptr& c)
         if constexpr (std::is_void_v<result_type>)
         {
             if constexpr (takes_token)
-                self->body()(*self->inst, c->token);
+                detail::invoke_user_body(self->body(), *self->inst, c->token);
             else
-                self->body()(*self->inst);
+                detail::invoke_user_body(self->body(), *self->inst);
         }
         else
         {
             if constexpr (takes_token)
-                self->storage.result.emplace(self->body()(*self->inst, c->token));
+                self->storage.result.emplace(detail::invoke_user_body(self->body(), *self->inst, c->token));
             else
-                self->storage.result.emplace(self->body()(*self->inst));
+                self->storage.result.emplace(detail::invoke_user_body(self->body(), *self->inst));
             c->result_ptr = &*self->storage.result;
         }
     }

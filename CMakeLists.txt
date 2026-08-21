@@ -10,7 +10,8 @@
 #                          (<windows.h> death tests). Not shipped.
 #   - ts_tsan            : the portable ThreadSanitizer stress driver (non-Windows), links
 #                          macrame; mirrors tsan/run.sh.
-# Exceptions are disabled project-wide (ts::fatal instead); see CLAUDE.md.
+# macrame neither throws nor catches (ts::fatal instead), so it builds with or without
+# exception support; MACRAME_NO_EXCEPTIONS below picks. See CLAUDE.md.
 
 cmake_minimum_required(VERSION 3.25)
 project(macrame VERSION 0.1.0 LANGUAGES CXX)
@@ -89,25 +90,37 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     set(CMAKE_CXX23_EXTENSION_COMPILE_OPTION "-std:c++latest")
 endif()
 
-# Exceptions off: strip CMake's default /EHsc (MSVC/clang-cl); Linux uses -fno-exceptions below.
-string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+# Exceptions are the consumer's choice. macrame contains no throw, try or catch: failures go
+# to ts::fatal, and an exception escaping a user body is fatal at the seam that invokes it
+# (detail::invoke_user_body). The library is therefore correct either way, and by default it is
+# built with whatever exception support the toolchain defaults to, so a consumer's own
+# translation units are free to use exceptions.
+#
+# MACRAME_NO_EXCEPTIONS builds it exceptions-off instead, for a program that is exceptions-off
+# throughout. That is not a private choice on MSVC: _HAS_EXCEPTIONS=0 rewrites STL
+# declarations, so every TU in the program must agree - hence the definition (and, where a
+# flag can express it, the flag) becomes a PUBLIC usage requirement, and the access.h tripwire
+# turns a mixed link into a link error. On cl the /EHsc removal itself cannot be expressed as
+# a target property; it is applied at directory scope here, and a consumer building
+# exceptions-off strips it the same way.
+option(MACRAME_NO_EXCEPTIONS "Build with exceptions disabled (a whole-program requirement)" OFF)
+
+if(MACRAME_NO_EXCEPTIONS)
+    string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+endif()
 
 # Common private build flags for our own targets (not propagated to consumers).
 function(macrame_private_flags target)
     if(WIN32)
         if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-            # ConformanceMode + no /EH flag (an explicit /EHs-c- makes cl's <type_traits>
-            # mis-specialize invoke_result for the sample lambdas).
-            target_compile_options(${target} PRIVATE /permissive- /Zc:__cplusplus)
-        else()
-            target_compile_options(${target} PRIVATE /EHs-c-)   # clang-cl: exceptions off
+            target_compile_options(${target} PRIVATE /permissive- /Zc:__cplusplus)   # ConformanceMode
         endif()
         # Debug info even in Release so std::stacktrace / MiniDumpWriteDump resolve symbols;
         # /OPT:REF,ICF restores the Release folding that /DEBUG disables (optimized codegen kept).
         target_compile_options(${target} PRIVATE /Zi)
         target_link_options(${target} PRIVATE /DEBUG /OPT:REF /OPT:ICF)
     else()
-        target_compile_options(${target} PRIVATE -fno-exceptions -pthread)
+        target_compile_options(${target} PRIVATE -pthread)
         target_link_options(${target} PRIVATE -pthread)
     endif()
 endfunction()
@@ -126,13 +139,22 @@ target_compile_features(macrame PUBLIC cxx_std_23)
 
 # Config-consistency (load-bearing): a consumer's own TUs must compile with the SAME values the
 # library was built with, or the layouts diverge (ODR) and the access.h detect_mismatch link
-# tripwire fires. Exceptions are off project-wide, which the MSVC STL bakes into template
-# specializations, so _HAS_EXCEPTIONS=0 is a PUBLIC requirement too. TS_SAFETY_CHECKS / TS_PROFILING
-# are only defined when OFF (their headers default them ON), matching the vcxproj/driver convention.
+# tripwire fires. TS_SAFETY_CHECKS / TS_PROFILING are only defined when OFF (their headers
+# default them ON), matching the vcxproj/driver convention.
 target_compile_definitions(macrame PUBLIC
-    $<$<CXX_COMPILER_ID:MSVC,Clang>:$<$<PLATFORM_ID:Windows>:_HAS_EXCEPTIONS=0>>
     $<$<NOT:$<BOOL:${TS_SAFETY_CHECKS}>>:TS_SAFETY_CHECKS=0>
     $<$<NOT:$<BOOL:${TS_PROFILING}>>:TS_PROFILING=0>)
+
+# The exceptions-off build's usage requirements: _HAS_EXCEPTIONS=0 is what the MSVC STL bakes
+# into its declarations, so it has to reach the consumer; the flag half is expressible for
+# clang-cl and for Linux, not for cl (see MACRAME_NO_EXCEPTIONS above).
+if(MACRAME_NO_EXCEPTIONS)
+    target_compile_definitions(macrame PUBLIC
+        $<$<CXX_COMPILER_ID:MSVC,Clang>:$<$<PLATFORM_ID:Windows>:_HAS_EXCEPTIONS=0>>)
+    target_compile_options(macrame PUBLIC
+        $<$<AND:$<PLATFORM_ID:Windows>,$<CXX_COMPILER_ID:Clang>>:/EHs-c->
+        $<$<NOT:$<PLATFORM_ID:Windows>>:-fno-exceptions>)
+endif()
 
 macrame_private_flags(macrame)
 

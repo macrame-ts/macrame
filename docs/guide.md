@@ -1199,7 +1199,7 @@ coroutine's access grants and task identity, whatever thread it resumes on.
 
 Cancellation stays value-based: a cancelled awaited `Task<void>` just
 resumes; check `is_cancelled()` or poll a token between awaits — there is no
-exception to catch (exceptions are off project-wide).
+exception to catch (§10.5).
 
 ### 8.2 Awaitable access guards
 
@@ -1563,6 +1563,52 @@ inline would run every parked task — however many accumulated — on the frame
 loop's own thread before `open()` returned. The flip side is that "`open()`
 returned" does not mean "the waiters ran", which is the right semantics for a
 phase signal.
+
+### 10.5 Exceptions
+
+macrame contains no `throw`, `try` or `catch`. Failures are `ts::fatal` (message,
+stack trace, abort), cancellation is value-based, and results come back through
+`sync()` / `co_await` rather than out of a throw. Whether *your* code uses
+exceptions is your choice: the library builds and links either way, and nothing
+in its interface asks you to turn them off.
+
+One rule makes that work — **an exception must not leave a body**:
+
+```cpp
+world.async([](World& w)
+{
+    try { load_from_disk(w); }
+    catch (const std::exception& e) { log(e.what()); }   // handled here, not thrown out
+});
+```
+
+A body returns into the library's own frames — a worker's dispatch loop, a pipe
+release, a coroutine resume — which hold grants, lock counts and refcounts, and
+which may be compiled with no exception support at all. So a body that lets one
+escape is fatal, on every path that runs one: `ts::launch`, `access` / `async`,
+a graph node, a `parallel_for` chunk, and a coroutine body (which reports
+through its promise). The report names the running task and, for anything
+deriving from `std::exception`, its `what()`:
+
+```
+FATAL: task 'physics' let an exception escape its body: asset missing - macrame
+does not carry an exception across a task boundary: ...
+```
+
+Those two are what locate the throw, because a handler runs *after* unwinding —
+the stack trace below the message starts at the library's seam, not at the
+`throw`. Give a task a name (`add_node("physics", ...)`,
+`ts::launch(fn, {.name = "stream"})`) and the report points straight at it; an
+unnamed one falls back to the call site that created it. Use exceptions freely
+*inside* a body; handle them before returning.
+
+To build the library itself with exceptions disabled — a program that is
+exceptions-off throughout — configure `-DMACRAME_NO_EXCEPTIONS=ON`. That is a
+whole-program setting, not a private one: MSVC's `_HAS_EXCEPTIONS=0` rewrites
+standard-library declarations, so the option exports it (and the compiler flag,
+where a flag can express it) as a usage requirement, and a link that mixes the
+two settings fails with a `_HAS_EXCEPTIONS` mismatch instead of corrupting
+quietly.
 
 ---
 

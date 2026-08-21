@@ -209,7 +209,7 @@ The concurrency behaviour is checked several ways:
 
 ## Requirements & building
 
-C++23, no external dependencies, exceptions disabled project-wide (failures are fatal-by-design — see the docs). Compilers: MSVC and clang-cl on Windows; clang on Linux.
+C++23, no external dependencies. Failures are fatal-by-design — see the docs. Compilers: MSVC and clang-cl on Windows; clang on Linux.
 
 - **Visual Studio 2022+**: open `macrame.slnx` (x64).
 - **CMake**: presets for `windows-msvc`, `windows-clang-cl`, `windows-shipping`, `linux-clang`, and `linux-tsan` (the ThreadSanitizer stress driver).

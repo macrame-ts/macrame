@@ -25,9 +25,13 @@ git clone <repo-url> macrame
   `src/*.cpp` — `main.cpp`, `mem_profile.cpp` — belong to the dev driver, not the
   library.
 
-C++23, exceptions disabled. Build your own translation units the same way: the
-library is exceptions-off, and a consumer must match (the config rides on the
-`macrame::macrame` target).
+C++23. The library neither throws nor catches, and it does not ask your code to
+do the same: compile your translation units with exceptions on or off as you
+prefer. The one rule is that an exception must not escape a task body - that is
+fatal (guide §10.5). To build macrame itself without exception support, for a
+program that is exceptions-off throughout, configure
+`-DMACRAME_NO_EXCEPTIONS=ON`; the setting then rides on the `macrame::macrame`
+target, because on MSVC it has to be program-wide.
 
 Include everything through the umbrella header, or the individual headers if you
 prefer:

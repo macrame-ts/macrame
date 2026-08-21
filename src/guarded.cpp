@@ -794,6 +794,23 @@ void report_all_suspensions(char* buffer, std::size_t size, std::size_t& used) n
 }
 #endif
 
+// The body-boundary diagnostic: a user body let an exception escape. Declared in task_block.h,
+// which explains why it is defined out of line here rather than inline there.
+[[noreturn]] void escaped_exception_diagnose(const char* what) noexcept
+{
+    char who[96];
+    char message[512];
+    std::snprintf(message, sizeof message,
+        "task '%s' let an exception escape its body%s%s - macrame does not carry an exception "
+        "across a task boundary: unwinding runs through library frames that hold grants, lock "
+        "counts and refcounts, and that may be compiled with no exception support at all. "
+        "Handle it inside the body",
+        task_name(current_task.get(), who, sizeof who),
+        what != nullptr ? ": " : "",
+        what != nullptr ? what : "");
+    ts::fatal(message);
+}
+
 } // namespace detail
 } // namespace ts
 

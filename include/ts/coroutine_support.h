@@ -456,9 +456,27 @@ struct Promise_base : Task_control_block
 
     Final_awaiter final_suspend() noexcept { return {}; }
 
+    // The coroutine arm of the body boundary the functor seams enforce
+    // (`detail::invoke_user_body`), reported the same way. A promise must declare this
+    // whatever the build's exception support is; with none, nothing can reach it.
     void unhandled_exception()
     {
-        ts::fatal("coroutine body escaped an exception (exceptions are disabled project-wide)");
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+        try
+        {
+            throw;   // re-raise, to read the exception's own text where there is one
+        }
+        catch (const std::exception& e)
+        {
+            detail::escaped_exception_diagnose(e.what());
+        }
+        catch (...)
+        {
+            detail::escaped_exception_diagnose(nullptr);
+        }
+#else
+        detail::escaped_exception_diagnose(nullptr);
+#endif
     }
 };
 

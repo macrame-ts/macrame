@@ -28,6 +28,13 @@ inline constexpr bool with_rule_await_under_guard = TS_RULE_ON(TS_RULE_AWAIT_UND
 inline constexpr bool with_rule_access_rank = TS_RULE_ON(TS_RULE_ACCESS_RANK);
 inline constexpr bool with_rule_circular_wait = TS_RULE_ON(TS_RULE_CIRCULAR_WAIT);
 inline constexpr bool with_rule_deadlock_net = TS_RULE_ON(TS_RULE_DEADLOCK_NET);
+// Whether this build can throw at all: the body-boundary fatal has nothing to catch without it,
+// and a test that throws does not compile.
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+inline constexpr bool with_exceptions = true;
+#else
+inline constexpr bool with_exceptions = false;
+#endif
 
 // Records a check. On failure: prints location + the call stack and marks the
 // current test failed, but does not abort (tests are the one place failures are

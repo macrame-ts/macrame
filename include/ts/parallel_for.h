@@ -127,8 +127,11 @@ void run_loop(Parallel_state<Body>* st)
         int stop = start + g;
         if (stop > st->n)
             stop = st->n;
-        for (int i = start; i < stop; ++i)
-            st->body(i);
+        invoke_user_body([&]
+        {
+            for (int i = start; i < stop; ++i)
+                st->body(i);
+        });
         // acq_rel forms a release sequence over `done`, so the executor that reaches `n`
         // (and the waiter it wakes) sees every executor's body writes.
         if (st->done.fetch_add(stop - start, std::memory_order_acq_rel) + (stop - start) == st->n)
@@ -200,8 +203,11 @@ void run_loop(Colored_state<Body>* st)
         if (!st->phase_next.compare_exchange_weak(cur, (std::uint64_t(ph) << 32) | std::uint64_t(stop),
                 std::memory_order_acq_rel, std::memory_order_acquire))
             continue;   // cur reloaded by the failed CAS
-        for (int i = idx; i < stop; ++i)
-            st->body(band[i]);
+        invoke_user_body([&]
+        {
+            for (int i = idx; i < stop; ++i)
+                st->body(band[i]);
+        });
         // acq_rel: the last finisher acquires every sibling's body writes here, and its
         // release-store of the new phase below publishes them to the next band's claimers.
         if (st->band_done.fetch_add(stop - idx, std::memory_order_acq_rel) + (stop - idx) == band_size)
