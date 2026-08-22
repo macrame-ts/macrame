@@ -354,12 +354,12 @@ Physics_stats run_physics_frames(int frames)
         {
             w.create_body(player_body, { 0.0f, 5.0f, 0.0f }, {});
         });
-        player.access([player_body](Player& p) { p.set_body(player_body); });
+        player.access([player_body](Player& p) { p.set_body(player_body); }).sync();
         spawns.access([](Spawn_queue& q)
         {
             for (int i = 0; i < 8; ++i)
                 q.request({ static_cast<float>(i) - 4.0f, 6.0f, 1.0f });
-        });
+        }).sync();
     }
 
     ts::Static_task_graph g;

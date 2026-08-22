@@ -712,6 +712,7 @@ public:
     // the handle, store a `Task<R>` - use `async`.
     template<typename Fn>
         requires detail::Read_write_accessor<Fn, T>
+    [[nodiscard("the attended verb: consume the op (co_await, .sync(), try_take()). To not wait, use async")]]
     auto access(Fn&& fn, Access_options opts = {},
                 std::source_location site = std::source_location::current())
         -> Access_op<T, std::decay_t<Fn>>
@@ -723,6 +724,7 @@ public:
     // access, read_only.
     template<typename Fn>
         requires detail::Read_only_accessor<Fn, T>
+    [[nodiscard("the attended verb: consume the op (co_await, .sync(), try_take()). To not wait, use async")]]
     auto access(Fn&& fn, Access_options opts = {},
                 std::source_location site = std::source_location::current()) const
         -> Access_op<T, std::decay_t<Fn>>

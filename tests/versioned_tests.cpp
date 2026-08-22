@@ -467,9 +467,11 @@ void test_read_orders_behind_queued_publish()
     TS_CHECK(op.take() == 9);   // the read saw the swapped-in version
 }
 
-// Copy-out-and-discard is correct by construction: the discarded op temporary's destructor
-// waits out the settle, so `out` is valid on the next statement (the old detached read
-// raced exactly this).
+
+// Copy-out into a caller local: `.sync()` makes the wait explicit, so `out` is valid on the
+// next statement (the old detached read raced exactly this). The destructor would also wait
+// on a `(void)`-discarded op - `[[nodiscard]]` marks that as probably-unintended rather than
+// illegal - but that contract has its own test, "op: dtor waits out unsettled".
 void test_read_discarded_copy_out()
 {
     ts::Versioned<int> v{ ts::Named{} };
@@ -477,7 +479,7 @@ void test_read_discarded_copy_out()
     rec.stage([](int& x) { x = 31; });
     v.publish().sync();
     int out = 0;
-    v.read([&out](const int& x) { out = x; });
+    v.read([&out](const int& x) { out = x; }).sync();
     TS_CHECK(out == 31);
 }
 

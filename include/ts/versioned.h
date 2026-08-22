@@ -182,6 +182,7 @@ public:
     // `v.state().async(fn)`.
     template<typename Fn>
         requires detail::Read_only_accessor<Fn, T>
+    [[nodiscard("the attended verb: consume the op (co_await, .sync(), try_take()). To not wait, use v.state().async(fn)")]]
     auto read(Fn&& fn, Access_options opts = {},
               std::source_location site = std::source_location::current()) const
     {
