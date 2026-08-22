@@ -102,6 +102,13 @@ void test_epoch_read_era_and_null()
     TS_CHECK(ctx.check(&x, Access::read_only) == Grant::stale);
     TS_CHECK(ctx.check(&z, Access::read_write) == Grant::granted);  // null source: never stale
 }
+#else
+// The epoch pair these exercise is compiled out with the harness, so the bodies cannot exist
+// here. They stay declared so `run_if` can name them and report a visible skip - a test that
+// vanishes with an `#if` around its registration is how the Shipping suite once accumulated
+// failures unnoticed (harness.h).
+void test_epoch_staleness() {}
+void test_epoch_read_era_and_null() {}
 #endif
 
 #if TS_SAFETY_CHECKS
@@ -152,6 +159,11 @@ void test_ensure_handler_hook()
     TS_CHECK(ts::ensure_failure_count() == base + 1);
     ts::test::consume_ensure_failures(1);
 }
+#else
+// `Expected_ensures` and the failure counter are harness-only, so these bodies cannot exist
+// here either; declared for the same reason as the pair above.
+void test_ensure_facility() {}
+void test_ensure_handler_hook() {}
 #endif
 
 void inert_ensure_handler(const char*) noexcept
@@ -211,12 +223,11 @@ void run_access_tests()
     run("grants logic", test_grants);
     run("scope nesting", test_scope_nesting);
     run("harness allows declared access", test_harness_allows);
-#if TS_SAFETY_CHECKS
-    run("epoch staleness verdicts", test_epoch_staleness);
-    run("epoch read era + null source", test_epoch_read_era_and_null);
-    run("ensure facility (once-per-site)", test_ensure_facility);
-    run("ensure handler hook", test_ensure_handler_hook);
-#endif
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "epoch staleness verdicts", test_epoch_staleness);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "epoch read era + null source",
+           test_epoch_read_era_and_null);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "ensure facility (once-per-site)", test_ensure_facility);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "ensure handler hook", test_ensure_handler_hook);
     run("ensure hook declared in every config", test_ensure_hook_available_in_every_config);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: no context", test_death_no_context);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: read-only context + write", test_death_ro_write);
