@@ -173,14 +173,22 @@ constexpr bool rule_compiled_in(Rule rule) noexcept
     return any(rule & static_cast<Rule>(TS_RULES_EFFECTIVE));
 }
 
-// Keeps a thread-local access out of the caller's frame. A coroutine frame holding a scope
-// guard across a suspension invites the compiler to resolve the thread-local's block address
-// once and reuse it after the resume - which is the address on the thread that suspended,
-// not the one that resumed. MSVC (19.51) does this: it spills the block pointer into the
-// coroutine frame at `Relaxed_scope`'s constructor and reloads it for every later access,
-// so the resumed body reads the suspending thread's relaxation. Out of line, the block is
-// resolved where the access happens. Regression test: "rules relaxed scope reads the
-// resuming thread" in tests/rules_tests.cpp.
+// Marks the thread-local accessors below. A coroutine frame holding a scope guard across a
+// suspension invites the compiler to resolve a thread-local's block address once and reuse it
+// after the resume - which is the address on the thread that suspended, not the one that
+// resumed. MSVC (19.51) does this: it spills the block pointer into the coroutine frame and
+// reloads it for every later access, so the resumed body reads the suspending thread's
+// relaxation. Out of line, the block is resolved where the access happens.
+//
+// The bug class is cross-compiler and its upstream fix is incomplete: LLVM #47179 (2020,
+// "[coroutines] Compiler incorrectly caches thread_local address across suspend-points") was
+// refiled as #63022 (2023) because the first fix did not cover every scenario, and D92661
+// ("[RFC] Fix TLS and Coroutine") is the standing proposal. clang-cl 22 and clang 21 recompute
+// the address in the scenario the regression test exercises, which is not immunity. The hazard
+// also is not limited to `thread_local`: anything thread-identifying can be cached the same
+// way (clang has the sibling case for `pthread_self()`, and LLVM #72006 is the general form of
+// a frame reused as scratch across a suspension). Regression test: "rules relaxed scope reads
+// the resuming thread" in tests/rules_tests.cpp.
 #if defined(_MSC_VER) && !defined(__clang__)
 #define TS_DETAIL_NO_INLINE __declspec(noinline)
 #else
@@ -193,15 +201,32 @@ namespace detail
 #if TS_RULES_ANY
 // Rules relaxed for the running scope. Thread-local, but carried with the ambient task state
 // rather than with the thread: a coroutine's segments re-install it (`Relaxed_carrier`),
-// exactly as grants propagate.
+// exactly as grants propagate. Reached only through `relaxed_load`/`relaxed_store`.
 inline thread_local unsigned relaxed_rules = 0;
 // Process-wide baseline, or-ed into every lookup ("the rules as advice" setting).
 inline std::atomic<unsigned> default_relaxed_rules_bits{ 0 };
 
-// The whole lookup, scope bits or process baseline, read on the thread that asks.
-TS_DETAIL_NO_INLINE inline unsigned relaxed_bits() noexcept
+// The only two ways to touch `relaxed_rules`. Both are out of line, so the block address is
+// resolved at the access and can never be kept in a caller's coroutine frame across a
+// suspension: the property holds for every toucher instead of being re-argued at each one.
+// Both pass the value - an `unsigned&` accessor would hand the same caching hazard back to
+// the caller. This is the shape Rust gives thread-locals by construction (`thread_local!`
+// plus a scoped `.with()`, with no way to obtain a raw reference); here the pair of value
+// accessors is the equivalent.
+TS_DETAIL_NO_INLINE inline unsigned relaxed_load() noexcept
 {
-    return relaxed_rules | default_relaxed_rules_bits.load(std::memory_order_relaxed);
+    return relaxed_rules;
+}
+
+TS_DETAIL_NO_INLINE inline void relaxed_store(unsigned bits) noexcept
+{
+    relaxed_rules = bits;
+}
+
+// The whole lookup, scope bits or process baseline, read on the thread that asks.
+inline unsigned relaxed_bits() noexcept
+{
+    return relaxed_load() | default_relaxed_rules_bits.load(std::memory_order_relaxed);
 }
 #endif
 
@@ -272,24 +297,24 @@ private:
 #endif
 };
 
-// The guard is what lives across a suspension, so its thread-local access is the one the
-// compiler is most tempted to keep in the frame (see `TS_DETAIL_NO_INLINE`). Both ends stay
-// out of line, which a scope entry can afford: it marks a claim, it is not a hot path.
-TS_DETAIL_NO_INLINE inline Relaxed_scope::Relaxed_scope(Rule rules) noexcept
+// The guard is what lives across a suspension, so its access is the one the compiler is most
+// tempted to keep in the frame. Going through the accessors keeps the block address out of
+// the frame however this constructor is inlined.
+inline Relaxed_scope::Relaxed_scope(Rule rules) noexcept
 {
     TS_ENSURE(!any(rules & ~Rule::advisory),
         "ts::Relaxed_scope: only advisory rules can be relaxed at runtime; a structural "
         "rule is compile-out-only (TS_ENABLED_RULES) and the quiescence net is global");
 #if TS_RULES_ANY
-    prev_ = detail::relaxed_rules;
-    detail::relaxed_rules = prev_ | static_cast<unsigned>(rules & Rule::advisory);
+    prev_ = detail::relaxed_load();
+    detail::relaxed_store(prev_ | static_cast<unsigned>(rules & Rule::advisory));
 #endif
 }
 
-TS_DETAIL_NO_INLINE inline Relaxed_scope::~Relaxed_scope()
+inline Relaxed_scope::~Relaxed_scope()
 {
 #if TS_RULES_ANY
-    detail::relaxed_rules = prev_;
+    detail::relaxed_store(prev_);
 #endif
 }
 
@@ -304,19 +329,19 @@ namespace detail
 struct Relaxed_carrier
 {
 #if TS_RULES_ANY
-    unsigned bits = relaxed_rules;   // the creator's relaxation
+    unsigned bits = relaxed_load();   // the creator's relaxation
     unsigned prev = 0;
 
     void enter() noexcept
     {
-        prev = relaxed_rules;
-        relaxed_rules = bits;
+        prev = relaxed_load();
+        relaxed_store(bits);
     }
 
     void exit() noexcept
     {
-        bits = relaxed_rules;
-        relaxed_rules = prev;
+        bits = relaxed_load();
+        relaxed_store(prev);
     }
 #else
     void enter() noexcept {}
@@ -328,7 +353,7 @@ struct Relaxed_carrier
 inline unsigned snapshot_relaxed() noexcept
 {
 #if TS_RULES_ANY
-    return relaxed_rules;
+    return relaxed_load();
 #else
     return 0;
 #endif
@@ -349,8 +374,8 @@ public:
     explicit Inherited_relaxed_scope(unsigned bits) noexcept
     {
 #if TS_RULES_ANY
-        prev_ = relaxed_rules;
-        relaxed_rules = bits;
+        prev_ = relaxed_load();
+        relaxed_store(bits);
 #else
         (void)bits;
 #endif
@@ -359,7 +384,7 @@ public:
     ~Inherited_relaxed_scope()
     {
 #if TS_RULES_ANY
-        relaxed_rules = prev_;
+        relaxed_store(prev_);
 #endif
     }
 

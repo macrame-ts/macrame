@@ -108,7 +108,7 @@ Coroutine carriage is the whole of the reach, and it is the case that matters: a
 `Relaxed_scope` is a claim about *this* logical task, and a frame stays one logical task
 across its segments even as it migrates between workers.
 
-### 4.1 The lookup is out of line on purpose
+### 4.1 The accessor pair that reaches the thread-local
 
 Carriage puts the right bits in the resuming thread's `detail::relaxed_rules`. Reading them
 back is a separate problem. A coroutine frame that holds a `Relaxed_scope` across a
@@ -119,15 +119,38 @@ block pointer at the guard's constructor and reloads it after the resume, so the
 the relaxation belonging to the thread that suspended. The carriage is not at fault there —
 the value is installed correctly and read from the wrong place.
 
-Both ends of the access are therefore kept out of line (`TS_DETAIL_NO_INLINE` in `rules.h`):
-`Relaxed_scope`'s constructor and destructor, so the address never enters the frame, and
-`detail::relaxed_bits()`, so a lookup resolves the block where it is read. clang-cl 22
-recomputes the address either way. The regression test is "rules relaxed scope reads the
-resuming thread" in `tests/rules_tests.cpp`: after a cross-thread resume it compares an
-inlined read of `relaxed_rules` against an out-of-line read of the same variable, and the two
-disagreeing is the signature of a cached block. It was found in an exceptions-enabled build,
-where the codegen differs enough to trigger the spill; the exceptions-off build compiles the
-same source without it, so this is a hazard the configuration masks rather than one it lacks.
+This is a known cross-compiler bug class with an incomplete upstream fix, not an MSVC quirk.
+LLVM #47179 (2020), "[coroutines] Compiler incorrectly caches thread_local address across
+suspend-points", was fixed and then refiled as #63022 (2023) under the same title with "in
+some scenarios" appended, because the fix did not cover everything; it is still open, and
+D92661 ("[RFC] Fix TLS and Coroutine") is the standing proposal. MSVC has its own
+Developer Community report ("Incorrect optimization: thread-local variables cached across
+coroutine ..."). clang-cl 22 and clang 21 recompute the address in the scenario the
+regression test exercises — that is what was measured, and it is not immunity. The hazard is
+also broader than `thread_local`: anything thread-identifying can be cached the same way
+(clang has the sibling case for `pthread_self()`, and LLVM #72006, "clang incorrectly uses
+coroutine frame for scratch space after suspending", is the general form).
+
+The defence is therefore structural rather than per site. `detail::relaxed_rules` is reached
+only through two accessors, `detail::relaxed_load()` and `detail::relaxed_store(unsigned)`,
+both `TS_DETAIL_NO_INLINE` (`rules.h`): the block address is resolved inside the accessor, at
+the access, so it can never be kept in a caller's frame no matter how that caller is inlined.
+Every toucher goes through them — the lookup `detail::relaxed_bits()`, `Relaxed_scope`'s
+constructor and destructor, the promise's `detail::Relaxed_carrier`, `detail::snapshot_relaxed`
+and `detail::Inherited_relaxed_scope` — so none of them needs a `TS_DETAIL_NO_INLINE` of its
+own, and a new toucher inherits the property instead of having to re-derive the argument for
+why its shape is safe. Both accessors pass the value: an `unsigned&` accessor would hand the
+same caching hazard back to the caller one level up. It is the shape Rust gives thread-locals
+by construction — `thread_local!` plus a scoped `.with()`, with no way to obtain a raw
+reference.
+
+The regression test is "rules relaxed scope reads the resuming thread" in
+`tests/rules_tests.cpp`: after a cross-thread resume it compares an inlined read of
+`relaxed_rules` against an out-of-line read of the same variable, and the two disagreeing is
+the signature of a cached block. Making the accessors inlinable makes it fail again, which is
+what keeps the test honest. It was found in an exceptions-enabled build, where the codegen
+differs enough to trigger the spill; the exceptions-off build compiles the same source without
+it, so this is a hazard the configuration masks rather than one it lacks.
 
 A guard holding a thread-local across a suspension is the shape that triggers this.
 `Access_guard` is the only other guard with it, and it cannot span a `co_await` at all
