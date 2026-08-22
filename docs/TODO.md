@@ -683,8 +683,8 @@ IDs — when an item is done, mark it, don't renumber.
       is one line and is exactly what `Frame_gate::open()` does for the same reason. **Action:
       document (a) + the hop as the sanctioned idiom in the guide; revisit (b) only alongside
       the platform layer (3.6), which is where the waiting threads would live.**
-   7. `[x]` **DONE (2026-08) — per-frame gate.** `ts::Frame_gate` (`frame_gate.h`, not in the
-      umbrella — include it): `co_await gate.next()` parks a task until the frame loop's next
+   7. `[x]` **DONE (2026-08) — per-frame gate.** `ts::Frame_gate` (`frame_gate.h`; in the
+      umbrella since 2026-08-22): `co_await gate.next()` parks a task until the frame loop's next
       `open()`. Shipped as a type rather than a documented `Signal::reset` idiom because the
       hand-rolled version has two real hazards: a missed-wakeup window (a task reading the
       signal just before a boundary can attach to a gate about to be re-armed) and

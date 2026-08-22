@@ -298,18 +298,21 @@ public:
             [method](void* p, const E& e) { (static_cast<O*>(p)->*method)(e); });
     }
 
-    // The per-domain delivery point, as a node body: run it as a graph node
-    // declaring write on `state()` (or through a write access from the frame
-    // loop). Applies the staged batch (`commit()` under the held grant takes
-    // the inline arm), dispatches every handler, clears the lanes.
-    auto dispatch_fn()
+    // The per-domain delivery point, as a node body: applies the staged batch
+    // (`commit()` under the held grant takes the inline arm), dispatches every
+    // handler, clears the lanes. A named type rather than a lambda so a user can
+    // store the body - `ts::Event_bus::Dispatch_fn dispatch_ = bus.dispatch_fn();`
+    // - the same spelling `ts::publish_fn` gives with `Publish_fn<T>`.
+    struct Dispatch_fn
     {
-        return [this](Board& board)
-        {
-            (void)staged_.commit();
-            board.dispatch_all();
-        };
-    }
+        Event_bus* bus;
+
+        void operator()(Board& board) const;
+    };
+
+    // Run it as a graph node declaring write on `state()`, or through a write
+    // access from the frame loop.
+    Dispatch_fn dispatch_fn() { return Dispatch_fn{ this }; }
 
     Guarded<Board>& state() { return board_; }
 
@@ -338,5 +341,11 @@ private:
     Parallel_recorder<Board> publisher_;
     std::atomic<std::uint64_t> next_id_{ 1 };
 };
+
+inline void Event_bus::Dispatch_fn::operator()(Board& board) const
+{
+    (void)bus->staged_.commit();   // holds the grant: applies inline, no handle to await
+    board.dispatch_all();
+}
 
 } // namespace ts

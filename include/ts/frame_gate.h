@@ -54,6 +54,7 @@ public:
     // to resume at the next frame boundary. Capturing the handle and awaiting it later is
     // fine - it names one specific frame's gate, so a boundary crossed in between releases it
     // rather than being missed.
+    [[nodiscard("the gate handle is the wait: co_await it, or nothing parks until the boundary")]]
     Task<void> next()
     {
         std::scoped_lock lock(mutex_);

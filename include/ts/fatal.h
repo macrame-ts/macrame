@@ -15,6 +15,22 @@ namespace ts
 // project is built with exceptions disabled).
 [[noreturn]] void fatal(const char* message) noexcept;
 
+// Presentation hook (`std::set_terminate` shape): a host application may
+// replace how a `TS_ENSURE` failure is reported - e.g. its own attach-a-debugger
+// dialog. Returns the previous handler. The failure counter and the
+// once-per-site filtering are not the handler's concern; it only presents.
+// Declared in every configuration so a host that installs a handler compiles
+// unchanged with the checks off, where the setter is inert and returns null.
+using Ensure_handler = void(*)(const char* message) noexcept;
+Ensure_handler set_ensure_handler(Ensure_handler handler) noexcept;
+
+// Total `TS_ENSURE` failures since process start - every occurrence, not just
+// the reported-once ones (relaxed; diagnostic). The test harness fails on
+// failures no test consumed; the bench/stress drivers fail their exit code on
+// any, so a tripped ensure cannot pass CI behind a surviving process. Always 0
+// when the checks are compiled out, since no ensure can fire.
+long long ensure_failure_count() noexcept;
+
 #if TS_SAFETY_CHECKS
 
 // `TS_ENSURE(expr, message)` - the recoverable assert, UE-`ensure`-shaped.
@@ -28,19 +44,6 @@ namespace ts
 // into the debugger when one is attached. For hazards that deserve a loud
 // diagnostic but are not certain corruption (e.g. a blocking `sync()` inside
 // an access scope). With `TS_SAFETY_CHECKS` 0 the macro is just the expression.
-
-// Presentation hook (`std::set_terminate` shape): a host application may
-// replace how a failure is reported - e.g. its own attach-a-debugger dialog.
-// Returns the previous handler. The failure counter and the once-per-site
-// filtering are not the handler's concern; it only presents.
-using Ensure_handler = void(*)(const char* message) noexcept;
-Ensure_handler set_ensure_handler(Ensure_handler handler) noexcept;
-
-// Total `TS_ENSURE` failures since process start - every occurrence, not just
-// the reported-once ones (relaxed; diagnostic). The test harness fails on
-// failures no test consumed; the bench/stress drivers fail their exit code on
-// any, so a tripped ensure cannot pass CI behind a surviving process.
-long long ensure_failure_count() noexcept;
 
 namespace detail
 {

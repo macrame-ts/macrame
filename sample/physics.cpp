@@ -426,7 +426,7 @@ Physics_stats run_physics_frames(int frames)
     auto sim = g.add_node(ts::Named{},
         [&world_in, out = poses.recorder()](Physics_world& w) mutable
         {
-            world_in.commit();
+            (void)world_in.commit();   // inline under the held grant: pre-settled handle
             w.step(dt);
             out.stage([batch = w.extract_poses()](Pose_snapshot& s) { s.apply(batch); });
         },

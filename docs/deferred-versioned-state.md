@@ -46,7 +46,8 @@ summary + the forward plan.
 
 | file | contents |
 |---|---|
-| `journal.h` | `detail::Journal<T>` (slots, cut, free-list, `max_slots`), `Recorder<T>`, `Parallel_recorder<T>`, THE ORDERING CONTRACT comment |
+| `detail/journal.h` | `detail::Journal<T>` (slots, cut, free-list, `max_slots`), the ordering contract comment |
+| `recorder.h` | `Recorder<T>`, `Parallel_recorder<T>` - the public producer handles (moved out of `detail/journal.h` 2026-08-22) |
 | `deferred.h` | `Deferred<T>`: `recorder()`, `parallel_recorder()`, `commit(opts)` (auto-dispatching: inline under the caller's held write grant, else one enqueued write; bound object implicit — see contract 7a), `discard()` |
 | `versioned.h` | `Versioned<T>`: `read()`, `recorder()`, `parallel_recorder()`, `publish(opts)`, `publish_into(T&)`, `state()`, `Resync{replay,copy,overwrite}`, `set_copy`, `set_divergence_check`, `discard()`; `ts::publish_fn(v)` for graph flip nodes |
 | `sample/physics.cpp` | machine/extract decomposition fixture (sealed `Guarded<Physics_world>`, `Deferred` inputs, `Versioned` poses, id reservation, batch extract, parallel drag staging); determinism self-check |

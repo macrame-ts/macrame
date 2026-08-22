@@ -184,6 +184,20 @@ void ensure_failed(const char* message, bool report) noexcept
 
 } // namespace detail
 
+#else // TS_SAFETY_CHECKS
+
+// The hook stays declared with the checks off so a host that installs a handler
+// compiles unchanged; with no ensure able to fire, both verbs are inert.
+Ensure_handler set_ensure_handler(Ensure_handler) noexcept
+{
+    return nullptr;
+}
+
+long long ensure_failure_count() noexcept
+{
+    return 0;
+}
+
 #endif // TS_SAFETY_CHECKS
 
 #if defined(_WIN32)

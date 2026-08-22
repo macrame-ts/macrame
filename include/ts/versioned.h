@@ -3,7 +3,7 @@
 #include "ts/access.h"
 #include "ts/fatal.h"
 #include "ts/guarded.h"
-#include "ts/detail/journal.h"
+#include "ts/recorder.h"
 #include "ts/task.h"
 
 #include <concepts>
@@ -58,11 +58,11 @@ enum class Resync
 // `docs/deferred-versioned-state.md`.)
 //
 // Use (dynamic tasks):
-//   ts::Versioned<Transforms> tf;                    // double-buffered; owns both replicas
+//   ts::Versioned<Transforms> tf{ ts::Named{"transforms"} };  // owns both replicas
 //   ts::Guarded<Transforms>& front = tf.state();     // its front - a Guarded readers access
 //   auto rec = tf.recorder();
 //   rec.stage([b = std::move(out)](Transforms& t){ t.apply(b); });  // stage next version
-//   tf.publish();                                    // fire-and-forget, or await it
+//   co_await tf.publish();                           // or sync() it from a blue thread
 //   co_await tf.read([](const Transforms& t){ render(t); });        // read the current version
 // Composes with `Static_task_graph`: a `ts::publish_fn(tf)` node is the flip; declaring a
 // read on the front before it reads the previous version, after it the fresh one. see
@@ -109,6 +109,25 @@ public:
         chain_ = ready;          // the "previous publish" of the first publish
 #if TS_SAFETY_CHECKS
         last_publish_ = ready;   // the "last" publish's returned gate - done for a fresh instance
+#endif
+    }
+
+    // With a declared lock rank (`ts::Rank`, access.h), forwarded to the front `Guarded`:
+    // required only when the front is dynamically awaited (`co_await ts::read_only(v.state())`)
+    // while another grant is held. Without a rank the `access_rank` rule has no order to check
+    // against and such an await cannot be satisfied - graph declarations and `read()` need none.
+    template<typename N>
+        requires std::same_as<std::remove_cvref_t<N>, Named>
+    explicit Versioned(N&& name, Rank rank, Resync policy = Resync::replay)
+        : front_(name, rank)
+        , policy_(policy)
+        , front_ptr_(detail::Guarded_access::instance(front_))
+    {
+        Signal ready;
+        ready.trigger();
+        chain_ = ready;
+#if TS_SAFETY_CHECKS
+        last_publish_ = ready;
 #endif
     }
 
@@ -201,6 +220,7 @@ public:
     // cancelled `opts.token` skips the step (commands stay staged for the next
     // publish); the returned task still completes - it is a phase gate, not the
     // skipped work itself.
+    [[nodiscard("await or sync the publish: ~Versioned is fatal while the swap is in flight")]]
     Task<void> publish(Access_options opts = {})
     {
         Signal swapped;        // the returned handle: version visible
@@ -429,7 +449,7 @@ private:
 // The publish step as a graph-node body: declare it with write access on
 // `v.state()` - conflict derivation then orders it against every reader, and the
 // node's grant is exactly what `publish_into` needs.
-//   auto flip = g.add_node(ts::publish_fn(poses), poses.state()).after(sim);
+//   auto flip = g.add_node("flip", ts::publish_fn(poses), poses.state()).after(sim);
 template<typename T>
 struct Publish_fn
 {

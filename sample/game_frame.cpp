@@ -488,7 +488,7 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     // `assets`, so the conflict edge to gc (which reads `assets`) orders it before gc; it has no
     // edge to streaming (staging is grant-free), so it commits whatever has arrived - last
     // frame's loads are fine.
-    graph.add_node("asset_commit", [&world](Assets& a) { (void)a; world.assets_stream.commit(); },
+    graph.add_node("asset_commit", [&world](Assets& a) { (void)a; (void)world.assets_stream.commit(); },
         world.assets).priority(ts::Priority::low);
     graph.add_node("gc", &tick_gc, world.assets, world.renderables, world.particles, world.gc);
     auto debug_overlay = graph.add_node("debug_overlay",   // bare generic lambda: modes probed
@@ -633,7 +633,9 @@ ts::Graph_node add_submit(ts::Static_task_graph& graph, World& world, bool opt)
         [&world](const Transforms& prev_xf, Draw_lists& dl)
         {
             read_all(prev_xf);
-            world.draw_staged.commit();
+            // This node holds the write grant, so the commit applies inline and its handle is
+            // a pre-settled sentinel - nothing to await.
+            (void)world.draw_staged.commit();
             drawn.fetch_add(dl.count(), std::memory_order_relaxed);
             parallel_cost(budget::submit);
             dl.clear();
@@ -1314,7 +1316,7 @@ ts::Task<void> gf_gc(World& world, ts::Task<void> streaming, ts::Task<void> part
     // The commit slot: apply the assets staged so far (one write on `assets`), then account
     // live memory. Sequencing the commit before the read is the hand-written analogue of the
     // graph's asset_commit->gc conflict edge.
-    co_await ts::async([&world](Assets& a) { (void)a; world.assets_stream.commit(); }, world.assets);
+    co_await ts::async([&world](Assets& a) { (void)a; (void)world.assets_stream.commit(); }, world.assets);
     co_await ts::async(&tick_gc, world.assets, world.renderables, world.particles, world.gc);
 }
 

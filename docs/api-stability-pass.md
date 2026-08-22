@@ -14,6 +14,9 @@ all. Additive changes can trail.
 Section 2 items are ready to implement as described. Section 3 items each carry
 options and a recommendation; reply by number. Section 4 is agreed post-1.0.
 
+**Status: every section 2 item landed on 2026-08-22** (M7 corrected on the way -
+see its row). Section 3 still needs decisions.
+
 ---
 
 ## 1. The four originally-listed inconsistencies
@@ -46,19 +49,19 @@ expanding before implementation.
 
 | # | item | fix |
 |---|---|---|
-| **M3** | `ts::Recorder<T>` / `ts::Parallel_recorder<T>` are public API living in `include/ts/detail/journal.h` (outside `namespace detail`) | move to a new public `include/ts/recorder.h`, include it from `deferred.h`/`versioned.h` so no user include breaks, add to `ts.h`. Source-compatible. |
-| **M4** | `Access_guard`/`Multi_access_guard` have public constructors taking `detail::Pipe&` | make them private, friend the awaiters. `detail::Pipe` then appears in no public signature - which is what the header already does for the awaiter types themselves. |
-| **M5** | `set_ensure_handler` / `ensure_failure_count` are inside `#if TS_SAFETY_CHECKS`, so a host that installs an ensure handler compiles in Debug and **fails to compile in Shipping** | declare both unconditionally; compile no-op definitions when checks are off. Public API shape must not depend on build config. |
-| **M7** | `Task::sync()` is not ref-qualified, so `const R& r = obj.async(fn).sync();` dangles - while the same spelling on `Access_op` is safe (`sync() &&` returns by value) | add the rvalue overload: `sync() &` keeps returning `const R&`, `sync() &&` returns `R` by value. Mirrors `Access_op` exactly. |
-| **M9** | `[[nodiscard]]` is on exactly one function, yet dropping a `Deferred::commit` or `Versioned::publish` handle is a **checked fatal later** in the destructor | mark `commit`, `publish`, `Frame_gate::next`, `async_parallel_for`. Deliberately not `async` - fire-and-forget is sanctioned there. **Corrected 2026-08-22: `access` and `Versioned::read` ARE marked.** The original reasoning ("discarding an `Access_op` is a defined wait") was wrong: the destructor blocks, and its ENSURE fires only when it actually has to wait, so a discard trips a nondeterministic diagnostic. That reddened master and hid two more discard sites in `sample/physics.cpp` until the attribute enumerated them. `access` is the *attended* verb - dropping it is never the intent; `async` is the spelling for not waiting. |
-| **S1** | `Versioned` has no `Rank` constructor, so its front can never satisfy `Rule::access_rank` - a user awaiting it while holding anything has no fix available | add `Versioned(Named, Rank, ...)` forwarding the rank to the front `Guarded`. |
-| **S3** | stale header comments (item 3 above) | fix the enumerated sites. Highest value: `versioned.h`'s documented `add_node` example **does not compile** (missing the leading `Named`); `guarded.h`'s "`{token, priority}`; deliberately no run-inline knob" is false on both halves; `global_scheduler()` is declared twice with each site pointing at the other. Also refresh the corresponding `CLAUDE.md` bullet. |
-| **S4** | `Access_op` has `try_take()` but no `as_optional()`, so the cancellation-tolerant await is missing on the verb most likely to carry a token | add it, completing the `sync`/`take`/`try_take`/`as_optional` vocabulary on both handle types. |
-| **S5** | `Event_bus::dispatch_fn()` returns an unspellable lambda while `ts::publish_fn(v)` returns a nameable `Publish_fn<T>` - so a user cannot store a dispatch body as a member | give it a named return type, mirroring `Publish_fn<T>`. |
-| **S8** | unqualified `uint32_t` / `size_t` in `scheduler.h`'s public aggregate | qualify with `std::`. |
-| **S11** | two code-style violations shipped in headers: padding-space alignment in `parallel_for.h`, and `--` used as a dash in a `static_assert` message in `static_task_graph.h` (the parallel message in `guarded.h` correctly uses `-`) | fix both. |
-| **S12** | `Access_op::take()` fatals on a second consume; `Task::take()` silently returns a moved-from object | add the same checked fatal to `Task::take()`. |
-| **S13** | `ts.h` claims to be "the whole public API" but omits `frame_gate.h` with no in-file explanation; `version.h` is macro-only | add a one-line comment naming the exclusion and why; add `ts::version_major/minor/patch` constants beside the macros. |
+| **M3** DONE | `ts::Recorder<T>` / `ts::Parallel_recorder<T>` are public API living in `include/ts/detail/journal.h` (outside `namespace detail`) | move to a new public `include/ts/recorder.h`, include it from `deferred.h`/`versioned.h` so no user include breaks, add to `ts.h`. Source-compatible. |
+| **M4** DONE | `Access_guard`/`Multi_access_guard` have public constructors taking `detail::Pipe&` | make them private, friend the awaiters. `detail::Pipe` then appears in no public signature - which is what the header already does for the awaiter types themselves. |
+| **M5** DONE | `set_ensure_handler` / `ensure_failure_count` are inside `#if TS_SAFETY_CHECKS`, so a host that installs an ensure handler compiles in Debug and **fails to compile in Shipping** | declare both unconditionally; compile no-op definitions when checks are off. Public API shape must not depend on build config. |
+| **M7** DONE | `Task::sync()` is not ref-qualified, so `const R& r = obj.async(fn).sync();` dangles - while the same spelling on `Access_op` is safe (`sync() &&` returns by value) | **Corrected 2026-08-22: documentation only, no signature change.** The original fix ("mirror `Access_op` exactly") is unsound here. `Access_op::sync() &&` is `return take()` - it *consumes* - which works only because an `Access_op` is single-owner: non-copyable, caller-owned storage, so an rvalue op is provably the last owner. A `Task<R>` is a refcounted handle onto a shared block, and the header promises any number of readers may `sync()` the same task; an rvalue `Task` is therefore not necessarily the last owner, and consuming there would move the result out from under a live copy. The real defect is undocumented: `sync()` returns `const R&` into block-owned storage, so binding it to a temporary handle's result dangles while `auto x = ...sync();` is safe (the copy happens inside the full expression). `Task::sync`'s comment now states the lifetime rule, shows the three spellings, and records why the two handle types differ. |
+| **M9** DONE | `[[nodiscard]]` is on exactly one function, yet dropping a `Deferred::commit` or `Versioned::publish` handle is a **checked fatal later** in the destructor | mark `commit`, `publish`, `Frame_gate::next`, `async_parallel_for`. Deliberately not `async` - fire-and-forget is sanctioned there. **Corrected 2026-08-22: `access` and `Versioned::read` ARE marked.** The original reasoning ("discarding an `Access_op` is a defined wait") was wrong: the destructor blocks, and its ENSURE fires only when it actually has to wait, so a discard trips a nondeterministic diagnostic. That reddened master and hid two more discard sites in `sample/physics.cpp` until the attribute enumerated them. `access` is the *attended* verb - dropping it is never the intent; `async` is the spelling for not waiting. |
+| **S1** DONE | `Versioned` has no `Rank` constructor, so its front can never satisfy `Rule::access_rank` - a user awaiting it while holding anything has no fix available | add `Versioned(Named, Rank, ...)` forwarding the rank to the front `Guarded`. |
+| **S3** DONE | stale header comments (item 3 above) | fix the enumerated sites. Highest value: `versioned.h`'s documented `add_node` example **does not compile** (missing the leading `Named`); `guarded.h`'s "`{token, priority}`; deliberately no run-inline knob" is false on both halves; `global_scheduler()` is declared twice with each site pointing at the other. Also refresh the corresponding `CLAUDE.md` bullet. |
+| **S4** DONE | `Access_op` has `try_take()` but no `as_optional()`, so the cancellation-tolerant await is missing on the verb most likely to carry a token | add it, completing the `sync`/`take`/`try_take`/`as_optional` vocabulary on both handle types. |
+| **S5** DONE | `Event_bus::dispatch_fn()` returns an unspellable lambda while `ts::publish_fn(v)` returns a nameable `Publish_fn<T>` - so a user cannot store a dispatch body as a member | give it a named return type, mirroring `Publish_fn<T>`. |
+| **S8** DONE | unqualified `uint32_t` / `size_t` in `scheduler.h`'s public aggregate | qualify with `std::`. |
+| **S11** DONE | two code-style violations shipped in headers: padding-space alignment in `parallel_for.h`, and `--` used as a dash in a `static_assert` message in `static_task_graph.h` (the parallel message in `guarded.h` correctly uses `-`) | fix both. |
+| **S12** DONE | `Access_op::take()` fatals on a second consume; `Task::take()` silently returns a moved-from object | add the same checked fatal to `Task::take()`. |
+| **S13** DONE | `ts.h` claims to be "the whole public API" but omits `frame_gate.h` with no in-file explanation; `version.h` is macro-only | **Author decision 2026-08-22: include it, do not document the exclusion.** There was no technical reason for it - `frame_gate.h` includes only `ts/task.h` and std headers - so `ts.h` now pulls it in and the umbrella's claim is true again. `version.h` also gained `ts::version_major/minor/patch` and `version_string()` beside the macros. |
 
 **A1 - decided (author, 2026-08-21): keep the uniform rule.** `Guarded`/`Versioned`
 require a spelled `ts::Named`; a bare literal stays a compile error. The audit
@@ -409,12 +412,10 @@ workaround.
 **Tag-gated** (field/overload shape, or visibility): M1, M2, M3, M4, M5, M6, M8,
 S2, S6, S9, S10. These land before `v0.1.0` or not at all.
 
-**Additive but grouped with them:** M7, M9, M10, S1, S4, S5, S7, S12. M7 changes
-the meaning of existing valid code, so it belongs in the same batch even though
-it is technically additive.
+**Additive but grouped with them:** M9, M10, S1, S4, S5, S7, S12. (M7 turned out
+to be a documentation fix - see its row - so it is not tag-gated at all.)
 
 **Free, any time:** S3, S8, S11, S13. (A2 is done.)
 
-Two are worth taking regardless of the rest: **M7** (a silent dangling reference
-in the most-typed spelling in the library) and **M5** (Shipping does not compile
-for a host that uses the ensure hook).
+**M5** is worth taking regardless of the rest: Shipping does not compile for a
+host that uses the ensure hook.

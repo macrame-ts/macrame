@@ -359,7 +359,7 @@ Graph_node Static_task_graph::add_node(Named name, Fn&& fn, Objs&&... objs)
     {
         static_assert((detail::is_access_arg_v<Objs> && ...),
             "add_node: don't mix tagged (ts::as_read_only/as_read_write) and bare Guarded arguments "
-            "-- tag EVERY object argument, or tag none");
+            "- tag EVERY object argument, or tag none");
         fill_node_tagged(node, std::index_sequence_for<Objs...>{},
             std::forward<Fn>(fn), std::forward<Objs>(objs)...);
     }

@@ -30,8 +30,8 @@ enum class Balance
 
 struct Parallel_options
 {
-    int     concurrency = 0;                 // # of parallel executors; 0 -> scheduler width
-    Balance balance     = Balance::guided;
+    int concurrency = 0;   // # of parallel executors; 0 -> scheduler width
+    Balance balance = Balance::guided;
     // Queue priority for the helper submissions. Unset (default) = inherit: helpers dispatch
     // at the calling task's priority (`Priority::normal` outside a task), so a high-priority
     // node's slices don't sink to `normal`. Set (`{.priority = Priority::low}`) to override.
@@ -321,6 +321,8 @@ void parallel_for(int n, Body&& body, Parallel_options opts = {})
 // returned Task's block holds the state). Do not block on it inside a graph node.
 template<typename Body>
     requires std::invocable<Body&, int>
+[[nodiscard("nothing else joins the slices: co_await or sync the returned task "
+            "(the blocking parallel_for joins for you)")]]
 Task<void> async_parallel_for(int n, Body&& body, Parallel_options opts = {})
 {
     if (n <= 0)

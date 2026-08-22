@@ -158,7 +158,7 @@ void test_commit_under_async_write_grant()
     target.async([&d](Counter& c)
     {
         c.add(1);
-        d.commit();
+        (void)d.commit();
         c.add(1);
     }).sync();
 
@@ -203,7 +203,7 @@ void test_commit_in_graph_node()
         ++s;
         rec.stage([](Counter& c) { c.add(10); });
     }, producer_state);
-    auto commit = g.add_node(ts::Named{}, [&d](Counter&) { d.commit(); }, target);
+    auto commit = g.add_node(ts::Named{}, [&d](Counter&) { (void)d.commit(); }, target);
     commit.after(producer);
     g.compile();
 

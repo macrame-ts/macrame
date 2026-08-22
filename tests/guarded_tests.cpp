@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <optional>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -532,6 +533,25 @@ void test_op_try_take()
     TS_CHECK(op.sync() == 5);
 }
 
+// `co_await op.as_optional()` completes the vocabulary `Task` already had: the value on a
+// completed access, empty on a cancelled one instead of the fatal a bare `co_await` raises.
+ts::Task<int> await_op_as_optional(ts::Guarded<int>& d, ts::Cancellation_token token)
+{
+    auto op = d.access([](const int& v) { return v; }, { .token = token });
+    std::optional<int> got = co_await op.as_optional();
+    co_return got.value_or(-1);
+}
+
+void test_op_as_optional()
+{
+    ts::Guarded<int> d{ ts::Named{}, 5 };
+    TS_CHECK(await_op_as_optional(d, {}).sync() == 5);
+
+    ts::Cancellation_source src;
+    src.request_cancel();
+    TS_CHECK(await_op_as_optional(d, src.token()).sync() == -1);   // cancelled: empty, no fatal
+}
+
 // Cancellation mirrors `Task`: a pre-cancelled token skips the body, the op settles
 // cancelled, `try_take` is empty, a void `sync()` returns normally.
 void test_op_cancellation()
@@ -798,6 +818,7 @@ void run_guarded_tests()
     run("op: void result", test_op_void_result);
     run("op: member storage", test_op_member_storage);
     run("op: try_take", test_op_try_take);
+    run("op: as_optional", test_op_as_optional);
     run("op: cancellation", test_op_cancellation);
     run("op: awaited across suspension", test_op_await_suspending);
     run("op: named form awaited", test_op_await_named);

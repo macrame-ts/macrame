@@ -471,7 +471,7 @@ void run_death_scenario(const char* name)
             ts::Deferred<int> d{ target };
             auto rec = d.recorder();
             rec.stage([](int& v) { ++v; });
-            d.commit();   // queued behind the blocker: still in flight
+            (void)d.commit();   // queued behind the blocker: still in flight
             // `d` destroyed with the commit unsettled -> fatal (before the
             // staged-leftover check can fire)
         }
@@ -490,7 +490,7 @@ void run_death_scenario(const char* name)
             // ambient context at creation) but is not the grant holder (`writer_owner` is the
             // node, `Current_task` is the frame); its commit() would enqueue behind the node's
             // own hold -> the misuse diagnostic fatals at the call (during the eager body).
-            [&d]() -> ts::Task<void> { d.commit(); co_return; }();
+            [&d]() -> ts::Task<void> { (void)d.commit(); co_return; }();
         }, target);
         g.compile();
         g.execute().sync();
@@ -560,7 +560,7 @@ void run_death_scenario(const char* name)
             });
             auto rec = v.recorder();
             rec.stage([](int& x) { ++x; });
-            v.publish();   // swap queued behind the reader: returned task in flight
+            (void)v.publish();   // swap queued behind the reader: returned task in flight
             // v destroyed here with the publish unsettled -> fatal (before the
             // staged-leftover check can fire)
         }
@@ -872,6 +872,14 @@ void run_death_scenario(const char* name)
         {
             exit_on_escaped_body_exception();
         }
+    }
+#endif
+#if TS_SAFETY_CHECKS
+    else if (std::strcmp(name, "task_double_take") == 0)
+    {
+        ts::Task<int> t = ts::launch([] { return 42; });
+        (void)t.take();
+        (void)t.take();   // the result is already moved out -> fatal
     }
 #endif
     // unknown scenario: return without dying -> parent's expect_death fails

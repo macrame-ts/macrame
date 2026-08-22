@@ -359,6 +359,19 @@ ts::Task<std::unique_ptr<Level>> t = ts::launch(load_level);
 std::unique_ptr<Level> level = t.take();
 ```
 
+Because `sync()` hands back a reference into storage the task's block owns,
+binding it to the result of a *temporary* handle dangles — the last handle dies
+at the end of the full expression:
+
+```cpp
+const Report& bad = world.async(build_report).sync();   // dangles
+auto ok = world.async(build_report).sync();             // copies inside the expression
+```
+
+`Access_op::sync()` on an rvalue does return by value (§5), because an
+`Access_op` is single-owner and provably the last one; a `Task` is a refcounted
+handle that may have live copies, so it has no such overload.
+
 `sync()`/`take()` are **blue-thread verbs**. Calling them inside a task parks
 a worker on work that may need that worker — the pool-exhaustion deadlock —
 so a `sync()` that would genuinely block inside a task is **fatal** under
@@ -379,7 +392,10 @@ std::optional<Mesh> m = co_await t.as_optional();   // waits; empty if cancelled
 
 `try_take()` never blocks, so it is legal inside a task too — it is the
 non-blocking spelling of "consume it if it is ready". Both *move* the result
-out like `take()`, so either must be the last consume. Neither exists for
+out like `take()`, so either must be the last consume. That is checked, not
+just documented: a `take()` after any consume is fatal in checked builds, and a
+second `try_take()` reads empty rather than handing back the moved-from
+object. Neither exists for
 `ts::Task<void>`: there is no result to be missing, `is_done()` answers the
 first question and awaiting a cancelled void task already resumes normally.
 
@@ -496,7 +512,8 @@ once:
   `op.sync()` on an lvalue is a non-consuming `const R&` peek and on an rvalue
   (`world.access(fn).sync()`) returns `R` by value, so the temporary stays
   dangle-free; `op.take()` is the explicit consuming move; `op.try_take()`
-  never blocks (empty until settled, also legal inside a task).
+  never blocks (empty until settled, also legal inside a task); and
+  `co_await op.as_optional()` waits but yields empty on cancellation.
 - The handle is **pinned** — non-copyable and non-movable, because the pipe's
   FIFO holds its embedded entry's address. Store a `Task<R>` from `async` if you
   need a movable handle; keep the `Access_op` local otherwise.
@@ -1679,8 +1696,8 @@ releases through the scheduler rather than inline.
 
 Work that waits on something outside the schedule resumes at an arbitrary
 moment, quite possibly mid-frame, when the systems it wants to touch are
-half-updated. `ts::Frame_gate` (in `ts/frame_gate.h`, which the umbrella header
-does not pull in) parks a task until the next frame boundary:
+half-updated. `ts::Frame_gate` (in `ts/frame_gate.h`, and in the umbrella header)
+parks a task until the next frame boundary:
 
 ```cpp
 ts::Frame_gate gate;                 // owned by the frame loop

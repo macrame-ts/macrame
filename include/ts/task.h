@@ -55,11 +55,12 @@ struct Optional_awaitable
 
 } // namespace detail
 
-// Options for a `Guarded` access (`access` / `async`, single- and multi-object). Deliberately
-// without a run-inline knob: the verb chooses inline-vs-enqueued (`access` runs inline when the
-// queue is free via `pipe_try_inline`; `async` always enqueues). `token` makes the body skippable
-// before it runs (and is forwarded to a trailing-`Cancellation_token` body for a mid-run
-// early-out); `priority` sets the queue position when enqueued.
+// Options for a `Guarded` access (`access` / `async`, single- and multi-object). The verb picks
+// inline-vs-enqueued by default (`access` runs inline when the object's pipe is free via
+// `pipe_try_inline`; `async` always enqueues); `queued` below is the one opt-out, and it is
+// honoured by `Guarded::access` only. `token` makes the body skippable before it runs (and is
+// forwarded to a trailing-`Cancellation_token` body for a mid-run early-out); `priority` sets
+// the queue position when enqueued.
 struct Access_options
 {
     Cancellation_token token = {};
@@ -87,6 +88,25 @@ struct Launch_options
     Priority priority = Priority::normal;
     const char* name = nullptr;
 };
+
+// The library-wide `[[nodiscard]]` policy for handle-returning verbs, stated once here
+// because the attribute is spread across `guarded.h`, `versioned.h`, `deferred.h`,
+// `frame_gate.h`, `parallel_for.h` and `static_task_graph.h`:
+//
+//   marked   - a verb whose handle is the caller's only way to meet an obligation the
+//              library checks later. Dropping it is not "fire and forget", it is a
+//              deferred fatal: `Guarded::access` / `Versioned::read` (the op's destructor
+//              blocks, and its diagnostic fires only when it actually has to wait, so a
+//              discard trips a nondeterministic report), `Deferred::commit` and
+//              `Versioned::publish` (destroying with the write still in flight is fatal),
+//              `Static_task_graph::execute` (the run's only completion signal),
+//              `Frame_gate::next` (a discarded gate parks nobody), and
+//              `async_parallel_for` (nothing else joins the slices).
+//   unmarked - a verb where not waiting is the point: `ts::launch`, `Guarded::async` and
+//              the free `ts::async`. Detaching is sanctioned there, so an attribute would
+//              only teach users to write `(void)`.
+//
+// `Task<R>` itself carries no attribute: it is the return type of both kinds.
 
 // Handle to an async result. `co_await` it from a coroutine task (the sanctioned
 // composition - see coroutine_support.h); `sync()` blocks for the result from a blue
@@ -120,6 +140,19 @@ public:
     // full-expression and is always safe. To *move* the result out (ownership handoff, or a
     // move-only `R`) use `take()`. For a value task, fatal if it was cancelled (no result) -
     // check `is_cancelled()` first; a cancelled `void` sync() simply returns.
+    // LIFETIME: the returned reference names storage the block owns, so binding it to the
+    // result of a temporary handle dangles at the end of the full-expression:
+    //
+    //   const R& bad = obj.async(fn).sync();   // the last handle dies; `bad` dangles
+    //   auto ok = obj.async(fn).sync();        // the copy happens inside the expression
+    //   R moved = obj.async(fn).take();        // or move the result out
+    //
+    // `Access_op::sync() &&` does return by value for the same spelling, and the asymmetry
+    // is deliberate: an `Access_op` is single-owner (non-copyable, caller-owned storage), so
+    // an rvalue op is provably the last owner and consuming it is sound. A `Task` is a
+    // refcounted handle onto a shared block - an rvalue `Task` may be one of several live
+    // copies, and moving the result out from under the others would break the "any number of
+    // readers" contract. There is therefore no rvalue overload here; name the handle, or copy.
     // NOTE: `sync()` waits for this task to settle, not for work attached downstream -
     // `settle()` fires internal continuations after waking waiters (`notify_all`), so an
     // attached callback may still be running (or not yet started) when `sync()` returns.
@@ -140,12 +173,21 @@ public:
 
     // Blocks, then **moves** the result out - the single destructive consume (for ownership
     // handoff or a move-only `R`). Leaves the stored result moved-from, so it must be the last
-    // consume (see the block's result-consumption contract). Fatal if the task was cancelled.
+    // consume (see the block's result-consumption contract); a second consume is fatal under
+    // `TS_SAFETY_CHECKS` rather than silently handing back the hollow object. Fatal if the
+    // task was cancelled.
     R take() requires (!std::is_void_v<R>)
     {
         detail::Task_control_block::sync_wait(core_);
         if (core_->cancelled)
             ts::fatal("Task::take() on a cancelled task; check is_cancelled() first");
+#if TS_SAFETY_CHECKS
+        if (core_->result_consumed.exchange(true, std::memory_order_acq_rel))
+        {
+            ts::fatal("Task::take() on a result already consumed - take()/try_take() moves the "
+                      "result out, so it must be the last consume (use sync() for repeatable reads)");
+        }
+#endif
         return std::move(*static_cast<R*>(core_->result_ptr));
     }
 
@@ -161,13 +203,20 @@ public:
     //                   instead of the fatal that `co_await t` raises.
     //
     // Both move the result out, like `take()`: the stored result is left moved-from, so
-    // either must be the last consume. Neither exists for `void` - a void task has no
+    // either must be the last consume - a later `take()` is fatal under `TS_SAFETY_CHECKS`
+    // and a later `try_take()` reads empty. Neither exists for `void` - a void task has no
     // result to be missing, `is_done()` answers the first and awaiting a cancelled void task
     // already resumes normally, so `is_cancelled()` answers the second.
     std::optional<R> try_take() requires (!std::is_void_v<R>)
     {
         if (!core_ || !core_->ready.load(std::memory_order_acquire) || core_->cancelled)
             return std::nullopt;
+#if TS_SAFETY_CHECKS
+        // Already consumed reads as empty rather than fatal, matching `Access_op::try_take`:
+        // this verb's whole shape is "answer, do not assert".
+        if (core_->result_consumed.exchange(true, std::memory_order_acq_rel))
+            return std::nullopt;
+#endif
         return std::move(*static_cast<R*>(core_->result_ptr));
     }
 

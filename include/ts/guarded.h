@@ -29,9 +29,6 @@
 namespace ts
 {
 
-// Ambient scheduler used by `access()` / `async()` (v1: a process-wide default).
-Scheduler& global_scheduler();
-
 namespace detail
 {
 
@@ -83,6 +80,16 @@ template<typename T, typename Body>
 bool* access_op_consumed(Access_op<T, Body>& op) noexcept;
 template<typename T, typename Body>
 bool access_op_started(const Access_op<T, Body>& op) noexcept;
+
+// What `Access_op<T, Body>::as_optional()` returns: the op's core plus its this-cycle consume
+// flag, made awaitable by an `operator co_await` in coroutine_support.h. The op-shaped
+// counterpart of `Optional_awaitable` (task.h), which carries no consume flag because a
+// `Task`'s result lives in a refcounted block rather than caller storage.
+template<typename R2> struct Optional_access_awaitable
+{
+    Task_ptr core;
+    bool* consumed;
+};
 }
 
 // `Access_op<T, Body>` - the caller-owned operation state `Guarded<T>::access` returns
@@ -99,10 +106,10 @@ bool access_op_started(const Access_op<T, Body>& op) noexcept;
 // pipe is free, else enqueued) and pinned - non-copyable and non-movable, because the pipe's
 // intrusive FIFO holds the embedded entry's address. Consume the result exactly once:
 // `co_await op` from a coroutine, `op.sync()` from outside a task (returns `R` BY VALUE - the op
-// owns the storage and often dies at the semicolon), or `try_take()` for the non-blocking /
-// cancellation-tolerant read. Destroying an unsettled op is a bug the destructor reports
-// (`TS_ENSURE`) and then survives: it blocks until the access settles in every configuration -
-// the caller-owned analog of the heap block's refcount.
+// owns the storage and often dies at the semicolon), `try_take()` for the non-blocking read, or
+// `co_await op.as_optional()` for the cancellation-tolerant await. Destroying an unsettled op is a
+// bug the destructor reports (`TS_ENSURE`) and then survives: it blocks until the access settles
+// in every configuration - the caller-owned analog of the heap block's refcount.
 template<typename T, typename Body>
 class Access_op
 {
@@ -161,6 +168,12 @@ public:
     // that is a checked fatal, not a silent empty. The never-blocks contract is intact: a
     // started-but-not-ready op still returns immediately.
     std::optional<result_type> try_take() requires (!std::is_void_v<result_type>);
+
+    // Awaitable-only: `co_await op.as_optional()` waits like `co_await op`, then yields empty
+    // on cancellation instead of the fatal a bare await raises - the cancellation-tolerant
+    // spelling for the verb most likely to carry a token. Moves the result out, so it is the
+    // last consume of the cycle. Fatal on a never-started op, like `co_await` and `try_take`.
+    detail::Optional_access_awaitable<result_type> as_optional() requires (!std::is_void_v<result_type>);
 
 private:
     template<typename U> friend class Guarded;
@@ -583,6 +596,18 @@ std::optional<typename Access_op<T, Body>::result_type> Access_op<T, Body>::try_
     return std::move(*static_cast<result_type*>(state_.result_ptr));
 }
 
+template<typename T, typename Body>
+detail::Optional_access_awaitable<typename Access_op<T, Body>::result_type>
+Access_op<T, Body>::as_optional() requires (!std::is_void_v<result_type>)
+{
+#if TS_SAFETY_CHECKS
+    if (!state_.started)
+        ts::fatal("Access_op::as_optional() on an op that was never started - start() it first "
+                  "(awaiting a dormant op would suspend forever)");
+#endif
+    return detail::Optional_access_awaitable<result_type>{ detail::Task_ptr(&state_), &state_.consumed };
+}
+
 namespace detail
 {
 template<typename T, typename Body>
@@ -614,8 +639,9 @@ bool access_op_started(const Access_op<T, Body>& op) noexcept
 // extend this to several objects at once in one deadlock-free canonical order, and the same
 // ordering backs the static graph's per-node access and the coroutine held-grant guards.
 //
-// Both verbs take `Access_options` (task.h) = `{token, priority}`; there is deliberately no
-// run-inline knob - the verb chooses inline vs enqueued, so the impossible option can't be passed.
+// Both verbs take `Access_options` (task.h) = `{token, priority, name, queued}`. The verb picks
+// inline vs enqueued; `queued` is the one opt-out and only `access` can honour it (`async` is
+// enqueued by definition).
 template<typename T>
 class Guarded
 {
@@ -698,7 +724,7 @@ public:
     //                                  compile (read bodies receive `const T&`)
     // Non-generic functors are introspected (`accessor_mode`); generic ones are classified by
     // the rvalue-bindability probe. Both accept a trailing `Cancellation_token`, and take
-    // `Access_options` = `{token, priority}` (no `run_inline`: the verb is the mode).
+    // `Access_options` = `{token, priority, name, queued}`; `queued` is read by `access` alone.
     //
     //   access(fn) - opportunistic: runs `fn` on the calling thread when the object is free right
     //                 now (no scheduling), otherwise enqueues. Best for short functors. Because it

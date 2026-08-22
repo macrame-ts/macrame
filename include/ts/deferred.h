@@ -3,7 +3,7 @@
 #include "ts/access.h"
 #include "ts/fatal.h"
 #include "ts/guarded.h"
-#include "ts/detail/journal.h"
+#include "ts/recorder.h"
 #include "ts/task.h"
 
 #include <utility>
@@ -129,6 +129,7 @@ public:
     // nested task is not the holder, and the enqueued write would queue behind the very
     // grant it waits out (fatal under `TS_SAFETY_CHECKS`, a silent deadlock-on-sync
     // otherwise).
+    [[nodiscard("await or sync the commit: ~Deferred is fatal while the write is in flight")]]
     Task<void> commit(Access_options opts = {},
                       std::source_location site = std::source_location::current())
     {

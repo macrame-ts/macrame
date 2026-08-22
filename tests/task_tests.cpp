@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -394,6 +395,34 @@ void test_take_moves_move_only()
     TS_CHECK(got.size() == 4 && got[3] == 4);
 }
 
+// The result is moved out at most once. `try_take()` answers empty on a second consume
+// (its shape is "answer, do not assert"); the second `take()` is the fatal, covered by the
+// `task_double_take` death scenario.
+void test_try_take_second_consume_is_empty()
+{
+    ts::Task<std::unique_ptr<int>> t = ts::launch([] { return std::make_unique<int>(7); });
+    t.sync();                             // settle it, so `try_take` is not merely early
+    std::optional first = t.try_take();
+    TS_CHECK(first && *first && **first == 7);
+    TS_CHECK(!t.try_take().has_value());
+}
+
+// `co_await t.as_optional()` consumes like `take()`, so it claims the same flag: a following
+// `try_take()` reads empty rather than handing back the moved-from result.
+ts::Task<bool> consume_via_as_optional(ts::Task<std::unique_ptr<int>> t)
+{
+    std::optional first = co_await t.as_optional();
+    co_return first && *first && **first == 7 && !t.try_take().has_value();
+}
+
+void test_as_optional_claims_the_consume()
+{
+    ts::Task<std::unique_ptr<int>> t = ts::launch([] { return std::make_unique<int>(7); });
+    TS_CHECK(consume_via_as_optional(t).sync());
+}
+
+void test_death_double_take() { TS_CHECK(ts::test::expect_death("task_double_take")); }
+
 void test_launch_priority()
 {
     // ts::Priority is accepted on every launch route (ordering is covered deterministically by
@@ -562,6 +591,11 @@ void run_task_tests()
     run("captures destroyed before sync", test_captures_destroyed_before_sync);
     run("sync const-ref multi-consumer", test_sync_const_ref_multi);
     run("take moves move-only", test_take_moves_move_only);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "try_take second consume is empty",
+           test_try_take_second_consume_is_empty);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "as_optional claims the consume",
+           test_as_optional_claims_the_consume);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: double take", test_death_double_take);
     run("launch priority", test_launch_priority);
     run("task body token earlyout", test_task_body_token_earlyout);
     run("async body token earlyout", test_async_body_token_earlyout);

@@ -259,6 +259,16 @@ struct Task_control_block
     std::atomic<bool> body_claimed{ false };
     bool completed = false;            // mutex-only
     bool cancelled = false;            // mutex-only
+#if TS_SAFETY_CHECKS
+    // The result was moved out (`Task::take` / `Task::try_take`), so the stored `R` is
+    // moved-from and no further consume can be served. `take()` fatals on the second one
+    // rather than handing back a hollow object - the same contract `Access_op` enforces
+    // with its own `consumed` flag. An `exchange` claims it, so two threads racing to
+    // consume one result get the diagnostic instead of a silent double move. Cleared by
+    // `reset()`. Diagnostic-only: the byte (and the block's growth for it) exists only in
+    // checked builds.
+    std::atomic<bool> result_consumed{ false };
+#endif
     // Pipe fields (see `pipe_links`): entry count / trigger threshold, and cascade progress.
     std::uint8_t pipe_count = 0;
     std::uint8_t pipes_entered = 0;
@@ -564,6 +574,9 @@ struct Task_control_block
         cancelled = false;
         prereq_cancelled.store(false, std::memory_order_relaxed);
         num_locks.store(0, std::memory_order_relaxed);
+#if TS_SAFETY_CHECKS
+        result_consumed.store(false, std::memory_order_relaxed);
+#endif
         ready.store(false, std::memory_order_release);
     }
 

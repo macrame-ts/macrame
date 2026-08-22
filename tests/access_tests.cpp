@@ -154,6 +154,27 @@ void test_ensure_handler_hook()
 }
 #endif
 
+void inert_ensure_handler(const char*) noexcept
+{
+}
+
+// The ensure hook is declared in every configuration, so a host that installs a
+// handler compiles unchanged with the checks off. This test contains no `#if`
+// on purpose: it is the compile-time half of the guarantee (it would not build
+// in Shipping if the declarations were gated) as much as a runtime check.
+void test_ensure_hook_available_in_every_config()
+{
+    TS_CHECK(ts::ensure_failure_count() >= 0);
+
+    ts::Ensure_handler prev = ts::set_ensure_handler(&inert_ensure_handler);
+    ts::Ensure_handler mine = ts::set_ensure_handler(prev);
+
+    if (ts::test::with_harness)
+        TS_CHECK(mine == &inert_ensure_handler);
+    else
+        TS_CHECK(mine == nullptr && ts::ensure_failure_count() == 0);   // inert with the checks off
+}
+
 void test_death_no_context()    { TS_CHECK(ts::test::expect_death("access_no_context")); }
 void test_death_ro_write()      { TS_CHECK(ts::test::expect_death("access_ro_write")); }
 void test_death_wrong_instance(){ TS_CHECK(ts::test::expect_death("access_wrong_instance")); }
@@ -196,6 +217,7 @@ void run_access_tests()
     run("ensure facility (once-per-site)", test_ensure_facility);
     run("ensure handler hook", test_ensure_handler_hook);
 #endif
+    run("ensure hook declared in every config", test_ensure_hook_available_in_every_config);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: no context", test_death_no_context);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: read-only context + write", test_death_ro_write);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: wrong instance", test_death_wrong_instance);

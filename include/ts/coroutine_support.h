@@ -389,6 +389,12 @@ struct Optional_awaiter : Task_awaiter<R>
         this->end_wait();
         if (this->core_->cancelled)
             return std::nullopt;
+#if TS_SAFETY_CHECKS
+        // Consumes like `take()`, so it claims the block's consume flag - a `take()` after
+        // this one is the checked fatal, not a silent moved-from result.
+        if (this->core_->result_consumed.exchange(true, std::memory_order_acq_rel))
+            return std::nullopt;
+#endif
         return std::move(*static_cast<R*>(this->core_->result_ptr));
     }
 };
@@ -545,6 +551,10 @@ struct Task_promise<void> : Promise_base<Task_promise<void>>
     void return_void() {}   // completion happens in the final awaiter
 };
 
+// The access-guard awaiters, defined below - named here so each guard can friend its creator.
+template<typename T, Access Mode> struct Access_awaiter;
+template<Access Mode, typename... Ts> struct Multi_access_awaiter;
+
 } // namespace detail
 
 // RAII async-lock guard over a `Guarded<T>`, held for direct `T` access. Returned by
@@ -558,21 +568,6 @@ template<typename T, Access Mode>
 class Access_guard
 {
 public:
-    Access_guard(Scheduler& scheduler, detail::Pipe& pipe, T* obj)
-        : scheduler_(scheduler)
-        , pipe_(pipe)
-        , obj_(obj)
-    {
-        if (const Access_context* cur = detail::access_load())
-            ctx_ = *cur;   // extend the coroutine's existing grant, don't replace it
-        ctx_.add(obj_, Mode, detail::pipe_epoch(pipe_), detail::pipe_rank(pipe_));
-        prev_ = detail::access_load();
-        detail::access_store(&ctx_);
-#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-        detail::guard_depth_add(1);
-#endif
-    }
-
     ~Access_guard()
     {
         detail::access_store(prev_);
@@ -602,6 +597,27 @@ public:
     }
 
 private:
+    // The grant is minted by awaiting `ts::read_only`/`ts::read_write`, never constructed by
+    // hand: the ctor takes the already-acquired pipe and would otherwise let a caller forge a
+    // grant (and release a pipe it never took). Keeping it private is also what keeps
+    // `detail::Pipe` out of every public signature.
+    friend struct detail::Access_awaiter<T, Mode>;
+
+    Access_guard(Scheduler& scheduler, detail::Pipe& pipe, T* obj)
+        : scheduler_(scheduler)
+        , pipe_(pipe)
+        , obj_(obj)
+    {
+        if (const Access_context* cur = detail::access_load())
+            ctx_ = *cur;   // extend the coroutine's existing grant, don't replace it
+        ctx_.add(obj_, Mode, detail::pipe_epoch(pipe_), detail::pipe_rank(pipe_));
+        prev_ = detail::access_load();
+        detail::access_store(&ctx_);
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+        detail::guard_depth_add(1);
+#endif
+    }
+
     Scheduler& scheduler_;
     detail::Pipe& pipe_;
     T* obj_;
@@ -624,24 +640,6 @@ class Multi_access_guard
 {
 public:
     static constexpr std::size_t arity = sizeof...(Ts);
-
-    Multi_access_guard(Scheduler& scheduler, std::tuple<Guarded<Ts>*...> objs,
-                       detail::Pipe* const* pipes, std::size_t pipe_count)
-        : scheduler_(scheduler)
-        , objs_(objs)
-        , pipe_count_(pipe_count)
-    {
-        for (std::size_t i = 0; i < pipe_count_; ++i)
-            pipes_[i] = pipes[i];
-        if (const Access_context* cur = detail::access_load())
-            ctx_ = *cur;   // extend the coroutine's existing grant
-        add_all(std::index_sequence_for<Ts...>{});
-        prev_ = detail::access_load();
-        detail::access_store(&ctx_);
-#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-        detail::guard_depth_add(1);
-#endif
-    }
 
     ~Multi_access_guard()
     {
@@ -670,6 +668,28 @@ public:
     }
 
 private:
+    // Minted by awaiting the multi-object `ts::read_only`/`ts::read_write` only - see
+    // `Access_guard`'s note; the ctor adopts pipes the awaiter already acquired.
+    friend struct detail::Multi_access_awaiter<Mode, Ts...>;
+
+    Multi_access_guard(Scheduler& scheduler, std::tuple<Guarded<Ts>*...> objs,
+                       detail::Pipe* const* pipes, std::size_t pipe_count)
+        : scheduler_(scheduler)
+        , objs_(objs)
+        , pipe_count_(pipe_count)
+    {
+        for (std::size_t i = 0; i < pipe_count_; ++i)
+            pipes_[i] = pipes[i];
+        if (const Access_context* cur = detail::access_load())
+            ctx_ = *cur;   // extend the coroutine's existing grant
+        add_all(std::index_sequence_for<Ts...>{});
+        prev_ = detail::access_load();
+        detail::access_store(&ctx_);
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+        detail::guard_depth_add(1);
+#endif
+    }
+
     template<std::size_t... I>
     void add_all(std::index_sequence<I...>)
     {
@@ -1046,6 +1066,41 @@ struct Access_op_awaiter : Task_awaiter<R>
         }
     }
 };
+
+// `co_await op.as_optional()` - `Access_op_awaiter`'s wait, resolving to `std::optional<R>`
+// instead of fatalling when the access settled cancelled. Consumes the cycle's result, like
+// the bare await.
+template<typename R>
+struct Optional_access_awaiter : Task_awaiter<R>
+{
+    bool* consumed;
+
+    Optional_access_awaiter(Task_ptr core, bool* consumed_flag)
+        : Task_awaiter<R>(std::move(core))
+        , consumed(consumed_flag)
+    {}
+
+    std::optional<R> await_resume()
+    {
+        this->end_wait();
+        if (this->core_->cancelled)
+            return std::nullopt;
+#if TS_SAFETY_CHECKS
+        if (*consumed)
+            ts::fatal("co_await on an Access_op whose result was already consumed this cycle - "
+                      "start() refires before the next consume");
+#endif
+        *consumed = true;
+        return std::move(*static_cast<R*>(this->core_->result_ptr));
+    }
+};
+
+// ADL finds this through `Optional_access_awaitable`, which lives in `ts::detail`.
+template<typename R>
+Optional_access_awaiter<R> operator co_await(Optional_access_awaitable<R> awaitable)
+{
+    return Optional_access_awaiter<R>(std::move(awaitable.core), awaitable.consumed);
+}
 
 // The awaiter build shared by both value categories: never-started check + core/consume hookup.
 template<typename T, typename Body>

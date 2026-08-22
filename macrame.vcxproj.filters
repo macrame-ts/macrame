@@ -95,6 +95,9 @@
     <ClInclude Include="include\ts\versioned.h">
       <Filter>include\ts</Filter>
     </ClInclude>
+    <ClInclude Include="include\ts\recorder.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
     <ClInclude Include="include\ts\detail\event_count.h">
       <Filter>include\ts\detail</Filter>
     </ClInclude>

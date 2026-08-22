@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -55,11 +56,11 @@ enum class Idle_policy
 
 struct Scheduler_config
 {
-    uint32_t num_threads = 0;                    // 0 -> `std::thread::hardware_concurrency()`
+    std::uint32_t num_threads = 0;   // 0 -> `std::thread::hardware_concurrency()`
     Idle_policy idle_policy = Idle_policy::spin_then_block;
     // `spin_then_block`/`handoff`: number of `find_work` scans an idle worker spins before it
     // parks (UE's `WorkerSpinCycles` is ~53). Ignored by `spin`.
-    uint32_t spin_cycles = 64;
+    std::uint32_t spin_cycles = 64;
     // Worker-less mode (UE's no-multithreading shape): no worker threads exist, and every
     // submitted task executes inline at its submit point, on the submitting thread, via a
     // bounded FIFO trampoline (a chain of tasks drains iteratively, not recursively). Serves
@@ -71,9 +72,9 @@ struct Scheduler_config
     bool single_threaded = false;
 };
 
-// The library runs exactly one scheduler per process (`global_scheduler()`, declared in
-// guarded.h), brought up EXPLICITLY and never lazily - a scheduler is heavy, so you choose
-// when its worker threads start. This is the subsystem-init shape (SDL_Init/SDL_Quit,
+// The library runs exactly one scheduler per process (`global_scheduler()`, below), brought
+// up explicitly and never lazily - a scheduler is heavy, so you choose when its worker
+// threads start. This is the subsystem-init shape (SDL_Init/SDL_Quit,
 // glfwInit/glfwTerminate): bring it up once at startup, and it services every task, graph
 // run, and `parallel_for` until you tear it down.
 
@@ -140,10 +141,9 @@ inline constexpr std::size_t priority_count = 3;
 
 class Scheduler;
 
-// The one process-wide scheduler (defined in guarded.cpp, where the holder lives). Fatal if
-// none is running - bring one up with `create_scheduler` first. Declared here so the global
-// lifecycle API (`create_scheduler`/`destroy_scheduler`/`Scheduler_scope`) and every caller
-// that submits to the running scheduler is reachable from `scheduler.h` alone.
+// The one process-wide scheduler - the ambient target of `access`/`async`/`launch`, every
+// graph run and every `parallel_for` (defined in guarded.cpp, where the holder lives). Fatal
+// if none is running: bring one up with `create_scheduler` first.
 Scheduler& global_scheduler();
 
 namespace detail
@@ -383,7 +383,7 @@ private:
                 // Option 2: a successful scan is on-worker machinery, so fold it into `busy`
                 // (the run_task-span accumulator). Then `M = busy - B` captures it by pure
                 // subtraction - it is not a separate accumulator. Single writer (this worker).
-                Busy_slot& slot = busy_[static_cast<size_t>(worker_index)];
+                Busy_slot& slot = busy_[static_cast<std::size_t>(worker_index)];
                 slot.ticks.store(slot.ticks.load(std::memory_order_relaxed) + dt, std::memory_order_relaxed);
             }
             return got;
@@ -438,7 +438,7 @@ private:
         // tracking must not tax untraced work. Disarmed cost: one relaxed load + branch.
         if (busy_tracking_.load(std::memory_order_relaxed) != 0)
         {
-            Busy_slot& slot = busy_[static_cast<size_t>(worker_index)];
+            Busy_slot& slot = busy_[static_cast<std::size_t>(worker_index)];
             slot.tasks.fetch_add(1, std::memory_order_relaxed);   // task-volume counter (every kind)
             long long t0 = std::chrono::steady_clock::now().time_since_epoch().count();
             slot.started.store(t0, std::memory_order_relaxed);   // in-flight, for busy_ticks

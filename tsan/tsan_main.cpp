@@ -972,7 +972,7 @@ void stress_deferred()
                     {
                         rec.stage([](int& v) { ++v; });
                         if ((k & 63) == 0)
-                            d.commit();   // commits race staging (cut at execution)
+                            (void)d.commit();   // commits race staging (cut at execution)
                         if ((k & 31) == 0)
                             target.async([](const int& v) { (void)v; });   // readers race commits
                     }
@@ -995,7 +995,7 @@ void stress_deferred()
         for (int r = 0; r < rounds_pr; ++r)
         {
             ts::parallel_for(per_pr, [&rec](int) { rec.stage([](int& v) { ++v; }); });
-            d.commit();
+            (void)d.commit();
         }
         d.commit().sync();
         assert(target.async([](const int& v) { return v; }).sync() == rounds_pr * per_pr);
