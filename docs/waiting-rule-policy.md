@@ -152,12 +152,20 @@ what keeps the test honest. It was found in an exceptions-enabled build, where t
 differs enough to trigger the spill; the exceptions-off build compiles the same source without
 it, so this is a hazard the configuration masks rather than one it lacks.
 
-A guard holding a thread-local across a suspension is the shape that triggers this.
-`Access_guard` is the only other guard with it, and it cannot span a `co_await` at all
-(`await_under_guard`). The remaining thread-locals — `current_task`, `current_access`,
-`current_worker_index`, the trace owner — are read either from library functions the body
-calls or on paths with no guard alive to force the spill; a probe reading each of them
-inlined and out of line across a cross-thread resume found no disagreement.
+A guard holding a thread-local across a suspension is the shape that triggers this, but it is
+not the only one - a loop containing a suspension hoists just as well, and that is how the
+next two were found.
+
+This paragraph previously argued the remaining thread-locals were safe: read from library
+functions the body calls, or on paths with no guard alive to force the spill, with a probe
+across a cross-thread resume finding no disagreement. That conclusion did not hold.
+`current_access` was a live bug - a false "accessed without declared access" aborting a correct
+program, reproduced at 10 failures in 20 runs with the barrier removed - and
+`access_guard_depth` was a second, a false `await_under_guard` fatal on the one rule a shipping
+build keeps. The probe was too narrow, and the argument itself was the failure: it reasoned
+about the source, which is precisely what this class of miscompile transforms. Every
+coroutine-path thread-local now sits behind the barrier by construction rather than by
+argument - see `include/ts/detail/thread_local.h` and guide section 8.4.
 
 ## 5. The global default
 

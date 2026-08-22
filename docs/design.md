@@ -760,6 +760,15 @@ identity, which the library already tracks for every other diagnostic
 is why the seam's handler delegates to a function in the library
 (`escaped_exception_diagnose`) rather than formatting inline in a header.
 
+What the seam brackets is the body's whole contribution, not just the call.
+A result-bearing body returns a value that has to be moved into the task's
+storage, and that move is the body's type's code — a move that is really an
+allocating copy can throw from it — so the emplace happens inside the seam
+alongside the call. Constructing the result outside would have reopened the
+hole for exactly the types whose moves are not free. The one thing left outside
+is the body's destructor, which is `noexcept` unless a type opts out, and a type
+that opts out has already left the standard library's own contract.
+
 What remains genuinely whole-program is MSVC's `_HAS_EXCEPTIONS=0`: it rewrites
 standard-library declarations, so it cannot be a private choice of the library
 build. It is therefore tied to one option (`MACRAME_NO_EXCEPTIONS`), exported as
@@ -896,6 +905,52 @@ sub-work alongside the grant snapshot. Wider than lexical scope, and
 deliberately so: the child inherits the grant, hence the hazard the claim is
 about. Full taxonomy, defaults, and the obligations a new check inherits:
 [waiting-rule-policy.md](waiting-rule-policy.md).
+
+### 5.3 Thread-local access through out-of-line accessors
+
+Every thread-local the library owns is a private member of a class whose only
+interface is out-of-line value accessors (`include/ts/detail/thread_local.h`).
+The failure mode it defends against is one where the value is installed
+correctly and read from the wrong place: a coroutine frame that holds state
+across a suspension invites the compiler to resolve a thread-local's block
+address once — the loop-invariant hoist above a suspension point is the shape
+that reproduces — and to reuse that address after the frame has resumed on
+another worker. The carriage machinery is not at fault in that picture; the
+segment swap put the right value in the resuming thread's slot, and the
+generated code read a slot belonging to the thread that suspended.
+
+Two of the library's own safety thread-locals were live instances, each an
+asymmetry between one side inlined into the frame and one side resolving
+freshly: `current_access`, producing a false access violation against a program
+that held its grant correctly, and `access_guard_depth`, producing a false
+`await_under_guard` fatal. The second is the sharper argument for a structural
+defence, since `await_under_guard` is the one rule a Shipping build keeps and a
+misread counter breaks it in both directions.
+
+The defence is structural rather than conventional because a convention has to
+be re-argued at every new toucher and lapses silently when it is not. Making
+the slot private and the accessors its only interface means a future toucher
+inherits the property without knowing the story: naming the variable does not
+compile. That earned itself immediately — the sweep that introduced the barrier
+found raw touches still bypassing the informal convention in the access
+installer that runs for every task and node body. Two constraints keep it
+honest: accessors pass by value, since a `T&` accessor hands the caching hazard
+back to the caller one level up; and state that cannot be passed by value (the
+resume, inline-dispatch and destroy queues) exposes whole operations instead,
+so the address never leaves the accessor's frame. Rust gives thread-locals this
+shape by construction — `thread_local!` plus a scoped `.with()`, with no way to
+obtain a raw reference.
+
+The cost is a call where there was a load, on paths including the hottest one.
+Measured 2026-08 by interleaved A/B on `current_task`, the game-frame benchmark
+moved 12569.5 to 12572.1 ns/op (0.02%) against 5-8% run-to-run swings on the
+controls — below the noise floor of the measurement. The one public consequence
+is that `ts::current_worker_index()` is a function rather than a variable.
+
+The bug-class writeup — the upstream issue trail, which compilers were observed
+doing what, and why observing a compiler recompute is not immunity — lives at
+the top of `include/ts/detail/thread_local.h`. The hazard as users meet it,
+including a canary test for their own build, is [guide.md](guide.md) §8.4.
 
 ---
 

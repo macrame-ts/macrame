@@ -135,8 +135,9 @@ answer to "what does a materialised graph buy that online scheduling cannot".
 
 The best value-to-effort cluster in the pattern review: these ride the existing
 awaiter handshake, cancellation callbacks and resume trampoline, and cover what a
-frame loop most predictably wants around `co_await`. Two things are simply absent
-today - a *first-of-N* and a notion of *time*.
+frame loop most predictably wants around `co_await`. Three things are simply
+absent today - a *first-of-N*, a notion of *time*, and implicit *per-task
+context*.
 
 - **Near-term** - a timer / delayed-dispatch primitive (a min-heap on one thread
   firing a `Signal`, zero-cost when unarmed). Nothing schedules against time today;
@@ -146,6 +147,26 @@ today - a *first-of-N* and a notion of *time*.
   samples already open-code it. The eager + cooperative-cancellation model makes it
   safe by construction, without the drop-mid-await data-loss footgun of poll-based
   systems.
+- **Near-term, high priority** - `ts::Task_local<T>`: implicit per-task context
+  that follows a task across suspensions and threads, for what you do not want
+  threaded through every signature - a logging or tracing scope, a frame id, a
+  budget. Scoped rather than speculative: `detail::Relaxed_carrier`
+  (`include/ts/rules.h`) is already the implementation - install the value when a
+  segment starts, write it back when the segment suspends - and Kotlin's
+  `ThreadContextElement` is the same design reached independently ("maintains the
+  given value of the ThreadLocal for a coroutine regardless of the actual thread it
+  is resumed on"). Nearly every system that migrates work provides one:
+  Boost.Fiber `fiber_specific_ptr`, `tokio::task_local!`, .NET `AsyncLocal<T>`,
+  Java Loom `ScopedValue`. Macrame provides none while using the mechanism
+  internally. The scoping note: in C++ a coroutine's own locals already cover most
+  of what `thread_local` gets misused for (the [user guide](guide.md) section 8.4),
+  so the need is narrower than in Go, Java or Kotlin, where a context object is the
+  only way to carry implicit state; the residual case is context that must stay
+  implicit. Design constraints: the cost must not land on `Task_control_block` for
+  tasks that do not use it (248 B, hard-won), a per-segment registry walk is the
+  obvious alternative and needs measuring before it is chosen, and accessors must
+  pass by value - a `T&` accessor reintroduces the address-caching hazard the
+  thread-local sweep removed.
 - **Mid-term** - timeout / deadline combinators (both the all-or-nothing and the
   anytime-algorithm "return best-so-far" shapes), linked and child cancellation
   tokens carrying a cancel *reason*, `retry`/`repeat`/backoff, a non-cancellable

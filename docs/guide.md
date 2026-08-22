@@ -1288,6 +1288,154 @@ an OR of `TS_RULE_*` bits (one value per binary, like `TS_SAFETY_CHECKS`). The d
 everything in checked builds and `TS_RULE_AWAIT_UNDER_GUARD` in shipping builds. Full table
 and rationale: [waiting-rule-policy.md](waiting-rule-policy.md).
 
+### 8.4 Thread-local state
+
+A task does not own a thread. A coroutine resumes on whichever worker settled
+the task it awaited, so a frame runs its segments on whatever workers happen to
+be free, and a `thread_local` written before a `co_await` and read after it
+belongs to two different threads:
+
+```cpp
+thread_local Draw_scratch scratch;                  // not per-task state
+
+ts::Task<void> record(ts::Guarded<Scene>& scene)
+{
+    scratch.clear();
+    co_await scene.async([](const Scene& s) { prepare(s); });
+    scratch.emit();                                 // another worker's `scratch`
+}
+```
+
+No check catches this and no compiler is at fault: both accesses are legal,
+they simply name different objects. It is the natural mistake arriving from a
+thread-pool library, where a callback runs to completion on the thread that
+picked it up.
+
+**A coroutine's own locals are the task-local storage.** They live in the
+frame, travel with the task across every suspension, and are correct by
+construction:
+
+```cpp
+ts::Task<void> record(ts::Guarded<Scene>& scene)
+{
+    Draw_scratch scratch;                           // in the frame, follows the task
+    co_await scene.async([](const Scene& s) { prepare(s); });
+    scratch.emit();
+}
+```
+
+That replaces most of what `thread_local` gets used for. What stays legitimate
+is a genuinely per-*thread* resource — a per-worker scratch arena, an allocator
+pool, a random-number stream — where thread ownership is the point. The rule
+for those: **never carry a value or a reference derived from a thread-local
+across a suspension.** Re-read it on the other side.
+
+```cpp
+ts::Task<void> upload(ts::Guarded<Scene>& scene)
+{
+    Staging_buffer& buffer = worker_staging();      // this worker's buffer
+    fill(buffer);
+    flush(buffer);
+
+    co_await scene.async([](const Scene& s) { prepare(s); });
+
+    Staging_buffer& resumed = worker_staging();     // re-read: `buffer` belongs to
+    fill(resumed);                                  // the thread we suspended on
+}
+```
+
+The same applies to anything that *identifies* a thread rather than being
+stored in one. `ts::current_worker_index()` is a reading, not a property of the
+task: after a suspension it describes the worker you resumed on, and a value
+saved before the suspension describes the one you left.
+
+### 8.4.1 When the compiler caches the address
+
+Discipline is not always enough. A compiler may resolve a thread-local's block
+address once and reuse it — notably hoisting it out of a loop that contains a
+suspension, where the address is loop-invariant — so code that carefully
+re-reads the variable after a resume still reads the *suspending* thread's
+slot. This defeats correct code specifically: the cached address is one the
+programmer never wrote.
+
+Two of the bugs it produced in this library were misreads of safety state, and
+both aborted programs that were doing nothing wrong: a false "accessed without
+declared access" from the harness, in any coroutine acquiring a guard inside a
+loop, and a false `await_under_guard` fatal — the one rule a shipping build
+keeps, where a misread counter fails both ways (a false positive kills a
+correct program, a false negative lets a genuinely unsafe suspension through
+unreported).
+
+This is a known cross-compiler class with an incomplete upstream fix. LLVM
+#47179 (2020), "[coroutines] Compiler incorrectly caches thread_local address
+across suspend-points", was fixed and refiled as #63022 (2023) because the fix
+did not cover every scenario; D92661 ("[RFC] Fix TLS and Coroutine") is the
+standing proposal. MSVC has its own Developer Community report ("Incorrect
+optimization: thread-local variables cached across coroutine ..."). LLVM #72006
+is the general form — a coroutine frame reused as scratch across a suspension —
+and a sibling clang issue caches `pthread_self()`, so anything that *identifies
+a thread* is exposed, not only `thread_local`.
+
+**"Which compiler" is not a mitigation.** clang recomputes the address in the
+scenarios this library's regression tests exercise; that is one shape measured
+on one version, not immunity. The codegen that triggers the hoist is not stable
+across compiler versions or build settings either — one of this library's cases
+reproduced only in an exceptions-enabled build, where the codegen differs
+enough to spill the address; the same source compiled with exceptions off did
+not.
+
+What does work is putting a barrier underneath the variable: reach it through
+out-of-line accessors, at both ends, so the block address is resolved where the
+access happens and can never be kept in a caller's frame.
+
+```cpp
+#if defined(_MSC_VER) && !defined(__clang__)
+#define APP_NO_INLINE __declspec(noinline)
+#else
+#define APP_NO_INLINE [[gnu::noinline]]
+#endif
+
+namespace app::detail
+{
+    inline thread_local int trace_depth = 0;        // named only in this namespace
+
+    APP_NO_INLINE inline int load_trace_depth() { return trace_depth; }
+    APP_NO_INLINE inline void store_trace_depth(int depth) { trace_depth = depth; }
+}
+```
+
+Two constraints make the barrier hold. The accessors must pass **by value**: an
+`int&` accessor hands the caching hazard straight back to the caller one level
+up. And state that cannot be passed by value — a container, a queue — exposes
+whole *operations* out of line instead, so the address never leaves the
+accessor's frame at all. Making the variable private to the accessors, rather
+than merely agreeing to go through them, is what stops the next person who
+touches it from bypassing the rule without noticing. This is the shape the
+library uses for its own thread-locals (`include/ts/detail/thread_local.h`),
+and the reason `ts::current_worker_index()` is a function rather than a
+variable.
+
+**A canary for your build.** Whether you are exposed is decided by your
+toolchain, optimization settings and code shape, not by ours, so this belongs
+in your suite rather than only in ours. The shape that caught both of the bugs
+above:
+
+1. a coroutine that acquires an access guard inside a loop whose body contains
+   a suspension — the loop invites the hoist, the guard keeps the address live
+   across the suspension point;
+2. enough concurrent copies of that coroutine that resumes genuinely cross
+   workers — an uncontended run tends to resume on the thread it left and
+   proves nothing;
+3. inside the loop, read the thread-local twice, once directly (inlinable) and
+   once through a `noinline` accessor, and assert the two readings agree.
+
+Disagreement is the signature: one reading came from a cached block address,
+the other resolved a fresh one. The worked example is the test
+`"co thread-local state survives resumption on another worker"` in
+`tests/coroutine_tests.cpp` — copy its structure and substitute your own
+thread-local. Failures are intermittent — ours reproduced between one run in
+four and one run in twenty-five — so run the canary in a loop rather than once.
+
 ---
 
 ## 9. `Deferred<T>` and `Versioned<T>` — staged writes
