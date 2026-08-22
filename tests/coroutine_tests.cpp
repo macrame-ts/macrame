@@ -222,6 +222,94 @@ void test_guard_contention()
     TS_CHECK(co_read_guard(w).sync() == threads * each);
 }
 
+// --- thread-local freshness across a cross-thread resume ---------------------------------
+
+// Both confirmed instances of the address-hoisting bug (see ts/detail/thread_local.h) had one
+// shape: a guard acquired inside a loop containing a suspension, so the compiler resolves a
+// thread-local's block address once, above the suspension, and the resumed segment reads the
+// slot of the thread it left. Contention is what makes it observable - the resumes have to
+// really cross workers.
+//
+// Every piece of ambient state the coroutine machinery swaps is checked against a freshly
+// resolved reading of the same variable: task identity, the frame's implicit scope, the guard
+// depth, and the access context (whose stale reading faults in the harness rather than
+// answering wrongly). A regression in any of them fails here instead of surfacing as a false
+// rule fatal one run in four.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define TS_TEST_NOINLINE __declspec(noinline)
+#else
+#define TS_TEST_NOINLINE [[gnu::noinline]]
+#endif
+
+TS_TEST_NOINLINE const void* task_identity_out_of_line()
+{
+    return ts::detail::Current_task::get();
+}
+
+TS_TEST_NOINLINE const void* scope_children_out_of_line()
+{
+    return ts::detail::Scope_children::load();
+}
+
+TS_TEST_NOINLINE const void* access_context_out_of_line()
+{
+    return ts::detail::access_load();
+}
+
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+TS_TEST_NOINLINE int guard_depth_out_of_line()
+{
+    return ts::detail::guard_depth_load();
+}
+#endif
+
+Task<bool> co_tls_freshness(ts::Guarded<tests::Counter>& shared, int iterations)
+{
+    const void* self = ts::detail::Current_task::get();
+    const void* scope = ts::detail::Scope_children::load();
+    bool ok = self != nullptr && scope != nullptr;
+    for (int i = 0; i < iterations; ++i)
+    {
+        // An enqueued access settles on a worker, so the frame resumes on whatever thread ran
+        // it - the cross-thread hop the checks below need.
+        co_await shared.async([](tests::Counter& counter) { counter.add(1); });
+        ok = ok && ts::detail::Current_task::get() == self && task_identity_out_of_line() == self;
+        ok = ok && ts::detail::Scope_children::load() == scope && scope_children_out_of_line() == scope;
+        {
+            // Contended: the grant usually arrives from another frame's release, resuming this
+            // one on that thread.
+            auto guard = co_await ts::read_write(shared);
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+            ok = ok && guard_depth_out_of_line() == 1;
+            ok = ok && ts::detail::guard_depth_load() == 1;
+#endif
+            const void* ctx = ts::detail::access_load();
+            ok = ok && ctx != nullptr && access_context_out_of_line() == ctx;
+            guard->add(1);   // a stale context faults in the harness
+        }
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+        ok = ok && guard_depth_out_of_line() == 0;
+#endif
+    }
+    co_return ok;
+}
+
+void test_tls_freshness_across_resumption()
+{
+    ts::Guarded<tests::Counter> shared{ ts::Named{ "tls_freshness" } };
+    constexpr int frames = 8, iterations = 25;
+    std::vector<Task<bool>> frames_running;
+    frames_running.reserve(frames);
+    for (int i = 0; i < frames; ++i)
+        frames_running.push_back(co_tls_freshness(shared, iterations));
+
+    bool all_fresh = true;
+    for (Task<bool>& frame : frames_running)
+        all_fresh = frame.sync() && all_fresh;   // sync every frame, then report
+    TS_CHECK(all_fresh);
+    TS_CHECK(co_read_guard(shared).sync() == frames * iterations * 2);
+}
+
 // --- multi-object scope guard: co_await ts::read_write(a, b, ...) -------------------------
 
 // A transfer: read one balance and write both accounts as one indivisible step, holding both
@@ -866,6 +954,7 @@ void run_coroutine_tests()
     run("co read guard", test_read_guard);
     run("co guard loop", test_guard_loop);
     run("co guard contention", test_guard_contention);
+    run("co thread-local state survives resumption on another worker", test_tls_freshness_across_resumption);
     run("co multi-guard transfer", test_multi_guard_transfer);
     run("co multi-guard structured bindings", test_multi_guard_structured_bindings);
     run("co multi-guard read_only concurrent", test_multi_guard_read_only);

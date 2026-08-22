@@ -10,7 +10,7 @@ Worker_thread::Worker_thread(Scheduler& scheduler, int index)
 
 void Worker_thread::main(Scheduler& scheduler, int index)
 {
-    current_worker_index = index;
+    Worker_index::store(index);
 
     // Busy/idle state for the scheduler's quiescence signal (`Scheduler::quiescent`, the
     // deadlock net). Tracked as a transition, not as "parked": under `Idle_policy::spin` a
@@ -53,7 +53,7 @@ void Worker_thread::main(Scheduler& scheduler, int index)
     }
 
     mark(false);   // leaving the pool: no longer a worker that could be idle
-    current_worker_index = -1;
+    Worker_index::store(-1);
 }
 
 } // namespace ts::detail

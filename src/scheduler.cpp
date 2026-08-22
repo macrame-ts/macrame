@@ -12,8 +12,6 @@
 namespace ts
 {
 
-thread_local int current_worker_index = -1;
-
 #if TS_PROFILING
 namespace detail
 {
@@ -34,7 +32,7 @@ void (*trace_owner_add)(int, long long) = +[](int owner, long long dt)
 // add-only - machinery is derived by pure subtraction (`M = busy - B`), not accumulated.
 void (*trace_body_add)(long long) = +[](long long dt)
 {
-    global_scheduler().add_body_ticks(current_worker_index, dt);
+    global_scheduler().add_body_ticks(current_worker_index(), dt);
 };
 // The orchestration bridge (the fourth bucket of the four-way subtraction split): `Trace_setup_scope`
 // (in static_task_graph.cpp's execute()) routes the per-run top-level setup+initial-dispatch span
@@ -45,7 +43,7 @@ void (*trace_body_add)(long long) = +[](long long dt)
 // span already - see `Trace_setup_scope`).
 void (*trace_orchestration_add)(long long) = +[](long long dt)
 {
-    global_scheduler().add_orchestration_ticks(current_worker_index, dt);
+    global_scheduler().add_orchestration_ticks(current_worker_index(), dt);
 };
 }
 #endif
@@ -152,12 +150,13 @@ void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
     // A worker submitting `normal` pushes to its own local deque (LIFO, cache-hot, no shared
     // cache line - the producer fast path). External/non-normal submits, and a full local
     // deque, go to the global queue for the priority. With the single-global collapse, being on
-    // a worker (`current_worker_index >= 0`) means being on this pool's worker - the only pool
+    // a worker (`current_worker_index() >= 0`) means being on this pool's worker - the only pool
     // with workers - so the index is a valid slot; the size check is a cheap belt-and-braces
     // guard (an isolated worker-less instance never reaches here - it returns above).
-    if (priority == Priority::normal && current_worker_index >= 0
-        && static_cast<std::size_t>(current_worker_index) < local_normal_.size()
-        && local_normal_[static_cast<std::size_t>(current_worker_index)]->push({ func, data }))
+    const int worker = current_worker_index();
+    if (priority == Priority::normal && worker >= 0
+        && static_cast<std::size_t>(worker) < local_normal_.size()
+        && local_normal_[static_cast<std::size_t>(worker)]->push({ func, data }))
     {
         signal_submit();   // wake a thief to help (no-op if none parked)
         return;
@@ -177,6 +176,12 @@ namespace
 // `serial_head` is shared state (not a loop local) so a reentrant drain - a body calling
 // `sync()` on work it just admitted, via `drain_serial_pending` - continues from where the
 // outer drain stands instead of re-running entries.
+//
+// These three carry no thread-local barrier (ts/detail/thread_local.h) and need none: they
+// have internal linkage in a translation unit that compiles no coroutine, and the only
+// functions that touch them are the out-of-line `run_serial`/`drain_serial`/
+// `drain_serial_pending` below. No caller's frame can hold their address, so there is nothing
+// for a suspension to carry across.
 thread_local std::vector<detail::Task_entry> serial_pending;
 thread_local std::size_t serial_head = 0;
 thread_local bool serial_draining = false;

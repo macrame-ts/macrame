@@ -372,7 +372,7 @@ void Static_task_graph::on_data_ready(Run_state& run, int index)
 
 // The node block's `execute`. Mirrors `Executable::run`, but reaches the body via
 // graph+index (no stored body) and completes via the block's `on_complete` hook: it
-// installs `current_task` + the execution-flag self-lock so a coroutine-node body's frame
+// installs `Current_task` + the execution-flag self-lock so a coroutine-node body's frame
 // (or a nested graph run) can gate the node's completion via `detail::add_nested`, then
 // completes once the self-lock and any nested completions release. The block carries the
 // run's `token`, so a cancelled node skips its body (settling cancelled) - `on_complete`
@@ -394,8 +394,7 @@ void Static_task_graph::run_graph_node(const detail::Task_ptr& block)
     }
 
     block->num_locks.store(Block::execution_flag + 1, std::memory_order_relaxed);
-    auto prev = std::move(detail::current_task);
-    detail::current_task = block;
+    detail::Task_ptr prev = detail::Current_task::exchange(block);
 
     self->graph->run_->stamps.mark_start(self->index);
 
@@ -407,7 +406,7 @@ void Static_task_graph::run_graph_node(const detail::Task_ptr& block)
         self->graph->nodes_[self->index].run(block->token);   // node body: installs its own Access_scope
     }
 
-    detail::current_task = std::move(prev);
+    detail::Current_task::exchange(std::move(prev));
 
     // Drop the self-lock; if no nested tasks are pending, complete now (fires on_complete);
     // otherwise the last nested task completes us.
@@ -493,7 +492,7 @@ void Static_task_graph::bind_links_for_run(bool detach)
     // A detached run structurally receives no lend (and no inherited context): it may outlive
     // the launcher, so the containment argument above does not hold. It simply queues behind
     // the caller's holds like any external work.
-    const Access_context* ctx = detach ? nullptr : detail::current_access;
+    const Access_context* ctx = detach ? nullptr : detail::access_load();
     bool any = false;
     for (std::size_t i = 0; i < distinct_pipes_.size(); ++i)
     {
@@ -522,7 +521,8 @@ void Static_task_graph::bind_links_for_run(bool detach)
     }
 
 #if TS_SAFETY_CHECKS
-    if (any && detail::current_scope_children != nullptr)
+    std::vector<detail::Task_ptr>* scope_children = any ? detail::Scope_children::load() : nullptr;
+    if (scope_children != nullptr)
     {
         // Lending hands the caller's exclusivity to the inner run, but a still-running earlier
         // nested run is also executing under that same grant - so both could touch the lent
@@ -530,7 +530,7 @@ void Static_task_graph::bind_links_for_run(bool detach)
         // flight when another lends. Settled runs are not a hazard, and the scope list only drops
         // them at completion, so filter on `ready` rather than on emptiness (else a fire-and-settle
         // run earlier in the body would fatal).
-        for (const detail::Task_ptr& child : *detail::current_scope_children)
+        for (const detail::Task_ptr& child : *scope_children)
         {
             if (!child->ready.load(std::memory_order_acquire))
             {
@@ -661,7 +661,7 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     // and a node releases its objects - only after the run settles. Attached before kickoff,
     // so the run cannot settle in the window. `{.detach = true}` opts out, and a run started
     // outside any task has nothing to join.
-    if (!opts.detach && detail::current_task)
+    if (!opts.detach && detail::Current_task::get() != nullptr)
         detail::add_nested(run.done);
 
     if (nodes_.empty())

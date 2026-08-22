@@ -463,7 +463,7 @@ void run_death_scenario(const char* name)
         {
             // A detached coroutine inherits the node's write grant (its promise snapshots the
             // ambient context at creation) but is not the grant holder (`writer_owner` is the
-            // node, `current_task` is the frame); its commit() would enqueue behind the node's
+            // node, `Current_task` is the frame); its commit() would enqueue behind the node's
             // own hold -> the misuse diagnostic fatals at the call (during the eager body).
             [&d]() -> ts::Task<void> { d.commit(); co_return; }();
         }, target);

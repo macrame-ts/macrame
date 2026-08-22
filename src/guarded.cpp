@@ -126,7 +126,7 @@ static void run_block_dispatch(void* data)
 // `Run_state`, which holds the node block for the whole run - provably outlives the
 // dispatch, so the queue need not keep it alive. Saves the dispatch-hop inc/dec that
 // `run_block_dispatch` pays. `Adopt_ref` wraps the pointer without an inc; `release()`
-// detaches without the matching dec (this frame never owned a ref). The `current_task`
+// detaches without the matching dec (this frame never owned a ref). The `Current_task`
 // swap inside the body still takes its own (necessary) ref, balanced by its own lifetime.
 static void run_borrowed_dispatch(void* data)
 {
@@ -484,7 +484,7 @@ const char* pipe_name(const Pipe* pipe, char* buf, std::size_t size) noexcept
             "awaited one strictly higher), or restructure: declare the object on the node, read a "
             "Versioned snapshot, or stage via Deferred. Per-scope escape: "
             "ts::Relaxed_scope{ts::Rule::access_rank}",
-            task_name(current_task.get(), waiter, sizeof waiter),
+            task_name(Current_task::get(), waiter, sizeof waiter),
             pipe_name(awaited, object, sizeof object));
     }
     else
@@ -495,7 +495,7 @@ const char* pipe_name(const Pipe* pipe, char* buf, std::size_t size) noexcept
             "representable. Raise the awaited object's ts::Rank above %u, or restructure: declare "
             "the object on the node, read a Versioned snapshot, or stage via Deferred. Per-scope "
             "escape: ts::Relaxed_scope{ts::Rule::access_rank}",
-            task_name(current_task.get(), waiter, sizeof waiter),
+            task_name(Current_task::get(), waiter, sizeof waiter),
             pipe_name(awaited, object, sizeof object), target, held_max, held_max);
     }
     ts::fatal(message);
@@ -762,12 +762,12 @@ void report_all_suspensions(char* buffer, std::size_t size, std::size_t& used) n
 {
     char waiter[96];
 #if TS_SAFETY_CHECKS
-    if (current_access != nullptr)
+    if (const Access_context* cur = access_load())
     {
         for (std::uint8_t i = 0; i < blk->pipe_count; ++i)
         {
             const Pipe_link& l = blk->pipe_links[i];
-            if (l.pipe != nullptr && current_access->holds_epoch(&l.pipe->write_epoch))
+            if (l.pipe != nullptr && cur->holds_epoch(&l.pipe->write_epoch))
             {
                 char message[512];
                 char object[96];
@@ -775,7 +775,7 @@ void report_all_suspensions(char* buffer, std::size_t size, std::size_t& used) n
                     "sync()/take() inside task '%s' on an access to '%s', which this task already "
                     "holds - the access queues behind the waiter's own grant, so this deadlocks. "
                     "co_await it, or commit()/access under the held grant",
-                    task_name(current_task.get(), waiter, sizeof waiter),
+                    task_name(Current_task::get(), waiter, sizeof waiter),
                     pipe_name(l.pipe, object, sizeof object));
                 ts::fatal(message);
             }
@@ -789,7 +789,7 @@ void report_all_suspensions(char* buffer, std::size_t size, std::size_t& used) n
         "now. Use co_await, or try_take() for the non-blocking read; if the wait is genuinely "
         "bounded by something we cannot see, declare it with "
         "ts::Relaxed_scope{ts::Rule::in_task_sync}",
-        task_name(current_task.get(), waiter, sizeof waiter));
+        task_name(Current_task::get(), waiter, sizeof waiter));
     ts::fatal(message);
 }
 #endif
@@ -805,7 +805,7 @@ void report_all_suspensions(char* buffer, std::size_t size, std::size_t& used) n
         "across a task boundary: unwinding runs through library frames that hold grants, lock "
         "counts and refcounts, and that may be compiled with no exception support at all. "
         "Handle it inside the body",
-        task_name(current_task.get(), who, sizeof who),
+        task_name(Current_task::get(), who, sizeof who),
         what != nullptr ? ": " : "",
         what != nullptr ? what : "");
     ts::fatal(message);

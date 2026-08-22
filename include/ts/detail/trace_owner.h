@@ -11,7 +11,7 @@
 // `submit_ready` uses. The scheduler layer installs `trace_owner_add` and bumps
 // `trace_owner_armed`; nothing here names `Scheduler`.
 //
-// `current_trace_owner` = the graph-node index owning the task running on this thread
+// `Trace_owner_state` = the graph-node index owning the task running on this thread
 // (-1 = none). A node body sets it (`Trace_owner_scope`); sub-work launched from the body
 // inherits it (the snapshot `ts::launch` already does for the access context), so a
 // `parallel_for` slice or async job on any worker knows which node it belongs to.
@@ -25,6 +25,8 @@
 #endif
 
 #if TS_PROFILING
+#include "ts/detail/thread_local.h"   // the barrier the two thread-locals below are reached through
+
 #include <atomic>
 #include <chrono>
 #endif
@@ -51,12 +53,16 @@ extern void (*trace_body_add)(long long dt);   // B += dt (user functor; machine
 // accounting (see `Trace_setup_scope`). Scheduler-free.
 extern void (*trace_orchestration_add)(long long dt);  // Orch += dt (top-level graph setup, off-worker)
 
-inline thread_local int current_trace_owner = -1;
+// Both behind the thread-local barrier (ts/detail/thread_local.h): the owner is inherited by a
+// coroutine frame's promise and the scopes below are inlined into bodies that suspend, so an
+// address kept in a frame would attribute a resumed segment's work to the thread it left.
+struct Trace_owner_state : Tls_scalar<Trace_owner_state, int, -1> {};
+
 // True while this thread is inside a user functor (a `Trace_busy_scope`). `Trace_setup_scope`
 // reads it to book orchestration only for a top-level `execute()` (not one nested inside a body).
-inline thread_local bool current_in_functor = false;
+struct In_functor_state : Tls_scalar<In_functor_state, bool> {};
 
-inline int trace_owner() noexcept { return current_trace_owner; }
+inline int trace_owner() noexcept { return Trace_owner_state::load(); }
 
 // Set the owning node for a scope (save/restore, so inline-nested runs and inherited
 // sub-work restore correctly). A cheap TLS write; the attribution scope gates on the trace.
@@ -64,11 +70,10 @@ class Trace_owner_scope
 {
 public:
     explicit Trace_owner_scope(int owner) noexcept
-        : prev_(current_trace_owner)
+        : prev_(Trace_owner_state::exchange(owner))
     {
-        current_trace_owner = owner;
     }
-    ~Trace_owner_scope() { current_trace_owner = prev_; }
+    ~Trace_owner_scope() { Trace_owner_state::store(prev_); }
     Trace_owner_scope(const Trace_owner_scope&) = delete;
     Trace_owner_scope& operator=(const Trace_owner_scope&) = delete;
 
@@ -91,9 +96,8 @@ public:
         if (trace_owner_armed.load(std::memory_order_relaxed) != 0)
         {
             active_ = true;
-            owner_ = current_trace_owner;
-            in_functor_prev_ = current_in_functor;
-            current_in_functor = true;
+            owner_ = Trace_owner_state::load();
+            in_functor_prev_ = In_functor_state::exchange(true);
             t0_ = std::chrono::steady_clock::now().time_since_epoch().count();
         }
     }
@@ -102,7 +106,7 @@ public:
         if (active_)
         {
             long long dt = std::chrono::steady_clock::now().time_since_epoch().count() - t0_;
-            current_in_functor = in_functor_prev_;
+            In_functor_state::store(in_functor_prev_);
             if (trace_body_add)
                 trace_body_add(dt);                    // B += dt (machinery = busy - B is derived)
             if (owner_ >= 0 && trace_owner_add)
@@ -124,7 +128,7 @@ private:
 // frame loop / a test) that work runs on the calling thread inside no `run_task` span, so it is
 // absent from `busy` and would escape the four-way split - this scope books it to the dedicated
 // orchestration bucket. For a nested run (an `execute()` called from inside a node body,
-// `current_in_functor` true) the setup runs inside the enclosing node's `run_task` span and is
+// `In_functor_state` true) the setup runs inside the enclosing node's `run_task` span and is
 // already captured by that node's busy/body accounting; booking orchestration too would
 // double-count it, so the scope stays silent when in-body. Disarmed cost: one relaxed load +
 // branch (no clock read). The span lands in the scheduler's overflow lane (a top-level caller is
@@ -136,7 +140,7 @@ public:
     {
         // Only a top-level `execute()` books orchestration: a nested in-body run's setup is
         // already inside the enclosing node's span (busy/body), so skip it to avoid double count.
-        if (!current_in_functor && trace_owner_armed.load(std::memory_order_relaxed) != 0)
+        if (!In_functor_state::load() && trace_owner_armed.load(std::memory_order_relaxed) != 0)
         {
             active_ = true;
             t0_ = std::chrono::steady_clock::now().time_since_epoch().count();

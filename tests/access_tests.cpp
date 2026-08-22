@@ -32,21 +32,21 @@ void test_grants()
 
 void test_scope_nesting()
 {
-    TS_CHECK(ts::detail::current_access == nullptr);
+    TS_CHECK(ts::detail::access_load() == nullptr);
 
     ts::Access_context outer;
     {
         ts::Access_scope s1(outer);
-        TS_CHECK(ts::detail::current_access == &outer);
+        TS_CHECK(ts::detail::access_load() == &outer);
 
         ts::Access_context inner;
         {
             ts::Access_scope s2(inner);
-            TS_CHECK(ts::detail::current_access == &inner);
+            TS_CHECK(ts::detail::access_load() == &inner);
         }
-        TS_CHECK(ts::detail::current_access == &outer);   // restored
+        TS_CHECK(ts::detail::access_load() == &outer);   // restored
     }
-    TS_CHECK(ts::detail::current_access == nullptr);       // restored
+    TS_CHECK(ts::detail::access_load() == nullptr);       // restored
 }
 
 void test_harness_allows()

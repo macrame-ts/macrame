@@ -21,6 +21,7 @@
 // the branch that is about to fatal, never on the path every call takes.
 
 #include "ts/fatal.h"
+#include "ts/detail/thread_local.h"   // the thread-local barrier every TLS here is reached through
 
 #include <atomic>
 
@@ -173,54 +174,28 @@ constexpr bool rule_compiled_in(Rule rule) noexcept
     return any(rule & static_cast<Rule>(TS_RULES_EFFECTIVE));
 }
 
-// Marks the thread-local accessors below. A coroutine frame holding a scope guard across a
-// suspension invites the compiler to resolve a thread-local's block address once and reuse it
-// after the resume - which is the address on the thread that suspended, not the one that
-// resumed. MSVC (19.51) does this: it spills the block pointer into the coroutine frame and
-// reloads it for every later access, so the resumed body reads the suspending thread's
-// relaxation. Out of line, the block is resolved where the access happens.
-//
-// The bug class is cross-compiler and its upstream fix is incomplete: LLVM #47179 (2020,
-// "[coroutines] Compiler incorrectly caches thread_local address across suspend-points") was
-// refiled as #63022 (2023) because the first fix did not cover every scenario, and D92661
-// ("[RFC] Fix TLS and Coroutine") is the standing proposal. clang-cl 22 and clang 21 recompute
-// the address in the scenario the regression test exercises, which is not immunity. The hazard
-// also is not limited to `thread_local`: anything thread-identifying can be cached the same
-// way (clang has the sibling case for `pthread_self()`, and LLVM #72006 is the general form of
-// a frame reused as scratch across a suspension). Regression test: "rules relaxed scope reads
-// the resuming thread" in tests/rules_tests.cpp.
-#if defined(_MSC_VER) && !defined(__clang__)
-#define TS_DETAIL_NO_INLINE __declspec(noinline)
-#else
-#define TS_DETAIL_NO_INLINE [[gnu::noinline]]
-#endif
-
 namespace detail
 {
 
 #if TS_RULES_ANY
 // Rules relaxed for the running scope. Thread-local, but carried with the ambient task state
 // rather than with the thread: a coroutine's segments re-install it (`Relaxed_carrier`),
-// exactly as grants propagate. Reached only through `relaxed_load`/`relaxed_store`.
-inline thread_local unsigned relaxed_rules = 0;
+// exactly as grants propagate. A `Relaxed_scope` is a guard living across a suspension, so
+// this was the first variable the hoisting bug was reproduced on - hence the barrier
+// (ts/detail/thread_local.h).
+struct Relaxed_state : Tls_scalar<Relaxed_state, unsigned> {};
+
 // Process-wide baseline, or-ed into every lookup ("the rules as advice" setting).
 inline std::atomic<unsigned> default_relaxed_rules_bits{ 0 };
 
-// The only two ways to touch `relaxed_rules`. Both are out of line, so the block address is
-// resolved at the access and can never be kept in a caller's coroutine frame across a
-// suspension: the property holds for every toucher instead of being re-argued at each one.
-// Both pass the value - an `unsigned&` accessor would hand the same caching hazard back to
-// the caller. This is the shape Rust gives thread-locals by construction (`thread_local!`
-// plus a scoped `.with()`, with no way to obtain a raw reference); here the pair of value
-// accessors is the equivalent.
-TS_DETAIL_NO_INLINE inline unsigned relaxed_load() noexcept
+inline unsigned relaxed_load() noexcept
 {
-    return relaxed_rules;
+    return Relaxed_state::load();
 }
 
-TS_DETAIL_NO_INLINE inline void relaxed_store(unsigned bits) noexcept
+inline void relaxed_store(unsigned bits) noexcept
 {
-    relaxed_rules = bits;
+    Relaxed_state::store(bits);
 }
 
 // The whole lookup, scope bits or process baseline, read on the thread that asks.

@@ -269,14 +269,13 @@ void Access_op<T, Body>::State::run(const detail::Task_ptr& c)
         return;
     }
     c->num_locks.store(detail::Task_control_block::execution_flag + 1, std::memory_order_relaxed);
-    auto prev = std::move(detail::current_task);
     // Borrowed install, not a counted copy: the op provably outlives its own body, and the
     // slot is defused before `prev` is restored - no refcount traffic on the hot path. A
     // copy taken FROM the slot by body-launched machinery still counts normally; the one
     // copier that could outlive the op - `add_nested` - borrows the caller-owned parent the
     // same way (flag-first release, defuse without a dec; see `Flags::caller_owned`), so it
     // too holds no ref, and the op's destructor waits the nested run out.
-    detail::current_task = detail::Task_ptr(c.get(), detail::Adopt_ref{});
+    detail::Task_ptr prev = detail::Current_task::exchange_borrowed(c.get());
     {
         // The flattened access context: what the heap path's wrapper closure installs, done
         // structurally from the op's own members.
@@ -300,10 +299,9 @@ void Access_op<T, Body>::State::run(const detail::Task_ptr& c)
             c->result_ptr = &*self->storage.result;
         }
     }
-    detail::current_task.release();   // defuse the borrowed install (never a counted ref)
-    detail::current_task = std::move(prev);
+    detail::Current_task::restore_borrowed(std::move(prev));   // defuses the borrowed install
     // The child set is frozen from here: `add_nested` requires the running task, and
-    // `current_task` is restored. If children are pending, this fire cannot settle
+    // `Current_task` is restored. If children are pending, this fire cannot settle
     // synchronously - clear the flag BEFORE dropping the self-lock, so a child's settle
     // (any thread, via `release()` -> `settle_thunk`) takes the locked settle path. The
     // grants stay held until then: the pipe advance lives in `finish`, which only the
@@ -395,7 +393,7 @@ void Access_op<T, Body>::fire()
     // grant - run inline under it, touching the pipe not at all (the link above is
     // diagnostics only; `run` overwrites the unused turn lock).
     detail::Task_control_block* owner = pipe.writer_owner.load(std::memory_order_acquire);
-    if (owner != nullptr && owner == detail::current_task.get())
+    if (owner != nullptr && owner == detail::Current_task::get())
     {
         state_.settle_synchronously = true;
         state_.execute(self);
@@ -475,7 +473,7 @@ Access_op<T, Body>::~Access_op()
         // In-flight at destruction INSIDE a task: the wait below is a blocking sync, and the
         // blue boundary applies to it exactly as to `sync()` - fatal, with the same sharp
         // same-object diagnosis.
-        if (detail::current_task && rule_enforced(Rule::in_task_sync))
+        if (detail::Current_task::get() != nullptr && rule_enforced(Rule::in_task_sync))
             detail::blocking_sync_diagnose(&state_);
 #endif
         TS_ENSURE(false,
@@ -512,7 +510,7 @@ void Access_op<T, Body>::wait_settled()
 #if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
     // The rule is about the call, not the incident (as `sync_wait`): checked before the
     // settled fast path, so an in-task wait faults deterministically even on a settled op.
-    if (detail::current_task && rule_enforced(Rule::in_task_sync))
+    if (detail::Current_task::get() != nullptr && rule_enforced(Rule::in_task_sync))
         detail::blocking_sync_diagnose(&state_);
 #endif
     if (!state_.ready.load(std::memory_order_acquire))

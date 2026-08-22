@@ -63,7 +63,7 @@ public:
         if (tracing_)
         {
             start_[static_cast<size_t>(index)] = now();
-            worker_[static_cast<size_t>(index)] = current_worker_index;
+            worker_[static_cast<size_t>(index)] = current_worker_index();
         }
     }
 

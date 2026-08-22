@@ -3,7 +3,7 @@
 // The task block layer behind `Task<R>` (ts/task.h): the fully monomorphic
 // `Task_control_block` and its intrusive handle `Task_ptr`, the wrappers that compose a
 // body and a result onto the block (`Executable`, `Block_backed`, `make_executable`), the
-// dispatch and destroy trampolines, the block-naming helpers, the `current_task` TLS, the
+// dispatch and destroy trampolines, the block-naming helpers, the `Current_task` TLS, the
 // body-shape traits, and the scheduler-free seams the block dispatches through
 // (`submit_ready`, `pipe_enter_first`, the deadlock-net internals). The design detail
 // lives on the entities themselves; internals: docs/task-internals.md.
@@ -383,8 +383,21 @@ struct Task_control_block
     // stack. The first inline dispatch on a thread starts the drain; inline tasks made
     // ready during the drain just push and are picked up in order (head advances as the
     // vector grows). `clear()` at the end retains capacity -> no steady-state allocation.
-    inline static thread_local std::vector<Task_ptr> inline_pending;
-    inline static thread_local bool inline_draining = false;
+    //
+    // Behind the thread-local barrier (ts/detail/thread_local.h) as one operation rather than
+    // an accessor pair, since a vector cannot be passed by value: the queue is unnameable from
+    // outside and the only function that touches it is out of line, so its address is resolved
+    // on the pushing thread. The drain that follows never leaves that thread - a body it runs
+    // may suspend a coroutine, but suspension returns to this stack rather than migrating it.
+    class Inline_queue
+    {
+    public:
+        TS_DETAIL_NO_INLINE static void push_and_drain(const Task_ptr& blk);
+
+    private:
+        inline static thread_local std::vector<Task_ptr> pending_;
+        inline static thread_local bool draining_ = false;
+    };
 
     static void dispatch_ready(const Task_ptr& blk)
     {
@@ -399,20 +412,7 @@ struct Task_control_block
                 submit_ready(blk);
             return;
         }
-        inline_pending.push_back(blk);
-        if (inline_draining)
-            return;              // an active drain on this thread will run it
-        inline_draining = true;
-        for (std::size_t head = 0; head < inline_pending.size(); ++head)
-        {
-            Task_ptr b = std::move(inline_pending[head]);
-            if (b->execute)
-                b->execute(b);   // claims + runs the body on this thread
-            else
-                b->complete();
-        }
-        inline_pending.clear();   // retains capacity
-        inline_draining = false;
+        Inline_queue::push_and_drain(blk);
     }
 
     void settle(bool cancel_)
@@ -568,9 +568,27 @@ struct Task_control_block
     }
 
     // Blocking wait for `blk` to settle (the blue-thread `sync()` path); defined after
-    // `current_task` below (the in-task blocking fatal reads it).
+    // `Current_task` below (the in-task blocking fatal reads it).
     static void sync_wait(const Task_ptr& blk);
 };
+
+inline void Task_control_block::Inline_queue::push_and_drain(const Task_ptr& blk)
+{
+    pending_.push_back(blk);
+    if (draining_)
+        return;              // an active drain on this thread will run it
+    draining_ = true;
+    for (std::size_t head = 0; head < pending_.size(); ++head)
+    {
+        Task_ptr next = std::move(pending_[head]);
+        if (next->execute)
+            next->execute(next);   // claims + runs the body on this thread
+        else
+            next->complete();
+    }
+    pending_.clear();   // retains capacity
+    draining_ = false;
+}
 
 // `Task_ptr` refcount ops (block is complete here). `dec` at 0 runs the wrapper's `destroy`.
 inline void intrusive_inc(Task_control_block* p) noexcept
@@ -588,38 +606,51 @@ inline void intrusive_inc(Task_control_block* p) noexcept
 // (scheduler drain, TLS destructors), after a non-trivial thread-local's destructor would
 // already have run - a `std::vector` here crashed at exit under TSan. The small buffer is
 // deliberately leaked at thread exit.
-struct Destroy_queue
+//
+// Behind the thread-local barrier (ts/detail/thread_local.h) as one operation, like the
+// inline-dispatch trampoline: `intrusive_dec` is inlined into every `Task_ptr` destructor,
+// including ones a coroutine frame holds across a suspension, so an in-frame queue address
+// would be the suspending thread's. Only the release path pays the call; the refcount
+// decrement itself stays inline.
+class Destroy_queue
 {
-    Task_control_block** items = nullptr;
-    std::size_t size = 0;
-    std::size_t cap = 0;
-    bool draining = false;
+public:
+    TS_DETAIL_NO_INLINE static void push_and_drain(Task_control_block* blk) noexcept;
+
+private:
+    inline static thread_local Task_control_block** items_ = nullptr;
+    inline static thread_local std::size_t size_ = 0;
+    inline static thread_local std::size_t cap_ = 0;
+    inline static thread_local bool draining_ = false;
 };
-inline thread_local Destroy_queue destroy_queue;
+
+inline void Destroy_queue::push_and_drain(Task_control_block* blk) noexcept
+{
+    if (size_ == cap_)
+    {
+        std::size_t new_cap = cap_ == 0 ? 16 : cap_ * 2;
+        auto** grown = new Task_control_block*[new_cap];
+        for (std::size_t i = 0; i < size_; ++i)
+            grown[i] = items_[i];
+        delete[] items_;
+        items_ = grown;
+        cap_ = new_cap;
+    }
+    items_[size_++] = blk;
+    if (draining_)
+        return;   // the active drain on this thread destroys it - don't recurse
+    draining_ = true;
+    for (std::size_t head = 0; head < size_; ++head)
+        items_[head]->destroy(items_[head]);   // may push more
+    size_ = 0;   // buffer retained
+    draining_ = false;
+}
 
 inline void intrusive_dec(Task_control_block* p) noexcept
 {
     if (p->refcount.fetch_sub(1, std::memory_order_acq_rel) != 1)
         return;
-    Destroy_queue& q = destroy_queue;
-    if (q.size == q.cap)
-    {
-        std::size_t new_cap = q.cap == 0 ? 16 : q.cap * 2;
-        auto** grown = new Task_control_block*[new_cap];
-        for (std::size_t i = 0; i < q.size; ++i)
-            grown[i] = q.items[i];
-        delete[] q.items;
-        q.items = grown;
-        q.cap = new_cap;
-    }
-    q.items[q.size++] = p;
-    if (q.draining)
-        return;   // the active drain on this thread destroys it - don't recurse
-    q.draining = true;
-    for (std::size_t head = 0; head < q.size; ++head)
-        q.items[head]->destroy(q.items[head]);   // may push more
-    q.size = 0;   // buffer retained
-    q.draining = false;
+    Destroy_queue::push_and_drain(p);
 }
 
 // CRTP base for a wrapper that embeds the block as a base subobject (`Executable`, the
@@ -700,13 +731,56 @@ inline const char* task_name(const Task_control_block* blk, char* buf, std::size
 // The task currently executing on this thread (for nested-task attachment). A `Task_ptr`
 // (intrusive strong ref) so a nested child can register the parent via `nested_parent` and
 // keep it alive until the child completes.
-inline thread_local Task_ptr current_task;
+//
+// Behind the thread-local barrier (ts/detail/thread_local.h): a coroutine's segment bracket
+// (`Promise_base::enter_segment`/`exit_segment`) is inlined into the frame on both sides of
+// every suspension, which is the exposed shape exactly. `Task_ptr` is not a scalar, so the
+// accessors are hand-written: reads that only need identity get the raw pointer (no refcount
+// traffic on the dispatch path), and every ownership transfer happens inside the class.
+class Current_task
+{
+public:
+    // The running block, or null.
+    TS_DETAIL_NO_INLINE static Task_control_block* get() noexcept { return task_.get(); }
+
+    // A counted reference to it, for machinery that may outlive the body.
+    TS_DETAIL_NO_INLINE static Task_ptr share() noexcept { return task_; }
+
+    // Install `next` and hand back what it replaced - the body/segment bracket, whose
+    // restore is `exchange(std::move(prev))` with the return discarded.
+    TS_DETAIL_NO_INLINE static Task_ptr exchange(Task_ptr next) noexcept
+    {
+        Task_ptr prev = std::move(task_);
+        task_ = std::move(next);
+        return prev;
+    }
+
+    // Borrowed install: the slot holds no counted ref, for a block that provably outlives its
+    // own body (`Access_op`). Pairs only with `restore_borrowed`, which defuses the borrow
+    // before reinstalling - `exchange` would drop a reference it never took.
+    TS_DETAIL_NO_INLINE static Task_ptr exchange_borrowed(Task_control_block* next) noexcept
+    {
+        Task_ptr prev = std::move(task_);
+        task_ = Task_ptr(next, Adopt_ref{});
+        return prev;
+    }
+
+    TS_DETAIL_NO_INLINE static void restore_borrowed(Task_ptr prev) noexcept
+    {
+        task_.release();
+        task_ = std::move(prev);
+    }
+
+private:
+    inline static thread_local Task_ptr task_;
+};
 
 // The running segment's implicit-scope child list: a coroutine frame installs its own
 // per-frame list around each segment (see `coroutine_support.h`), so `detail::add_nested`
 // records a nested graph run there for the graph's non-quiet-scope lending check. Null for
-// functor bodies (counter-gated only) and outside tasks.
-inline thread_local std::vector<Task_ptr>* current_scope_children = nullptr;
+// functor bodies (counter-gated only) and outside tasks. Installed by the same segment
+// bracket as `Current_task`, so it carries the same barrier.
+struct Scope_children : Tls_scalar<Scope_children, std::vector<Task_ptr>*> {};
 
 // A coroutine frame has no call site to capture (a promise sees the coroutine's arguments,
 // not where it was called), so it inherits the identity of the task it was created inside
@@ -715,8 +789,8 @@ inline thread_local std::vector<Task_ptr>* current_scope_children = nullptr;
 inline void inherit_task_name(Task_control_block& core) noexcept
 {
 #if TS_DEBUG_NAMES
-    if (current_task)
-        core.name = current_task->name;
+    if (const Task_control_block* running = Current_task::get())
+        core.name = running->name;
 #else
     (void)core;
 #endif
@@ -738,7 +812,7 @@ inline void Task_control_block::sync_wait(const Task_ptr& blk)
     // nondeterminism - so it triggers on the rule instead, deterministically on the first
     // execution of the path. `parallel_for` joins are structurally exempt (they wait on
     // group state directly, on provably running helpers, and never route here).
-    if (current_task && rule_enforced(Rule::in_task_sync))
+    if (Current_task::get() != nullptr && rule_enforced(Rule::in_task_sync))
         blocking_sync_diagnose(blk.get());
 #endif
     blk->wait();
@@ -841,8 +915,7 @@ struct Executable : Block_backed<Executable<Body, R>>
         // Switch the counter to completion-lock mode: the flag + a self-lock held for
         // the body. Nested tasks launched during the body add more locks.
         c->num_locks.store(Task_control_block::execution_flag + 1, std::memory_order_relaxed);
-        auto prev = std::move(current_task);
-        current_task = c;
+        Task_ptr prev = Current_task::exchange(c);
 
         // The body may take the task's token (opt-in cooperative cancellation via a trailing
         // `Cancellation_token` parameter); pass it if so, otherwise invoke nullary.
@@ -862,7 +935,7 @@ struct Executable : Block_backed<Executable<Body, R>>
             c->result_ptr = &*self->storage.result;
         }
 
-        current_task = std::move(prev);
+        Current_task::exchange(std::move(prev));
 
         // Destroy the body (and its captures) now that it has run and any result is emplaced -
         // before the task settles, so a captured `Recorder`/reference cannot outlive a `sync()`
@@ -935,14 +1008,15 @@ concept Task_body = std::invocable<std::decay_t<Fn>&>
 // static_task_graph.cpp); nesting is a completion dependency, orthogonal to how the child runs.
 inline void add_nested(Task_ptr child_core)
 {
-    if (!current_task)
+    Task_control_block* running = Current_task::get();
+    if (running == nullptr)
         ts::fatal("detail::add_nested called outside a running task");
     // A caller-owned parent (`Access_op`) is linked BORROWED: the machinery must hold no ref
     // on it (Flags::caller_owned), and the op cannot settle - so cannot be legally destroyed
     // - before the child's release fires. The child's settle defuses symmetrically.
-    Task_ptr parent = current_task->flags.caller_owned
-        ? Task_ptr(current_task.get(), Adopt_ref{})
-        : current_task;
+    Task_ptr parent = running->flags.caller_owned
+        ? Task_ptr(running, Adopt_ref{})
+        : Current_task::share();
 
     parent->num_locks.fetch_add(1, std::memory_order_relaxed);   // a completion lock on the parent
 
@@ -950,8 +1024,8 @@ inline void add_nested(Task_ptr child_core)
     // lending check (static_task_graph.cpp) can see a still-running nested graph run. A
     // coroutine frame installs the scope; functor bodies have none (nullptr), and a coroutine
     // node's frame is attached at the functor node's block, where the scope is likewise absent.
-    if (current_scope_children != nullptr)
-        current_scope_children->push_back(child_core);
+    if (std::vector<Task_ptr>* children = Scope_children::load())
+        children->push_back(child_core);
     {
         std::scoped_lock lock(child_core->mutex);
 #if TS_SAFETY_CHECKS

@@ -86,9 +86,10 @@ inline unsigned suspension_shard_of(const void* record) noexcept
 inline void suspension_capture_held(Suspension_record& record) noexcept
 {
 #if TS_SAFETY_CHECKS
-    if (current_access == nullptr)
+    const Access_context* cur = access_load();
+    if (cur == nullptr)
         return;
-    current_access->for_each_epoch([&record](const std::atomic<std::uint64_t>* epoch)
+    cur->for_each_epoch([&record](const std::atomic<std::uint64_t>* epoch)
     {
         if (record.held_count < Suspension_record::max_held)
             record.held[record.held_count++] = epoch;
@@ -100,7 +101,8 @@ inline void suspension_capture_held(Suspension_record& record) noexcept
 
 inline void suspension_link(Suspension_record& record) noexcept
 {
-    record.task = current_task ? current_task->name : Named{ nullptr };
+    const Task_control_block* running = Current_task::get();
+    record.task = running != nullptr ? running->name : Named{ nullptr };
     suspension_capture_held(record);
     record.shard = suspension_shard_of(&record);
     Suspension_shard& shard = suspension_shards[record.shard];

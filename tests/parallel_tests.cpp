@@ -186,7 +186,7 @@ void test_parallel_for_priorities()
 }
 
 // The resolution rule (`detail::resolved_priority` - the exact value every helper submit
-// gets): unset inherits the calling task's priority via the `current_task` TLS, `normal`
+// gets): unset inherits the calling task's priority via the `Current_task` TLS, `normal`
 // outside a task; an explicit option always wins.
 void test_parallel_for_priority_inheritance()
 {
@@ -314,7 +314,7 @@ void test_parallel_for_current_scheduler()
     {
         ts::parallel_for(pf_sched_n, [](int i)
         {
-            pf_sched_worker[static_cast<size_t>(i)] = ts::current_worker_index;
+            pf_sched_worker[static_cast<size_t>(i)] = ts::current_worker_index();
         });
         pf_sched_done.store(true, std::memory_order_release);
     }, nullptr);

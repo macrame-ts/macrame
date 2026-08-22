@@ -134,7 +134,7 @@ public:
     {
         detail::Pipe& pipe = detail::Guarded_access::pipe(*target_);
         detail::Task_control_block* owner = pipe.writer_owner.load(std::memory_order_acquire);
-        if (owner != nullptr && owner == detail::current_task.get())
+        if (owner != nullptr && owner == detail::Current_task::get())
         {
             if (opts.token.is_cancel_requested())
                 return detail::task_from_core<void>(detail::cancelled_void_core());   // batch retained
@@ -145,8 +145,8 @@ public:
         // Nested sub-work under an inherited write grant: not the holder (`writer_owner`
         // is the parent), and enqueueing would deadlock behind the parent's own hold the
         // moment anyone syncs it. Surface the misuse at the call.
-        if (detail::current_access != nullptr
-            && detail::current_access->holds_write_epoch(detail::pipe_epoch(pipe)))
+        const Access_context* cur = detail::access_load();
+        if (cur != nullptr && cur->holds_write_epoch(detail::pipe_epoch(pipe)))
             fatal("Deferred::commit() from nested sub-work under an inherited write grant - "
                   "commit from the task holding the grant (the node/async body) instead");
 #endif

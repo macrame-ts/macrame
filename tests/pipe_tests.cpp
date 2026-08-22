@@ -415,7 +415,7 @@ void test_writer_owner_set_and_cleared()
     x.async([&x, &matched](int& v)
     {
         v = 1;
-        matched.store(owner_of(x) == ts::detail::current_task.get());
+        matched.store(owner_of(x) == ts::detail::Current_task::get());
     }).sync();
 
     TS_CHECK(matched.load());
@@ -439,13 +439,13 @@ void test_writer_owner_transfers_between_writes()
     {
         v += 1;
         first.store(owner_of(x));
-        self1.store(owner_of(x) == ts::detail::current_task.get());
+        self1.store(owner_of(x) == ts::detail::Current_task::get());
     });
     ts::Task<void> b = x.async([&](int& v)
     {
         v += 1;
         second.store(owner_of(x));
-        self2.store(owner_of(x) == ts::detail::current_task.get());
+        self2.store(owner_of(x) == ts::detail::Current_task::get());
     });
     a.sync();
     b.sync();
@@ -501,7 +501,7 @@ void test_writer_owner_multi_object()
     {
         x = 1;
         y = 2;
-        ts::detail::Task_control_block* self = ts::detail::current_task.get();
+        ts::detail::Task_control_block* self = ts::detail::Current_task::get();
         both_self.store(owner_of(a) == self && owner_of(b) == self);
         untouched.store(owner_of(c));
     }, a, b).sync();

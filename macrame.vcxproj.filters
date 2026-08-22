@@ -107,6 +107,9 @@
     <ClInclude Include="include\ts\detail\ref_count.h">
       <Filter>include\ts\detail</Filter>
     </ClInclude>
+    <ClInclude Include="include\ts\detail\thread_local.h">
+      <Filter>include\ts\detail</Filter>
+    </ClInclude>
     <ClInclude Include="include\ts\detail\trace_owner.h">
       <Filter>include\ts\detail</Filter>
     </ClInclude>

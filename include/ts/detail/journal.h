@@ -360,7 +360,7 @@ private:
     // One TLS read + two compares.
     std::size_t lane() const
     {
-        int w = current_worker_index;
+        int w = current_worker_index();
         if (w < 0 || static_cast<std::size_t>(w) + 1 >= slots_.size())
             return 0;
         return static_cast<std::size_t>(w) + 1;

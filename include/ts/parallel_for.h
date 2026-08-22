@@ -42,14 +42,14 @@ struct Parallel_options
 namespace detail
 {
 
-// Resolve the effective helper priority, on the calling thread (where the `current_task`
+// Resolve the effective helper priority, on the calling thread (where the `Current_task`
 // TLS is meaningful): an explicit option wins; otherwise inherit the calling task's queue
 // priority; outside a running task, `Priority::normal`.
 inline Priority resolved_priority(std::optional<Priority> requested)
 {
     if (requested)
         return *requested;
-    if (const Task_control_block* c = current_task.get())
+    if (const Task_control_block* c = Current_task::get())
         return c->flags.priority;
     return Priority::normal;
 }

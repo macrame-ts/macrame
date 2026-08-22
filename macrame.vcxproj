@@ -34,6 +34,8 @@
     <ClInclude Include="include\ts\detail\ref_count.h" />
     <ClInclude Include="include\ts\rules.h" />
     <ClInclude Include="include\ts\detail\suspension_registry.h" />
+    <ClInclude Include="include	sdetail	hread_local.h" />
+    <ClInclude Include="include\ts\detail\thread_local.h" />
     <ClInclude Include="include\ts\detail\trace_owner.h" />
     <ClInclude Include="include\ts\scheduler.h" />
     <ClInclude Include="include\ts\static_task_graph.h" />

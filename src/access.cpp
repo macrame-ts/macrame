@@ -94,8 +94,6 @@ Access_context::Grant Access_context::check(const void* instance, Access mode) c
 namespace detail
 {
 
-thread_local const Access_context* current_access = nullptr;
-
 void access_violation(const char* type_name, Access mode, bool stale) noexcept
 {
     char message[256];

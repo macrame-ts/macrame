@@ -134,7 +134,7 @@ void test_relaxed_scope_across_suspension()
 // block. A guard living across a suspension invites the compiler to materialize the
 // thread-local's address once, in the coroutine frame, and reuse it after the resume - which
 // is the suspending thread's block. MSVC (19.51) does exactly that when `Relaxed_scope`'s
-// constructor is inlined into the frame, so an inlined read of `relaxed_rules` returned the
+// constructor is inlined into the frame, so an inlined read of the relaxation returned the
 // value the frame was suspended with while an out-of-line read of the same variable returned
 // the live one. The two must agree; disagreement means a stale block, and every rule check
 // (plus anything else the body reads out of a thread-local) is answering for the wrong thread.
@@ -147,7 +147,7 @@ void test_relaxed_scope_across_suspension()
 
 TS_TEST_NOINLINE unsigned relaxed_bits_out_of_line()
 {
-    return ts::detail::relaxed_rules;
+    return ts::detail::relaxed_load();
 }
 
 TS_TEST_NOINLINE bool rule_relaxed_out_of_line()
@@ -161,9 +161,9 @@ ts::Task<bool> co_relaxed_tls_freshness(ts::Signal& gate, std::atomic<unsigned>&
                                         std::atomic<unsigned>& after)
 {
     ts::Relaxed_scope relax{ Rule::in_task_sync };
-    before.store(ts::detail::relaxed_rules, std::memory_order_relaxed);
+    before.store(ts::detail::relaxed_load(), std::memory_order_relaxed);
     co_await gate;
-    unsigned inlined_bits = ts::detail::relaxed_rules;
+    unsigned inlined_bits = ts::detail::relaxed_load();
     bool inlined_predicate = ts::rule_relaxed(Rule::in_task_sync);
     after.store(inlined_bits, std::memory_order_relaxed);
     co_return inlined_bits == relaxed_bits_out_of_line()

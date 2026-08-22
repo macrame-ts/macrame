@@ -44,7 +44,22 @@ namespace detail
 // implementation invariant, not merely a user-level hazard. It can be compiled out
 // wholesale (`TS_ENABLED_RULES`), which also removes the counter.
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-inline thread_local int access_guard_depth = 0;
+// Behind the thread-local barrier (ts/detail/thread_local.h): a guard whose constructor is
+// inlined into a coroutine can bump the counter through an address hoisted out of a loop
+// containing a suspension, while the check below resolves a fresh one - and
+// `await_under_guard` then fatals on a coroutine holding no guard at all. That is the one
+// rule a shipping build keeps, so the false positive reaches production.
+struct Guard_depth : Tls_scalar<Guard_depth, int> {};
+
+inline int guard_depth_load() noexcept
+{
+    return Guard_depth::load();
+}
+
+inline void guard_depth_add(int delta) noexcept
+{
+    Guard_depth::add(delta);
+}
 #endif
 
 // The guard-across-suspension check. It lives at `co_await` entry (`await_ready`), not at
@@ -59,7 +74,7 @@ inline thread_local int access_guard_depth = 0;
 inline void check_await_under_guard(const char* message)
 {
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-    if (access_guard_depth > 0 && rule_enforced(Rule::await_under_guard))
+    if (guard_depth_load() > 0 && rule_enforced(Rule::await_under_guard))
         ts::fatal(message);
 #else
     (void)message;
@@ -79,10 +94,11 @@ inline bool reentrant_under_held_grant(const Task_control_block* blk) noexcept
 {
     if (blk == nullptr || blk->pipe_count == 0)
         return false;
+    const Task_control_block* running = Current_task::get();
     for (std::uint8_t i = 0; i < blk->pipe_count; ++i)
     {
         const Pipe* pipe = blk->pipe_links[i].pipe;
-        if (pipe == nullptr || pipe->writer_owner.load(std::memory_order_acquire) != current_task.get())
+        if (pipe == nullptr || pipe->writer_owner.load(std::memory_order_acquire) != running)
             return false;
     }
     return true;
@@ -107,11 +123,11 @@ inline bool reentrant_under_held_grant(const Task_control_block* blk) noexcept
 // lend), so it cannot extend a wait chain.
 inline void check_access_rank(const Pipe* pipe, const void* instance) noexcept
 {
-    if (pipe == nullptr || current_access == nullptr || !rule_enforced(Rule::access_rank))
+    if (pipe == nullptr || access_load() == nullptr || !rule_enforced(Rule::access_rank))
         return;
-    if (instance != nullptr && current_access->check(instance, Access::read_only) != Access_context::Grant::none)
+    if (instance != nullptr && access_load()->check(instance, Access::read_only) != Access_context::Grant::none)
         return;   // already held - not a later acquisition
-    const Access_context::Rank_state held = current_access->rank_state();
+    const Access_context::Rank_state held = access_load()->rank_state();
     if (held.held == 0)
         return;   // nothing held: a top-level await orders against nothing
     const unsigned target = pipe_rank(*pipe);
@@ -139,7 +155,7 @@ inline constexpr const char* await_under_guard_message =
     "await, re-acquire). This rule is structural - it has no runtime opt-out; a build can drop "
     "it wholesale with TS_ENABLED_RULES";
 
-// Segment bracket, resolved per promise type: enter installs the coroutine's `current_task`
+// Segment bracket, resolved per promise type: enter installs the coroutine's `Current_task`
 // (and, in the promise, its access snapshot is applied by the resume path); exit restores.
 // A foreign promise (some other library's coroutine awaiting our task) has neither - both
 // no-op for it.
@@ -157,7 +173,7 @@ inline void exit_segment_if_ours(P& promise)
         promise.exit_segment();
 }
 
-// Resume a coroutine, re-installing its captured access grant and its `current_task`
+// Resume a coroutine, re-installing its captured access grant and its `Current_task`
 // segment state. The async resume runs on the thread that settled the awaited task /
 // granted the pipe - whose ambient state is not the coroutine's. The scope's destructor
 // only touches its saved `prev_`, so it stays valid even though `h.resume()` may destroy
@@ -180,7 +196,7 @@ inline void resume_with_access(std::coroutine_handle<P> h)
 
 // Bounded coroutine-resume trampoline. Without it a cascade of coroutine completions recurses
 // and overflows the stack for a deep chain: coroutine A's completion resumes B (which awaited
-// A), whose completion resumes C, ... This mirrors `Task_control_block::inline_pending`
+// A), whose completion resumes C, ... This mirrors `Task_control_block::Inline_queue`
 // (task.h) in spirit - we can't reuse that vector because it is typed to `Task_ptr` and
 // drives `block->execute()`, whereas here we drive a `coroutine_handle`. The first resume on a
 // thread starts a drain; a resume requested during the drain (the cascade) is pushed and run by
@@ -192,8 +208,40 @@ struct Resume_item
     void (*thunk)(void*);
     void* handle;
 };
-inline thread_local std::vector<Resume_item> resume_pending;
-inline thread_local bool resume_draining = false;
+
+// The queue itself, behind the thread-local barrier (ts/detail/thread_local.h). A vector
+// cannot be passed by value, so the barrier is the whole operation rather than an accessor
+// pair: nothing outside can name the queue, and the one function that touches it is out of
+// line, so its address is resolved on the thread that pushes. That the drain then stays on
+// one thread is a property of the drain, not of the caller - `h.resume()` returns to this
+// stack whether the resumed frame suspends again or completes, so the loop's later reads see
+// the slot it started with.
+class Resume_queue
+{
+public:
+    // Queue a resume and, unless a drain is already running on this thread, run the whole
+    // chain iteratively.
+    TS_DETAIL_NO_INLINE static void push_and_drain(Resume_item item);
+
+private:
+    inline static thread_local std::vector<Resume_item> pending_;
+    inline static thread_local bool draining_ = false;
+};
+
+inline void Resume_queue::push_and_drain(Resume_item item)
+{
+    pending_.push_back(item);
+    if (draining_)
+        return;   // an active drain on this thread will pick it up - don't recurse
+    draining_ = true;
+    for (std::size_t head = 0; head < pending_.size(); ++head)
+    {
+        Resume_item next = pending_[head];   // copy: a nested push may realloc the vector
+        next.thunk(next.handle);             // re-install ambient state + h.resume()
+    }
+    pending_.clear();   // retains capacity -> no steady-state allocation
+    draining_ = false;
+}
 
 template<typename P>
 void resume_thunk(void* addr)
@@ -204,17 +252,7 @@ void resume_thunk(void* addr)
 template<typename P>
 void schedule_resume(std::coroutine_handle<P> h)
 {
-    resume_pending.push_back({ &resume_thunk<P>, h.address() });
-    if (resume_draining)
-        return;   // an active drain on this thread will pick it up - don't recurse
-    resume_draining = true;
-    for (std::size_t head = 0; head < resume_pending.size(); ++head)
-    {
-        Resume_item item = resume_pending[head];   // copy: a nested push may realloc the vector
-        item.thunk(item.handle);                   // re-install ambient state + h.resume()
-    }
-    resume_pending.clear();   // retains capacity -> no steady-state allocation
-    resume_draining = false;
+    Resume_queue::push_and_drain({ &resume_thunk<P>, h.address() });
 }
 
 // Awaiter for `co_await task`. Holds an owning `core_` (keeps the awaited block alive across
@@ -263,13 +301,13 @@ struct Task_awaiter
         // held-grant cycle through them is the suspended-ABBA deadlock. Recorded before the
         // attach (the segment's `current_access` is still installed here); cleared at
         // `await_resume`. Non-pipe tasks record nothing.
-        if (core_->pipe_count > 0 && current_access != nullptr && rule_enforced(Rule::circular_wait))
+        if (core_->pipe_count > 0 && access_load() != nullptr && rule_enforced(Rule::circular_wait))
         {
             Pipe* awaited[Access_context::max_entries];   // sized to the object cap, so it never truncates
             int n = 0;
             for (std::uint8_t i = 0; i < core_->pipe_count && n < Access_context::max_entries; ++i)
                 awaited[n++] = core_->pipe_links[i].pipe;
-            recorded_ = circular_wait_record(current_access, this, current_task.get(), awaited, n);
+            recorded_ = circular_wait_record(access_load(), this, Current_task::get(), awaited, n);
         }
 #endif
 
@@ -378,7 +416,7 @@ struct Promise_base : Task_control_block
     // The ambient access grant at creation (empty if created outside any task), re-installed
     // around each resumed segment.
     std::optional<Access_context> access_ctx_ = snapshot_access();
-    // Saved `current_task` of the enclosing segment; valid only while this coroutine's
+    // Saved `Current_task` of the enclosing segment; valid only while this coroutine's
     // segment is installed. Written/read only by the thread running the segment (the
     // suspension handshake orders cross-thread handoffs).
     Task_ptr prev_task_;
@@ -414,20 +452,22 @@ struct Promise_base : Task_control_block
         std::coroutine_handle<Derived>::from_promise(promise).destroy();
     }
 
+    // The segment bracket. Every piece of ambient state it swaps sits behind the thread-local
+    // barrier (ts/detail/thread_local.h): this runs inlined into the frame on both sides of
+    // every suspension, so an address resolved here and reused after the resume would be the
+    // suspending thread's.
     void enter_segment()
     {
-        prev_task_ = std::move(current_task);
-        current_task = Task_ptr(this);
-        prev_scope_ = current_scope_children;
-        current_scope_children = &scope_children_;
+        prev_task_ = Current_task::exchange(Task_ptr(this));
+        prev_scope_ = Scope_children::exchange(&scope_children_);
         relaxed_.enter();
     }
 
     void exit_segment()
     {
         relaxed_.exit();
-        current_task = std::move(prev_task_);
-        current_scope_children = prev_scope_;
+        Current_task::exchange(std::move(prev_task_));
+        Scope_children::store(prev_scope_);
     }
 
     std::suspend_never initial_suspend() const noexcept { return {}; }
@@ -523,21 +563,21 @@ public:
         , pipe_(pipe)
         , obj_(obj)
     {
-        if (detail::current_access)
-            ctx_ = *detail::current_access;   // extend the coroutine's existing grant, don't replace it
+        if (const Access_context* cur = detail::access_load())
+            ctx_ = *cur;   // extend the coroutine's existing grant, don't replace it
         ctx_.add(obj_, Mode, detail::pipe_epoch(pipe_), detail::pipe_rank(pipe_));
-        prev_ = detail::current_access;
-        detail::current_access = &ctx_;
+        prev_ = detail::access_load();
+        detail::access_store(&ctx_);
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-        ++detail::access_guard_depth;
+        detail::guard_depth_add(1);
 #endif
     }
 
     ~Access_guard()
     {
-        detail::current_access = prev_;
+        detail::access_store(prev_);
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-        --detail::access_guard_depth;
+        detail::guard_depth_add(-1);
 #endif
         detail::pipe_release(scheduler_, pipe_, Mode);   // admit queued entries / the next guard
     }
@@ -593,21 +633,21 @@ public:
     {
         for (std::size_t i = 0; i < pipe_count_; ++i)
             pipes_[i] = pipes[i];
-        if (detail::current_access)
-            ctx_ = *detail::current_access;   // extend the coroutine's existing grant
+        if (const Access_context* cur = detail::access_load())
+            ctx_ = *cur;   // extend the coroutine's existing grant
         add_all(std::index_sequence_for<Ts...>{});
-        prev_ = detail::current_access;
-        detail::current_access = &ctx_;
+        prev_ = detail::access_load();
+        detail::access_store(&ctx_);
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-        ++detail::access_guard_depth;
+        detail::guard_depth_add(1);
 #endif
     }
 
     ~Multi_access_guard()
     {
-        detail::current_access = prev_;
+        detail::access_store(prev_);
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-        --detail::access_guard_depth;
+        detail::guard_depth_add(-1);
 #endif
         for (std::size_t i = 0; i < pipe_count_; ++i)
             detail::pipe_release(scheduler_, *pipes_[i], Mode);
@@ -698,7 +738,7 @@ struct Access_awaiter
         };
         // A write hold publishes the awaiting coroutine's task as the grant holder (null on
         // a non-task thread) - so `Deferred::commit` under a coroutine write guard can take
-        // its held-grant fast path. `current_task` was restored by `exit_segment` above, so
+        // its held-grant fast path. `Current_task` was restored by `exit_segment` above, so
         // name the coroutine's own core explicitly.
         Task_control_block* owner = owner_of(h);
         bool acquired = pipe_acquire(scheduler_, pipe_, Mode, std::move(on_acquired), owner);
@@ -722,7 +762,7 @@ struct Access_awaiter
         // task identity, not the access scope). Cleared at `await_resume`.
         Pipe* awaited = &pipe_;
         if (rule_enforced(Rule::circular_wait))
-            recorded_ = circular_wait_record(current_access, this, owner_of(h), &awaited, 1);
+            recorded_ = circular_wait_record(access_load(), this, owner_of(h), &awaited, 1);
 #endif
 
         if (state_.exchange(2, std::memory_order_acq_rel) == 1)
@@ -758,7 +798,7 @@ private:
         if constexpr (std::derived_from<P, Task_control_block>)
             return static_cast<Task_control_block*>(&h.promise());
         else
-            return current_task.get();
+            return Current_task::get();
     }
 
 public:
@@ -835,7 +875,7 @@ struct Multi_access_awaiter
         exit_segment_if_ours(h.promise());
         owner_ = owner_of(h);
 #if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
-        held_ctx_ = current_access;   // the coroutine's grants, captured for the wait record
+        held_ctx_ = access_load();   // the coroutine's grants, captured for the wait record
 #endif
         drive(0, h, true);
         if (state_.exchange(2, std::memory_order_acq_rel) == 1)
@@ -921,7 +961,7 @@ private:
         if constexpr (std::derived_from<P, Task_control_block>)
             return static_cast<Task_control_block*>(&h.promise());
         else
-            return current_task.get();
+            return Current_task::get();
     }
 
     Scheduler& scheduler_;

@@ -240,8 +240,22 @@ private:
 namespace detail
 {
 
-// null when this thread is not executing a task -> any guarded access faults.
-extern thread_local const Access_context* current_access;
+// The grants of the task running on this thread; null when no task is running, so any guarded
+// access faults. Behind the thread-local barrier (ts/detail/thread_local.h) because it has to
+// be both ends: a guard whose constructor is inlined into a coroutine loop can write through a
+// hoisted address while an out-of-line `access_check` reads a freshly resolved one, and the
+// harness then reports a grant the task genuinely holds as missing.
+struct Access_state : Tls_scalar<Access_state, const Access_context*> {};
+
+inline const Access_context* access_load() noexcept
+{
+    return Access_state::load();
+}
+
+inline void access_store(const Access_context* ctx) noexcept
+{
+    Access_state::store(ctx);
+}
 
 [[noreturn]] void access_violation(const char* type_name, Access mode, bool stale = false) noexcept;
 
@@ -252,8 +266,8 @@ extern thread_local const Access_context* current_access;
 // holding the launcher's grant.
 inline std::optional<Access_context> snapshot_access()
 {
-    if (current_access)
-        return *current_access;
+    if (const Access_context* ctx = access_load())
+        return *ctx;
     return std::nullopt;
 }
 
@@ -266,7 +280,7 @@ inline std::optional<Access_context> snapshot_access()
 template<typename T>
 inline void access_check(T* self) noexcept
 {
-    const Access_context* ctx = detail::current_access;
+    const Access_context* ctx = detail::access_load();
     Access_context::Grant g = ctx ? ctx->check(self, Access::read_write) : Access_context::Grant::none;
     if (g != Access_context::Grant::granted)
         detail::access_violation(typeid(T).name(), Access::read_write, g == Access_context::Grant::stale);
@@ -275,7 +289,7 @@ inline void access_check(T* self) noexcept
 template<typename T>
 inline void access_check(const T* self) noexcept
 {
-    const Access_context* ctx = detail::current_access;
+    const Access_context* ctx = detail::access_load();
     Access_context::Grant g = ctx ? ctx->check(self, Access::read_only) : Access_context::Grant::none;
     if (g != Access_context::Grant::granted)
         detail::access_violation(typeid(T).name(), Access::read_only, g == Access_context::Grant::stale);
@@ -294,14 +308,14 @@ class Access_scope
 {
 public:
     explicit Access_scope(const Access_context& ctx) noexcept
-        : prev_(detail::current_access)
+        : prev_(detail::access_load())
     {
-        detail::current_access = &ctx;
+        detail::access_store(&ctx);
     }
 
     ~Access_scope()
     {
-        detail::current_access = prev_;
+        detail::access_store(prev_);
     }
 
     Access_scope(const Access_scope&) = delete;
@@ -325,15 +339,15 @@ public:
     {
         if (active_)
         {
-            prev_ = current_access;
-            current_access = &*ctx;
+            prev_ = access_load();
+            access_store(&*ctx);
         }
     }
 
     ~Inherited_access_scope()
     {
         if (active_)
-            current_access = prev_;
+            access_store(prev_);
     }
 
     Inherited_access_scope(const Inherited_access_scope&) = delete;

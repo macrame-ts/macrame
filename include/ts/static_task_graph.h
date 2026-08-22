@@ -298,7 +298,7 @@ private:
     // last node finishes. Runs via the node block's `on_complete` (see run_graph_node).
     static void node_complete(Run_state& run, int index);
     // A node runs as a real task block. These are wired into the block's `execute`
-    // (run_graph_node: sets current_task + the execution-flag lock, runs the body, then
+    // (run_graph_node: sets `Current_task` + the execution-flag lock, runs the body, then
     // completes once nested tasks settle) and `on_complete` (graph_node_completed ->
     // node_complete). node_trampoline is the raw scheduler entry - a fn-ptr + Node*,
     // so dispatching a node costs no per-run allocation.

@@ -3,6 +3,7 @@
 #include "ts/detail/event_count.h"
 #include "ts/detail/mpmc_queue.h"
 #include "ts/priority.h"
+#include "ts/detail/thread_local.h"   // the barrier `current_worker_index()`'s slot sits behind
 #include "ts/detail/work_stealing_deque.h"
 
 #include <array>
@@ -152,13 +153,20 @@ namespace detail
 // enforces the single-instance invariant; the public way to bring a scheduler up is
 // `create_scheduler`. Returns a `unique_ptr` because `Scheduler` is non-movable.
 std::unique_ptr<Scheduler> make_scheduler(Scheduler_config config = {});
+
+// The slot behind `ts::current_worker_index()`, written only by a worker thread's entry and
+// exit. Behind the thread-local barrier (ts/detail/thread_local.h) like every other
+// thread-local here: the readers are header code (`Parallel_recorder::lane`, the trace
+// stamps) that a coroutine body inlines, so a cached address would route a resumed segment's
+// staging to the lane of the worker it left.
+struct Worker_index : Tls_scalar<Worker_index, int, -1> {};
 }
 
 // This thread's worker index within the one process-wide `global_scheduler()` (>= 0 for a
 // worker of it, else -1). It is the sole worker-vs-external discriminator now that there is a
 // single pool: `>= 0` means "a worker of the running pool". Routes a worker's own `normal`
 // submits to its local deque, identifies it in stealing, and selects its profiling busy slot.
-extern thread_local int current_worker_index;
+inline int current_worker_index() noexcept { return detail::Worker_index::load(); }
 
 class Scheduler
 {
