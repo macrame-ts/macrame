@@ -131,6 +131,31 @@ static ts::Task<void> throwing_coroutine()
     throw 1;
     co_return;
 }
+
+// Death scenario result type (`body_result_move_throws_*`): a move constructor that throws.
+// A body's return value reaches the task's storage through this move, and the move is the
+// body's own code, so it belongs inside the seam with the call - a move that is really an
+// allocating copy can throw exactly where the library has no handler.
+struct Throwing_move_result
+{
+    int value = 0;
+
+    Throwing_move_result() = default;
+    Throwing_move_result(Throwing_move_result&&) { throw std::runtime_error("moving a body's result"); }
+};
+
+// The negative arm of those two scenarios: what a `catch` around the call must do when it sees
+// the exception at all. An escape that reaches the library's frames dies too - by an unhandled
+// fault, or by whatever the half-unwound machinery does next - so an exit-code-only death check
+// would read a hole as a pass. Exiting 0 instead makes the two outcomes distinguishable: the
+// seam reports and aborts, or the death test fails. The exit is immediate because the frames
+// the throw came through hold grants and lock counts that unwinding left half updated - the
+// point of the seam - so there is nothing here worth running a teardown over.
+[[noreturn]] static void exit_on_escaped_body_exception()
+{
+    std::fputs("the exception left the body seam\n", stderr);
+    std::_Exit(0);
+}
 #endif
 
 void run_death_scenario(const char* name)
@@ -818,6 +843,35 @@ void run_death_scenario(const char* name)
     else if (std::strcmp(name, "body_throws_coroutine") == 0)
     {
         throwing_coroutine().sync();
+    }
+    else if (std::strcmp(name, "body_result_move_throws_launch") == 0)
+    {
+        // Worker-less, so the body runs inline on this thread and an escape is catchable here
+        // rather than ending on a worker where no handler of ours can see it.
+        ts::Scheduler_scope inline_scope{ { .single_threaded = true } };
+        try
+        {
+            auto task = ts::launch([] { return Throwing_move_result{}; });
+            (void)task.sync();   // by reference: the only move of the result is the seam's
+        }
+        catch (...)
+        {
+            exit_on_escaped_body_exception();
+        }
+    }
+    else if (std::strcmp(name, "body_result_move_throws_access") == 0)
+    {
+        ts::Guarded<Counter> counter{ ts::Named{ "counter" } };
+        try
+        {
+            // `access` on a free pipe runs the body inline on this thread, for the same reason.
+            auto op = counter.access([](Counter&) { return Throwing_move_result{}; });
+            (void)op.sync();
+        }
+        catch (...)
+        {
+            exit_on_escaped_body_exception();
+        }
     }
 #endif
     // unknown scenario: return without dying -> parent's expect_death fails

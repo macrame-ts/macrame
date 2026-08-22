@@ -829,6 +829,12 @@ template<> struct Result_storage<void> {};
 // compiled with no exception support at all. An escaping exception is therefore reported and
 // fatal. A body is free to use exceptions internally; it must handle them before returning.
 //
+// A caller that has a result to store passes a lambda which both calls the body and constructs
+// the result, so the move into the task's storage is covered too: that move is the body's own
+// code, and a type whose move allocates can throw from it. What the seam leaves outside is the
+// body's destructor - a destructor is `noexcept` unless it opts out, and a type that opts out
+// is already outside the standard library's own contract.
+//
 // The handlers exist only where the calling translation unit has exceptions enabled; with them
 // off this compiles to the invocation alone. If a program mixes both, the linker may keep
 // either copy of an inlined seam, and the whole of that risk is which diagnostic a throwing
@@ -918,7 +924,9 @@ struct Executable : Block_backed<Executable<Body, R>>
         Task_ptr prev = Current_task::exchange(c);
 
         // The body may take the task's token (opt-in cooperative cancellation via a trailing
-        // `Cancellation_token` parameter); pass it if so, otherwise invoke nullary.
+        // `Cancellation_token` parameter); pass it if so, otherwise invoke nullary. The result's
+        // move into storage is inside the seam with the call: the move that lands `R` in the
+        // optional is the body's own code, and a type whose move allocates can throw there.
         if constexpr (std::is_void_v<R>)
         {
             if constexpr (std::is_invocable_v<Body&, const Cancellation_token&>)
@@ -928,10 +936,13 @@ struct Executable : Block_backed<Executable<Body, R>>
         }
         else
         {
-            if constexpr (std::is_invocable_v<Body&, const Cancellation_token&>)
-                self->storage.result.emplace(invoke_user_body(self->body, c->token));
-            else
-                self->storage.result.emplace(invoke_user_body(self->body));
+            invoke_user_body([&]
+            {
+                if constexpr (std::is_invocable_v<Body&, const Cancellation_token&>)
+                    self->storage.result.emplace(self->body(c->token));
+                else
+                    self->storage.result.emplace(self->body());
+            });
             c->result_ptr = &*self->storage.result;
         }
 
@@ -940,6 +951,9 @@ struct Executable : Block_backed<Executable<Body, R>>
         // Destroy the body (and its captures) now that it has run and any result is emplaced -
         // before the task settles, so a captured `Recorder`/reference cannot outlive a `sync()`
         // (TODO 7.3). Nested tasks launched during the body do not reference the body member.
+        // This runs outside the seam and stays there: a destructor is `noexcept` unless it
+        // opts out, and a type that opts out is already outside the standard library's own
+        // contract, so there is nothing here worth the cost of a second handler.
         self->destroy_body();
 
         // Drop the self-lock. If it was the only remaining lock, no nested tasks are

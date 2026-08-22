@@ -292,10 +292,16 @@ void Access_op<T, Body>::State::run(const detail::Task_ptr& c)
         }
         else
         {
-            if constexpr (takes_token)
-                self->storage.result.emplace(detail::invoke_user_body(self->body(), *self->inst, c->token));
-            else
-                self->storage.result.emplace(detail::invoke_user_body(self->body(), *self->inst));
+            // The result's move into storage is inside the seam with the call: the move that
+            // lands the result in the optional is the body's own code, and a type whose move
+            // allocates can throw there.
+            detail::invoke_user_body([&]
+            {
+                if constexpr (takes_token)
+                    self->storage.result.emplace(self->body()(*self->inst, c->token));
+                else
+                    self->storage.result.emplace(self->body()(*self->inst));
+            });
             c->result_ptr = &*self->storage.result;
         }
     }

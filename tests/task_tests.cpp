@@ -513,6 +513,20 @@ void test_death_body_throws_node()     { TS_CHECK(ts::test::expect_death("body_t
 void test_death_body_throws_parallel() { TS_CHECK(ts::test::expect_death("body_throws_parallel_for")); }
 void test_death_body_throws_coroutine(){ TS_CHECK(ts::test::expect_death("body_throws_coroutine")); }
 
+// The same boundary on the result path: a body returns a type whose move constructor throws,
+// and that move is what lands the value in the task's storage. Each scenario runs its body
+// inline and catches: an exception the seam let past exits the child 0, so a hole fails these
+// tests instead of dying by the runtime's own abort and reading as a pass.
+void test_death_result_move_throws_launch()
+{
+    TS_CHECK(ts::test::expect_death("body_result_move_throws_launch"));
+}
+
+void test_death_result_move_throws_access()
+{
+    TS_CHECK(ts::test::expect_death("body_result_move_throws_access"));
+}
+
 } // namespace
 
 void run_task_tests()
@@ -566,4 +580,8 @@ void run_task_tests()
            test_death_body_throws_parallel);
     run_if(with_exceptions, "built without exceptions", "death: body throws (coroutine)",
            test_death_body_throws_coroutine);
+    run_if(with_exceptions, "built without exceptions", "death: body result move throws (launch)",
+           test_death_result_move_throws_launch);
+    run_if(with_exceptions, "built without exceptions", "death: body result move throws (access)",
+           test_death_result_move_throws_access);
 }
