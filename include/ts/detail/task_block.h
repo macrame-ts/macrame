@@ -303,6 +303,12 @@ struct Task_control_block
         // that cannot suspend by construction. Recomputed on every fire; a spare bit in a byte
         // that already exists, so it costs nothing.
         bool all_lent : 1 = false;
+        // The block is a coroutine promise, so it is safe to recover the non-template
+        // `detail::Coroutine_block` from it with a `static_cast` (coroutine_support.h). That
+        // base carries the state a type-erased `Task_control_block*` must reach - currently
+        // the live-`Access_guard` count the `await_under_guard` rule reads. Set once in
+        // `Coroutine_block`'s constructor; another spare bit in the byte, so it costs nothing.
+        bool coroutine : 1 = false;
     };
     Flags flags;
     // -----------------------------------------------------------------------------------

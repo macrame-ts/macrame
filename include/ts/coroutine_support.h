@@ -31,34 +31,69 @@ namespace ts
 namespace detail
 {
 
-// Depth of live `Access_guard`s on this thread (the async-lock guards below). A guard is confined
-// to one coroutine segment (the "no co_await under a guard" rule), so a thread-local count is
-// right: any `co_await` that would actually suspend while a guard is held (`> 0`) is the
-// lock-across-suspension anti-pattern and faults - the harness doubling as a suspension
-// detector. Incremented/decremented by `Access_guard`; checked in both `await_suspend`s.
-//
-// `Rule::await_under_guard` (ts/rules.h) is a structural rule: it has no scoped opt-out,
-// because a guard that did survive a suspension would leave the resumed segment installing
-// the promise's access snapshot over the guard's own context, and the guard's destructor
-// restoring a `current_access` pointer captured on another thread. The rule protects an
-// implementation invariant, not merely a user-level hazard. It can be compiled out
-// wholesale (`TS_ENABLED_RULES`), which also removes the counter.
-#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-// Behind the thread-local barrier (ts/detail/thread_local.h): a guard whose constructor is
-// inlined into a coroutine can bump the counter through an address hoisted out of a loop
-// containing a suspension, while the check below resolves a fresh one - and
-// `await_under_guard` then fatals on a coroutine holding no guard at all. That is the one
-// rule a shipping build keeps, so the false positive reaches production.
-struct Guard_depth : Tls_scalar<Guard_depth, int> {};
-
-inline int guard_depth_load() noexcept
+// The non-template part of a coroutine promise: everything a type-erased
+// `Task_control_block*` has to be able to reach. `Promise_base<Derived>` is a template, so
+// nothing can downcast to it without naming `Derived`; this base can be recovered from any
+// block whose `flags.coroutine` is set.
+struct Coroutine_block : Task_control_block
 {
-    return Guard_depth::load();
+    Coroutine_block() noexcept { flags.coroutine = true; }
+
+    // The coroutine's dispatch priority, carried onto the block for queued uses of its task.
+    // Here rather than on `Promise_base` so it shares one 8-byte slot with the guard count
+    // below - two sub-8-byte fields in the padding one of them needed anyway.
+    Priority priority_ = Priority::normal;
+
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+    // How many `Access_guard`s this task currently holds (the async-lock guards below).
+    // Any `co_await` issued while the count is nonzero is the lock-across-suspension
+    // anti-pattern and faults - the harness doubling as a suspension detector.
+    // Adjusted by `Access_guard`/`Multi_access_guard`, read by `check_await_under_guard`.
+    //
+    // A guard exists only inside a coroutine frame (`co_await ts::read_write(obj)` is the
+    // only way to mint one) and "is a guard live" is a property of the TASK, not of the
+    // thread running it, so the count lives here rather than in thread-local storage. The
+    // per-thread spelling was only ever correct because the rule forbids a guard spanning a
+    // suspension, which made the invariant argue for itself - and it needed a no-inline
+    // barrier to stop a resumed segment reading the suspending thread's slot.
+    //
+    // One byte: nesting past 8 already exceeds `Access_context::max_entries`, and the byte
+    // lands in padding the promise had anyway.
+    std::uint8_t guard_depth = 0;
+#endif
+};
+
+// The running coroutine's promise, or null when the running task is not a coroutine (a
+// functor `async` body, a graph node, a bare `launch`) or nothing is running at all.
+inline Coroutine_block* current_coroutine_block() noexcept
+{
+    Task_control_block* blk = Current_task::get();
+    return blk != nullptr && blk->flags.coroutine ? static_cast<Coroutine_block*>(blk) : nullptr;
 }
 
+// Guards live in this task. Zero outside a coroutine, where none can exist, and zero
+// throughout when the rule is compiled out and nothing counts them.
+inline int current_guard_depth() noexcept
+{
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+    const Coroutine_block* blk = current_coroutine_block();
+    return blk != nullptr ? blk->guard_depth : 0;
+#else
+    return 0;
+#endif
+}
+
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+// Enter/leave a guard's hold. Called from the guard's constructor and destructor, which run
+// in the body of the coroutine that awaited the guard into existence - so the promise is the
+// running task both times. A guard outside a coroutine has no owner to charge and no rule to
+// enforce, which is a machinery bug, not a user error.
 inline void guard_depth_add(int delta) noexcept
 {
-    Guard_depth::add(delta);
+    Coroutine_block* blk = current_coroutine_block();
+    if (blk == nullptr)
+        ts::fatal("an access guard was created or destroyed outside the coroutine that owns it");
+    blk->guard_depth = static_cast<std::uint8_t>(blk->guard_depth + delta);
 }
 #endif
 
@@ -68,13 +103,20 @@ inline void guard_depth_add(int delta) noexcept
 // fire only on the runs where timing was unfriendly - so a hold-then-await shipped
 // undiagnosed whenever the target pipe was momentarily free.
 //
+// `Rule::await_under_guard` (ts/rules.h) is a structural rule: it has no scoped opt-out,
+// because a guard that did survive a suspension would leave the resumed segment installing
+// the promise's access snapshot over the guard's own context, and the guard's destructor
+// restoring a `current_access` pointer captured on another thread. The rule protects an
+// implementation invariant, not merely a user-level hazard. It can be compiled out
+// wholesale (`TS_ENABLED_RULES`), which also removes the counter.
+//
 // The reentrancy exemption used to be emergent (a reentrant same-object access never
 // suspends, so it never reached the check). Hoisting forces it to be stated: see
 // `reentrant_under_held_grant` below. Everything else is illegal, guard depth > 0.
 inline void check_await_under_guard(const char* message)
 {
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
-    if (guard_depth_load() > 0 && rule_enforced(Rule::await_under_guard))
+    if (current_guard_depth() > 0 && rule_enforced(Rule::await_under_guard))
         ts::fatal(message);
 #else
     (void)message;
@@ -419,14 +461,14 @@ Optional_awaiter<R> operator co_await(Optional_awaitable<R> awaitable)
 // The shared (result-agnostic) half of the fused promise. The block is a base subobject
 // (the `Executable` pattern): a `Task_control_block*` recovers the promise with a
 // `static_cast`, and the block's `destroy` destroys the whole coroutine frame. Derives
-// from `Task_control_block` directly, not `Block_backed` - the frame, not the promise, is
-// what `destroy` must tear down. `num_locks` is armed to `execution_flag + 1`
+// from `Coroutine_block` (itself a `Task_control_block`) rather than `Block_backed` - the
+// frame, not the promise, is what `destroy` must tear down. `num_locks` is armed to `execution_flag + 1`
 // (executing + the body self-lock) in the constructor, so `detail::add_nested` can attach a
 // gating child (a nested graph run) to this coroutine across all its segments; the final
 // awaiter drops the self-lock - the task completes at `co_return` when no children are
 // pending, else when the last child settles.
 template<typename Derived>
-struct Promise_base : Task_control_block
+struct Promise_base : Coroutine_block
 {
     // The ambient access grant at creation (empty if created outside any task), re-installed
     // around each resumed segment.
@@ -445,8 +487,6 @@ struct Promise_base : Task_control_block
     // way: a `Relaxed_scope` entered in the body must still be in effect when the body resumes
     // on another worker, and must not leak onto that worker (docs/waiting-rule-policy.md §4).
     Relaxed_carrier relaxed_;
-    // The coroutine's dispatch priority, carried onto the block for queued uses of its task.
-    Priority priority_ = Priority::normal;
 
     Promise_base()
     {

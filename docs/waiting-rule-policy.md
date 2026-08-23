@@ -63,6 +63,17 @@ might know to be absent. There is no claim a user could make that would render t
 sound. It is compile-out-only, and its escape is the sanctioned form — the functor verb
 `co_await obj.access(fn)`, or splitting the scope (release, await, re-acquire).
 
+What the check reads is a count of live guards, and it lives on the **task**: a guard can only
+be minted by `co_await ts::read_write(obj)`, so the owner is always a coroutine frame, and
+`detail::Coroutine_block::guard_depth` (a byte on the promise, reached from a type-erased
+`Task_control_block*` through the block's `coroutine` flag) is where it sits. The earlier
+thread-local spelling was correct only because this rule forbids a guard spanning a suspension
+— an invariant arguing for itself — and it needed a no-inline barrier to stop a resumed segment
+reading the suspending thread's slot (§4.1). One consequence is worth stating: a *different*
+task started under a caller's guard — an eagerly-called child coroutine — carries a count of
+its own, so it may await. What it inherits is the caller's access snapshot, and that is
+policed by the grant-window (write-epoch) check, not by this counter.
+
 That gives the taxonomy, which is the answer to 6.15's "flat enum, or classes?" question —
 **both**: a flat enum of rules (stable bits, individually switchable) plus three classes
 expressed as named masks over it.
@@ -161,8 +172,10 @@ functions the body calls, or on paths with no guard alive to force the spill, wi
 across a cross-thread resume finding no disagreement. That conclusion did not hold.
 `current_access` was a live bug - a false "accessed without declared access" aborting a correct
 program, reproduced at 10 failures in 20 runs with the barrier removed - and
-`access_guard_depth` was a second, a false `await_under_guard` fatal on the one rule a shipping
-build keeps. The probe was too narrow, and the argument itself was the failure: it reasoned
+the live-guard count was a second, a false `await_under_guard` fatal on the one rule a
+shipping build keeps. (That count is no longer thread-local at all: "is a guard live" is a
+property of the task, so it lives on the coroutine promise - `detail::Coroutine_block::guard_depth`
+- and the question of which thread is reading it does not arise.) The probe was too narrow, and the argument itself was the failure: it reasoned
 about the source, which is precisely what this class of miscompile transforms. Every
 coroutine-path thread-local now sits behind the barrier by construction rather than by
 argument - see `include/ts/detail/thread_local.h` and guide section 8.4.
@@ -296,13 +309,13 @@ never sit on the path every call takes. The pattern at every site is: test the h
 condition first, and consult the policy only on the branch that is about to fatal.
 
 ```cpp
-if (access_guard_depth > 0 && rule_enforced(Rule::await_under_guard))
+if (current_guard_depth() > 0 && rule_enforced(Rule::await_under_guard))
     ts::fatal(...);
 ```
 
-The steady-state cost of an enabled rule is therefore whatever its hazard test costs — a
-thread-local compare — and the policy machinery costs nothing until something is already
-wrong.
+The steady-state cost of an enabled rule is therefore whatever its hazard test costs — here a
+byte off the running task's block — and the policy machinery costs nothing until something is
+already wrong.
 
 ## 10. Deliberately not built
 

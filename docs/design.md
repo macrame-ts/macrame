@@ -924,8 +924,10 @@ generated code read a slot belonging to the thread that suspended.
 Two of the library's own safety thread-locals were live instances, each an
 asymmetry between one side inlined into the frame and one side resolving
 freshly: `current_access`, producing a false access violation against a program
-that held its grant correctly, and `access_guard_depth`, producing a false
-`await_under_guard` fatal. The second is the sharper argument for a structural
+that held its grant correctly, and the live-`Access_guard` count, producing a
+false `await_under_guard` fatal. (That count has since stopped being
+thread-local: it is a property of the task, so it lives on the coroutine
+promise.) The second is the sharper argument for a structural
 defence, since `await_under_guard` is the one rule a Shipping build keeps and a
 misread counter breaks it in both directions.
 

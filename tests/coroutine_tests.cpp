@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <future>
+#include <optional>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -259,7 +260,7 @@ TS_TEST_NOINLINE const void* access_context_out_of_line()
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
 TS_TEST_NOINLINE int guard_depth_out_of_line()
 {
-    return ts::detail::guard_depth_load();
+    return ts::detail::current_guard_depth();
 }
 #endif
 
@@ -281,7 +282,7 @@ Task<bool> co_tls_freshness(ts::Guarded<tests::Counter>& shared, int iterations)
             auto guard = co_await ts::read_write(shared);
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
             ok = ok && guard_depth_out_of_line() == 1;
-            ok = ok && ts::detail::guard_depth_load() == 1;
+            ok = ok && ts::detail::current_guard_depth() == 1;
 #endif
             const void* ctx = ts::detail::access_load();
             ok = ok && ctx != nullptr && access_context_out_of_line() == ctx;
@@ -308,6 +309,45 @@ void test_tls_freshness_across_resumption()
         all_fresh = frame.sync() && all_fresh;   // sync every frame, then report
     TS_CHECK(all_fresh);
     TS_CHECK(co_read_guard(shared).sync() == frames * iterations * 2);
+}
+
+// A task of its own, started while its caller holds a guard and settling without ever
+// suspending. The guard count is the CALLER's, so this frame - a different task - must see
+// none of it. Reading a nonzero depth here is the thread-scoped spelling showing through.
+Task<int> co_guard_depth_probe()
+{
+    co_return ts::detail::current_guard_depth();
+}
+
+// Contending frames: each waits its turn on the same object, so it resumes on whichever
+// worker released the grant, and holds its own guard while the others hold theirs.
+Task<bool> co_guard_depth_per_task(ts::Guarded<tests::Counter>& shared)
+{
+    auto guard = co_await ts::read_write(shared);
+    bool ok = ts::detail::current_guard_depth() == 1;
+    std::optional<int> probed = co_guard_depth_probe().try_take();
+    ok = ok && probed.has_value() && *probed == 0;
+    guard->increment();
+    ok = ok && ts::detail::current_guard_depth() == 1;
+    co_return ok;
+}
+
+// The count belongs to the task, not to the thread: every frame holding a guard reports
+// exactly its own, and work started under the hold reports none.
+void test_guard_depth_is_per_task()
+{
+    ts::Guarded<tests::Counter> shared{ ts::Named{ "guard_depth_per_task" } };
+    constexpr int frames = 8;
+    std::vector<Task<bool>> frames_running;
+    frames_running.reserve(frames);
+    for (int i = 0; i < frames; ++i)
+        frames_running.push_back(co_guard_depth_per_task(shared));
+
+    bool all_own = true;
+    for (Task<bool>& frame : frames_running)
+        all_own = frame.sync() && all_own;   // sync every frame, then report
+    TS_CHECK(all_own);
+    TS_CHECK(co_read_guard(shared).sync() == frames);
 }
 
 // --- multi-object scope guard: co_await ts::read_write(a, b, ...) -------------------------
@@ -955,6 +995,7 @@ void run_coroutine_tests()
     run("co guard loop", test_guard_loop);
     run("co guard contention", test_guard_contention);
     run("co thread-local state survives resumption on another worker", test_tls_freshness_across_resumption);
+    run_if(with_rule_await_under_guard, "TS_RULE_AWAIT_UNDER_GUARD off", "co guard depth is per task", test_guard_depth_is_per_task);
     run("co multi-guard transfer", test_multi_guard_transfer);
     run("co multi-guard structured bindings", test_multi_guard_structured_bindings);
     run("co multi-guard read_only concurrent", test_multi_guard_read_only);
