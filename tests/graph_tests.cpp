@@ -820,8 +820,18 @@ void test_graph_trace_end_to_end_utilization()
     TS_CHECK(trace.core_utilization() <= 1.0);
 }
 
-// Task volume: a node running a `parallel_for` fans out into slice tasks, so the trace's
-// total task count exceeds the run count (which would equal it if each run were one task).
+// Task volume: the trace's task counter sees every task the scheduler runs - the node, the
+// helpers a `parallel_for` submits, anything launched from the body - not just the node count.
+// The assertion is anchored on tasks the test itself dispatches and awaits: the node launches
+// `extra` tasks through the scheduler and `co_await`s every one before returning, so each
+// passes `run_task` inside the run's armed window and is counted, and every run contributes at
+// least 1 + `extra`. The `parallel_for` stays because the stat exists to expose that fan-out,
+// but it is not what the check rests on. Its `conc - 1` helpers are submitted unconditionally,
+// yet the caller's `parallel_for` returns once the *items* are done, not once the helpers have
+// exited - a helper that got its worker late claims nothing and runs `run_task` after the node
+// has completed and the trace has disarmed, so it is not counted. Under load most helpers are
+// late, the count drops toward the run count, and a check that depended on it asserted the
+// OS scheduler's timing rather than the counter.
 void test_graph_trace_task_count()
 {
     ts::Guarded<int> x{ ts::Named{}, 0 };
@@ -830,11 +840,17 @@ void test_graph_trace_task_count()
         auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(us);
         while (std::chrono::steady_clock::now() < until) {}
     };
+    constexpr int extra = 8;
 
     ts::Static_task_graph g;
-    g.add_node("fanout", [busy](int& v)
+    g.add_node("fanout", [busy](int& v) -> ts::Task<void>
     {
-        ts::parallel_for(64, [&busy](int) { busy(30); });   // fans out onto the pool
+        ts::parallel_for(64, [&busy](int) { busy(30); });   // fans out onto the pool, opportunistically
+        ts::Task<void> launched[extra];
+        for (ts::Task<void>& t : launched)
+            t = ts::launch([busy] { busy(10); });           // each one a scheduled task, counted
+        for (ts::Task<void>& t : launched)
+            co_await t;
         ++v;
     }, x);
     g.compile();
@@ -848,8 +864,8 @@ void test_graph_trace_task_count()
     g.set_trace(nullptr);
 
     TS_CHECK(trace.run_count() == N);
-    TS_CHECK(trace.task_total() > trace.run_count());   // fan-out: slices are separate tasks
-    TS_CHECK(trace.tasks_per_run() > 1.0);
+    TS_CHECK(trace.task_total() >= static_cast<long long>(N) * (1 + extra));   // node + the launches, every run
+    TS_CHECK(trace.tasks_per_run() >= 1.0 + extra);
 }
 
 // Task-system overhead metric on synthetic folds: `on_run_complete` derives machinery by pure
