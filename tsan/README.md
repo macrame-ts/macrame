@@ -22,7 +22,8 @@ behaviour matters, and the hooks run it there:
 
 - **pre-commit**: compile-check `tsan_main.cpp` (`-fsyntax-only`, ~3 s) when the
   staged changes touch C++ sources/headers.
-- **pre-push**: full `tsan/run.sh` (~40 s) when the outgoing commits touch C++
+- **pre-push**: full `tsan/run.sh` - the suite repeated, then the stress stages, a few
+  minutes - when the outgoing commits touch C++
   sources/headers.
 
 Both skip with a warning when no Linux clang is reachable (WSL not set up yet).

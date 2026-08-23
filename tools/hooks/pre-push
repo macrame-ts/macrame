@@ -1,7 +1,7 @@
 #!/bin/sh
-# Full ThreadSanitizer stress run (tsan/run.sh, ~40 s) before commits leave the
-# machine. Runs only when the outgoing commits touch C++ sources/headers; skips
-# with a warning when no Linux toolchain is reachable. Enable per clone:
+# Full ThreadSanitizer run (tsan/run.sh: the suite, repeated, then the stress stages - a few
+# minutes) before commits leave the machine. Runs only when the outgoing commits touch C++
+# sources/headers; skips with a warning when no Linux toolchain is reachable. Enable per clone:
 #   git config core.hooksPath tools/hooks
 
 zero=0000000000000000000000000000000000000000
@@ -24,13 +24,13 @@ if command -v wsl.exe >/dev/null 2>&1; then
         exit 0
     fi
     win_pwd=$(pwd -W 2>/dev/null || pwd)
-    echo "pre-push: running TSan stress (tsan/run.sh, ~40 s)..."
+    echo "pre-push: running the suite and stress under TSan (tsan/run.sh, a few minutes)..."
     if ! wsl.exe -e bash -c "bash \"\$(wslpath '$win_pwd')/tsan/run.sh\""; then
         echo "$fail_msg" >&2
         exit 1
     fi
 elif command -v clang++ >/dev/null 2>&1; then
-    echo "pre-push: running TSan stress (tsan/run.sh, ~40 s)..."
+    echo "pre-push: running the suite and stress under TSan (tsan/run.sh, a few minutes)..."
     if ! bash tsan/run.sh; then
         echo "$fail_msg" >&2
         exit 1
