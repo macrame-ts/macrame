@@ -56,7 +56,7 @@ render-thread pipeline, which is why §2 reads the UE source first.
 
 ---
 
-## 2. UE research (read from `c:\src\UnrealEngine-release`)
+## 2. UE research (read from a local Unreal Engine source checkout)
 
 ### 2.1 `ENQUEUE_RENDER_COMMAND` — the coarse cross-thread queue
 

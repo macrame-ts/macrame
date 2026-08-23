@@ -1,6 +1,4 @@
-<!-- Quick start. Linked from the README. Name decided: Macrame; project and file names are
-     now `macrame`. Only the GitHub repo and URLs stay `Andriy06/task_system` until the repo
-     moves to macrame-ts/macrame (docs/going-public.md). -->
+<!-- Quick start. Linked from the README. -->
 
 # Quick start
 
