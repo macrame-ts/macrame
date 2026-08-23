@@ -56,7 +56,7 @@ enum class Idle_policy
 
 struct Scheduler_config
 {
-    std::uint32_t num_threads = 0;   // 0 -> `std::thread::hardware_concurrency()`
+    std::uint32_t num_workers = 0;   // 0 -> `std::thread::hardware_concurrency()`
     Idle_policy idle_policy = Idle_policy::spin_then_block;
     // `spin_then_block`/`handoff`: number of `find_work` scans an idle worker spins before it
     // parks (UE's `WorkerSpinCycles` is ~53). Ignored by `spin`.
@@ -68,7 +68,7 @@ struct Scheduler_config
     // to be aware of: a task body runs before `launch`/`async` returns (reentrancy is
     // observable - launching under a user lock runs the body under that lock); priorities
     // and the idle policy are no-ops; work triggered from an external thread runs on that
-    // thread. `num_threads` is ignored when set.
+    // thread. `num_workers` is ignored when set.
     bool single_threaded = false;
 };
 

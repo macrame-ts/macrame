@@ -92,7 +92,7 @@ scheduler is heavy, so it never starts lazily. Create it once at startup, before
 any scheduled work; a second one is fatal (there is exactly one):
 
 ```cpp
-ts::create_scheduler({ .num_threads = 4 });   // once, at startup
+ts::create_scheduler({ .num_workers = 4 });   // once, at startup
 // ... graph.execute(), ts::launch(...), etc. all run on it ...
 ts::destroy_scheduler();                        // or omit — torn down at program exit
 ```
@@ -104,7 +104,7 @@ restores the previous config on exit:
 
 ```cpp
 {
-    ts::Scheduler_scope sched{ { .num_threads = 4 } };
+    ts::Scheduler_scope sched{ { .num_workers = 4 } };
     // graph.execute(), ts::launch(...), etc. run on the 4-worker scheduler here
 }   // previous config restored (or torn down if none was running)
 ```
@@ -1175,25 +1175,34 @@ Data-parallel loops over an index range:
 ```cpp
 ts::parallel_for(n, [&](int i) { out[i] = f(in[i]); });
 
-ts::Task<void> done = ts::async_parallel_for(n, body);   // non-blocking variant
+ts::Task<void> done = ts::parallel_for_async(n, body);   // non-blocking variant
 ```
 
-Options — `ts::Parallel_options{ .concurrency, .balance, .priority }`:
+Options — `ts::Parallel_options{ .max_workers, .balance, .priority, .token }`:
 
-- `concurrency`: number of parallel executors (0 = scheduler width).
+- `max_workers`: upper bound on the executors that may participate, the
+  calling thread included (0 = the scheduler's worker count). Helpers are
+  fanned out up to it; one that never gets a worker finds nothing left to
+  claim.
 - `balance`:
   - `guided` (default) — chunk size shrinks as work drains: low overhead
     early, fine-grained load balancing at the tail.
-  - `balanced` — fixed `n/concurrency` chunks; lowest overhead, assumes
+  - `balanced` — fixed `n/max_workers` chunks; lowest overhead, assumes
     uniform item cost.
   - `unbalanced` — every item claimed individually; maximum balancing,
     maximum overhead.
 - `priority`: queue priority for the helper tasks. Unset (the default)
-  inherits the calling task's priority — a `parallel_for` inside a
-  high-priority task or graph node dispatches its helpers at `high`; outside
-  a running task it is `normal`. Set it (`{.priority = ts::Priority::low}`)
-  to override. The calling thread's own share is unaffected either way — it
-  runs inline, not through the queue.
+  inherits the calling task's priority — the same rule every option struct
+  follows (§10.1); a `parallel_for` inside a high-priority task or graph node
+  dispatches its helpers at `high`, and outside a running task it is
+  `normal`. Set it (`{.priority = ts::Priority::low}`) to override. The
+  calling thread's own share is unaffected either way — it runs inline, not
+  through the queue.
+- `token`: cancellation for `parallel_for_async` only. Once requested, chunks
+  not yet claimed are skipped and the returned task settles cancelled
+  (`is_cancelled()`); chunks already running finish. The blocking forms
+  ignore it — their caller participates and joins, so stopping early is the
+  body's own early-out.
 
 The calling thread participates in the loop (it does not just wait), which is
 what makes *nested* `parallel_for` — a parallel loop inside a parallel loop's
@@ -1653,11 +1662,14 @@ demonstration incl. minimal setup floors: `sample/events.cpp`.
 
 ### 10.1 Priorities
 
-`ts::Priority { high, normal, low }`, defaulting to `normal`, accepted by
-every route: `launch` options, `async` options,
-`Graph_node::priority(p)`. `high` is strict (always served first); `low`
-still makes progress under sustained load (an aging valve prevents
-starvation).
+`ts::Priority { high, normal, low }`, accepted by every route: `launch`
+options, `async`/`access` options, `parallel_for` options,
+`Graph_node::priority(p)`. On the option structs the field is
+`std::optional<Priority>`: unset inherits the calling task's priority;
+outside a task, `normal`. So an `async` issued from a `high` node runs
+`high` unless you say otherwise, and `{.priority = ts::Priority::low}`
+always wins. `high` is strict (always served first); `low` still makes
+progress under sustained load (an aging valve prevents starvation).
 
 A coroutine has no priority option of its own: its frame is never queued (it
 starts on the caller's thread and resumes on the thread that settled what it
@@ -1674,7 +1686,7 @@ and it services every task until `destroy_scheduler` (or program exit):
 
 ```cpp
 ts::create_scheduler({
-    .num_threads = 0,                                // 0 = hardware concurrency
+    .num_workers = 0,                                // 0 = hardware concurrency
     .idle_policy = ts::Idle_policy::spin_then_block, // the default
     .spin_cycles = 64,
 });

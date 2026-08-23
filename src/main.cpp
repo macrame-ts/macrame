@@ -108,7 +108,7 @@ int main(int argc, char** argv)
     for (int i = 1; i + 1 < argc; ++i)
     {
         if (std::strcmp(argv[i], "--workers") == 0)
-            config.num_threads = static_cast<std::uint32_t>(std::atoi(argv[i + 1]));
+            config.num_workers = static_cast<std::uint32_t>(std::atoi(argv[i + 1]));
     }
     ts::create_scheduler(config);
 

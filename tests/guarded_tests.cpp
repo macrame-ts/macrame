@@ -970,6 +970,33 @@ void test_op_queued_option()
     TS_CHECK(inner_ok.load());
 }
 
+// `Access_options::priority` / `Dispatch_options::priority` unset = inherit: an `async` issued
+// from inside a launched task dispatches at the launcher's priority (`detail::resolved_priority`,
+// the rule `parallel_for` already follows), read off the body's own block; an explicit option
+// still wins; outside a task it is `normal`.
+void test_async_inherits_caller_priority()
+{
+    ts::Guarded<int> d{ ts::Named{}, 0 };
+    auto own_priority = [](int&) { return static_cast<int>(ts::detail::Current_task::get()->flags.priority); };
+
+    TS_CHECK(d.async(own_priority).sync() == static_cast<int>(ts::Priority::normal));   // outside a task
+
+    // The launched body only issues the async (it cannot sync inside a task); the handle is
+    // joined here, on the test thread.
+    const ts::Priority classes[] = { ts::Priority::high, ts::Priority::normal, ts::Priority::low };
+    for (ts::Priority p : classes)
+    {
+        ts::Task<int> probe;
+        ts::launch([&d, &probe, own_priority] { probe = d.async(own_priority); }, { .priority = p }).sync();
+        TS_CHECK(probe.sync() == static_cast<int>(p));
+    }
+
+    ts::Task<int> forced;
+    ts::launch([&d, &forced, own_priority] { forced = d.async(own_priority, { .priority = ts::Priority::low }); },
+        { .priority = ts::Priority::high }).sync();
+    TS_CHECK(forced.sync() == static_cast<int>(ts::Priority::low));
+}
+
 // --- Access_op: nested completion-gating (s4 as revised) -------------------
 
 // A functor op body that starts a nested graph run and RETURNS: `execute()` attaches the run
@@ -1072,6 +1099,7 @@ void run_guarded_tests()
     run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: access writes under a read grant",
         []{ TS_CHECK(ts::test::expect_death("access_write_under_read_grant")); });
     run("op: queued option", test_op_queued_option);
+    run("async inherits caller priority", test_async_inherits_caller_priority);
     run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op start unbound",
         []{ TS_CHECK(ts::test::expect_death("access_op_start_unbound")); });
     run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op sync never started",

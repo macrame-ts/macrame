@@ -1064,16 +1064,21 @@ using Access_awaiter = detail::Access_awaiter<T, Mode>;
 template<Access Mode, typename... Ts>
 using Multi_access_awaiter = detail::Multi_access_awaiter<Mode, Ts...>;
 
+// Public spelling of the task awaiter (what `co_await task` builds), for symmetry with
+// `ts::Access_awaiter`; like it, users never name it.
+template<typename R>
+using Task_awaiter = detail::Task_awaiter<R>;
+
 // `co_await task` -> suspend until `task` settles, then resume with its result (`const R&`,
 // non-consuming; `void` for a void task). ADL finds these in namespace `ts`.
 template<typename R>
-detail::Task_awaiter<R> operator co_await(const Task<R>& t)
+Task_awaiter<R> operator co_await(const Task<R>& t)
 {
     return detail::Task_awaiter<R>(detail::core_of(t));
 }
 
 template<typename R>
-detail::Task_awaiter<R> operator co_await(Task<R>&& t)
+Task_awaiter<R> operator co_await(Task<R>&& t)
 {
     return detail::Task_awaiter<R>(detail::core_of(t));
 }

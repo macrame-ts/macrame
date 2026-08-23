@@ -15,8 +15,8 @@ Section 2 items are ready to implement as described. Section 3 items each carry
 options and a recommendation; reply by number. Section 4 is agreed post-1.0.
 
 **Status: every section 2 item landed on 2026-08-22** (M7 corrected on the way -
-see its row). From section 3, M1 landed in 2026-08 and M2 and S9 on 2026-08-23; the rest
-still need decisions.
+see its row). From section 3, M1 landed in 2026-08, and M2, S9, M8, M10, S2, S6 and S7 on
+2026-08-23 (plus D5's alias); S10 still needs a decision.
 
 ---
 
@@ -54,7 +54,7 @@ expanding before implementation.
 | **M4** DONE | `Access_guard`/`Multi_access_guard` have public constructors taking `detail::Pipe&` | make them private, friend the awaiters. `detail::Pipe` then appears in no public signature - which is what the header already does for the awaiter types themselves. |
 | **M5** DONE | `set_ensure_handler` / `ensure_failure_count` are inside `#if TS_SAFETY_CHECKS`, so a host that installs an ensure handler compiles in Debug and **fails to compile in Shipping** | declare both unconditionally; compile no-op definitions when checks are off. Public API shape must not depend on build config. |
 | **M7** DONE | `Task::sync()` is not ref-qualified, so `const R& r = obj.async(fn).sync();` dangles - while the same spelling on `Access_op` is safe (`sync() &&` returns by value) | **Corrected 2026-08-22: documentation only, no signature change.** The original fix ("mirror `Access_op` exactly") is unsound here. `Access_op::sync() &&` is `return take()` - it *consumes* - which works only because an `Access_op` is single-owner: non-copyable, caller-owned storage, so an rvalue op is provably the last owner. A `Task<R>` is a refcounted handle onto a shared block, and the header promises any number of readers may `sync()` the same task; an rvalue `Task` is therefore not necessarily the last owner, and consuming there would move the result out from under a live copy. The real defect is undocumented: `sync()` returns `const R&` into block-owned storage, so binding it to a temporary handle's result dangles while `auto x = ...sync();` is safe (the copy happens inside the full expression). `Task::sync`'s comment now states the lifetime rule, shows the three spellings, and records why the two handle types differ. |
-| **M9** DONE | `[[nodiscard]]` is on exactly one function, yet dropping a `Deferred::commit` or `Versioned::publish` handle is a **checked fatal later** in the destructor | mark `commit`, `publish`, `Frame_gate::next`, `async_parallel_for`. Deliberately not `async` - fire-and-forget is sanctioned there. **Corrected 2026-08-22: `access` and `Versioned::read` ARE marked.** The original reasoning ("discarding an `Access_op` is a defined wait") was wrong: the destructor blocks, and its ENSURE fires only when it actually has to wait, so a discard trips a nondeterministic diagnostic. That reddened master and hid two more discard sites in `sample/physics.cpp` until the attribute enumerated them. `access` is the *attended* verb - dropping it is never the intent; `async` is the spelling for not waiting. |
+| **M9** DONE | `[[nodiscard]]` is on exactly one function, yet dropping a `Deferred::commit` or `Versioned::publish` handle is a **checked fatal later** in the destructor | mark `commit`, `publish`, `Frame_gate::next`, `parallel_for_async`. Deliberately not `async` - fire-and-forget is sanctioned there. **Corrected 2026-08-22: `access` and `Versioned::read` ARE marked.** The original reasoning ("discarding an `Access_op` is a defined wait") was wrong: the destructor blocks, and its ENSURE fires only when it actually has to wait, so a discard trips a nondeterministic diagnostic. That reddened master and hid two more discard sites in `sample/physics.cpp` until the attribute enumerated them. `access` is the *attended* verb - dropping it is never the intent; `async` is the spelling for not waiting. |
 | **S1** DONE | `Versioned` has no `Rank` constructor, so its front can never satisfy `Rule::access_rank` - a user awaiting it while holding anything has no fix available | add `Versioned(Named, Rank, ...)` forwarding the rank to the front `Guarded`. |
 | **S3** DONE | stale header comments (item 3 above) | fix the enumerated sites. Highest value: `versioned.h`'s documented `add_node` example **does not compile** (missing the leading `Named`); `guarded.h`'s "`{token, priority}`; deliberately no run-inline knob" is false on both halves; `global_scheduler()` is declared twice with each site pointing at the other. Also refresh the corresponding `CLAUDE.md` bullet. |
 | **S4** DONE | `Access_op` has `try_take()` but no `as_optional()`, so the cancellation-tolerant await is missing on the verb most likely to carry a token | add it, completing the `sync`/`take`/`try_take`/`as_optional` vocabulary on both handle types. |
@@ -252,7 +252,12 @@ it cannot be done cheaply after.
 
 ---
 
-### M10 - `Event_bus`'s defaulted `Named` captures the library header
+### M10 - `Event_bus`'s defaulted `Named` captures the library header - DONE (2026-08-23)
+
+**Decision (author): (a), require the name** - `explicit Event_bus(Named)`, uniform with
+`Guarded`/`Versioned`. Every in-tree construction site already spelled `ts::Named{}`, so none
+changed. `named_tests.cpp` gained the `Event_bus` case: a `Named{}` bus is identified by a site
+in the test file, reached through the board's pipe name.
 
 **Defect.** `explicit Event_bus(Named name = {})` (`event_bus.h:261`). A default argument is
 evaluated at its *declaration* site, so `Named`'s own defaulted `source_location::current()`
@@ -279,7 +284,17 @@ Either way, add an `Event_bus` case to `named_tests.cpp`.
 **Recommendation:** (a), for uniformity with the other required-name types - unless you would
 rather not touch call sites, in which case (b) fixes the identity without an API change.
 
-### S2 - priority inheritance is inconsistent between the option structs
+### S2 - priority inheritance is inconsistent between the option structs - DONE (2026-08-23)
+
+**Decision (author): (a), align on inheritance.** `Dispatch_options::priority` and
+`Access_options::priority` are `std::optional<Priority>`, resolved through one
+`detail::resolved_priority` (moved from `parallel_for.h` to `detail/task_block.h`, where every
+option consumer can reach it): explicit wins, else the calling task's priority, else `normal`.
+Resolved on the calling thread at the verb - `Versioned::publish` resolves at the publish call
+rather than in its later phase-1 continuation, where "the calling task" would be the wrong one.
+Designated-initializer sites are unchanged. Test: `async inherits caller priority`
+(`guarded_tests.cpp`) reads the body's own `flags.priority` from inside a launched task of
+each class, plus the explicit-override case.
 
 **Defect.** `Parallel_options::priority` is `std::optional<Priority>` meaning
 *inherit the calling task's priority*. `Access_options::priority` and
@@ -303,7 +318,14 @@ Either way the field *type* is the breaking part, so decide before the tag.
 
 ---
 
-### S6 - three names for worker count
+### S6 - three names for worker count - DONE (2026-08-23)
+
+**Decision (author): (a), both fields.** `Scheduler_config::num_threads` is now `num_workers`.
+`Parallel_options::concurrency` is now `max_workers`, not `workers`: the field is an upper
+bound on the executors that may participate, the calling thread included - a helper that never
+gets a worker just finds nothing left to claim - so a name that reads as an exact count would
+misstate it. Every site in tests, samples, benchmarks, tsan, `src/main.cpp` (`--workers N`)
+and the guide moved; the README was left as it was (out of scope for this pass).
 
 `Scheduler_config::num_threads`, `Scheduler::worker_count()`,
 `Parallel_options::concurrency`, plus prose "scheduler width" and "executors".
@@ -318,7 +340,20 @@ tests, samples, benchmarks, tsan, plus guide and quickstart.
 
 ---
 
-### S7 - `async_parallel_for` naming and cancellation
+### S7 - `async_parallel_for` naming and cancellation - DONE (2026-08-23)
+
+**Decision (author):** renamed to `parallel_for_async` (the `parallel_for_colored` suffix
+convention; no deprecated alias - nothing is released), and `Parallel_options` gained a
+`token`. The async form honours it: a helper that finds the token requested claims the whole
+unclaimed tail in one step, accounts for it through `done` unprocessed and raises a `skipped`
+flag; the executor whose accounting reaches `n` then settles the task cancelled rather than
+complete. Running chunks finish. Cost: one token load per chunk claim (an empty token is a null
+test), not per item. The blocking forms ignore the field, stated on the struct: their caller
+participates and joins, so stopping early is the body's own early-out. Test:
+`parallel_for_async cancel` holds every worker, requests cancellation while all helpers are
+still queued, releases, and asserts `is_cancelled()` with zero bodies run (deterministic -
+nothing can claim before the request lands); the same requested token on the blocking form
+runs every item. The README still spells the old name - it was out of scope for this pass.
 
 Two smaller calls in one place. It is the only `async_` *prefix* in the library
 (elsewhere `async` is a verb), while the sibling suffix convention exists in
@@ -482,7 +517,7 @@ workaround.
 | **D2** | mixed-mode multi-object held guard, `co_await ts::read_write(a, as_read_only(b))` | additive; the callback form covers it today |
 | **D3** | enforcing `Versioned::state()`'s read-only contract | `state()` hands out a mutable `Guarded<T>&`, so a direct write compiles and silently breaks the replica invariant. The clean fix is a distinct front handle type exposing only what `add_node`/`read` need - nontrivial graph-declaration plumbing. Document the hazard louder meanwhile |
 | **D4** | trimming `Access_op`'s lifecycle surface (`Dormant`/`bind`/`start`/refire) | five states and four verbs for a pooled-op case with no in-tree user, but it is deliberately designed; removing surface later is easier than adding it |
-| **D5** | remaining `detail::` types in rvalue-only public signatures | opaque in practice. One cheap exception worth pulling forward: a `ts::Task_awaiter` alias for symmetry with `ts::Access_awaiter` |
+| **D5** | remaining `detail::` types in rvalue-only public signatures | opaque in practice. The one cheap exception was pulled forward (2026-08-23): `ts::Task_awaiter<R>` aliases `detail::Task_awaiter<R>`, and the two `operator co_await`s return it, for symmetry with `ts::Access_awaiter`. The rest stays deferred |
 | **D6** | `Access_scope` / `Access_context::add` allow forging a grant | needs a documented position ("this is the extension point for instrumenting your own types"), not an API change |
 
 ---
@@ -490,10 +525,12 @@ workaround.
 ## 5. Sequencing
 
 **Tag-gated** (field/overload shape, or visibility): M1, M2, M3, M4, M5, M6, M8,
-S2, S6, S10. These land before `v0.1.0` or not at all.
+S2, S6, S10. These land before `v0.1.0` or not at all. All but S10 have landed
+(M8, S2 and S6 on 2026-08-23).
 
-**Additive but grouped with them:** M9, M10, S1, S4, S5, S7, S12. (M7 turned out
-to be a documentation fix - see its row - so it is not tag-gated at all.)
+**Additive but grouped with them:** M9, M10, S1, S4, S5, S7, S12 - all landed
+(M10 and S7 on 2026-08-23, with D5's alias pulled forward alongside). (M7 turned
+out to be a documentation fix - see its row - so it is not tag-gated at all.)
 
 **Free, any time:** S3, S8, S9, S11, S13. (S9 resolved as a docs-only change - see
 its row; A2 is done.)

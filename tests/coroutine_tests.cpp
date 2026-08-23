@@ -539,7 +539,7 @@ void test_death_await_under_guard()
 
 // 13. Feature showcase: one coroutine weaving the whole system into straight-line code --
 // prioritized producers awaited as a join (dependencies), a task that forks nested work,
-// a Guarded write-guard critical section, async_parallel_for, a Signal phase gate,
+// a Guarded write-guard critical section, parallel_for_async, a Signal phase gate,
 // cooperative cancellation, and a final async read.
 Task<int> co_showcase(ts::Guarded<tests::Counter>& world, ts::Signal& phase, Cancellation_token tok)
 {
@@ -567,7 +567,7 @@ Task<int> co_showcase(ts::Guarded<tests::Counter>& world, ts::Signal& phase, Can
 
     // (d) data-parallel fan-out, awaited.
     std::atomic<int> pf{ 0 };
-    co_await ts::async_parallel_for(100, [&pf](int) { pf.fetch_add(1, std::memory_order_relaxed); });
+    co_await ts::parallel_for_async(100, [&pf](int) { pf.fetch_add(1, std::memory_order_relaxed); });
 
     // (e) phase gate: block on an external Signal.
     co_await phase;
@@ -644,7 +644,7 @@ void run_fork_join_on_pool(int workers)
     std::future<long long> fut = prom.get_future();
     std::thread runner([&]
     {
-        ts::Scheduler_scope scope{ { .num_threads = static_cast<uint32_t>(workers) } };
+        ts::Scheduler_scope scope{ { .num_workers = static_cast<uint32_t>(workers) } };
         long long r = co_sum_range(values.data(), 0, fork_join_leaves).sync();
         prom.set_value(r);
     });

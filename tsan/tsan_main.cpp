@@ -848,7 +848,7 @@ void stress_parallel_for()
         assert(total.load() == static_cast<long long>(n) * (n - 1) / 2);
 
         total.store(0);
-        ts::async_parallel_for(n, [&total](int k) { total.fetch_add(k, std::memory_order_relaxed); },
+        ts::parallel_for_async(n, [&total](int k) { total.fetch_add(k, std::memory_order_relaxed); },
             { .balance = ts::Balance::unbalanced }).sync();
         assert(total.load() == static_cast<long long>(n) * (n - 1) / 2);
     }

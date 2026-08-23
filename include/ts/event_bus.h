@@ -258,7 +258,7 @@ public:
         detail::Ref_ptr<Sub_control> control_;
     };
 
-    explicit Event_bus(Named name = {})
+    explicit Event_bus(Named name)
         : board_{ std::move(name) }, staged_{ board_ }, publisher_{ staged_.parallel_recorder() }
     {
     }

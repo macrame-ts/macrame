@@ -1653,7 +1653,7 @@ void trace_game_frame(int frames, const char* DOT_path, const char* SVG_path)
 #else
     double gt_baseline = -1.0, gt_optimised = -1.0;
 #endif
-    ts::Scheduler_scope pool{ { .num_threads = static_cast<uint32_t>(variant_workers) } };
+    ts::Scheduler_scope pool{ { .num_workers = static_cast<uint32_t>(variant_workers) } };
     trace_variant(frames, Frame_variant::baseline, SVG_path, "baseline", DOT_path, gt_baseline);
     trace_variant(frames, Frame_variant::optimised, SVG_path, "optimised", nullptr, gt_optimised);
 }
@@ -1669,7 +1669,7 @@ void stress_game_frame_optimised(int frames, int workers)
     constexpr int entities = 500;
     time_scale = 0.05f;
     reset_stats();
-    ts::Scheduler_scope pool{ { .num_threads = static_cast<uint32_t>(workers) } };
+    ts::Scheduler_scope pool{ { .num_workers = static_cast<uint32_t>(workers) } };
     World world{ entities };
     ts::Static_task_graph graph = build_frame_graph(world, Frame_variant::optimised);
     for (int f = 0; f < frames; ++f)

@@ -46,7 +46,7 @@ void test_parallel_for_concurrency()
     constexpr int n = 5000;
     std::atomic<long long> total{ 0 };
     ts::parallel_for(n, [&total](int i) { total.fetch_add(i, std::memory_order_relaxed); },
-        { .concurrency = 4, .balance = ts::Balance::unbalanced });
+        { .max_workers = 4, .balance = ts::Balance::unbalanced });
     TS_CHECK(total.load() == static_cast<long long>(n) * (n - 1) / 2);
 }
 
@@ -61,23 +61,23 @@ void test_parallel_for_edges()
     TS_CHECK(count.load() == 1);
 
     count.store(0);
-    ts::parallel_for(3, [&count](int) { count.fetch_add(1); }, { .concurrency = 16 });
+    ts::parallel_for(3, [&count](int) { count.fetch_add(1); }, { .max_workers = 16 });
     TS_CHECK(count.load() == 3);   // clamped to n executors, all items still run
 }
 
 // async: returns a Task<void> that completes when done; compose + sync.
-void test_async_parallel_for()
+void test_parallel_for_async()
 {
     constexpr int n = 8000;
     std::vector<int> out(n, 0);
-    ts::Task<void> t = ts::async_parallel_for(n, [&out](int i) { out[i] = i + 1; });
+    ts::Task<void> t = ts::parallel_for_async(n, [&out](int i) { out[i] = i + 1; });
     t.sync();
     bool all = true;
     for (int i = 0; i < n; ++i)
         all = all && (out[i] == i + 1);
     TS_CHECK(all);
 
-    ts::async_parallel_for(0, [](int) {}).sync();   // empty -> already complete
+    ts::parallel_for_async(0, [](int) {}).sync();   // empty -> already complete
     TS_CHECK(true);
 }
 
@@ -180,7 +180,7 @@ void test_parallel_for_priorities()
 
     constexpr int n = 4000;
     std::atomic<long long> total{ 0 };
-    ts::async_parallel_for(n, [&total](int i) { total.fetch_add(i, std::memory_order_relaxed); },
+    ts::parallel_for_async(n, [&total](int i) { total.fetch_add(i, std::memory_order_relaxed); },
         { .priority = ts::Priority::high }).sync();
     TS_CHECK(total.load() == static_cast<long long>(n) * (n - 1) / 2);
 }
@@ -240,7 +240,7 @@ void set_flag(void* p)
 // Deterministic dispatch-order observation on the shared default scheduler: hold every
 // worker, free exactly one and feed it a `low` dummy (popping a low task resets that
 // worker's starvation-valve counter, so the order below is independent of prior suite
-// history), catch it again, queue one single-helper `async_parallel_for` per class, then
+// history), catch it again, queue one single-helper `parallel_for_async` per class, then
 // release it alone - it drains the global queues sequentially, in strict class order,
 // while the other workers stay held (no concurrent pops to interleave).
 void test_parallel_for_priority_order()
@@ -277,9 +277,9 @@ void test_parallel_for_priority_order()
     {
         return [&idx, &order, tag](int) { order[idx.fetch_add(1)] = tag; };
     };
-    ts::Task<void> hi = ts::async_parallel_for(1, record(0), { .priority = ts::Priority::high });
-    ts::Task<void> mid = ts::async_parallel_for(1, record(1));
-    ts::Task<void> lo = ts::async_parallel_for(1, record(2), { .priority = ts::Priority::low });
+    ts::Task<void> hi = ts::parallel_for_async(1, record(0), { .priority = ts::Priority::high });
+    ts::Task<void> mid = ts::parallel_for_async(1, record(1));
+    ts::Task<void> lo = ts::parallel_for_async(1, record(2), { .priority = ts::Priority::low });
 
     holds[static_cast<std::size_t>(workers)]->go.store(true, std::memory_order_release);
     hi.sync();
@@ -294,6 +294,55 @@ void test_parallel_for_priority_order()
     wait_until([&exited, workers] { return exited.load() == workers + 1; });
 }
 
+// `Parallel_options::token` on the async form: hold every worker so the helpers queue behind
+// the holds, request cancellation while they are all still queued, then release. Every helper
+// then finds the token requested on its first claim, skips the whole range, and the task settles
+// cancelled with no chunk body ever run. Deterministic: nothing can claim a chunk before the
+// request lands, because nothing is running.
+void test_parallel_for_async_cancel()
+{
+    ts::Scheduler& sched = ts::global_scheduler();
+    const int workers = sched.worker_count();
+    std::atomic<int> entered{ 0 }, exited{ 0 };
+
+    std::vector<std::unique_ptr<Hold>> holds;
+    for (int i = 0; i < workers; ++i)
+        holds.push_back(std::unique_ptr<Hold>(new Hold{ &entered, &exited }));
+    for (int i = 0; i < workers; ++i)
+        sched.submit(&hold_worker, holds[static_cast<std::size_t>(i)].get());
+    wait_until([&entered, workers] { return entered.load() == workers; });
+
+    std::atomic<int> ran{ 0 };
+    ts::Cancellation_source source;
+    ts::Task<void> loop = ts::parallel_for_async(1000, [&ran](int) { ran.fetch_add(1, std::memory_order_relaxed); },
+        { .balance = ts::Balance::unbalanced, .token = source.token() });
+    TS_CHECK(!loop.is_done());
+    source.request_cancel();
+
+    for (int i = 0; i < workers; ++i)
+        holds[static_cast<std::size_t>(i)]->go.store(true, std::memory_order_release);
+    loop.sync();   // a cancelled void task unblocks normally
+    TS_CHECK(loop.is_done());
+    TS_CHECK(loop.is_cancelled());
+    TS_CHECK(ran.load() == 0);
+    wait_until([&exited, workers] { return exited.load() == workers; });
+
+    // The blocking form ignores the field: the same requested token, every item still runs.
+    std::atomic<int> blocking_ran{ 0 };
+    ts::parallel_for(64, [&blocking_ran](int) { blocking_ran.fetch_add(1, std::memory_order_relaxed); },
+        { .token = source.token() });
+    TS_CHECK(blocking_ran.load() == 64);
+
+    // An unrequested token leaves the async form as it was.
+    ts::Cancellation_source idle;
+    std::atomic<int> all{ 0 };
+    ts::Task<void> full = ts::parallel_for_async(64, [&all](int) { all.fetch_add(1, std::memory_order_relaxed); },
+        { .token = idle.token() });
+    full.sync();
+    TS_CHECK(!full.is_cancelled());
+    TS_CHECK(all.load() == 64);
+}
+
 // A parallel_for launched from a task fans out on the running pool: reconfigure the one global
 // scheduler to 2 workers, run parallel_for inside a task on it, and assert every executor that
 // touched an item reports a worker index in [0, 2). (With the single-global collapse there is
@@ -305,7 +354,7 @@ std::atomic<bool> pf_sched_done{ false };
 
 void test_parallel_for_current_scheduler()
 {
-    ts::Scheduler_scope scope{ { .num_threads = 2 } };
+    ts::Scheduler_scope scope{ { .num_workers = 2 } };
     ts::Scheduler& dedicated = ts::global_scheduler();
     pf_sched_worker.assign(pf_sched_n, -2);
     pf_sched_done.store(false);
@@ -342,7 +391,7 @@ void test_colored_counts()
     std::vector<std::atomic<int>> hits(n);   // C++20 value-inits atomics to 0
     std::vector<std::vector<int>> bands = { { 0, 2, 4 }, { 1, 3 }, { 5 } };
     ts::parallel_for_colored(bands, 3, [&hits](int i) { hits[i].fetch_add(1, std::memory_order_relaxed); },
-        { .concurrency = 4 });
+        { .max_workers = 4 });
     for (int i = 0; i < n; ++i)
         TS_CHECK(hits[i].load() == 3);
 }
@@ -364,7 +413,7 @@ std::vector<float> relax_chain(int m, int rounds, int conc)
         float mid = 0.5f * (v[ci] + v[ci + 1]);
         v[ci] = mid;
         v[ci + 1] = mid;
-    }, { .concurrency = conc });
+    }, { .max_workers = conc });
     return v;
 }
 
@@ -391,15 +440,15 @@ void test_colored_edges()
     TS_CHECK(calls.load() == 0);
 
     calls.store(0);
-    ts::parallel_for_colored({ { 7 } }, 4, body, { .concurrency = 1 });   // single item, serial
+    ts::parallel_for_colored({ { 7 } }, 4, body, { .max_workers = 1 });   // single item, serial
     TS_CHECK(calls.load() == 4);
 
     calls.store(0);
-    ts::parallel_for_colored({ { 0, 1 } }, 2, body, { .concurrency = 8 }); // band narrower than conc
+    ts::parallel_for_colored({ { 0, 1 } }, 2, body, { .max_workers = 8 }); // band narrower than conc
     TS_CHECK(calls.load() == 4);   // 2 items x 2 rounds; surplus executors find nothing, no hang
 
     calls.store(0);
-    ts::parallel_for_colored({ { 0 }, {}, { 2 } }, 3, body, { .concurrency = 4 }); // interior empty band filtered
+    ts::parallel_for_colored({ { 0 }, {}, { 2 } }, 3, body, { .max_workers = 4 }); // interior empty band filtered
     TS_CHECK(calls.load() == 6);   // 2 non-empty items x 3 rounds
 }
 
@@ -413,7 +462,7 @@ void run_parallel_tests()
     run("parallel_for unbalanced", test_parallel_for_unbalanced);
     run("parallel_for concurrency", test_parallel_for_concurrency);
     run("parallel_for edges", test_parallel_for_edges);
-    run("async_parallel_for", test_async_parallel_for);
+    run("parallel_for_async", test_parallel_for_async);
     run("parallel_for nested", test_parallel_for_nested);
     run("parallel_for inherits grant", test_parallel_for_inherits_grant);
     run_if(with_rule_in_task_sync, "TS_RULE_IN_TASK_SYNC off",
@@ -421,6 +470,7 @@ void run_parallel_tests()
     run("parallel_for priorities", test_parallel_for_priorities);
     run("parallel_for priority inheritance", test_parallel_for_priority_inheritance);
     run("parallel_for priority order", test_parallel_for_priority_order);
+    run("parallel_for_async cancel", test_parallel_for_async_cancel);
     run("parallel_for current scheduler", test_parallel_for_current_scheduler);
     run("parallel_for_colored counts", test_colored_counts);
     run("parallel_for_colored determinism across concurrency", test_colored_determinism);

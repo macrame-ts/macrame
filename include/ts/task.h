@@ -62,7 +62,7 @@ struct Optional_awaitable
 struct Dispatch_options
 {
     Cancellation_token token = {};
-    Priority priority = Priority::normal;
+    std::optional<Priority> priority{};   // unset = inherit the calling task's (`detail::resolved_priority`)
     // Optional debug identity for the task: a literal (`{.name = "hud"}`) or a call site
     // (`{.name = ts::Named{}}`). Left empty, a verb that can capture one falls back to the site
     // its own defaulted `std::source_location` recorded. The multi-object verbs end in an
@@ -84,7 +84,7 @@ struct Dispatch_options
 struct Access_options
 {
     Cancellation_token token = {};
-    Priority priority = Priority::normal;
+    std::optional<Priority> priority{};   // as `Dispatch_options::priority`
     // As `Dispatch_options::name`.
     Named name = Named(nullptr);
     // Never run the body inline on the calling thread - the attended-but-never-inline
@@ -107,7 +107,7 @@ struct Access_options
 //              `Versioned::publish` (destroying with the write still in flight is fatal),
 //              `Static_task_graph::execute` (the run's only completion signal),
 //              `Frame_gate::next` (a discarded gate parks nobody), and
-//              `async_parallel_for` (nothing else joins the slices).
+//              `parallel_for_async` (nothing else joins the slices).
 //   unmarked - a verb where not waiting is the point: `ts::launch`, `Guarded::async` and
 //              the free `ts::async`. Detaching is sanctioned there, so an attribute would
 //              only teach users to write `(void)`.
@@ -273,7 +273,7 @@ auto build_bare_task(Fn&& fn, Dispatch_options opts, std::source_location site)
 {
     using R = detail::Task_result_t<Fn>;
     Task_ptr core = make_executable<R>(std::forward<Fn>(fn), std::move(opts.token));
-    core->flags.priority = opts.priority;
+    core->flags.priority = detail::resolved_priority(opts.priority);
     set_task_name(core, named_from(opts, site));
     submit_ready(core);
     return Task<R>(core);

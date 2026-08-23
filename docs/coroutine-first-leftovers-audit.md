@@ -61,7 +61,7 @@ exactly what the brief flags: functor bodies are structurally immune to the
 suspension/ABBA/guard-across-suspend hazards the whole rules layer (`rules.h`) exists to
 catch, and they cost no frame. Keep. (Assessed as requested, not recommended for removal.)
 
-### A4. `parallel_for` / `async_parallel_for` — KEEP, surface is clean
+### A4. `parallel_for` / `parallel_for_async` — KEEP, surface is clean
 `Parallel_options` (`parallel_for.h:27`) is `{concurrency, balance, priority}` — no
 builder-era vestige (no `run_inline`, no retraction hint). The internal
 `Parallel_state::inherited_ctx` / `inherited_owner` are the grant-snapshot and trace-owner
@@ -221,7 +221,7 @@ and doc comments (task.h) — zero call sites. `Result_block<R>` is referenced o
 `Result_block<R>` for non-void `R` is never instantiated.
 
 Distinguish from live neighbours: `make_bare_block()` (the *void* producer, `task.h:710`) is
-live (`Signal`, `settled_void_core`/`cancelled_void_core`, `async_parallel_for` n<=0);
+live (`Signal`, `settled_void_core`/`cancelled_void_core`, `parallel_for_async` n<=0);
 `Result_storage<R>` (`task.h:835`, used by `Executable` and `Task_promise`) is live and
 different. Only the standalone `Result_block<R>` + `make_block()` pair is dead.
 **Classification: definitely dead. Recommendation: delete both** (a `Task<R>` with a stored

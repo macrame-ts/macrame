@@ -328,7 +328,7 @@ void run_coro_resume_bench()
     std::printf("\ncoroutine resume round trip, decomposed (ns/op = ns per awaited stage):\n");
     report("N w s+blk", bench_coro_chain_on({ .idle_policy = ts::Idle_policy::spin_then_block }));
     report("N w spin", bench_coro_chain_on({ .idle_policy = ts::Idle_policy::spin }));
-    report("1 w s+blk", bench_coro_chain_on({ .num_threads = 1, .idle_policy = ts::Idle_policy::spin_then_block }));
-    report("1 w spin", bench_coro_chain_on({ .num_threads = 1, .idle_policy = ts::Idle_policy::spin }));
-    report("2 w spin", bench_coro_chain_on({ .num_threads = 2, .idle_policy = ts::Idle_policy::spin }));
+    report("1 w s+blk", bench_coro_chain_on({ .num_workers = 1, .idle_policy = ts::Idle_policy::spin_then_block }));
+    report("1 w spin", bench_coro_chain_on({ .num_workers = 1, .idle_policy = ts::Idle_policy::spin }));
+    report("2 w spin", bench_coro_chain_on({ .num_workers = 2, .idle_policy = ts::Idle_policy::spin }));
 }

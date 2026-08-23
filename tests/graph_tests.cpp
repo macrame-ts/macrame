@@ -422,7 +422,7 @@ void test_nested_before_successor()
 // root queues all three (in its node_complete) before the worker picks the next task.
 void test_node_priority_order()
 {
-    ts::Scheduler_scope s{ { .num_threads = 1 } };
+    ts::Scheduler_scope s{ { .num_workers = 1 } };
     ts::Guarded<int> a{ ts::Named{}, 0 };
     std::atomic<int> seq{ 0 };
     std::atomic<int> high_ord{ 0 }, normal_ord{ 0 }, low_ord{ 0 };
@@ -810,7 +810,7 @@ void test_graph_trace_end_to_end_utilization()
 
     ts::tools::Graph_trace trace;
     g.set_trace(&trace);
-    ts::Scheduler_scope one{ { .num_threads = 1 } };
+    ts::Scheduler_scope one{ { .num_workers = 1 } };
     for (int i = 0; i < 8; ++i)
         g.execute().sync();
     g.set_trace(nullptr);
@@ -857,7 +857,7 @@ void test_graph_trace_task_count()
 
     ts::tools::Graph_trace trace;
     g.set_trace(&trace);
-    ts::Scheduler_scope pool{ { .num_threads = 4 } };
+    ts::Scheduler_scope pool{ { .num_workers = 4 } };
     constexpr int N = 6;
     for (int i = 0; i < N; ++i)
         g.execute().sync();
@@ -935,7 +935,7 @@ void test_graph_trace_overhead_end_to_end()
 
     ts::tools::Graph_trace trace;
     g.set_trace(&trace);
-    ts::Scheduler_scope pool{ { .num_threads = 4 } };
+    ts::Scheduler_scope pool{ { .num_workers = 4 } };
     for (int i = 0; i < 8; ++i)
         g.execute().sync();
     g.set_trace(nullptr);

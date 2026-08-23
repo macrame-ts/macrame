@@ -69,7 +69,7 @@ void rec_fn(void* p)
 // they drain in priority order.
 void test_priority_order()
 {
-    ts::Scheduler_scope scope{ { .num_threads = 1 } };
+    ts::Scheduler_scope scope{ { .num_workers = 1 } };
     ts::Scheduler& s = ts::global_scheduler();
     std::atomic<bool> started{ false }, go{ false };
     std::atomic<int> idx{ 0 };
@@ -109,7 +109,7 @@ void test_handoff_mode()         { run_mode(ts::Idle_policy::handoff, 2000); }
 void test_handoff_single_worker()
 {
     std::atomic<int> n{ 0 };
-    ts::Scheduler_scope scope{ { .num_threads = 1, .idle_policy = ts::Idle_policy::handoff } };
+    ts::Scheduler_scope scope{ { .num_workers = 1, .idle_policy = ts::Idle_policy::handoff } };
     ts::Scheduler& s = ts::global_scheduler();
     for (int i = 0; i < 2000; ++i)
         s.submit(inc, &n);
@@ -202,7 +202,7 @@ void order_fn(void* p)
 // valve `low` runs last (order == normals); with it, it runs mid-stream (well before the end).
 void test_low_starvation_valve()
 {
-    ts::Scheduler_scope scope{ { .num_threads = 1 } };
+    ts::Scheduler_scope scope{ { .num_workers = 1 } };
     ts::Scheduler& s = ts::global_scheduler();
     std::atomic<bool> started{ false }, go{ false };
     std::atomic<int> seq{ 0 }, low_order{ -1 };

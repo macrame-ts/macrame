@@ -811,6 +811,19 @@ private:
 // bracket as `Current_task`, so it carries the same barrier.
 struct Scope_children : Tls_scalar<Scope_children, std::vector<Task_ptr>*> {};
 
+// The one priority-resolution rule behind every option struct's `std::optional<Priority>`
+// (`Dispatch_options`, `Access_options`, `Parallel_options`), evaluated on the calling thread
+// where `Current_task` is meaningful: an explicit option wins; otherwise the new work inherits
+// the calling task's queue priority; outside a running task, `Priority::normal`.
+inline Priority resolved_priority(std::optional<Priority> requested) noexcept
+{
+    if (requested)
+        return *requested;
+    if (const Task_control_block* running = Current_task::get())
+        return running->flags.priority;
+    return Priority::normal;
+}
+
 // A coroutine frame has no call site to capture (a promise sees the coroutine's arguments,
 // not where it was called), so it inherits the identity of the task it was created inside
 // - typically the graph node whose body it is. That is the identity a diagnostic wants

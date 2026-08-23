@@ -78,15 +78,15 @@ Scheduler::Scheduler(Scheduler_config config)
     , spin_cycles_(config.spin_cycles)
     , single_threaded_(config.single_threaded)
 {
-    uint32_t num_threads = config.num_threads;
-    if (num_threads == 0)
-        num_threads = std::thread::hardware_concurrency();
+    uint32_t num_workers = config.num_workers;
+    if (num_workers == 0)
+        num_workers = std::thread::hardware_concurrency();
     if (single_threaded_)
-        num_threads = 0;   // worker-less: no deques, no workers; `submit` runs tasks inline
+        num_workers = 0;   // worker-less: no deques, no workers; `submit` runs tasks inline
 
     // Per-worker deques must exist before any worker starts (workers steal from all of them).
-    local_normal_.reserve(num_threads);
-    for (uint32_t i = 0; i < num_threads; ++i)
+    local_normal_.reserve(num_workers);
+    for (uint32_t i = 0; i < num_workers; ++i)
         local_normal_.push_back(std::make_unique<detail::Work_stealing_deque<detail::Task_entry>>());
 
 #if TS_PROFILING
@@ -97,12 +97,12 @@ Scheduler::Scheduler(Scheduler_config config)
     // is what makes the body accumulator (and the worker-less ground-truth overhead) work with
     // no workers. Buckets are worker-only (run_task, index >= 0), so bucket_busy_ stays sized
     // to the worker count.
-    busy_ = std::vector<Busy_slot>(num_threads + 1);   // +1 overflow lane; before any worker starts
-    bucket_busy_ = std::vector<Bucket_row>(num_threads);
+    busy_ = std::vector<Busy_slot>(num_workers + 1);   // +1 overflow lane; before any worker starts
+    bucket_busy_ = std::vector<Bucket_row>(num_workers);
 #endif
 
-    workers_.reserve(num_threads);
-    for (uint32_t i = 0; i < num_threads; ++i)
+    workers_.reserve(num_workers);
+    for (uint32_t i = 0; i < num_workers; ++i)
         workers_.emplace_back(*this, static_cast<int>(i));
 }
 

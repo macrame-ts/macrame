@@ -18,54 +18,50 @@
 namespace ts
 {
 
-// How items map to the `concurrency` parallel executors. Only the claim grain differs; the
+// How items map to the `max_workers` parallel executors. Only the claim grain differs; the
 // worker loop is identical. See docs/task-internals.md.
 enum class Balance
 {
     guided,       // default: grain shrinks as work drains (big early -> low overhead; small late
                   //          -> a straggler is a small chunk others absorb). Best general default.
-    balanced,     // fixed coarse chunks (~N/concurrency). Lowest overhead; assumes uniform cost.
+    balanced,     // fixed coarse chunks (~N/max_workers). Lowest overhead; assumes uniform cost.
     unbalanced,   // grain 1 - every item claimed separately. Max dynamic balance, max overhead.
 };
 
 struct Parallel_options
 {
-    int concurrency = 0;   // # of parallel executors; 0 -> scheduler width
+    // Upper bound on the executors that may participate, the calling thread included (the
+    // blocking forms) - helpers are fanned out up to it, and a helper that never gets a worker
+    // just finds nothing left to claim. 0 -> the scheduler's worker count.
+    int max_workers = 0;
     Balance balance = Balance::guided;
     // Queue priority for the helper submissions. Unset (default) = inherit: helpers dispatch
     // at the calling task's priority (`Priority::normal` outside a task), so a high-priority
     // node's slices don't sink to `normal`. Set (`{.priority = Priority::low}`) to override.
     // The participating caller is unaffected either way - it runs inline.
     std::optional<Priority> priority{};
+    // Cancellation for `parallel_for_async` only: once requested, chunks not yet claimed are
+    // skipped and the returned task settles cancelled (`Task::is_cancelled()`); chunks already
+    // running finish. The blocking forms ignore it - their caller participates and joins, so
+    // "stop early" is the body's own early-out, not the loop's.
+    Cancellation_token token = {};
 };
 
 namespace detail
 {
 
-// Resolve the effective helper priority, on the calling thread (where the `Current_task`
-// TLS is meaningful): an explicit option wins; otherwise inherit the calling task's queue
-// priority; outside a running task, `Priority::normal`.
-inline Priority resolved_priority(std::optional<Priority> requested)
-{
-    if (requested)
-        return *requested;
-    if (const Task_control_block* c = Current_task::get())
-        return c->flags.priority;
-    return Priority::normal;
-}
-
 // Items to claim on one fetch/CAS, shared by the flat and colored loops. `claimed` is an
 // approximate racy read for `guided` (a heuristic; the actual claim clamps to `size`).
-inline int claim_grain(Balance balance, int size, int claimed, int concurrency)
+inline int claim_grain(Balance balance, int size, int claimed, int workers)
 {
     if (balance == Balance::unbalanced)
         return 1;
     if (balance == Balance::balanced)
     {
-        int g = (size + concurrency - 1) / concurrency;
+        int g = (size + workers - 1) / workers;
         return g < 1 ? 1 : g;
     }
-    int g = (size - claimed) / (2 * concurrency);   // guided
+    int g = (size - claimed) / (2 * workers);   // guided
     return g < 1 ? 1 : g;
 }
 
@@ -81,7 +77,7 @@ template<typename Body>
 struct Parallel_base : Task_control_block
 {
     Body body;
-    int concurrency;
+    int max_workers;
     Balance balance;
     std::optional<Access_context> inherited_ctx;
     int inherited_owner;       // trace owner (graph node index), snapshotted like inherited_ctx
@@ -89,8 +85,8 @@ struct Parallel_base : Task_control_block
     unsigned inherited_relaxed;   // the caller's `Relaxed_scope` opt-outs, snapshotted alike
 #endif
 
-    Parallel_base(Body b, int conc, Balance bal)
-        : body(std::move(b)), concurrency(conc), balance(bal)
+    Parallel_base(Body b, int workers, Balance bal)
+        : body(std::move(b)), max_workers(workers), balance(bal)
         , inherited_ctx(snapshot_access()), inherited_owner(trace_owner())
 #if TS_RULES_ANY
         , inherited_relaxed(snapshot_relaxed())
@@ -106,36 +102,63 @@ struct Parallel_state : Parallel_base<Body>
 {
     int n;
     std::atomic<int> next{ 0 };   // next item index to claim
-    std::atomic<int> done{ 0 };   // items processed (acq_rel: publishes body writes to the waiter)
+    std::atomic<int> done{ 0 };   // items processed or skipped (acq_rel: publishes body writes to the waiter)
+    // Set once an executor saw the block's `token` requested and skipped the unclaimed tail;
+    // the executor that accounts for the last item then settles the task cancelled. Stored
+    // before, and read after, the `done` handoff, so the acq_rel chain carries it. Only
+    // `parallel_for_async` installs a token; the blocking forms leave it empty.
+    std::atomic<bool> skipped{ false };
 
-    Parallel_state(Body b, int n_, int conc, Balance bal)
-        : Parallel_base<Body>(std::move(b), conc, bal), n(n_)
+    Parallel_state(Body b, int n_, int workers, Balance bal)
+        : Parallel_base<Body>(std::move(b), workers, bal), n(n_)
     {
     }
 };
 
 // The claim + process loop, shared by the raw helpers and the participating (blocking) caller.
+// Accounts every item exactly once through `done`, whether processed or skipped: the executor
+// whose accounting reaches `n` settles the task. One relaxed token load per chunk claim, not
+// per item (an empty token is a null test).
 template<typename Body>
 void run_loop(Parallel_state<Body>* st)
 {
     for (;;)
     {
-        int g = claim_grain(st->balance, st->n, st->next.load(std::memory_order_relaxed), st->concurrency);
-        int start = st->next.fetch_add(g, std::memory_order_relaxed);
-        if (start >= st->n)
-            break;
-        int stop = start + g;
-        if (stop > st->n)
-            stop = st->n;
-        invoke_user_body([&]
+        int start, stop;
+        if (st->token.is_cancel_requested())
         {
-            for (int i = start; i < stop; ++i)
-                st->body(i);
-        });
+            // Claim everything left in one step and account for it unprocessed.
+            start = st->next.exchange(st->n, std::memory_order_relaxed);
+            if (start >= st->n)
+                break;
+            stop = st->n;
+            st->skipped.store(true, std::memory_order_relaxed);
+        }
+        else
+        {
+            int g = claim_grain(st->balance, st->n, st->next.load(std::memory_order_relaxed), st->max_workers);
+            start = st->next.fetch_add(g, std::memory_order_relaxed);
+            if (start >= st->n)
+                break;
+            stop = start + g;
+            if (stop > st->n)
+                stop = st->n;
+            invoke_user_body([&]
+            {
+                for (int i = start; i < stop; ++i)
+                    st->body(i);
+            });
+        }
         // acq_rel forms a release sequence over `done`, so the executor that reaches `n`
-        // (and the waiter it wakes) sees every executor's body writes.
+        // (and the waiter it wakes) sees every executor's body writes - and the `skipped` flag.
         if (st->done.fetch_add(stop - start, std::memory_order_acq_rel) + (stop - start) == st->n)
-            st->complete();   // processed the last item -> signal completion
+        {
+            // Accounted for the last item: settle - cancelled if any chunk was skipped.
+            if (st->skipped.load(std::memory_order_relaxed))
+                st->cancel();
+            else
+                st->complete();
+        }
     }
 }
 
@@ -155,7 +178,7 @@ struct Colored_state : Parallel_base<Body>
     std::atomic<std::uint64_t> phase_next{ 0 };
     std::atomic<int> band_done{ 0 };
 
-    Colored_state(Body b, int conc, Balance bal) : Parallel_base<Body>(std::move(b), conc, bal) {}
+    Colored_state(Body b, int workers, Balance bal) : Parallel_base<Body>(std::move(b), workers, bal) {}
 };
 
 // The claim + process + phase-advance loop. No per-band fork/join and no fixed-participant
@@ -196,7 +219,7 @@ void run_loop(Colored_state<Body>* st)
             cur = seen;
             continue;
         }
-        int g = claim_grain(st->balance, band_size, idx, st->concurrency);
+        int g = claim_grain(st->balance, band_size, idx, st->max_workers);
         int stop = idx + g;
         if (stop > band_size)
             stop = band_size;
@@ -265,7 +288,19 @@ void set_destroy(State* st)
     st->destroy = [](Task_control_block* c) { delete static_cast<State*>(c); };
 }
 
-// Fan out `conc - 1` helpers on the one process-wide `global_scheduler()` (with the
+// The effective executor count: the option, else the scheduler's worker count, clamped to
+// [1, `items`] (no executor could ever claim beyond the work).
+inline int effective_workers(int max_workers, int items)
+{
+    int workers = max_workers > 0 ? max_workers : global_scheduler().worker_count();
+    if (workers < 1)
+        workers = 1;
+    if (workers > items)
+        workers = items;
+    return workers;
+}
+
+// Fan out `max_workers - 1` helpers on the one process-wide `global_scheduler()` (with the
 // single-global collapse there is no other pool a task could belong to), participate on
 // the calling thread, then wait out the still-running helpers. The wait is the one
 // sanctioned in-task block (docs/coroutine-first.md §4.1): the caller has already drained
@@ -276,12 +311,12 @@ template<typename State>
 void run_participants(State* st, std::optional<Priority> priority)
 {
     Task_ptr handle(st);   // the caller's ref (refcount 1)
-    int conc = st->concurrency;
-    st->refcount.fetch_add(conc - 1, std::memory_order_relaxed);   // one ref per helper
+    int workers = st->max_workers;
+    st->refcount.fetch_add(workers - 1, std::memory_order_relaxed);   // one ref per helper
 
     Priority prio = resolved_priority(priority);   // resolved once, on the calling thread
     Scheduler& sched = global_scheduler();
-    for (int t = 0; t < conc - 1; ++t)
+    for (int t = 0; t < workers - 1; ++t)
         sched.submit(&helper_entry<State>, st, prio);
 
     run_loop(st);      // caller participates (its ref is `handle`, so no dec here)
@@ -292,12 +327,13 @@ void run_participants(State* st, std::optional<Priority> priority)
 
 } // namespace detail
 
-// Run `body(i)` for each i in [0, n), across `opts.concurrency` executors, and block until all
-// items are done. The calling thread participates (runs a share itself) and waits on the
+// Run `body(i)` for each i in [0, n), across up to `opts.max_workers` executors, and block until
+// all items are done. The calling thread participates (runs a share itself) and waits on the
 // completion - so even nested inside a task / another parallel_for it can't deadlock: the
 // caller drains all the work itself if no helper gets a worker, then waits only for the
 // still-running helpers. `body` must be safe to call concurrently for distinct i. One heap
 // allocation (the shared state). `body` is called inline (templated), so per-item is not a cost.
+// `opts.token` is ignored (see `Parallel_options`).
 template<typename Body>
     requires std::invocable<Body&, int>
 void parallel_for(int n, Body&& body, Parallel_options opts = {})
@@ -305,25 +341,23 @@ void parallel_for(int n, Body&& body, Parallel_options opts = {})
     if (n <= 0)
         return;
 
-    int conc = opts.concurrency > 0 ? opts.concurrency : global_scheduler().worker_count();
-    if (conc < 1)
-        conc = 1;
-    if (conc > n)
-        conc = n;
-
-    auto* st = new detail::Parallel_state<std::decay_t<Body>>(std::forward<Body>(body), n, conc, opts.balance);
+    int workers = detail::effective_workers(opts.max_workers, n);
+    auto* st = new detail::Parallel_state<std::decay_t<Body>>(std::forward<Body>(body), n, workers, opts.balance);
     detail::set_destroy(st);
     detail::run_participants(st, opts.priority);
 }
 
 // Non-blocking parallel_for: returns a Task<void> that completes when all items are done.
-// Composable (`co_await` it). One heap allocation (the
-// returned Task's block holds the state). Do not block on it inside a graph node.
+// Composable (`co_await` it). One heap allocation (the returned Task's block holds the state).
+// Do not block on it inside a graph node. `opts.token` cancels it: chunks not yet claimed when
+// the request lands are skipped and the task settles cancelled (a cancelled `void` task awaits
+// and syncs normally; `is_cancelled()` tells). An empty token cannot be requested, so the loop
+// reads as before.
 template<typename Body>
     requires std::invocable<Body&, int>
 [[nodiscard("nothing else joins the slices: co_await or sync the returned task "
             "(the blocking parallel_for joins for you)")]]
-Task<void> async_parallel_for(int n, Body&& body, Parallel_options opts = {})
+Task<void> parallel_for_async(int n, Body&& body, Parallel_options opts = {})
 {
     if (n <= 0)
     {
@@ -332,22 +366,18 @@ Task<void> async_parallel_for(int n, Body&& body, Parallel_options opts = {})
         return Task<void>(std::move(core));
     }
 
-    int conc = opts.concurrency > 0 ? opts.concurrency : global_scheduler().worker_count();
-    if (conc < 1)
-        conc = 1;
-    if (conc > n)
-        conc = n;
-
+    int workers = detail::effective_workers(opts.max_workers, n);
     using State = detail::Parallel_state<std::decay_t<Body>>;
-    auto* st = new State(std::forward<Body>(body), n, conc, opts.balance);
+    auto* st = new State(std::forward<Body>(body), n, workers, opts.balance);
     detail::set_destroy(st);
+    st->token = std::move(opts.token);   // read by the helpers' `run_loop`; the block's own slot
 
     Task<void> result(detail::Task_ptr{ st });   // the returned handle (refcount 1)
-    st->refcount.fetch_add(conc, std::memory_order_relaxed);   // one ref per helper
+    st->refcount.fetch_add(workers, std::memory_order_relaxed);   // one ref per helper
 
     Priority prio = detail::resolved_priority(opts.priority);   // resolved once, on the calling thread
     Scheduler& sched = global_scheduler();
-    for (int t = 0; t < conc; ++t)
+    for (int t = 0; t < workers; ++t)
         sched.submit(&detail::helper_entry<State>, st, prio);
 
     return result;
@@ -374,14 +404,10 @@ void parallel_for_colored(const std::vector<std::vector<int>>& bands, int rounds
     if (rounds <= 0 || widest == 0)
         return;
 
-    int conc = opts.concurrency > 0 ? opts.concurrency : global_scheduler().worker_count();
-    if (conc < 1)
-        conc = 1;
-    if (conc > widest)
-        conc = widest;   // no executor could ever claim beyond the widest band
+    int workers = detail::effective_workers(opts.max_workers, widest);   // clamped to the widest band
 
     using State = detail::Colored_state<std::decay_t<Body>>;
-    auto* st = new State(std::forward<Body>(body), conc, opts.balance);
+    auto* st = new State(std::forward<Body>(body), workers, opts.balance);
     detail::set_destroy(st);
     for (const std::vector<int>& band : bands)
     {

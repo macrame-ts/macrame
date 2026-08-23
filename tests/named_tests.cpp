@@ -2,6 +2,7 @@
 #include "harness.h"
 #include "test_util.h"
 
+#include "ts/event_bus.h"
 #include "ts/guarded.h"
 #include "ts/named.h"
 #include "ts/static_task_graph.h"
@@ -183,6 +184,22 @@ void test_object_captures_construction_site()
     TS_CHECK(name.literal == nullptr);
 }
 
+// 8. An `Event_bus` constructed with `ts::Named{}` is identified by its construction site: the
+// name reaches the board it wraps. (The ctor once defaulted the `Named`, which captured the
+// library header - the exact failure the naming rule forbids - so the site is asserted here.)
+void test_event_bus_captures_construction_site()
+{
+    ts::Event_bus bus{ Named{} };
+    const Named& name = ts::detail::Guarded_access::pipe(bus.state()).debug_name;
+    TS_CHECK_MSG(is_this_file(name.file), "Event_bus{Named{}} must capture the CALLER's site");
+    TS_CHECK(!is_library_header(name.file));
+    TS_CHECK(name.literal == nullptr);
+
+    ts::Event_bus literal{ Named{ "gameplay" } };
+    const Named& literal_name = ts::detail::Guarded_access::pipe(literal.state()).debug_name;
+    TS_CHECK(literal_name.literal != nullptr && std::strcmp(literal_name.literal, "gameplay") == 0);
+}
+
 } // namespace
 
 void run_named_tests()
@@ -195,4 +212,5 @@ void run_named_tests()
     run("named publish carries name", test_publish_carries_name);
     run("named node block carries name", test_node_block_carries_name);
     run("named object captures construction site", test_object_captures_construction_site);
+    run("named event bus captures construction site", test_event_bus_captures_construction_site);
 }

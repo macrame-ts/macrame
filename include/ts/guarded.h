@@ -601,7 +601,7 @@ void Access_op<Args...>::bind_targets(const detail::Op_target (&targets)[arity])
 template<typename... Args>
 Access_op<Args...>::Access_op(Body body, Access_options opts, Named name,
                               const detail::Op_target (&targets)[arity])
-    : state_(std::move(body), std::move(opts.token), opts.priority, opts.queued)
+    : state_(std::move(body), std::move(opts.token), detail::resolved_priority(opts.priority), opts.queued)
 {
     bind_targets(targets);
     {
@@ -1133,7 +1133,7 @@ private:
                 return make_access_block<R>(std::move(body), opts.token);
             }
         }();
-        core->flags.priority = opts.priority;
+        core->flags.priority = detail::resolved_priority(opts.priority);
         detail::set_task_name(core, name);
         detail::bind_pipe_link(core.get(), 0, pipe_, mode);
         core->num_locks.store(1, std::memory_order_relaxed);   // the one pipe turn
@@ -1180,7 +1180,7 @@ template<typename... Args>
 Access_op<Args...>::Access_op(Dormant, Guarded<object_type<0>>& target, Body body,
                               Access_options opts, std::source_location site)
     requires (arity == 1)
-    : state_(std::move(body), std::move(opts.token), opts.priority, opts.queued)
+    : state_(std::move(body), std::move(opts.token), detail::resolved_priority(opts.priority), opts.queued)
 {
     const detail::Op_target targets[1] = {
         { &detail::Guarded_access::pipe(target), detail::Guarded_access::instance(target) } };
@@ -1275,7 +1275,7 @@ auto async_build_modes(Dispatch_options opts, std::index_sequence<I...>, Fn&& fn
     Pipe* pipes[] = { &Guarded_access::pipe(objs)... };
     Access modes[] = { Modes... };
     auto block = make_piped_executable<R, sizeof...(Ts)>(std::move(body), std::move(opts.token));
-    block->flags.priority = opts.priority;
+    block->flags.priority = resolved_priority(opts.priority);
     // Multi-object `ts::access`/`ts::async` end in an object pack, so no trailing defaulted
     // `source_location` is expressible and there is no call site for the verb to capture:
     // `Dispatch_options::name` is the whole identity, which is why it is a `Named` - spell

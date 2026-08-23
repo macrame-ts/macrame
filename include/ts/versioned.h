@@ -244,7 +244,10 @@ public:
         // the detail level (a waiter on `prev`'s block that submits phase 1 as a task at
         // the publish's priority): the public continuation verb is gone (coroutine-first),
         // and this chain runs on blue threads, so it cannot await.
-        auto phase1 = [this, swapped, shadow_ready, opts, name]() mutable
+        // Resolved here, on the publishing thread: phase 1 runs later on whichever thread settles the
+        // previous resync, where "the calling task" would mean the wrong one.
+        Priority priority = detail::resolved_priority(opts.priority);
+        auto phase1 = [this, swapped, shadow_ready, opts, name, priority]() mutable
         {
             if (opts.token.is_cancel_requested())
             {
@@ -272,10 +275,10 @@ public:
                 swap_replicas(front);
                 start_resync(std::move(shadow_ready));
                 swapped.trigger();
-            }, { .priority = opts.priority, .name = name });
+            }, { .priority = priority, .name = name });
         };
         detail::core_of(prev)->attach(
-            [phase1 = std::move(phase1), priority = opts.priority, name](void*, bool) mutable
+            [phase1 = std::move(phase1), priority, name](void*, bool) mutable
             {
                 auto core = detail::make_executable<void>(std::move(phase1), {});
                 core->flags.priority = priority;
