@@ -253,6 +253,23 @@ void run_death_scenario(const char* name)
         go.trigger();
         stray.sync();         // body writes `c` under the stale inherited grant -> fatal
     }
+    else if (std::strcmp(name, "child_stale_after_guard") == 0)
+    {
+        // The guard-scope twin of `stale_inherited_grant`: the stray is created while a
+        // coroutine holds a `read_write` guard on `c`, so it inherits that grant, suspends
+        // on `go`, and writes `c` only after the guard's scope has closed.
+        ts::Guarded<Counter> c{ ts::Named{} };
+        ts::Signal go;
+        ts::Task<void> stray;
+        auto parent = [&c, &go, &stray]() -> ts::Task<void>
+        {
+            auto guard = co_await ts::read_write(c);
+            stray = stale_stray(*guard, go);
+        };
+        parent().sync();      // guard released at scope exit (epoch moved)
+        go.trigger();
+        stray.sync();         // the write runs under the stale inherited grant -> fatal
+    }
     else if (std::strcmp(name, "detached_launch_undeclared") == 0)
     {
         // A detached `ts::launch` inherits no grant (docs/coroutine-first.md §2): a child that

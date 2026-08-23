@@ -1659,6 +1659,12 @@ every route: `launch` options, `async` options,
 still makes progress under sustained load (an aging valve prevents
 starvation).
 
+A coroutine has no priority option of its own: its frame is never queued (it
+starts on the caller's thread and resumes on the thread that settled what it
+awaited). It inherits the priority of the task that created it, which matters
+only for what the body launches — a `parallel_for` inside a coroutine called
+from a `high` node dispatches its helpers at `high`.
+
 ### 10.2 Scheduler configuration
 
 There is one process-wide scheduler, brought up explicitly with

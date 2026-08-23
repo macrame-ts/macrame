@@ -37,12 +37,16 @@ namespace detail
 // block whose `flags.coroutine` is set.
 struct Coroutine_block : Task_control_block
 {
-    Coroutine_block() noexcept { flags.coroutine = true; }
-
-    // The coroutine's dispatch priority, carried onto the block for queued uses of its task.
-    // Here rather than on `Promise_base` so it shares one 8-byte slot with the guard count
-    // below - two sub-8-byte fields in the padding one of them needed anyway.
-    Priority priority_ = Priority::normal;
+    // A frame is never submitted (eager start, trampoline resume), so the block's priority is
+    // never a dispatch key for the frame itself; it is what sub-work launched from the body
+    // inherits (`parallel_for` helpers), so it is inherited in turn from the task that
+    // created the frame - `normal` when created outside a task.
+    Coroutine_block() noexcept
+    {
+        flags.coroutine = true;
+        if (const Task_control_block* creator = Current_task::get())
+            flags.priority = creator->flags.priority;
+    }
 
 #if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
     // How many `Access_guard`s this task currently holds (the async-lock guards below).
@@ -496,7 +500,6 @@ struct Promise_base : Coroutine_block
         refcount.store(1, std::memory_order_relaxed);
         // Executing + body self-lock: nested children add completion locks (task.h §4 regime).
         num_locks.store(Task_control_block::execution_flag + 1, std::memory_order_relaxed);
-        flags.priority = priority_;
         inherit_task_name(*this);   // before `enter_segment` installs this frame as current
         enter_segment();   // the eager body runs on the caller right after the promise ctor
     }

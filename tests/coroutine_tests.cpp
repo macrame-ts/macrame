@@ -332,6 +332,58 @@ Task<bool> co_guard_depth_per_task(ts::Guarded<tests::Counter>& shared)
     co_return ok;
 }
 
+// A child started eagerly while its caller holds a guard: it holds no guard of its own, so
+// it may suspend (here on `go`, a real suspension). Under the former thread-scoped count it
+// fatalled at this `co_await` for seeing the caller's depth.
+Task<int> co_child_suspends_under_callers_guard(ts::Signal go)
+{
+    co_await go;
+    co_return ts::detail::current_guard_depth();
+}
+
+Task<bool> co_parent_starts_child_under_guard(ts::Guarded<tests::Counter>& shared, ts::Signal go)
+{
+    Task<int> child;
+    {
+        auto guard = co_await ts::read_write(shared);
+        child = co_child_suspends_under_callers_guard(go);   // suspended on `go`, not awaited here
+        guard->increment();
+    }
+    go.trigger();
+    co_return co_await child == 0;
+}
+
+// A child started under a guard is a different task: it sees depth 0, may suspend, and its
+// inherited grant is policed by the write-epoch staleness check instead (death scenario
+// `child_stale_after_guard`), not by the caller's guard count.
+void test_child_under_guard_may_suspend()
+{
+    ts::Guarded<tests::Counter> shared{ ts::Named{ "child_under_guard" } };
+    ts::Signal go;
+    TS_CHECK(co_parent_starts_child_under_guard(shared, go).sync());
+    TS_CHECK(co_read_guard(shared).sync() == 1);
+}
+
+void test_death_child_stale_after_guard() { TS_CHECK(ts::test::expect_death("child_stale_after_guard")); }
+
+// A coroutine created inside a task inherits the creator's priority (it is never queued
+// itself; the value is what its `parallel_for` helpers inherit in turn).
+Task<int> co_report_priority()
+{
+    co_return static_cast<int>(ts::detail::resolved_priority({}));
+}
+
+void test_coroutine_inherits_creator_priority()
+{
+    TS_CHECK(co_report_priority().sync() == static_cast<int>(ts::Priority::normal));   // outside a task
+    const ts::Priority classes[] = { ts::Priority::high, ts::Priority::normal, ts::Priority::low };
+    for (ts::Priority p : classes)
+    {
+        int seen = ts::launch([] { return co_report_priority().try_take().value_or(-1); }, { .priority = p }).sync();
+        TS_CHECK(seen == static_cast<int>(p));
+    }
+}
+
 // The count belongs to the task, not to the thread: every frame holding a guard reports
 // exactly its own, and work started under the hold reports none.
 void test_guard_depth_is_per_task()
@@ -996,6 +1048,9 @@ void run_coroutine_tests()
     run("co guard contention", test_guard_contention);
     run("co thread-local state survives resumption on another worker", test_tls_freshness_across_resumption);
     run_if(with_rule_await_under_guard, "TS_RULE_AWAIT_UNDER_GUARD off", "co guard depth is per task", test_guard_depth_is_per_task);
+    run("co child under guard may suspend", test_child_under_guard_may_suspend);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: child stale after guard", test_death_child_stale_after_guard);
+    run("co inherits creator priority", test_coroutine_inherits_creator_priority);
     run("co multi-guard transfer", test_multi_guard_transfer);
     run("co multi-guard structured bindings", test_multi_guard_structured_bindings);
     run("co multi-guard read_only concurrent", test_multi_guard_read_only);
