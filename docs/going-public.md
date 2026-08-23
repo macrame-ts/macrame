@@ -172,7 +172,10 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
       interleaved A/B with medians (the measurement rule), and update the doc's numbers
       before publishing. The qualitative analysis and the levers stand. While at it,
       regenerate `docs/media/game_frame_trace.svg` (the README embed) from the fresh trace.
-- [ ] **Re-run the secrets/paths scrub** (must be clean):
+- [x] **Re-run the secrets/paths scrub** (must be clean) — DONE 2026-08-23: tree clean on all
+      three patterns; two stale notes fixed (`9029ffd`). History holds old local drive paths,
+      two initial commits under a hostname identity, and one commit under a second person's
+      address (`5683839`) — author decision: leave, no rewrite. Re-run once more at the flip:
       ```
       git grep -niE "c:\\\\users\\\\[a-z]|/home/[a-z]+/|/mnt/c/" -- .            # personal paths
       git grep -niE "ghp_[A-Za-z0-9]{20}|xox[baprs]-|AKIA[0-9A-Z]{16}|-----BEGIN" -- .   # credentials
