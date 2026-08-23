@@ -96,6 +96,12 @@ private:
 // unconsumed ensure failures).
 int summary();
 
+// Clears the per-run counters so the suite can be run again in the same process - the
+// `--repeat N` mode, which is how a timing-dependent failure is found at all (a race at
+// 1-in-N is invisible to a single run with probability (N-1)/N). The ensure counter is
+// process-wide and monotonic, so it is re-baselined rather than reset.
+void reset();
+
 } // namespace ts::test
 
 #define TS_CHECK(cond) \

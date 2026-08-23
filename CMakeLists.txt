@@ -228,20 +228,32 @@ install(FILES
 
 # ============================ The dev driver (Windows) ============================
 if(WIN32 AND MACRAME_BUILD_DRIVER)
+    # tsan_main.cpp rides along under `TS_TSAN_NO_MAIN` as an API-drift tripwire (it is the one
+    # TU a Linux toolchain runs, so without this it rots until a WSL TSan run) and to provide
+    # `--tsan-stress`. The vcxproj has compiled it this way for some time; the CMake target had
+    # drifted and omitted it - the two-list hazard CLAUDE.md documents.
     add_executable(macrame_playground
         ${TS_SAMPLE_SOURCES}
         ${TS_DRIVER_SOURCES}
+        tsan/tsan_main.cpp
     )
     target_link_libraries(macrame_playground PRIVATE macrame::macrame)
     target_include_directories(macrame_playground PRIVATE tests benchmarks sample tools)
-    target_compile_definitions(macrame_playground PRIVATE _CONSOLE)
+    target_compile_definitions(macrame_playground PRIVATE _CONSOLE TS_TSAN_NO_MAIN)
     macrame_private_flags(macrame_playground)
 endif()
 
 # ============================ The TSan stress driver (non-Windows) ============================
 if(NOT WIN32)
-    add_executable(ts_tsan ${TS_SAMPLE_SOURCES} tsan/tsan_main.cpp)
+    # The playground's own sources, instrumented, with the stress stages folded in as the
+    # `--tsan-stress` mode (`TS_TSAN_NO_MAIN` turns tsan_main.cpp's entry into
+    # `ts::tsan::run_all`, the same seam the Windows build already compiles it through). One
+    # binary, so `--tests --repeat N` runs the whole suite under TSan: previously the suite
+    # was not in this target's source list at all, and a green TSan job covered only the
+    # samples while being read as covering the tests.
+    add_executable(ts_tsan ${TS_SAMPLE_SOURCES} ${TS_DRIVER_SOURCES} tsan/tsan_main.cpp)
+    target_compile_definitions(ts_tsan PRIVATE TS_TSAN_NO_MAIN)
     target_link_libraries(ts_tsan PRIVATE macrame::macrame)
-    target_include_directories(ts_tsan PRIVATE sample tools tests)
+    target_include_directories(ts_tsan PRIVATE sample tools tests benchmarks)
     macrame_private_flags(ts_tsan)
 endif()

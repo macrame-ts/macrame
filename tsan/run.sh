@@ -17,8 +17,10 @@ cd "$(dirname "$0")/.."
 CXX="${CXX:-clang++}"
 OUT="${TMPDIR:-/tmp}/ts_tsan"
 TIMEOUT="${TSAN_TIMEOUT:-180}"   # watchdog seconds; a deadlock fails fast, never hangs
-SRC="src/scheduler.cpp src/worker_thread.cpp src/guarded.cpp src/static_task_graph.cpp src/access.cpp src/fatal.cpp \
-     sample/game_frame.cpp sample/physics.cpp sample/blackboard.cpp sample/coloring.cpp tsan/tsan_main.cpp"
+# The playground driver, whole: core + samples + tests + benchmarks + the stress stages. One
+# instrumented binary serves both the suite (`--tests --repeat N`) and the stress stages
+# (`--tsan-stress`). Mirrors the ts_tsan CMake target; keep the two in step.
+SRC="src/*.cpp sample/*.cpp tests/*.cpp benchmarks/*.cpp tsan/tsan_main.cpp"
 
 # A previous run that deadlocked keeps the binary busy (a build can't overwrite a
 # running executable) and burns no CPU while looking "alive". Kill any leftover and
@@ -26,8 +28,8 @@ SRC="src/scheduler.cpp src/worker_thread.cpp src/guarded.cpp src/static_task_gra
 pkill -9 -f "$OUT" 2>/dev/null || true
 rm -f "$OUT"
 
-"$CXX" -std=c++23 -fsanitize=thread -fno-exceptions -O1 -g -pthread \
-    -Iinclude -Isample -Itools -Itests $SRC -o "$OUT"
+"$CXX" -std=c++23 -fsanitize=thread -fno-exceptions -O1 -g -pthread -DTS_TSAN_NO_MAIN \
+    -Iinclude -Isample -Itools -Itests -Ibenchmarks $SRC -o "$OUT"
 
 # Symbolize reports (file:line) if llvm-symbolizer is available -- `sudo apt
 # install -y llvm`. Without it, reports still fire but show addresses only.
@@ -41,7 +43,13 @@ SYM="$(command -v llvm-symbolizer || true)"
 # unbuffered stdout, so on a hang the log ends at the stage that deadlocked.
 LOG="${TMPDIR:-/tmp}/ts_tsan.log"
 status=0
-TSAN_OPTIONS="$OPTS" timeout --kill-after=10 "$TIMEOUT" "$OUT" >"$LOG" 2>&1 || status=$?
+# The suite first, repeated (`TSAN_REPEAT`, default 3 - a race at 1-in-N is invisible to one
+# run), then the stress stages. Either failing fails the script.
+REPEAT="${TSAN_REPEAT:-3}"
+TSAN_OPTIONS="$OPTS" timeout --kill-after=10 "$TIMEOUT" "$OUT" --tests --repeat "$REPEAT" >"$LOG" 2>&1 || status=$?
+if [ "$status" -eq 0 ]; then
+    TSAN_OPTIONS="$OPTS" timeout --kill-after=10 "$TIMEOUT" "$OUT" --tsan-stress >>"$LOG" 2>&1 || status=$?
+fi
 cat "$LOG"
 if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
     echo "tsan: TIMED OUT after ${TIMEOUT}s -- deadlock in the stage above; FAIL" >&2

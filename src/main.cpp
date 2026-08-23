@@ -27,6 +27,9 @@ void run_scope_access_sample();
 #include <cstdlib>
 #include <cstring>
 
+// The TSan stress stages' entry, renamed from `main` under `TS_TSAN_NO_MAIN` (tsan/tsan_main.cpp).
+namespace ts::tsan { int run_all(); }
+
 namespace
 {
 
@@ -65,6 +68,11 @@ int main(int argc, char** argv)
             "usage: macrame_playground [MODE]\n\n"
             "  (no args)      run the test suite, all samples, and the benchmarks\n"
             "  --tests        run the test suite only; exit code = failure count\n"
+            "    --repeat N   ... N times in one process, stopping at the first failing run\n"
+            "                 (a race at 1-in-N is invisible to a single run)\n"
+            "  --workers N    pin the scheduler width (any mode); the default is the hardware\n"
+            "                 width, which on a wide machine hides the contended interleavings\n"
+            "                 a 2-core CI runner produces every time\n"
             "  --bench        run the benchmarks only\n"
             "  --stress       run the sample many frames at a fast scale (for sanitizers)\n"
             "  --dot [path]   write the game_frame graph structure as Graphviz DOT\n"
@@ -82,7 +90,27 @@ int main(int argc, char** argv)
 
     // Every mode below runs scheduled work, so bring the process-wide scheduler up here (after
     // the no-op --version/--help paths). Torn down at program exit by the holder's safety net.
-    ts::create_scheduler();
+    //
+    // `--workers N` (anywhere on the line) pins the width. The suite otherwise runs at the
+    // machine's hardware width, and a race that needs a particular interleaving shows at one
+    // width and not another: the CI runner has 2 cores, a development machine may have 20,
+    // and "passes locally" and "passes on CI" are then two different measurements. A narrow
+    // scheduler produces the contended interleavings deterministically, rather than when the
+    // OS happens to starve the process.
+    // The TSan stress stages (tsan/tsan_main.cpp), compiled into this driver under
+    // `TS_TSAN_NO_MAIN` so one instrumented binary serves both the suite and the stress run.
+    // `ts::tsan::run_all` brings up its own scheduler, so it dispatches here, ahead of the
+    // `create_scheduler` below - a second one is a fatal.
+    if (argc >= 2 && std::strcmp(argv[1], "--tsan-stress") == 0)
+        return ts::tsan::run_all();
+
+    ts::Scheduler_config config;
+    for (int i = 1; i + 1 < argc; ++i)
+    {
+        if (std::strcmp(argv[i], "--workers") == 0)
+            config.num_threads = static_cast<std::uint32_t>(std::atoi(argv[i + 1]));
+    }
+    ts::create_scheduler(config);
 
     // Death-test child: run one fatal scenario (it is expected to abort).
     if (argc >= 3 && std::strcmp(argv[1], "--death") == 0)
@@ -132,8 +160,32 @@ int main(int argc, char** argv)
     }
     if (argc >= 2 && std::strcmp(argv[1], "--tests") == 0)
     {
-        run_all_tests();
-        return ts::test::summary();
+        // `--tests --repeat N`: the suite N times in one process, stopping at the first
+        // failing run and naming it. A race at 1-in-N survives a single run with probability
+        // (N-1)/N, so "passes" means little for concurrent code until it means "passes N
+        // times" - and N is the dial. The run number is printed up front because the one
+        // piece of information a flake hunt needs is which run to read.
+        int repeat = 1;
+        if (argc >= 4 && std::strcmp(argv[2], "--repeat") == 0)
+            repeat = std::atoi(argv[3]);
+        if (repeat < 1)
+            repeat = 1;
+        for (int i = 1; i <= repeat; ++i)
+        {
+            if (repeat > 1)
+                std::printf("\n===== run %d / %d =====\n", i, repeat);
+            ts::test::reset();
+            run_all_tests();
+            if (int code = ts::test::summary(); code != 0)
+            {
+                if (repeat > 1)
+                    std::fprintf(stderr, "\nrun %d / %d failed - stopping\n", i, repeat);
+                return code;
+            }
+        }
+        if (repeat > 1)
+            std::printf("\n%d / %d runs clean\n", repeat, repeat);
+        return 0;
     }
 
     run_all_tests();
