@@ -363,9 +363,17 @@ public:
         detail::set_task_name(detail::core_of(*this), name != nullptr ? Named(name, site) : Named(site));
     }
 
+    // Pins the block for the duration of `complete()`. `settle()` wakes its waiters before
+    // running its own tail, and the thread it wakes may be the one holding the last `Signal`:
+    // it returns from `sync()`, drops the handle, and frees the block while this thread is
+    // still inside `settle()` reading members and destroying the condition variable. Every
+    // other completer reaches `complete()` through a `Task_ptr` it holds; this one went
+    // through the raw pointer, which is the use-after-free ThreadSanitizer reported the first
+    // time the suite ran under it.
     void trigger()
     {
-        control()->complete();
+        detail::Task_ptr keep = detail::core_of(*this);
+        keep->complete();
     }
 
     // Re-arm so it can be triggered again - a reusable barrier / phase gate. Precondition:
