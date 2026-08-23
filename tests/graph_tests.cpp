@@ -925,10 +925,11 @@ void test_graph_trace_overhead_end_to_end()
     // task with its own run_task span and a find_work dispatch scan, so `M = busy - B`
     // (setup/completion + dispatch, everything in busy that is not the slice body) accrues over
     // many events and is comfortably positive on a normal run. The machinery/overhead assertions
-    // below are `>= 0`, not `> 0`: `M` is >= 0 by construction (the body span nests inside the
-    // run_task span), and a loaded runner can leave the per-slice machinery below the clock tick,
-    // folding `M` to exactly 0 - a measurement floor, not a regression. The load-bearing checks are
-    // that the body is measured and the overhead share stays bounded.
+    // below are `>= 0`, not `> 0`: `M` is >= 0 by construction (the body span nests inside a timed
+    // run_task span - the `trace_span_timed` gate, see the window test below), and a loaded runner
+    // can leave the per-slice machinery below the clock tick, folding `M` to exactly 0 - a
+    // measurement floor, not a regression. The load-bearing checks are that the body is measured
+    // and the overhead share stays bounded.
     g.add_node("ov_a", [busy](int& v) { ts::parallel_for(64, [&busy](int) { busy(20); }); ++v; }, x);
     g.add_node("ov_b", [busy](int& v) { ts::parallel_for(64, [&busy](int) { busy(20); }); ++v; }, x);
     g.compile();
@@ -945,6 +946,60 @@ void test_graph_trace_overhead_end_to_end()
     TS_CHECK(trace.machinery_us() >= 0.0);    // scheduler cost; 0 only when it rounds below the clock
     TS_CHECK(trace.overhead() >= 0.0);
     TS_CHECK(trace.overhead() < 0.5);         // bodies dwarf the fan-out machinery at this granularity
+}
+
+// The window the span gate closes: a task dequeued while no run is armed (its run_task is not
+// timed, so it contributes no busy) whose functor opens a `Trace_busy_scope` only after the next
+// run arms. Without the gate that scope credits its whole wall-clock span to B against zero busy
+// and `M = busy - B` goes negative - seen on an oversubscribed CI runner, where a helper left over
+// from one run's fan-out was dequeued in the gap before the next and preempted for a scheduler
+// quantum inside the window (2026-08-23). The node spins until the stray scope has closed, so its
+// credit lands inside the armed window deterministically.
+void test_graph_trace_body_only_in_timed_span()
+{
+#if TS_PROFILING
+    ts::Scheduler_scope pool{ { .num_workers = 4 } };
+    ts::Guarded<int> x{ ts::Named{}, 0 };
+    std::atomic<bool> scope_closed{ false };
+    ts::Static_task_graph g;
+    g.add_node("wait_stray", [&scope_closed](int& v)
+    {
+        while (!scope_closed.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        ++v;
+    }, x);
+    g.compile();
+    ts::tools::Graph_trace trace;
+    g.set_trace(&trace);
+
+    // Dequeued while disarmed (the main thread arms only once the stray reports it is running):
+    // an untimed run_task span. It waits for the run to arm, then opens the scope - the
+    // straddling shape.
+    std::atomic<bool> stray_running{ false };
+    ts::Task<void> stray = ts::launch([&scope_closed, &stray_running]
+    {
+        stray_running.store(true, std::memory_order_release);
+        while (!ts::detail::Scheduler_profiling::busy_armed(ts::global_scheduler()))
+            std::this_thread::yield();
+        {
+            ts::detail::Trace_busy_scope scope;
+            auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
+            while (std::chrono::steady_clock::now() < until) {}
+        }
+        scope_closed.store(true, std::memory_order_release);
+    });
+    while (!stray_running.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    g.execute().sync();
+    stray.sync();
+    g.set_trace(nullptr);
+
+    TS_CHECK(trace.run_count() == 1);
+    TS_CHECK(trace.body_us() > 0.0);           // the node's own (waiting) body is measured
+    // The node's busy covers its body by nesting; the stray's 2 ms, credited to B with no busy
+    // behind it, would put M 2 ms below zero against a few microseconds of node machinery.
+    TS_CHECK(trace.machinery_us() >= 0.0);
+#endif
 }
 
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
@@ -1372,6 +1427,7 @@ void run_graph_tests()
     run_if(with_profiling, "TS_PROFILING=0", "graph trace task count", test_graph_trace_task_count);
     run_if(with_profiling, "TS_PROFILING=0", "graph trace overhead", test_graph_trace_overhead);
     run_if(with_profiling, "TS_PROFILING=0", "graph trace overhead end-to-end", test_graph_trace_overhead_end_to_end);
+    run_if(with_profiling, "TS_PROFILING=0", "graph trace body only in timed span", test_graph_trace_body_only_in_timed_span);
     run("nested run lends the write grant", test_nested_run_lends_write_grant);
     run("nested run: inner edges survive the lend", test_nested_run_inner_edges_survive_lend);
     run("nested run without overlap takes turns", test_nested_run_without_overlap_takes_turns);

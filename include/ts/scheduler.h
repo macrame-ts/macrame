@@ -288,6 +288,16 @@ private:
     {
         busy_[busy_slot_index(worker_index)].body.fetch_add(dt, std::memory_order_relaxed);
     }
+    // Whether the calling thread is inside a timed `run_task` span - the `trace_span_timed`
+    // bridge target. B may only be credited inside such a span: `run_task` decides "armed" at
+    // its start and a `Trace_busy_scope` at its construction, and a task dequeued while
+    // disarmed whose functor starts after the next arm would otherwise credit body with no
+    // busy behind it (`M = busy - B` goes negative by the whole span). A non-worker thread
+    // has no span; its body lands in the overflow lane, which the worker-less oracle reads.
+    bool in_timed_span(int worker_index) const noexcept
+    {
+        return worker_index < 0 || busy_[static_cast<std::size_t>(worker_index)].started.load(std::memory_order_relaxed) != 0;
+    }
     // Add `dt` ticks of orchestration - the `trace_orchestration_add` bridge target (the fourth
     // bucket of the four-way subtraction split: the per-run top-level graph-setup span, off any
     // `run_task` span and so absent from `busy`). A non-worker caller lands in the overflow lane.
@@ -567,6 +577,7 @@ struct Scheduler_profiling
     static long long bucket_width(const Scheduler& s) noexcept { return s.bucket_width(); }
     static bool busy_armed(const Scheduler& s) noexcept { return s.busy_armed(); }
 
+    static bool in_timed_span(const Scheduler& s, int worker_index) noexcept { return s.in_timed_span(worker_index); }
     static void add_body_ticks(Scheduler& s, int worker_index, long long dt) noexcept
     {
         s.add_body_ticks(worker_index, dt);

@@ -34,6 +34,11 @@ void (*trace_body_add)(long long) = +[](long long dt)
 {
     detail::Scheduler_profiling::add_body_ticks(global_scheduler(), current_worker_index(), dt);
 };
+// The span gate: B is credited only inside a timed `run_task` span (see `Scheduler::in_timed_span`).
+bool (*trace_span_timed)() = +[]
+{
+    return detail::Scheduler_profiling::in_timed_span(global_scheduler(), current_worker_index());
+};
 // The orchestration bridge (the fourth bucket of the four-way subtraction split): `Trace_setup_scope`
 // (in static_task_graph.cpp's execute()) routes the per-run top-level setup+initial-dispatch span
 // here - the overflow lane when `execute()` runs on a non-worker thread (the common case: the frame

@@ -45,6 +45,11 @@ namespace ts::detail
 extern std::atomic<int> trace_owner_armed;
 extern void (*trace_owner_add)(int owner, long long dt);
 extern void (*trace_body_add)(long long dt);   // B += dt (user functor; machinery = busy - B is derived)
+// Whether the calling thread is inside a timed busy span (a `run_task` that started armed, or
+// a non-worker thread - the overflow lane). `Trace_busy_scope` credits B only when this holds,
+// so B is a sub-span of busy by construction even for a task that was dequeued while disarmed
+// and reached its functor after the next arm.
+extern bool (*trace_span_timed)();
 // Orchestration accumulator (the off-worker fourth bucket of the four-way subtraction split):
 // `Trace_setup_scope` routes the per-run `execute()` setup span here - framework work done off
 // any worker's `run_task` span, so absent from `busy`. Booked only for a top-level `execute()`
@@ -93,7 +98,7 @@ class Trace_busy_scope
 public:
     Trace_busy_scope() noexcept
     {
-        if (trace_owner_armed.load(std::memory_order_relaxed) != 0)
+        if (trace_owner_armed.load(std::memory_order_relaxed) != 0 && (!trace_span_timed || trace_span_timed()))
         {
             active_ = true;
             owner_ = Trace_owner_state::load();
