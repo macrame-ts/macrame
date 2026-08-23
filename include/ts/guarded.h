@@ -58,7 +58,7 @@ struct Guarded_access;
 }
 
 template<typename T> class Guarded;
-template<typename T, typename Body> class Access_op;
+template<typename... Args> class Access_op;
 
 // Tag for the bound-but-dormant `Access_op` constructor: `Access_op(ts::dormant, world, body)`
 // stores the target and body without firing - `start()` fires later. Needed because a member
@@ -68,20 +68,29 @@ inline constexpr Dormant dormant{};
 
 namespace detail
 {
+// An access-mode-tagged object argument (`ts::as_read_only`/`as_read_write`), defined below
+// `Guarded`; declared here because an `Access_op` position reads the tag for its mode.
+template<typename T, Access M> struct Access_arg;
+
 // `Access_op::sync() &`'s return: a non-consuming `const R&` peek, `void` for a void access.
 template<typename R2> struct Sync_ref { using type = const R2&; };
 template<> struct Sync_ref<void> { using type = void; };
 template<typename R2> using Sync_ref_t = typename Sync_ref<R2>::type;
 
 // The op's hooks for the coroutine awaiter (coroutine_support.h). Defined below the class.
-template<typename T, typename Body>
-Task_control_block* access_op_core(Access_op<T, Body>& op) noexcept;
-template<typename T, typename Body>
-bool* access_op_consumed(Access_op<T, Body>& op) noexcept;
-template<typename T, typename Body>
-bool access_op_started(const Access_op<T, Body>& op) noexcept;
+template<typename... Args>
+Task_control_block* access_op_core(Access_op<Args...>& op) noexcept;
+template<typename... Args>
+bool* access_op_consumed(Access_op<Args...>& op) noexcept;
+template<typename... Args>
+bool access_op_started(const Access_op<Args...>& op) noexcept;
 
-// What `Access_op<T, Body>::as_optional()` returns: the op's core plus its this-cycle consume
+// Constructs an `Access_op` in the caller's storage from the verb's flattened targets. The
+// verbs reach `Guarded`'s internals through `Guarded_access`; this is the other half, giving
+// them the op's private constructor without friending every entry path.
+struct Access_op_maker;
+
+// What `Access_op<...>::as_optional()` returns: the op's core plus its this-cycle consume
 // flag, made awaitable by an `operator co_await` in coroutine_support.h. The op-shaped
 // counterpart of `Optional_awaitable` (task.h), which carries no consume flag because a
 // `Task`'s result lives in a refcounted block rather than caller storage.
@@ -90,32 +99,161 @@ template<typename R2> struct Optional_access_awaitable
     Task_ptr core;
     bool* consumed;
 };
+
+// One position of an `Access_op`'s object list: a bare `T`, whose mode the body decides, or an
+// `Access_arg<T, M>` from a call-site tag, which declares it.
+template<typename A>
+struct Op_object
+{
+    using type = A;
+    static constexpr bool tagged = false;
+    static constexpr Access mode = Access::read_only;   // unread: the deduction below decides
+};
+
+template<typename T, Access M>
+struct Op_object<Access_arg<T, M>>
+{
+    using type = T;
+    static constexpr bool tagged = true;
+    static constexpr Access mode = M;
+};
+
+// The access mode of object position `P` - the one spelling rule (docs/guide.md §5), in the
+// tiers the verbs already use: a call-site tag wins; a single-object op is classified by
+// `accessor_mode` (which is also token-arity aware, so `Access_op<T, Body>` keeps exactly the
+// mode it had before the type became variadic); a multi-object introspectable body by its
+// parameter's const-ness; a generic one by the per-position rvalue probe.
+template<typename Body, std::size_t P, typename Arg, typename... Objs>
+constexpr Access op_mode_of()
+{
+    if constexpr (Op_object<Arg>::tagged)
+        return Op_object<Arg>::mode;
+    else if constexpr (sizeof...(Objs) == 1)
+        return accessor_mode<Body, Objs...>();
+    else if constexpr (introspectable_v<Body>)
+        return async_mode_of<std::tuple_element_t<P, typename Function_traits<std::decay_t<Body>>::args>>();
+    else
+        return probed_mode<Body, P, Objs...>();
 }
 
-// `Access_op<T, Body>` - the caller-owned operation state `Guarded<T>::access` returns
-// (docs/access-op-design.md). `access` is the ATTENDED verb: the caller stays for the result, so
-// the operation's whole state - completion core, result storage, body, pipe entry - lives in the
-// returned object instead of a heap block, and an access allocates nothing. `async` remains the
-// detached verb and keeps returning a heap-backed `Task<R>`.
+template<typename Body, std::size_t P, typename Arg, typename Objects> struct Op_mode;
+template<typename Body, std::size_t P, typename Arg, typename... Objs>
+struct Op_mode<Body, P, Arg, std::tuple<Objs...>>
+{
+    static constexpr Access value = op_mode_of<Body, P, Arg, Objs...>();
+};
+
+// The op's result over its mode-corrected object references, with the opt-in trailing
+// `Cancellation_token`. Guarded like `Accessor_result`: a combination the body cannot be
+// invoked with yields `void` instead of hard-erroring inside `invoke_result_t`.
+template<bool Invocable, bool Takes_token, typename Body, typename... As>
+struct Op_result_sel { using type = void; };
+template<bool Takes_token, typename Body, typename... As>
+struct Op_result_sel<true, Takes_token, Body, As...> : Node_body_result<Takes_token, Body, As...> {};
+
+template<typename Body, typename Refs> struct Op_result;
+template<typename Body, typename... As>
+struct Op_result<Body, std::tuple<As...>>
+{
+    static constexpr bool takes_token = std::invocable<Body&, As..., const Cancellation_token&>;
+    static constexpr bool invocable = std::invocable<Body&, As...> || takes_token;
+    using type = typename Op_result_sel<invocable, takes_token, Body&, As...>::type;
+};
+
+// `Access_op<Args...>`'s compile-time shape. The pack is objects first, body last, so the
+// split is "all but the last" and "the last"; every other property - each object's access
+// mode, the references the body is invoked with, the result - follows from it.
+template<typename Seq, typename... Args> struct Op_traits_impl;
+template<std::size_t... I, typename... Args>
+struct Op_traits_impl<std::index_sequence<I...>, Args...>
+{
+    using args = std::tuple<Args...>;
+    static constexpr std::size_t arity = sizeof...(I);
+    using body = std::tuple_element_t<arity, args>;
+    using objects = std::tuple<typename Op_object<std::tuple_element_t<I, args>>::type...>;
+
+    template<std::size_t P> using object = std::tuple_element_t<P, objects>;
+    template<std::size_t P>
+    static constexpr Access mode = Op_mode<body, P, std::tuple_element_t<P, args>, objects>::value;
+
+    using refs = std::tuple<
+        Mode_ref_t<Op_mode<body, I, std::tuple_element_t<I, args>, objects>::value, object<I>>...>;
+    using result = typename Op_result<body, refs>::type;
+    static constexpr bool takes_token = Op_result<body, refs>::takes_token;
+
+    // The compile-time modes as a runtime array, in declaration order - what the op's binding
+    // pass permutes into canonical order.
+    static constexpr Access declared_modes[arity] = {
+        Op_mode<body, I, std::tuple_element_t<I, args>, objects>::value... };
+};
+
+template<typename... Args>
+using Op_traits = Op_traits_impl<std::make_index_sequence<sizeof...(Args) - 1>, Args...>;
+
+// One object's binding for an `Access_op`, in declaration order: the pipe that serializes it
+// and the address of the instance the body receives. The verbs build these (they can reach
+// `Guarded`'s internals), so the op itself needs no `Guarded` at all.
+struct Op_target
+{
+    Pipe* pipe;
+    const void* inst;
+};
+}
+
+// `Access_op<Objects..., Body>` - the caller-owned operation state the `access` verbs return
+// (docs/access-op-design.md, docs/multi-access-op-design.md). `access` is the ATTENDED verb: the
+// caller stays for the result, so the operation's whole state - completion core, result storage,
+// body, one pipe entry per object - lives in the returned object instead of a heap block, and an
+// access allocates nothing. `async` remains the detached verb and keeps returning a heap-backed
+// `Task<R>`.
+//
+// The template argument list is objects first, body last, so one type serves every arity:
+//
+//   ts::Access_op<World, Snapshot>            // world.access(fn)
+//   ts::Access_op<Combat, Economy, Hud>       // ts::access(fn, combat, economy)
 //
 // `Body` is the user's decayed functor, verbatim - no library wrapper closure - so the type is
 // spellable for members: `ts::Access_op<World, Snapshot> op_;` with `Snapshot` a named functor.
-// The access mode and result type are deduced from `Body` exactly as the verb deduces them.
+// Each object's access mode and the result type are deduced from `Body` exactly as the verbs
+// deduce them; a position tagged at the call site carries its mode in the type instead
+// (`Access_op<detail::Access_arg<World, Access::read_only>, Fn>`) - a spelling the tagged verb's
+// deduced return type produces, not one to write by hand.
 //
-// The op is eager (the constructor performs the access fast path: reentrant arm, inline when the
-// pipe is free, else enqueued) and pinned - non-copyable and non-movable, because the pipe's
-// intrusive FIFO holds the embedded entry's address. Consume the result exactly once:
+// The op is eager (the constructor performs the access fast path: objects the calling task
+// already holds are lent, the rest are admitted inline when every one of them is free, else
+// enqueued through the canonical cascade) and pinned - non-copyable and non-movable, because the
+// pipe's intrusive FIFO holds the embedded entries' addresses. Consume the result exactly once:
 // `co_await op` from a coroutine, `op.sync()` from outside a task (returns `R` BY VALUE - the op
 // owns the storage and often dies at the semicolon), `try_take()` for the non-blocking read, or
 // `co_await op.as_optional()` for the cancellation-tolerant await. Destroying an unsettled op is a
 // bug the destructor reports (`TS_ENSURE`) and then survives: it blocks until the access settles
 // in every configuration - the caller-owned analog of the heap block's refcount.
-template<typename T, typename Body>
+template<typename... Args>
 class Access_op
 {
+    static_assert(sizeof...(Args) >= 2,
+        "Access_op names the guarded objects first and the body last: Access_op<World, Body>, "
+        "Access_op<Combat, Economy, Body>");
+    using Traits = detail::Op_traits<Args...>;
+
 public:
-    static constexpr Access mode = detail::accessor_mode<Body, T>();
-    using result_type = detail::Accessor_result_t<Body, T, mode>;
+    using Body = typename Traits::body;
+
+    // Objects declared, hence pipe turns taken and `Access_context` entries made.
+    static constexpr std::size_t arity = Traits::arity;
+    static_assert(arity <= Access_context::max_entries,
+        "an Access_op declares more objects than one grant context holds "
+        "(Access_context::max_entries): access sets are coarse-grained by design - split the "
+        "operation, or widen Access_context::max_entries");
+
+    template<std::size_t I> using object_type = typename Traits::template object<I>;
+
+    // The declared access mode of object `I`; `mode` is the first object's - the only one for
+    // the single-object spelling, where it means exactly what it always did.
+    template<std::size_t I> static constexpr Access mode_at = Traits::template mode<I>;
+    static constexpr Access mode = mode_at<0>;
+
+    using result_type = typename Traits::result;
 
     Access_op(const Access_op&) = delete;
     Access_op& operator=(const Access_op&) = delete;
@@ -129,14 +267,17 @@ public:
     // `start()`.
     Access_op() = default;
 
-    // Bound but dormant: target and body stored, pipe untouched; `start()` fires.
-    Access_op(Dormant, Guarded<T>& target, Body body, Access_options opts = {},
-              std::source_location site = std::source_location::current());
+    // Bound but dormant: target and body stored, pipe untouched; `start()` fires. Single-object
+    // only - a multi-object op is bound by the verb that built it (a parameter pack cannot be
+    // followed by the defaulted options and site these carry), and refires through `start()`.
+    Access_op(Dormant, Guarded<object_type<0>>& target, Body body, Access_options opts = {},
+              std::source_location site = std::source_location::current())
+        requires (arity == 1);
 
     // Store the target + construct the body in place; does not fire. Legal on an unbound,
     // dormant, or settled op (rebinding destroys the old body; a settled op's pipe refs are
     // drained, so retargeting is safe - the pooled/reused-op enabler); fatal in flight.
-    void bind(Guarded<T>& target, Body body);
+    void bind(Guarded<object_type<0>>& target, Body body) requires (arity == 1);
 
     // Fire: first fire on a dormant op, refire on a settled one (an unconsumed result is
     // discarded - "skip a stale frame's read" is a legitimate steady state). Fatal on an
@@ -177,26 +318,36 @@ public:
 
 private:
     template<typename U> friend class Guarded;
-    template<typename U, typename B> friend detail::Task_control_block* detail::access_op_core(Access_op<U, B>&) noexcept;
-    template<typename U, typename B> friend bool* detail::access_op_consumed(Access_op<U, B>&) noexcept;
-    template<typename U, typename B> friend bool detail::access_op_started(const Access_op<U, B>&) noexcept;
-
-    // A read access stores (and hands the body) `const T*`; the const-ness is structural, not
-    // a runtime mode check.
-    using Inst = std::conditional_t<mode == Access::read_only, const T, T>;
+    friend struct detail::Access_op_maker;
+    template<typename... A> friend detail::Task_control_block* detail::access_op_core(Access_op<A...>&) noexcept;
+    template<typename... A> friend bool* detail::access_op_consumed(Access_op<A...>&) noexcept;
+    template<typename... A> friend bool detail::access_op_started(const Access_op<A...>&) noexcept;
 
     // The op's block: the monomorphic core as a base (recovery is the standard derived cast),
-    // result storage, the flattened access context (instance/epoch/rank as plain members - what
-    // the heap path captures in a wrapper closure), the user's body, and the embedded pipe
-    // entry. `caller_owned` custody: the machinery holds no ref on it, ever (Flags doc).
+    // result storage, the flattened access context (instances/epochs/ranks as plain members -
+    // what the heap path captures in a wrapper closure), the user's body, and one embedded pipe
+    // entry per object. `caller_owned` custody: the machinery holds no ref on it, ever (Flags
+    // doc).
+    //
+    // Two orderings, deliberately (docs/multi-access-op-design.md §3). The pipe arrays are in
+    // CANONICAL (ascending pipe-address) order, because that is what makes the cascade
+    // deadlock-free and it is the order graph nodes take their objects in. The instance arrays
+    // are in DECLARATION order, because that is the order the body takes its parameters and the
+    // order the compile-time modes (`mode_at<I>`) are indexed by. `decl_index` maps the first
+    // onto the second.
     struct State : detail::Task_control_block
     {
         detail::Result_storage<result_type> storage;
-        detail::Pipe_link link;
-        detail::Pipe* pipe = nullptr;
-        Inst* inst = nullptr;
-        const std::atomic<std::uint64_t>* epoch = nullptr;
-        unsigned rank = 0;
+
+        detail::Pipe_link links[arity];
+        detail::Pipe* pipes[arity] = {};
+        Access link_modes[arity] = {};
+        std::uint8_t decl_index[arity] = {};
+
+        const void* insts[arity] = {};
+        const std::atomic<std::uint64_t>* epochs[arity] = {};
+        unsigned ranks[arity] = {};
+
         // The body lives in raw storage behind the `bound` bit (symmetric with the result
         // storage): an unbound op has none, `bind()` constructs it in place, a rebind
         // destroys and reconstructs. No allocation, nothing on the fire path.
@@ -211,21 +362,40 @@ private:
         bool settle_synchronously = false;
 
         State();
-        State(Body b, Cancellation_token tok, Priority pri, bool queued_opt);   // bound; target set by the caller
+        State(Body b, Cancellation_token tok, Priority pri, bool queued_opt);   // bound; targets set by the caller
         ~State();
 
         Body& body() noexcept { return *std::launder(reinterpret_cast<Body*>(body_store)); }
 
+        // Object `I` as the body receives it: `const T&` for a read position, `T&` for a write
+        // one (`mode_ref`), so a mutating body under a read classification does not compile.
+        template<std::size_t I>
+        detail::Mode_ref_t<mode_at<I>, object_type<I>> inst_ref() const noexcept
+        {
+            using Obj = object_type<I>;
+            return detail::mode_ref<mode_at<I>>(const_cast<Obj*>(static_cast<const Obj*>(insts[I])));
+        }
+
         static void run(const detail::Task_ptr& c);
+        template<std::size_t... I>
+        static void run_body(State* self, const detail::Task_ptr& c, std::index_sequence<I...>);
         static void settle_thunk(detail::Task_control_block* c);
         void op_settle(bool cancel);
         void finish(bool cancel);   // the shared completion tail: advance pipes, settle
     };
 
-    Access_op(detail::Pipe& pipe, Inst* inst, Body body, Access_options opts, Named name);
+    Access_op(Body body, Access_options opts, Named name, const detail::Op_target (&targets)[arity]);
 
-    // The fire fast path (reentrant arm / inline when free / enqueue), shared by the eager
-    // constructor and `start()`.
+    // Store the objects: instances/epochs/ranks in declaration order, then the pipes sorted
+    // into canonical order (a repeated object is fatal). Shared by every bind path.
+    void bind_targets(const detail::Op_target (&targets)[arity]);
+
+    // Bind the pipe entries this fire must take a turn on, canonically, and return how many.
+    // Objects the calling task already holds are lent, not entered.
+    std::uint8_t bind_links(bool lend);
+
+    // The fire fast path (lend / inline when free / enqueue), shared by the eager constructor
+    // and `start()`.
     void fire();
 
     // The blocking-wait prologue shared by `sync()`/`take()`: never-started check, the
@@ -239,8 +409,8 @@ private:
     bool settled_sync_ = false;
 };
 
-template<typename T, typename Body>
-Access_op<T, Body>::State::State()
+template<typename... Args>
+Access_op<Args...>::State::State()
 {
     destroy = [](detail::Task_control_block*) {};   // caller-owned: a drained refcount frees nothing
     execute = &State::run;
@@ -249,11 +419,11 @@ Access_op<T, Body>::State::State()
     // Never fired by `op_settle`, so the seam is otherwise unused here.
     on_complete = &State::settle_thunk;
     flags.caller_owned = true;
-    pipe_links = &link;
+    pipe_links = links;
 }
 
-template<typename T, typename Body>
-Access_op<T, Body>::State::State(Body b, Cancellation_token tok, Priority pri, bool queued_opt)
+template<typename... Args>
+Access_op<Args...>::State::State(Body b, Cancellation_token tok, Priority pri, bool queued_opt)
     : State()
 {
     ::new (static_cast<void*>(body_store)) Body(std::move(b));
@@ -263,15 +433,15 @@ Access_op<T, Body>::State::State(Body b, Cancellation_token tok, Priority pri, b
     queued = queued_opt;
 }
 
-template<typename T, typename Body>
-Access_op<T, Body>::State::~State()
+template<typename... Args>
+Access_op<Args...>::State::~State()
 {
     if (bound)
         std::destroy_at(&body());   // a dormant body is a capability, not a pending effect - no lost-work check
 }
 
-template<typename T, typename Body>
-void Access_op<T, Body>::State::run(const detail::Task_ptr& c)
+template<typename... Args>
+void Access_op<Args...>::State::run(const detail::Task_ptr& c)
 {
     if (!c->claim())
         return;   // machinery bug (fatal under TS_SAFETY_CHECKS); skip in shipping
@@ -289,35 +459,7 @@ void Access_op<T, Body>::State::run(const detail::Task_ptr& c)
     // same way (flag-first release, defuse without a dec; see `Flags::caller_owned`), so it
     // too holds no ref, and the op's destructor waits the nested run out.
     detail::Task_ptr prev = detail::Current_task::exchange_borrowed(c.get());
-    {
-        // The flattened access context: what the heap path's wrapper closure installs, done
-        // structurally from the op's own members.
-        Access_context ctx;
-        ctx.add(static_cast<const void*>(self->inst), mode, self->epoch, self->rank);
-        Access_scope scope(ctx);
-        constexpr bool takes_token = detail::accessor_takes_token_v<Body, Inst&>;
-        if constexpr (std::is_void_v<result_type>)
-        {
-            if constexpr (takes_token)
-                detail::invoke_user_body(self->body(), *self->inst, c->token);
-            else
-                detail::invoke_user_body(self->body(), *self->inst);
-        }
-        else
-        {
-            // The result's move into storage is inside the seam with the call: the move that
-            // lands the result in the optional is the body's own code, and a type whose move
-            // allocates can throw there.
-            detail::invoke_user_body([&]
-            {
-                if constexpr (takes_token)
-                    self->storage.result.emplace(self->body()(*self->inst, c->token));
-                else
-                    self->storage.result.emplace(self->body()(*self->inst));
-            });
-            c->result_ptr = &*self->storage.result;
-        }
-    }
+    run_body(self, c, std::make_index_sequence<arity>{});
     detail::Current_task::restore_borrowed(std::move(prev));   // defuses the borrowed install
     // The child set is frozen from here: `add_nested` requires the running task, and
     // `Current_task` is restored. If children are pending, this fire cannot settle
@@ -332,16 +474,49 @@ void Access_op<T, Body>::State::run(const detail::Task_ptr& c)
     // else: the last nested child's settle completes the op through `settle_thunk`.
 }
 
-template<typename T, typename Body>
-void Access_op<T, Body>::State::settle_thunk(detail::Task_control_block* c)
+template<typename... Args>
+template<std::size_t... I>
+void Access_op<Args...>::State::run_body(State* self, const detail::Task_ptr& c, std::index_sequence<I...>)
+{
+    // The flattened access context: what the heap path's wrapper closure installs, done
+    // structurally from the op's own members - every declared object, in declaration order.
+    Access_context ctx;
+    (ctx.add(self->insts[I], mode_at<I>, self->epochs[I], self->ranks[I]), ...);
+    Access_scope scope(ctx);
+    constexpr bool takes_token = Traits::takes_token;
+    if constexpr (std::is_void_v<result_type>)
+    {
+        if constexpr (takes_token)
+            detail::invoke_user_body(self->body(), self->template inst_ref<I>()..., c->token);
+        else
+            detail::invoke_user_body(self->body(), self->template inst_ref<I>()...);
+    }
+    else
+    {
+        // The result's move into storage is inside the seam with the call: the move that
+        // lands the result in the optional is the body's own code, and a type whose move
+        // allocates can throw there.
+        detail::invoke_user_body([&]
+        {
+            if constexpr (takes_token)
+                self->storage.result.emplace(self->body()(self->template inst_ref<I>()..., c->token));
+            else
+                self->storage.result.emplace(self->body()(self->template inst_ref<I>()...));
+        });
+        c->result_ptr = &*self->storage.result;
+    }
+}
+
+template<typename... Args>
+void Access_op<Args...>::State::settle_thunk(detail::Task_control_block* c)
 {
     // A cancelled nested child is ordering-only (the flag is read before the body, which
     // already ran) - the op completes normally.
     static_cast<State*>(c)->finish(false);
 }
 
-template<typename T, typename Body>
-void Access_op<T, Body>::State::finish(bool cancel)
+template<typename... Args>
+void Access_op<Args...>::State::finish(bool cancel)
 {
     detail::advance_pipe_links(this);   // release the taken turn(s); admissions fire pipe-free
     op_settle(cancel);
@@ -355,8 +530,8 @@ void Access_op<T, Body>::State::finish(bool cancel)
 // continuations fire - a fired continuation can resume the awaiting coroutine, whose frame
 // owns this op, and run it to the end of the `co_await`'s full-expression, destroying the op
 // (and possibly the frame) before the loop below even advances.
-template<typename T, typename Body>
-void Access_op<T, Body>::State::op_settle(bool cancel)
+template<typename... Args>
+void Access_op<Args...>::State::op_settle(bool cancel)
 {
     if (settle_synchronously)
     {
@@ -382,14 +557,53 @@ void Access_op<T, Body>::State::op_settle(bool cancel)
         cont(r, cancel);
 }
 
-template<typename T, typename Body>
-Access_op<T, Body>::Access_op(detail::Pipe& pipe, Inst* inst, Body body, Access_options opts, Named name)
+template<typename... Args>
+void Access_op<Args...>::bind_targets(const detail::Op_target (&targets)[arity])
+{
+    constexpr auto& modes = Traits::declared_modes;
+    // Declaration order: what the body is invoked with, and what the access context declares.
+    for (std::size_t k = 0; k < arity; ++k)
+    {
+        state_.insts[k] = targets[k].inst;
+        state_.epochs[k] = detail::pipe_epoch(*targets[k].pipe);
+        state_.ranks[k] = detail::pipe_rank(*targets[k].pipe);
+    }
+    // Canonical order: insertion sort by pipe address (the pack is small), carrying each
+    // pipe's mode and its declaration slot. The same globally canonical order the graph's
+    // nodes and the multi-object `async` cascade use, which is what makes a cross-object wait
+    // cycle unrepresentable. A repeated object is fatal: declare each object once, with the
+    // strongest mode the body needs.
+    std::size_t n = 0;
+    for (std::size_t k = 0; k < arity; ++k)
+    {
+        detail::Pipe* pk = targets[k].pipe;
+        std::size_t i = 0;
+        while (i < n && state_.pipes[i] < pk)
+            ++i;
+        if (i < n && state_.pipes[i] == pk)
+        {
+            ts::fatal("ts::access/ts::async: the same Guarded object was passed twice - declare "
+                      "each object once, with the strongest access the body needs");
+        }
+        for (std::size_t j = n; j > i; --j)
+        {
+            state_.pipes[j] = state_.pipes[j - 1];
+            state_.link_modes[j] = state_.link_modes[j - 1];
+            state_.decl_index[j] = state_.decl_index[j - 1];
+        }
+        state_.pipes[i] = pk;
+        state_.link_modes[i] = modes[k];
+        state_.decl_index[i] = static_cast<std::uint8_t>(k);
+        ++n;
+    }
+}
+
+template<typename... Args>
+Access_op<Args...>::Access_op(Body body, Access_options opts, Named name,
+                              const detail::Op_target (&targets)[arity])
     : state_(std::move(body), std::move(opts.token), opts.priority, opts.queued)
 {
-    state_.pipe = &pipe;
-    state_.inst = inst;
-    state_.epoch = detail::pipe_epoch(pipe);
-    state_.rank = detail::pipe_rank(pipe);
+    bind_targets(targets);
     {
         detail::Task_ptr self(&state_, detail::Adopt_ref{});   // borrowed wrapper, defused below
         detail::set_task_name(self, name);
@@ -399,38 +613,72 @@ Access_op<T, Body>::Access_op(detail::Pipe& pipe, Inst* inst, Body body, Access_
     fire();
 }
 
-template<typename T, typename Body>
-void Access_op<T, Body>::fire()
+// The lend protocol (docs/multi-access-op-design.md §7.2), the same one a nested graph run uses
+// (`Static_task_graph::bind_links_for_run`): ask the calling task's `Access_context` - keyed by
+// instance address - whether it already holds a grant covering what this object needs. It does
+// exactly when the op runs inside that grant's window, which is already the exclusion the
+// object needs, so the op takes no turn on it; taking one would only queue the op behind the
+// caller's own hold, and awaiting it from there is a deadlock. Lending the single-object write
+// case is what used to be the separate reentrant arm.
+template<typename... Args>
+std::uint8_t Access_op<Args...>::bind_links(bool lend)
 {
-    detail::Pipe& pipe = *state_.pipe;
+    // The context read is the one thread-local touch on the fire path, and it sits behind the
+    // out-of-line barrier (`access_load`), so it costs a call. `fire` therefore binds without
+    // lending first and probes: when every object is free - the common case - the grant
+    // question is never asked. Lending is consulted only after that probe fails, which loses
+    // nothing: an object the caller holds for writing is never admissible, so the probe fails
+    // on it and the lend happens on the retry; one the caller holds for reading admits a
+    // second reader, which is the single-object behaviour exactly; and the read-holder-writes
+    // fatal still fires, because that probe can never succeed.
+    const Access_context* ctx = lend ? detail::access_load() : nullptr;
+    std::uint8_t bound = 0;
+    for (std::size_t i = 0; i < arity; ++i)
+    {
+        const Access mode_i = state_.link_modes[i];
+        if (ctx != nullptr)
+        {
+            const void* inst = state_.insts[state_.decl_index[i]];
+            if (ctx->grants(inst, mode_i))
+                continue;   // lent: contained in the caller's grant window
+#if TS_SAFETY_CHECKS
+            if (mode_i == Access::read_write && ctx->grants(inst, Access::read_only))
+            {
+                // Mode-incompatible overlap, exactly the graph's nested-run case: a read grant
+                // cannot be lent to a writer, and queueing would put the op behind the caller's
+                // own read hold, which the caller cannot release while it waits for the op.
+                ts::fatal("ts::access - the calling task holds READ access on an object this access "
+                          "writes; a read grant cannot be lent to a writer (declare the write on the "
+                          "calling task, or hand the write to ts::async and do not wait for it)");
+            }
+#endif
+        }
+        detail::bind_pipe_link(&state_, bound, *state_.pipes[i], mode_i);
+        ++bound;
+    }
+    state_.pipe_count = bound;   // `bind_pipe_link` cannot say this when nothing was bound
+    // An all-lent fire is indistinguishable from a bare task by the links alone (both have no
+    // pipes), and the guard-across-suspension rule's one exemption is exactly this shape.
+    state_.flags.all_lent = (bound == 0);
+    return bound;
+}
+
+template<typename... Args>
+void Access_op<Args...>::fire()
+{
     settled_sync_ = false;
     // Borrowed wrapper for this frame's machinery calls - defused before every return
     // (`this` outlives the call by the single-owner contract; the refcount stays untouched).
     detail::Task_ptr self(&state_, detail::Adopt_ref{});
-    detail::bind_pipe_link(&state_, 0, pipe, mode);
-    // Reentrant arm (waiting rule (b)): the calling task already holds this pipe's write
-    // grant - run inline under it, touching the pipe not at all (the link above is
-    // diagnostics only; `run` overwrites the unused turn lock).
-    detail::Task_control_block* owner = pipe.writer_owner.load(std::memory_order_acquire);
-    if (owner != nullptr && owner == detail::Current_task::get())
-    {
-        state_.settle_synchronously = true;
-        state_.execute(self);
-        // `run` cleared the flag if the body attached nested children - the op is then
-        // still in flight when this call returns, and the destructor must synchronize.
-        settled_sync_ = state_.settle_synchronously;
-        self.release();
-        return;
-    }
-    state_.num_locks.store(1, std::memory_order_relaxed);   // the one pipe turn
-    // Inline fast path: claim an idle pipe and run on this thread; else enqueue - the
-    // admitted turn's release dispatches the body (borrowed route, no machinery refs).
-    // `.queued` skips only this arm (never-inline is a dispatch preference); the reentrant
-    // arm above is correctness, not opportunism, so it ran regardless.
+    // Inline fast path first, over every object and with no grant lookup: claim every pipe at
+    // once, all or nothing, and run on this thread. `.queued` skips this arm (never-inline is
+    // a dispatch preference). A failed probe admits nothing, so the links can be rebound below.
     if (!state_.queued)
     {
+        const std::uint8_t bound = bind_links(false);
+        state_.num_locks.store(bound, std::memory_order_relaxed);
         state_.settle_synchronously = true;
-        if (detail::pipe_try_inline(global_scheduler(), pipe, mode, self))
+        if (detail::pipe_try_inline(self))
         {
             settled_sync_ = state_.settle_synchronously;   // false if the body attached children
             self.release();
@@ -438,12 +686,46 @@ void Access_op<T, Body>::fire()
         }
         state_.settle_synchronously = false;
     }
+    // Something is busy (or never-inline was asked for). Now ask whether the caller is what
+    // holds it: a lent object takes no turn, which is correctness rather than opportunism - an
+    // op queued behind its own caller's held grant deadlocks when awaited.
+    const std::uint8_t bound = bind_links(true);
+    if (bound == 0)
+    {
+        // Every object lent: nothing to acquire, so the body runs inline under the grants the
+        // caller already holds, touching no pipe at all. `.queued` does not apply here.
+        state_.settle_synchronously = true;
+        state_.execute(self);
+        // `run` cleared the flag if the body attached nested children - the op is then still
+        // in flight when this call returns, and the destructor must synchronize.
+        settled_sync_ = state_.settle_synchronously;
+        self.release();
+        return;
+    }
+    state_.num_locks.store(bound, std::memory_order_relaxed);   // one per pipe turn taken
+    // Lending narrowed the set, so the objects that made the first probe fail may be exactly
+    // the lent ones. Probe what remains: a caller holding `a` with `b` free runs inline on `b`,
+    // the same outcome lending-first would have produced - the first probe only deferred the
+    // grant question, it did not forfeit the inline arm. Still never-inline under `.queued`.
+    if (!state_.queued && bound < arity)
+    {
+        state_.settle_synchronously = true;
+        if (detail::pipe_try_inline(self))
+        {
+            settled_sync_ = state_.settle_synchronously;
+            self.release();
+            return;
+        }
+        state_.settle_synchronously = false;
+    }
+    // Enqueue: the last admitted turn's release dispatches the body (borrowed route, no
+    // machinery refs).
     self.release();
-    detail::pipe_enter_first(&state_, nullptr);
+    detail::pipe_enter_first(&state_, nullptr);   // turns cascade canonically; the last release dispatches
 }
 
-template<typename T, typename Body>
-void Access_op<T, Body>::start()
+template<typename... Args>
+void Access_op<Args...>::start()
 {
 #if TS_SAFETY_CHECKS
     if (!state_.bound)
@@ -478,8 +760,8 @@ void Access_op<T, Body>::start()
     fire();
 }
 
-template<typename T, typename Body>
-Access_op<T, Body>::~Access_op()
+template<typename... Args>
+Access_op<Args...>::~Access_op()
 {
     // Unbound / dormant: no fire outstanding, nothing to synchronize (the State dtor
     // destroys a bound body). Settled-synchronously: the settle preceded the firing call's
@@ -506,20 +788,20 @@ Access_op<T, Body>::~Access_op()
     state_.wait();
 }
 
-template<typename T, typename Body>
-bool Access_op<T, Body>::is_done() const noexcept
+template<typename... Args>
+bool Access_op<Args...>::is_done() const noexcept
 {
     return state_.ready.load(std::memory_order_acquire);
 }
 
-template<typename T, typename Body>
-bool Access_op<T, Body>::is_cancelled() const noexcept
+template<typename... Args>
+bool Access_op<Args...>::is_cancelled() const noexcept
 {
     return state_.ready.load(std::memory_order_acquire) && state_.cancelled;
 }
 
-template<typename T, typename Body>
-void Access_op<T, Body>::wait_settled()
+template<typename... Args>
+void Access_op<Args...>::wait_settled()
 {
 #if TS_SAFETY_CHECKS
     if (!state_.started)
@@ -540,8 +822,8 @@ void Access_op<T, Body>::wait_settled()
     }
 }
 
-template<typename T, typename Body>
-detail::Sync_ref_t<typename Access_op<T, Body>::result_type> Access_op<T, Body>::sync() &
+template<typename... Args>
+detail::Sync_ref_t<typename Access_op<Args...>::result_type> Access_op<Args...>::sync() &
 {
     wait_settled();
     if constexpr (std::is_void_v<result_type>)
@@ -556,8 +838,8 @@ detail::Sync_ref_t<typename Access_op<T, Body>::result_type> Access_op<T, Body>:
     }
 }
 
-template<typename T, typename Body>
-typename Access_op<T, Body>::result_type Access_op<T, Body>::sync() &&
+template<typename... Args>
+typename Access_op<Args...>::result_type Access_op<Args...>::sync() &&
 {
     if constexpr (std::is_void_v<result_type>)
         wait_settled();
@@ -565,8 +847,8 @@ typename Access_op<T, Body>::result_type Access_op<T, Body>::sync() &&
         return take();   // the temporary form is a consume; same contract, same fatals
 }
 
-template<typename T, typename Body>
-typename Access_op<T, Body>::result_type Access_op<T, Body>::take()
+template<typename... Args>
+typename Access_op<Args...>::result_type Access_op<Args...>::take()
     requires (!std::is_void_v<result_type>)
 {
     wait_settled();
@@ -581,8 +863,8 @@ typename Access_op<T, Body>::result_type Access_op<T, Body>::take()
     return std::move(*static_cast<result_type*>(state_.result_ptr));
 }
 
-template<typename T, typename Body>
-std::optional<typename Access_op<T, Body>::result_type> Access_op<T, Body>::try_take()
+template<typename... Args>
+std::optional<typename Access_op<Args...>::result_type> Access_op<Args...>::try_take()
     requires (!std::is_void_v<result_type>)
 {
 #if TS_SAFETY_CHECKS
@@ -596,9 +878,9 @@ std::optional<typename Access_op<T, Body>::result_type> Access_op<T, Body>::try_
     return std::move(*static_cast<result_type*>(state_.result_ptr));
 }
 
-template<typename T, typename Body>
-detail::Optional_access_awaitable<typename Access_op<T, Body>::result_type>
-Access_op<T, Body>::as_optional() requires (!std::is_void_v<result_type>)
+template<typename... Args>
+detail::Optional_access_awaitable<typename Access_op<Args...>::result_type>
+Access_op<Args...>::as_optional() requires (!std::is_void_v<result_type>)
 {
 #if TS_SAFETY_CHECKS
     if (!state_.started)
@@ -610,23 +892,45 @@ Access_op<T, Body>::as_optional() requires (!std::is_void_v<result_type>)
 
 namespace detail
 {
-template<typename T, typename Body>
-Task_control_block* access_op_core(Access_op<T, Body>& op) noexcept
+template<typename... Args>
+Task_control_block* access_op_core(Access_op<Args...>& op) noexcept
 {
     return &op.state_;
 }
 
-template<typename T, typename Body>
-bool* access_op_consumed(Access_op<T, Body>& op) noexcept
+template<typename... Args>
+bool* access_op_consumed(Access_op<Args...>& op) noexcept
 {
     return &op.state_.consumed;
 }
 
-template<typename T, typename Body>
-bool access_op_started(const Access_op<T, Body>& op) noexcept
+template<typename... Args>
+bool access_op_started(const Access_op<Args...>& op) noexcept
 {
     return op.state_.started;
 }
+
+// The single-object spelling `Access_op<T, Body>` must keep meaning exactly what it meant
+// before the type became variadic (docs/multi-access-op-design.md §7.1) - enforced here rather
+// than asserted in prose: one object, the mode `accessor_mode` deduces, and the result
+// `Accessor_result_t` computes under it.
+template<typename T, typename Body>
+inline constexpr bool op_matches_single_object_deduction =
+    Access_op<T, Body>::arity == 1
+    && Access_op<T, Body>::mode == accessor_mode<Body, T>()
+    && std::is_same_v<typename Access_op<T, Body>::result_type,
+                      Accessor_result_t<Body, T, accessor_mode<Body, T>()>>;
+
+// Declarations only - the probes are never called, just classified.
+struct Op_compat_read { int operator()(const int&) const; };
+struct Op_compat_write { void operator()(int&) const; };
+struct Op_compat_token { int operator()(const int&, const Cancellation_token&) const; };
+struct Op_compat_generic { template<typename V> void operator()(V&) const; };
+
+static_assert(op_matches_single_object_deduction<int, Op_compat_read>);
+static_assert(op_matches_single_object_deduction<int, Op_compat_write>);
+static_assert(op_matches_single_object_deduction<int, Op_compat_token>);
+static_assert(op_matches_single_object_deduction<int, Op_compat_generic>);
 }
 
 // `Guarded<T>` - the access-controlled wrapper, the sanctioned way to touch a `T` across threads.
@@ -749,8 +1053,9 @@ public:
                 std::source_location site = std::source_location::current())
         -> Access_op<T, std::decay_t<Fn>>
     {
-        return Access_op<T, std::decay_t<Fn>>(pipe_, &instance_, std::forward<Fn>(fn), opts,
-                                              detail::named_from(opts, site));
+        const detail::Op_target targets[1] = { { &pipe_, &instance_ } };
+        return Access_op<T, std::decay_t<Fn>>(std::forward<Fn>(fn), opts,
+                                              detail::named_from(opts, site), targets);
     }
 
     // access, read_only.
@@ -761,8 +1066,9 @@ public:
                 std::source_location site = std::source_location::current()) const
         -> Access_op<T, std::decay_t<Fn>>
     {
-        return Access_op<T, std::decay_t<Fn>>(pipe_, &instance_, std::forward<Fn>(fn), opts,
-                                              detail::named_from(opts, site));
+        const detail::Op_target targets[1] = { { &pipe_, &instance_ } };
+        return Access_op<T, std::decay_t<Fn>>(std::forward<Fn>(fn), opts,
+                                              detail::named_from(opts, site), targets);
     }
 
     // async, read_write: always enqueued (never inline).
@@ -869,16 +1175,15 @@ struct Guarded_access
 
 // Defined here rather than with the other `Access_op` members: both need `Guarded`'s
 // internals (`Guarded_access`), which are only complete below the class.
-template<typename T, typename Body>
-Access_op<T, Body>::Access_op(Dormant, Guarded<T>& target, Body body, Access_options opts,
-                              std::source_location site)
+template<typename... Args>
+Access_op<Args...>::Access_op(Dormant, Guarded<object_type<0>>& target, Body body,
+                              Access_options opts, std::source_location site)
+    requires (arity == 1)
     : state_(std::move(body), std::move(opts.token), opts.priority, opts.queued)
 {
-    detail::Pipe& pipe = detail::Guarded_access::pipe(target);
-    state_.pipe = &pipe;
-    state_.inst = detail::Guarded_access::instance(target);
-    state_.epoch = detail::pipe_epoch(pipe);
-    state_.rank = detail::pipe_rank(pipe);
+    const detail::Op_target targets[1] = {
+        { &detail::Guarded_access::pipe(target), detail::Guarded_access::instance(target) } };
+    bind_targets(targets);
     {
         detail::Task_ptr self(&state_, detail::Adopt_ref{});
         detail::set_task_name(self, detail::named_from(opts, site));
@@ -886,8 +1191,8 @@ Access_op<T, Body>::Access_op(Dormant, Guarded<T>& target, Body body, Access_opt
     }
 }
 
-template<typename T, typename Body>
-void Access_op<T, Body>::bind(Guarded<T>& target, Body body)
+template<typename... Args>
+void Access_op<Args...>::bind(Guarded<object_type<0>>& target, Body body) requires (arity == 1)
 {
 #if TS_SAFETY_CHECKS
     if (state_.started && !state_.ready.load(std::memory_order_acquire))
@@ -897,11 +1202,9 @@ void Access_op<T, Body>::bind(Guarded<T>& target, Body body)
     if (state_.bound)
         std::destroy_at(&state_.body());
     ::new (static_cast<void*>(state_.body_store)) Body(std::move(body));
-    detail::Pipe& pipe = detail::Guarded_access::pipe(target);
-    state_.pipe = &pipe;
-    state_.inst = detail::Guarded_access::instance(target);
-    state_.epoch = detail::pipe_epoch(pipe);
-    state_.rank = detail::pipe_rank(pipe);
+    const detail::Op_target targets[1] = {
+        { &detail::Guarded_access::pipe(target), detail::Guarded_access::instance(target) } };
+    bind_targets(targets);
     state_.bound = true;
 }
 
@@ -973,12 +1276,10 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
     auto block = make_piped_executable<R, sizeof...(Ts)>(std::move(body), std::move(opts.token));
     block->flags.priority = opts.priority;
     // Multi-object `ts::access`/`ts::async` end in an object pack, so no trailing defaulted
-    // `source_location` is expressible and there is no call site to capture: an unnamed
-    // multi-object access carries only whatever literal the options gave it. Name it with
-    // `{.name = "..."}` when a diagnostic would need to point at it.
-    Named name{ nullptr };
-    name.literal = opts.name;
-    set_task_name(block, name);
+    // `source_location` is expressible and there is no call site for the verb to capture:
+    // `Access_options::name` is the whole identity, which is why it is a `Named` - spell
+    // `{.name = "hud"}` for a literal or `{.name = ts::Named{}}` to capture the call site.
+    set_task_name(block, opts.name);
     // Insertion-sort by pipe address (canonical order), in place - the pack is small. A
     // repeated object is fatal: declare each object once, with the strongest mode the body
     // needs (a duplicate is a copy-paste bug far more often than intent; this was previously
@@ -1048,6 +1349,61 @@ auto async_build_tagged(Access_options opts, std::index_sequence<I...> seq, Fn&&
         std::move(opts), seq, std::forward<Fn>(fn), *objs.obj...);
 }
 
+// Construct an `Access_op` in the caller's storage: flatten the objects into targets (pipe +
+// instance, declaration order) and hand them to the op's private constructor. Every prvalue
+// on the way out is elided, which is what lets a non-movable op be built by a verb.
+struct Access_op_maker
+{
+    template<typename Op, typename Fn, typename... Ts>
+    static Op make(Access_options opts, Fn&& fn, Guarded<Ts>&... objs)
+    {
+        static_assert(sizeof...(Ts) == Op::arity,
+            "the op's object arguments and the verb's object pack must agree in count");
+        const Op_target targets[sizeof...(Ts)] = {
+            { &Guarded_access::pipe(objs), static_cast<const void*>(Guarded_access::instance(objs)) }... };
+        Named name = opts.name;
+        return Op(std::forward<Fn>(fn), std::move(opts), name, targets);
+    }
+};
+
+// The `access` counterpart of the `async_build_*` trio: the same three tiers over the same
+// canonical cascade, with the operation state in the CALLER's storage instead of a heap block.
+// The modes are not threaded through - the op recomputes them from its own template arguments,
+// which is why a tagged position spells `Access_arg<T, M>` in the op's type and a bare one
+// spells `T`.
+template<typename Args, std::size_t... I, typename Fn, typename... Ts>
+auto access_build(Access_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... objs)
+{
+    static_assert((std::is_lvalue_reference_v<std::tuple_element_t<I, Args>> && ...),
+        "a guarded-resource parameter must be `T&` or `const T&`: taking it by value copies "
+        "the resource (writes hit the copy and are silently discarded), and `T&&` cannot "
+        "bind the stored instance");
+    return Access_op_maker::make<Access_op<Ts..., std::decay_t<Fn>>>(
+        std::move(opts), std::forward<Fn>(fn), objs...);
+}
+
+template<std::size_t... I, typename Fn, typename... Ts>
+auto access_build_probed(Access_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... objs)
+{
+    static_assert(std::invocable<Fn, Ts&...>,
+        "multi-object access/async: functor parameters must match the Guarded objects "
+        "(same arity, each taken by reference)");
+    // Guard the forward on the same condition: a failed assert does not stop instantiation,
+    // so without it the op's own deduction re-errors past the message.
+    if constexpr (std::invocable<Fn, Ts&...>)
+    {
+        return Access_op_maker::make<Access_op<Ts..., std::decay_t<Fn>>>(
+            std::move(opts), std::forward<Fn>(fn), objs...);
+    }
+}
+
+template<std::size_t... I, typename Fn, typename... Objs>
+auto access_build_tagged(Access_options opts, std::index_sequence<I...>, Fn&& fn, Objs&&... objs)
+{
+    return Access_op_maker::make<Access_op<std::remove_cvref_t<Objs>..., std::decay_t<Fn>>>(
+        std::move(opts), std::forward<Fn>(fn), *objs.obj...);
+}
+
 } // namespace detail
 
 // Tag an object argument with an explicit access mode: `graph.add_node([](auto& p, auto& n)
@@ -1109,23 +1465,49 @@ auto async(Fn&& fn, Objs&&... objs)
     return async(Access_options{}, std::forward<Fn>(fn), std::forward<Objs>(objs)...);
 }
 
-// Multi-object `access`: the opportunistic sibling of `ts::async(fn, objs...)`. NOTE: the
-// multi-object inline fast path is unimplemented, so `access` here currently behaves exactly
-// like `async` (always enqueued) - unlike single-object `access`, which runs inline when the
-// queue is free. Tracked in docs/TODO.md (Guarded/access). Documented so the difference is not
-// a silent surprise. Accepts the same bare-or-tagged arguments as `ts::async`.
+// Multi-object `access`: the attended sibling of `ts::async(fn, objs...)`, taking the same
+// bare-or-tagged arguments and the same deadlock-free canonical order. Returns the caller-owned
+// `Access_op<Objects..., Body>` - the operation state lives in the returned object, so a
+// multi-object access allocates nothing; consume it with `co_await`, `.sync()` (from outside a
+// task) or `try_take()`. Dispatch is opportunistic: objects the calling task already holds are
+// lent (no turn taken at all), and the rest run inline on the calling thread when every one of
+// them is free right now, otherwise the whole set enqueues through the cascade. To detach -
+// drop the handle, store a `Task<R>` - use `ts::async`.
 template<typename Fn, typename... Objs>
     requires (sizeof...(Objs) >= 1) && (detail::Object_arg<Objs> && ...)
+[[nodiscard("the attended verb: consume the op (co_await, .sync(), try_take()). To not wait, use ts::async")]]
 auto access(Access_options opts, Fn&& fn, Objs&&... objs)
 {
-    return async(std::move(opts), std::forward<Fn>(fn), std::forward<Objs>(objs)...);
+    constexpr bool any_tagged = (detail::is_access_arg_v<Objs> || ...);
+    if constexpr (any_tagged)
+    {
+        static_assert((detail::is_access_arg_v<Objs> && ...),
+            "multi-object access: don't mix tagged (ts::as_read_only/as_read_write) and bare Guarded "
+            "arguments - tag EVERY object argument, or tag none");
+        return detail::access_build_tagged(std::move(opts), std::index_sequence_for<Objs...>{},
+            std::forward<Fn>(fn), std::forward<Objs>(objs)...);
+    }
+    else if constexpr (detail::introspectable_v<Fn>)
+    {
+        using Args = typename detail::Function_traits<std::decay_t<Fn>>::args;
+        static_assert(std::tuple_size_v<Args> == sizeof...(Objs),
+            "multi-object access: functor arity must match the number of Guarded objects");
+        return detail::access_build<Args>(std::move(opts), std::index_sequence_for<Objs...>{},
+            std::forward<Fn>(fn), objs...);
+    }
+    else
+    {
+        return detail::access_build_probed(std::move(opts), std::index_sequence_for<Objs...>{},
+            std::forward<Fn>(fn), objs...);
+    }
 }
 
 template<typename Fn, typename... Objs>
     requires (sizeof...(Objs) >= 1) && (detail::Object_arg<Objs> && ...)
+[[nodiscard("the attended verb: consume the op (co_await, .sync(), try_take()). To not wait, use ts::async")]]
 auto access(Fn&& fn, Objs&&... objs)
 {
-    return async(std::forward<Fn>(fn), std::forward<Objs>(objs)...);
+    return access(Access_options{}, std::forward<Fn>(fn), std::forward<Objs>(objs)...);
 }
 
 // `ts::launch` (bare scheduler task) lives in task.h now - it dispatches

@@ -488,6 +488,17 @@ static_assert(!std::is_move_assignable_v<ts::Access_op<int, Int_read>>);
 static_assert(ts::Access_op<int, Int_read>::mode == ts::Access::read_only);
 static_assert(ts::Access_op<int, Int_write>::mode == ts::Access::read_write);
 static_assert(std::is_same_v<ts::Access_op<int, Write_fn>::result_type, void>);
+// The single-object spelling still names one object: the arity split is objects-then-body, so
+// `Access_op<T, Body>` reads the same as it always did.
+static_assert(ts::Access_op<int, Int_read>::arity == 1);
+
+// The same type at higher arity - objects first, body last - with a mode per position.
+struct Two_add { int operator()(int&, const int&) const { return 0; } };
+static_assert(ts::Access_op<int, int, Two_add>::arity == 2);
+static_assert(ts::Access_op<int, int, Two_add>::mode_at<0> == ts::Access::read_write);
+static_assert(ts::Access_op<int, int, Two_add>::mode_at<1> == ts::Access::read_only);
+static_assert(std::is_same_v<ts::Access_op<int, int, Two_add>::result_type, int>);
+static_assert(!std::is_move_constructible_v<ts::Access_op<int, int, Two_add>>);
 
 // A void access: `sync()` returns nothing, the write lands.
 void test_op_void_result()
@@ -640,6 +651,224 @@ void test_op_dtor_waits_unsettled()
     TS_CHECK(read_value(d) == 7);   // the dtor waited the access out; nothing was lost
 }
 
+// --- Multi-object Access_op ------------------------------------------------
+
+// `ts::access(fn, a, b)` returns the same caller-owned op the single-object verb does: one
+// consume vocabulary at every arity, the body invoked in DECLARATION order however the pipes
+// happened to sort, and `start()` refiring the same storage.
+void test_multi_op_basic()
+{
+    ts::Guarded<int> a{ ts::Named{}, 1 };
+    ts::Guarded<int> b{ ts::Named{}, 2 };
+    auto op = ts::access([](int& x, const int& y) { x += y; return x; }, a, b);
+    TS_CHECK(op.sync() == 3);
+    op.start();
+    TS_CHECK(op.sync() == 5);
+    TS_CHECK(read_value(a) == 5);
+    TS_CHECK(read_value(b) == 2);
+}
+
+// Declaration order is independent of canonical (pipe-address) order: the same body over the
+// same pair, declared both ways round, writes the object it was given first.
+void test_multi_op_declaration_order()
+{
+    ts::Guarded<int> a{ ts::Named{}, 10 };
+    ts::Guarded<int> b{ ts::Named{}, 3 };
+    TS_CHECK(ts::access([](int& x, const int& y) { x -= y; return x; }, a, b).sync() == 7);
+    TS_CHECK(ts::access([](int& x, const int& y) { x -= y; return x; }, b, a).sync() == -4);
+}
+
+// Awaited from a coroutine, across a real suspension: the op is frame-resident, and the
+// settling worker resumes the frame.
+void test_multi_op_await()
+{
+    ts::Guarded<int> a{ ts::Named{}, 4 };
+    ts::Guarded<int> b{ ts::Named{}, 5 };
+    std::atomic<bool> gate{ false };
+    ts::Task<void> blocker = b.async([&gate](int&) { while (!gate.load()) std::this_thread::yield(); });
+
+    auto frame = [&]() -> ts::Task<int>
+    {
+        co_return co_await ts::access([](const int& x, const int& y) { return x * y; }, a, b);
+    }();
+    TS_CHECK(!frame.is_done());   // suspended behind the blocker on b
+    gate.store(true);
+    blocker.sync();
+    TS_CHECK(frame.sync() == 20);
+}
+
+// Every object free: the whole set is admitted in one pass and the body runs on the CALLING
+// thread, like the single-object inline arm. The thread-id check is what keeps the rest of
+// this group honest - without it "ran inline" could pass vacuously on a queued dispatch.
+void test_multi_op_inline_when_all_free()
+{
+    ts::Guarded<int> a{ ts::Named{}, 1 };
+    ts::Guarded<int> b{ ts::Named{}, 2 };
+    const std::thread::id caller = std::this_thread::get_id();
+    std::atomic<std::thread::id> body_thread{};
+    auto op = ts::access([&body_thread](int& x, const int& y)
+    {
+        body_thread.store(std::this_thread::get_id());
+        x += y;
+        return x;
+    }, a, b);
+    TS_CHECK(op.is_done());                     // admitted and run before the verb returned
+    TS_CHECK(body_thread.load() == caller);
+    TS_CHECK(op.sync() == 3);
+}
+
+// One object busy defers the WHOLE op: the probe admits nothing and the body runs off the
+// calling thread once the busy object drains. (A failed probe leaves no trace to observe
+// afterwards - what follows it is the queued cascade, which legitimately holds each object it
+// has reached while it waits for the next, in canonical order.)
+void test_multi_op_defers_when_one_busy()
+{
+    ts::Guarded<int> a{ ts::Named{}, 1 };
+    ts::Guarded<int> b{ ts::Named{}, 2 };
+    const std::thread::id caller = std::this_thread::get_id();
+    std::atomic<bool> gate{ false };
+    std::atomic<bool> holding{ false };
+    ts::Task<void> blocker = b.async([&gate, &holding](int&)
+    {
+        holding.store(true);
+        while (!gate.load())
+            std::this_thread::yield();
+    });
+    wait_until([&holding] { return holding.load(); });
+    // Armed before the probe below, so a partial-admission regression fails the check instead
+    // of hanging the suite.
+    std::thread releaser([&gate] { std::this_thread::sleep_for(200ms); gate.store(true); });
+
+    std::atomic<std::thread::id> body_thread{};
+    auto op = ts::access([&body_thread](int& x, const int& y)
+    {
+        body_thread.store(std::this_thread::get_id());
+        x += y;
+        return x;
+    }, a, b);
+    TS_CHECK(!op.is_done());   // b is held: the probe failed and the op queued
+
+    releaser.join();
+    blocker.sync();
+    TS_CHECK(op.sync() == 3);
+    TS_CHECK(body_thread.load() != caller);
+}
+
+// Fairness per pipe: an entry QUEUED on any one object suppresses the inline arm even when
+// that object's mode rules would admit the op right now. Here `b` has a live reader (so a
+// second read is admissible) with a writer queued behind it - the op reads `b`, and taking it
+// inline would jump that writer.
+void test_multi_op_never_jumps_queued_entry()
+{
+    ts::Guarded<int> a{ ts::Named{}, 0 };
+    ts::Guarded<int> b{ ts::Named{}, 1 };
+    std::atomic<bool> gate{ false };
+    std::atomic<bool> reading{ false };
+    ts::Task<void> reader = b.async([&gate, &reading](const int&)
+    {
+        reading.store(true);
+        while (!gate.load())
+            std::this_thread::yield();
+    });
+    wait_until([&reading] { return reading.load(); });
+    ts::Task<void> writer = b.async([](int& v) { v = 99; });   // queued behind the live reader
+    std::thread releaser([&gate] { std::this_thread::sleep_for(200ms); gate.store(true); });
+
+    auto op = ts::access([](int& x, const int& y) { x = y; return x; }, a, b);
+    TS_CHECK(!op.is_done());   // admissible on b, but queued work is never jumped
+
+    releaser.join();
+    reader.sync();
+    writer.sync();
+    TS_CHECK(op.sync() == 99);   // ran after the queued writer: FIFO held
+}
+
+// Two multi-object READ ops over the same pair overlap - the inline arm joins both as readers
+// on both pipes rather than serializing them.
+void test_multi_op_readers_overlap()
+{
+    ts::Guarded<int> a{ ts::Named{}, 1 };
+    ts::Guarded<int> b{ ts::Named{}, 2 };
+    tests::Parallel_gate gate(2);
+    auto body = [&gate](const int& x, const int& y)
+    {
+        gate.arrive();
+        return x + y;
+    };
+    // `TS_CHECK` bumps the harness's plain counters, so it is called from the test thread
+    // only: each worker hands its result back and the checks run after the joins.
+    int first_sum = 0;
+    int second_sum = 0;
+    std::thread first([&] { first_sum = ts::access(body, a, b).sync(); });
+    std::thread second([&] { second_sum = ts::access(body, a, b).sync(); });
+    first.join();
+    second.join();
+    TS_CHECK(first_sum == 3);
+    TS_CHECK(second_sum == 3);
+    TS_CHECK(gate.met());   // both bodies were in flight at once
+}
+
+// The canonical order is global, so the DECLARED order cannot deadlock: two threads hammer the
+// same pair of objects, each writing both, declared opposite ways round.
+void test_multi_op_opposite_orders_stress()
+{
+    constexpr int iterations = 3000;
+    ts::Guarded<int> a{ ts::Named{ "a" }, 0 };
+    ts::Guarded<int> b{ ts::Named{ "b" }, 0 };
+    auto bump = [](int& x, int& y) { ++x; ++y; };
+    std::thread forward([&] { for (int i = 0; i < iterations; ++i) ts::access(bump, a, b).sync(); });
+    std::thread backward([&] { for (int i = 0; i < iterations; ++i) ts::access(bump, b, a).sync(); });
+    forward.join();
+    backward.join();
+    TS_CHECK(read_value(a) == 2 * iterations);
+    TS_CHECK(read_value(b) == 2 * iterations);
+}
+
+// The lend protocol, partial: the calling task already holds `a`, so the op takes a turn on
+// `b` alone and runs. Queueing on `a` instead would put the op behind its own caller's hold -
+// the deadlock lending exists to remove - so this test cannot pass by accident.
+void test_multi_op_lend_partial()
+{
+    ts::Guarded<int> a{ ts::Named{ "a" }, 1 };
+    ts::Guarded<int> b{ ts::Named{ "b" }, 2 };
+    std::atomic<int> got{ -1 };
+    a.async([&a, &b, &got](int& x)
+    {
+        x = 10;
+        auto op = ts::access([](int& p, const int& q) { p += q; return p; }, a, b);
+        got.store(op.try_take().value_or(-1));   // `b` was free too, so the op settled inline
+    }).sync();
+    TS_CHECK(got.load() == 12);
+    TS_CHECK(read_value(a) == 12);
+}
+
+// Every object lent: nothing to acquire, so the body runs inline on the holder's thread under
+// the grants it already has - what the single-object reentrant arm did, generalized.
+void test_multi_op_lend_all()
+{
+    ts::Guarded<int> a{ ts::Named{ "a" }, 1 };
+    ts::Guarded<int> b{ ts::Named{ "b" }, 2 };
+    std::atomic<std::thread::id> holder{};
+    std::atomic<std::thread::id> lent_body{};
+    std::atomic<int> got{ -1 };
+    ts::async([&a, &b, &holder, &lent_body, &got](int& x, int& y)
+    {
+        holder.store(std::this_thread::get_id());
+        (void)x;
+        (void)y;
+        auto op = ts::access([&lent_body](int& p, const int& q)
+        {
+            lent_body.store(std::this_thread::get_id());
+            p += q;
+            return p;
+        }, a, b);
+        got.store(op.try_take().value_or(-1));
+    }, a, b).sync();
+    TS_CHECK(got.load() == 3);
+    TS_CHECK(lent_body.load() == holder.load());
+    TS_CHECK(read_value(a) == 3);
+}
+
 // --- Access_op lifecycle: construct / bind / start (§10.1) -----------------
 
 struct Read_plus
@@ -715,7 +944,7 @@ void test_op_sync_take_vocabulary()
 }
 
 // `Access_options{.queued = true}`: attended but never-inline - the body runs off the
-// calling thread even on a free pipe. The reentrant arm ignores the option (queuing behind
+// calling thread even on a free pipe. A lent object ignores the option (queuing behind
 // the caller's own held grant would deadlock when awaited).
 void test_op_queued_option()
 {
@@ -828,6 +1057,20 @@ void run_guarded_tests()
     run("op: rebind settled to another object", test_op_rebind_settled);
     run("op: nested graph run gates completion", test_op_nested_graph_run);
     run("op: sync/take vocabulary", test_op_sync_take_vocabulary);
+    run("multi-op: basic and refire", test_multi_op_basic);
+    run("multi-op: declaration order", test_multi_op_declaration_order);
+    run("multi-op: awaited across suspension", test_multi_op_await);
+    run("multi-op: inline when all free", test_multi_op_inline_when_all_free);
+    run("multi-op: defers when one busy", test_multi_op_defers_when_one_busy);
+    run("multi-op: never jumps a queued entry", test_multi_op_never_jumps_queued_entry);
+    run("multi-op: readers overlap", test_multi_op_readers_overlap);
+    run("multi-op: opposite orders stress", test_multi_op_opposite_orders_stress);
+    run("multi-op: lends the held object", test_multi_op_lend_partial);
+    run("multi-op: all lent runs inline", test_multi_op_lend_all);
+    run("death: multi-object access duplicate object",
+        []{ TS_CHECK(ts::test::expect_death("access_duplicate_object")); });
+    run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: access writes under a read grant",
+        []{ TS_CHECK(ts::test::expect_death("access_write_under_read_grant")); });
     run("op: queued option", test_op_queued_option);
     run_if(ts::test::with_harness, "TS_SAFETY_CHECKS=0", "death: op start unbound",
         []{ TS_CHECK(ts::test::expect_death("access_op_start_unbound")); });

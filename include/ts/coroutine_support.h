@@ -81,18 +81,27 @@ inline void check_await_under_guard(const char* message)
 #endif
 }
 
-// The one stated exemption to the rule above. An access whose every pipe is currently
-// write-owned by this task ran inline under that held grant (`Guarded::access`'s reentrant
-// arm, waiting rule (b)): it never touched the pipe, it is settled before the `co_await`
-// is even evaluated, and it cannot suspend by construction rather than by timing.
-// `writer_owner` is always-on state, so this works in every build.
+// The one stated exemption to the rule above: an access that cannot suspend by construction
+// rather than by timing, because everything it needed was already held by this task. Two
+// spellings of the same condition.
+//
+// (1) `Access_op` lent every object it declares (`bind_links`, waiting rule (b)): it entered
+// no pipe, ran inline under the caller's grants, and was settled before the `co_await` was
+// evaluated. The flag is what says so - an all-lent block has no links left to inspect.
+//
+// (2) Every pipe of a block that did take turns is currently write-owned by this task
+// (`writer_owner`, always-on state, so this works in every build).
 //
 // Deliberately narrow. A read access under a read guard is not exempt: it reaches the pipe,
 // and if a writer is queued ahead it enqueues and suspends - with our own read hold
 // blocking that writer. That is the genuine hazard, not a false positive.
 inline bool reentrant_under_held_grant(const Task_control_block* blk) noexcept
 {
-    if (blk == nullptr || blk->pipe_count == 0)
+    if (blk == nullptr)
+        return false;
+    if (blk->flags.all_lent)
+        return true;
+    if (blk->pipe_count == 0)
         return false;
     const Task_control_block* running = Current_task::get();
     for (std::uint8_t i = 0; i < blk->pipe_count; ++i)
@@ -1103,15 +1112,15 @@ Optional_access_awaiter<R> operator co_await(Optional_access_awaitable<R> awaita
 }
 
 // The awaiter build shared by both value categories: never-started check + core/consume hookup.
-template<typename T, typename Body>
-Access_op_awaiter<typename Access_op<T, Body>::result_type> make_access_op_awaiter(Access_op<T, Body>& op)
+template<typename... Args>
+Access_op_awaiter<typename Access_op<Args...>::result_type> make_access_op_awaiter(Access_op<Args...>& op)
 {
 #if TS_SAFETY_CHECKS
     if (!access_op_started(op))
         ts::fatal("co_await on an Access_op that was never started - start() it first "
                   "(awaiting a dormant op would suspend forever)");
 #endif
-    return Access_op_awaiter<typename Access_op<T, Body>::result_type>(
+    return Access_op_awaiter<typename Access_op<Args...>::result_type>(
         Task_ptr(access_op_core(op)), access_op_consumed(op));
 }
 
@@ -1119,14 +1128,14 @@ Access_op_awaiter<typename Access_op<T, Body>::result_type> make_access_op_await
 
 // `co_await` an `Access_op` (usually the temporary from `obj.access(fn)`, materialized in the
 // coroutine frame for the suspension - zero-alloc; or a named op, awaited once per cycle).
-template<typename T, typename Body>
-auto operator co_await(Access_op<T, Body>& op)
+template<typename... Args>
+auto operator co_await(Access_op<Args...>& op)
 {
     return detail::make_access_op_awaiter(op);
 }
 
-template<typename T, typename Body>
-auto operator co_await(Access_op<T, Body>&& op)
+template<typename... Args>
+auto operator co_await(Access_op<Args...>&& op)
 {
     return detail::make_access_op_awaiter(op);
 }

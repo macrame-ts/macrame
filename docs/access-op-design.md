@@ -222,6 +222,10 @@ integration for pending requests. Not in v1.
    `pipe_acquire` reduced to the link-enter protocol.
 3. **Multi-object `Access_op`** (N embedded links through the same canonical
    cascade) - closes TODO 1.2 (multi-object inline arm) as a side effect.
+   *Landed 2026-08*; design of record and the "as landed" notes are in
+   [multi-access-op-design.md](multi-access-op-design.md). The reentrant arm
+   named in §5 and §7.1 is gone as a separate path: it is the all-objects-lent
+   case of the lend protocol (§7.2 there).
 4. **The §10 lifecycle** - shipped (`include/ts/guarded.h`): the default
    constructor leaves the op **unbound**, `Access_op(ts::dormant, target,
    body, opts)` constructs it bound-but-dormant, `bind(target, body)`

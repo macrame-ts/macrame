@@ -65,28 +65,30 @@ struct Access_options
 {
     Cancellation_token token = {};
     Priority priority = Priority::normal;
-    // Optional debug identity for the access task. A literal only: the call site is
-    // captured by the verb itself (its own defaulted `std::source_location`), so an
-    // unnamed access is still identified in diagnostics.
-    const char* name = nullptr;
+    // Optional debug identity for the access task: a literal (`{.name = "hud"}`) or a call
+    // site (`{.name = ts::Named{}}`). Left empty, a single-object verb falls back to the site
+    // its own defaulted `std::source_location` captured. The multi-object verbs end in an
+    // object pack, so no defaulted `source_location` is expressible after it and this field
+    // is the only identity they can carry - which is why it is a `Named` and not a literal.
+    Named name = Named(nullptr);
     // `access` only (`async` always enqueues): never run the body inline on the calling
     // thread - the attended-but-never-inline quadrant, for a heavy body whose result the
-    // caller still stays for. Skips only the inline-when-free arm; the reentrant arm (the
-    // caller's task already holds the object's write grant) stays inline regardless -
-    // that arm is correctness, not opportunism: an access queued behind its own caller's
-    // held grant deadlocks when awaited.
+    // caller still stays for. Skips only the inline-when-free arm; an access whose objects
+    // the calling task already holds is lent and runs inline regardless - lending is
+    // correctness, not opportunism: an access queued behind its own caller's held grant
+    // deadlocks when awaited.
     bool queued = false;
 };
 
 // Dispatch options for launching a standalone task (`ts::launch`). `token` makes it
 // skippable before it runs; `priority` sets its queue
-// position; `name` gives it a debug identity (a literal - the launch site is captured by
-// the verb, so an unnamed task is still identified).
+// position; `name` gives it a debug identity (a literal or `ts::Named{}` - left empty, the
+// launch site is captured by the verb, so an unnamed task is still identified).
 struct Launch_options
 {
     Cancellation_token token = {};
     Priority priority = Priority::normal;
-    const char* name = nullptr;
+    Named name = Named(nullptr);
 };
 
 // The library-wide `[[nodiscard]]` policy for handle-returning verbs, stated once here

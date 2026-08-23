@@ -74,6 +74,11 @@ fixed to `ts::Named{"..."}`. No code change.
 
 ### M1 - the multi-object `access` surface
 
+**Decided (author, 2026-08-21): option (b), implemented 2026-08.** `ts::access(fn, objs...)`
+returns a caller-owned `Access_op<Objects..., Body>` over N pipes, with the lend protocol and
+an all-or-nothing inline probe. Design of record and the "as landed" notes:
+[multi-access-op-design.md](multi-access-op-design.md).
+
 **Defect.** `g.access(fn)` returns a caller-owned, pinned, allocation-free
 `Access_op<T, Body>`. `ts::access(fn, objs...)` forwards verbatim to `ts::async`
 and returns a heap-allocated `Task<R>`. The free form accepts one object, so:
@@ -113,7 +118,10 @@ sites in tests; guide/design/coroutine-first/task-internals mentions; the
 **Defect.** `queued` is a run-inline knob in negated spelling. It is honoured on
 `Guarded::access` only. It is silently ignored by multi-object `ts::access`/
 `ts::async`, `Guarded::async`, `Deferred::commit`, and `Versioned::publish`
-(which also drops `opts.name`). For `Guarded::async` the ignore is at least
+(which also drops `opts.name`). *(Partly overtaken by M1: since the multi-object
+`access` verb returns a real `Access_op`, it honours `queued` - it skips the
+inline probe, never the lend. The remaining inert surfaces are `Guarded::async`,
+the multi-object `ts::async`, `commit` and `publish`.)* For `Guarded::async` the ignore is at least
 semantically consistent - it always enqueues. For the others it is a lie.
 
 Silently-inert option fields are unfixable after 1.0 without a *behaviour*
@@ -136,6 +144,9 @@ Related: **S9** renames the field if you keep it.
 ---
 
 ### M6 - `Access_options::name` / `Launch_options::name` are `const char*`
+
+**Done (2026-08).** Both fields are `ts::Named name = Named(nullptr)`, and `detail::named_from`
+prefers the option's name when it is non-empty, else the verb's captured site. Landed with M1.
 
 **Defect.** Every other named entity takes a `ts::Named`. Because these two take
 a bare pointer, a multi-object `access`/`async` builds `Named{nullptr}` with no
@@ -398,7 +409,7 @@ workaround.
 
 | # | item | why it can wait |
 |---|---|---|
-| **D1** | multi-object inline fast path (`Access_op` over N pipes) | real design work; **M1(a)** makes deferring it free - the surface simply does not exist in 0.1.0 |
+| **D1** | ~~multi-object inline fast path (`Access_op` over N pipes)~~ | **not deferred - landed 2026-08 with M1(b)**; see [multi-access-op-design.md](multi-access-op-design.md) |
 | **D2** | mixed-mode multi-object held guard, `co_await ts::read_write(a, as_read_only(b))` | additive; the callback form covers it today |
 | **D3** | enforcing `Versioned::state()`'s read-only contract | `state()` hands out a mutable `Guarded<T>&`, so a direct write compiles and silently breaks the replica invariant. The clean fix is a distinct front handle type exposing only what `add_node`/`read` need - nontrivial graph-declaration plumbing. Document the hazard louder meanwhile |
 | **D4** | trimming `Access_op`'s lifecycle surface (`Dormant`/`bind`/`start`/refire) | five states and four verbs for a pooled-op case with no in-tree user, but it is deliberately designed; removing surface later is easier than adding it |

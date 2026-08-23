@@ -294,6 +294,15 @@ struct Task_control_block
         // not a longer-lived registry but the op itself, whose destructor blocks until the
         // access settles - that wait is the lifetime guarantee the refs used to be.
         bool caller_owned : 1 = false;
+        // Every object this block declares was LENT by the task that fired it - the calling
+        // task already held a covering grant on all of them, so the block entered no pipe and
+        // ran inline under those grants (`Access_op::bind_links`, the lend protocol). Recorded
+        // because the result is no longer visible in the links: an all-lent block has
+        // `pipe_count == 0`, which is also what a bare task looks like. Read by the
+        // guard-across-suspension rule, whose one exemption is exactly this shape - an access
+        // that cannot suspend by construction. Recomputed on every fire; a spare bit in a byte
+        // that already exists, so it costs nothing.
+        bool all_lent : 1 = false;
     };
     Flags flags;
     // -----------------------------------------------------------------------------------
@@ -719,12 +728,13 @@ inline void set_task_name(const Task_ptr& core, const Named& name) noexcept
 #endif
 }
 
-// The `Named` a public verb records: its options' literal when given, at the site the verb
-// captured. Both option aggregates carry a `const char* name`, so one helper serves all.
+// The `Named` a public verb records: the name its options carry when the caller gave one,
+// else the site the verb captured. Both option aggregates carry a `Named name`, so one
+// helper serves all.
 template<typename Options>
 inline Named named_from(const Options& opts, const std::source_location& site) noexcept
 {
-    return opts.name != nullptr ? Named(opts.name, site) : Named(site);
+    return opts.name.empty() ? Named(site) : opts.name;
 }
 
 // Display identity of a block for a diagnostic; never null. `buf` must outlive the use.

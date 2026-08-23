@@ -491,7 +491,10 @@ it's belt-and-suspenders: conflict edges serialise every conflicting node pair, 
 *concurrent* nodes ever contend an object, and single-object async holds one object and waits
 for none — no wait-cycle can form regardless. Canonical order is load-bearing for multi-object
 `async` (the second class of multi-object acquirer), which enters the *same* cascade in the
-*same* order — so nodes and multi-object asyncs can never deadlock against each other.
+*same* order — so nodes and multi-object asyncs can never deadlock against each other. The
+multi-object `access` op is the third: it sorts its links the same way, and its all-or-nothing
+inline probe takes the pipes' mutexes in that same ascending order (holding no user code under
+them), so two probes over overlapping sets cannot deadlock either.
 
 **Inline node dispatch (opt-in, `Graph_node::set_inline`).** When a node's last prerequisite
 completes and all its pipe turns are grantable on that thread, the last cascade admission

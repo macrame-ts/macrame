@@ -99,8 +99,27 @@ and [docs/pipe-rebase.md](docs/pipe-rebase.md) §0.
   a bound-but-dormant one (`Access_op(ts::dormant, obj, body)`); `start()` also refires a
   settled op with the same storage — a zero-alloc steady state.
 - `Access_options{.queued}`: attended but never inline, for a heavy body whose result the
-  caller still stays for. Skips only the inline-when-free arm; the reentrant arm stays inline
+  caller still stays for. Skips only the inline-when-free arm; a lent object stays inline
   regardless (correctness, not opportunism).
+- The multi-object verb returns the same handle: `ts::access(fn, a, b)` yields
+  `ts::Access_op<A, B, Body>`, not a heap `Task<R>`. The type is variadic, objects first and
+  body last, so `Access_op<T, Body>` still names exactly the single-object op it always did.
+  One consume vocabulary, one dispatch policy, and no allocation at any arity. `ts::async`
+  is unchanged - it remains the detached verb at every arity.
+  See [docs/multi-access-op-design.md](docs/multi-access-op-design.md).
+- Dispatch, at every arity: objects the calling task **already holds** are *lent* - no turn is
+  taken on them, because the access runs inside the caller's grant window, which is already the
+  exclusion those objects need (the same protocol a nested `graph.execute()` uses; at one
+  object it is what the reentrant arm was). The remaining pipes are then probed **all or
+  nothing** - every one free right now, or none admitted and the whole set enqueues through the
+  canonical cascade. A queued entry is never jumped, on any object.
+- A calling task holding only a *read* grant on an object the body **writes** is fatal in
+  checked builds: a read grant cannot be lent to a writer, and enqueueing would wait behind the
+  caller's own hold. Same rule, and same message shape, as a nested graph run.
+- `Access_options::name` / `Launch_options::name` are now `ts::Named` rather than `const char*`.
+  A literal still works; `{.name = ts::Named{} }` captures the call site, which is the only way
+  a multi-object verb can be identified by site (an object pack cannot be followed by a
+  defaulted `source_location`).
 
 ### Also in 0.1.0
 

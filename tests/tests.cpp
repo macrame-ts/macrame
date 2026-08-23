@@ -370,6 +370,22 @@ void run_death_scenario(const char* name)
         ts::Guarded<int> a{ ts::Named{}, 0 };
         ts::async([](int& v, const int& r) { v = r; }, a, a).sync();   // -> fatal: duplicate
     }
+    else if (std::strcmp(name, "access_duplicate_object") == 0)
+    {
+        ts::Guarded<int> a{ ts::Named{}, 0 };
+        ts::access([](int& v, const int& r) { v = r; }, a, a).sync();   // -> fatal: duplicate
+    }
+    else if (std::strcmp(name, "access_write_under_read_grant") == 0)
+    {
+        ts::Guarded<int> a{ ts::Named{ "a" }, 0 };
+        a.async([&a](const int&)
+        {
+            // Holding READ on `a`, ask for a write on it: the read grant cannot be lent to a
+            // writer, and queueing would wait behind this very task -> fatal at the cause.
+            auto op = a.access([](int& v) { v = 1; });
+            (void)op.is_done();
+        }).sync();
+    }
     else if (std::strcmp(name, "multi_guard_duplicate_object") == 0)
     {
         ts::Guarded<int> a{ ts::Named{}, 0 };

@@ -220,13 +220,17 @@ inline void bind_pipe_link(Task_control_block* core, std::uint8_t index, Pipe& p
 }
 
 // Try to run a job inline on the calling thread instead of enqueuing it (the `access` verb's
-// fast path). Admissible only when the pipe is immediately free for this mode - no queued jobs
-// (FIFO preserved) and the reader/writer rules allow: `read_only`
-// joins as a concurrent reader, `read_write` as an exclusive writer. On success runs the
-// block's body synchronously (the caller blocks for its duration), then releases,
-// re-dispatches the pipe, and returns true. On failure returns false and the caller
-// enqueues the same block. Caller-blocking + a nested access scope - see `Guarded::async`.
-bool pipe_try_inline(Scheduler& scheduler, Pipe& pipe, Access mode, const Task_ptr& block);
+// fast path), over every pipe the block's bound links name - all or nothing. Admissible only
+// when every one of those pipes is immediately free for its mode: no queued entries (FIFO
+// preserved) and the reader/writer rules allow (`read_only` joins as a concurrent reader,
+// `read_write` as an exclusive writer). The N pipe mutexes are held together for the probe -
+// briefly, over no user code - and nothing is admitted unless all of them pass, so a failed
+// probe is invisible to every other participant. On success runs the block's body
+// synchronously (the caller blocks for its duration); the settle then releases the
+// admissions and re-dispatches each pipe. On failure returns false, having changed nothing,
+// and the caller enters the same block into the queued cascade. Caller-blocking + a nested
+// access scope - see `Guarded::async`.
+bool pipe_try_inline(const Task_ptr& block);
 
 } // namespace detail
 } // namespace ts

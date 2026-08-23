@@ -185,7 +185,9 @@ reason the constructor is constrained to an actual `Named`, so
 default-constructed string named "hello". A trailing defaulted parameter after
 an object pack is not expressible in C++, hence the leading position (also UE's
 argument order) — and hence the one gap: the multi-object `ts::access`/`async`
-have no site to capture and take only an explicit literal.
+have no site to capture. That is why the option field is a `Named` rather than a
+literal: `{.name = ts::Named{} }` lets the caller capture the site the verb
+cannot.
 
 The load-bearing implementation rule is that a defaulted `source_location`
 captures the *caller* of the function that declares it. So it is declared only
@@ -680,11 +682,11 @@ what the first measurement showed.
 Hoisting the guard check had a second effect worth recording: it forced the
 reentrancy exemption to be *stated*. A reentrant same-object access never
 suspends, so it never reached the old check — the exemption existed only as an
-accident of where the check sat. Now it is a predicate (every pipe of the
-awaited task is write-owned by this task, so the access ran inline under the
-held grant) with the narrowness spelled out: a *read* access under a *read*
-guard is not exempt, because it does reach the pipe and can queue behind a
-waiting writer that our own read hold is blocking.
+accident of where the check sat. Now it is a predicate — the awaited access was
+lent every object it declares, so it took no pipe turn and ran inline under the
+caller's grants — with the narrowness spelled out: a *read* access under a
+*read* guard is not exempt, because it does reach the pipe and can queue behind
+a waiting writer that our own read hold is blocking.
 
 ### 4.5 Two real races, and the method that caught them
 

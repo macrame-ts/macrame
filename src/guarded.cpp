@@ -399,18 +399,62 @@ void pipe_links_on_complete(Task_control_block* blk)
     advance_pipe_links(blk);
 }
 
-bool pipe_try_inline(Scheduler&, Pipe& pipe, Access mode, const Task_ptr& block)
+namespace
 {
+// The probe's brief critical section: every one of the block's bound pipes locked at once,
+// released in reverse on scope exit. The links are bound in canonical (ascending pipe-address)
+// order, so this acquires in that order - which is what keeps two probes over overlapping
+// object sets from deadlocking each other, and nothing else in the library ever holds two pipe
+// mutexes at the same time. `std::scoped_lock` is not usable here: the set of pipes a fire must
+// actually take is a runtime count (lending removes the ones the caller already holds).
+class Locked_pipes
+{
+public:
+    Locked_pipes(const Pipe_link* links, std::uint8_t count)
+        : links_(links)
+        , count_(count)
     {
-        std::scoped_lock lock(pipe.mutex);
-        if (pipe.queue_head != nullptr || !admissible(pipe, mode))
-            return false;   // queued work ahead (FIFO) or mode-blocked - defer to the queue
-        admit_locked(pipe, &block->pipe_links[0]);
-        block->pipes_entered = 1;   // settle's advance releases this admission
+        for (std::uint8_t i = 0; i < count_; ++i)
+            links_[i].pipe->mutex.lock();
+    }
+
+    ~Locked_pipes()
+    {
+        for (std::uint8_t i = count_; i > 0; --i)
+            links_[i - 1].pipe->mutex.unlock();
+    }
+
+    Locked_pipes(const Locked_pipes&) = delete;
+    Locked_pipes& operator=(const Locked_pipes&) = delete;
+
+private:
+    const Pipe_link* links_;
+    std::uint8_t count_;
+};
+
+} // namespace
+
+bool pipe_try_inline(const Task_ptr& block)
+{
+    const std::uint8_t count = block->pipe_count;
+    {
+        // All or nothing: nothing is admitted unless every pipe passes, so a failed probe is
+        // invisible to every other participant (docs/multi-access-op-design.md §4.4). No user
+        // code runs under the mutexes - the critical section is N checks and N admits.
+        Locked_pipes locked(block->pipe_links, count);
+        for (std::uint8_t i = 0; i < count; ++i)
+        {
+            const Pipe_link& l = block->pipe_links[i];
+            if (l.pipe->queue_head != nullptr || !admissible(*l.pipe, l.mode))
+                return false;   // queued work ahead (FIFO) or mode-blocked - defer to the queue
+        }
+        for (std::uint8_t i = 0; i < count; ++i)
+            admit_locked(*block->pipe_links[i].pipe, &block->pipe_links[i]);
+        block->pipes_entered = count;   // settle's advance releases these admissions
     }
 
     // Admitted: run the body inline on this thread (it installs its own access scope). The
-    // caller blocks for its duration; the settle's `advance_pipe_links` releases the pipe.
+    // caller blocks for its duration; the settle's `advance_pipe_links` releases the pipes.
     block->execute(block);
     return true;
 }

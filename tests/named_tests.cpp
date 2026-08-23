@@ -108,6 +108,30 @@ void test_access_verb_captures_call_site()
 #endif
 }
 
+// 5b. The multi-object verbs end in an object pack, so no defaulted `source_location` can
+// follow them and the verb has no site to capture. `Access_options::name` is their whole
+// identity - which is why it is a `ts::Named` rather than a literal: `{.name = ts::Named{}}`
+// captures the caller's site by hand, and a literal names them outright.
+void test_multi_object_access_name()
+{
+#if TS_SAFETY_CHECKS
+    ts::Guarded<int> first{ Named{ "first" }, 2 };
+    ts::Guarded<int> second{ Named{ "second" }, 3 };
+    auto sited = ts::access({ .name = ts::Named{} },
+                            [](const int& x, const int& y) { return x + y; }, first, second);
+    const Named& name = ts::detail::access_op_core(sited)->name;
+    TS_CHECK_MSG(is_this_file(name.file), "{.name = ts::Named{}} must capture the CALLER's site");
+    TS_CHECK(!is_library_header(name.file));
+    TS_CHECK(name.literal == nullptr);
+    TS_CHECK(sited.sync() == 5);
+
+    auto named = ts::access({ .name = "hud" },
+                            [](const int& x, const int& y) { return x * y; }, first, second);
+    TS_CHECK(std::strcmp(ts::detail::access_op_core(named)->name.literal, "hud") == 0);
+    TS_CHECK(named.sync() == 6);
+#endif
+}
+
 // 6. A graph node's block carries the node's identity, so a diagnostic that names the
 // task names the node - including the pipe entries the node takes, which are that block.
 void test_node_block_carries_name()
@@ -145,6 +169,7 @@ void run_named_tests()
     run("named display", test_named_display);
     run("named launch captures call site", test_launch_captures_call_site);
     run("named access verb captures call site", test_access_verb_captures_call_site);
+    run("named multi-object access", test_multi_object_access_name);
     run("named node block carries name", test_node_block_carries_name);
     run("named object captures construction site", test_object_captures_construction_site);
 }

@@ -671,7 +671,7 @@ Task<int> reentrant_access_under_guard(ts::Guarded<tests::Counter>& w)
 {
     auto g = co_await ts::read_write(w);
     g->increment();
-    // `w`'s writer_owner is this frame, so `access` takes the reentrant arm.
+    // This frame holds `w`'s write grant, so `access` lends it and runs inline under it.
     int seen = co_await w.access([](const tests::Counter& k) { return k.value(); });
     co_return seen;
 }

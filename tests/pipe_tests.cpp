@@ -296,6 +296,63 @@ void test_worker_less_deep_chain()
     TS_CHECK(read_int(d) == n);
 }
 
+// Cross-arity: multi-object `ts::access` ops against graph nodes over the SAME pair of
+// objects. Both ride the one canonical cascade, and the op's inline arm admits its whole set
+// under the pipes' own mutexes, so the two must still serialize - the `Rw_probe` oracle fails
+// on any overlap of a writer with a reader or another writer.
+void test_graph_multi_access_hammer()
+{
+    ts::Guarded<Rw_probe> a{ ts::Named{ "a" } }, b{ ts::Named{ "b" } };
+    ts::Static_task_graph g;
+    g.add_node(ts::Named{}, [](Rw_probe& p, const Rw_probe& q) { p.observe_write(1); q.observe_read(1); }, a, b);
+    g.add_node(ts::Named{}, [](const Rw_probe& q) { q.observe_read(2); }, b);
+    g.compile();
+
+    std::atomic<bool> stop{ false };
+    std::vector<std::thread> hammers;
+    for (int t = 0; t < 3; ++t)
+    {
+        hammers.emplace_back([&a, &b, &stop, t]
+        {
+            std::uint32_t s = static_cast<std::uint32_t>(t) * 7919u;
+            while (!stop.load(std::memory_order_relaxed))
+            {
+                // Attended, so each op is consumed before the next: no in-flight window to
+                // bound, and a wedge shows up as the main thread's deadline below.
+                (void)ts::access([s](Rw_probe& p, const Rw_probe& q)
+                {
+                    p.observe_write(s);
+                    q.observe_read(s);
+                }, a, b).sync();
+                (void)ts::access([s](const Rw_probe& p, const Rw_probe& q)
+                {
+                    return p.observe_read(s) + q.observe_read(s);
+                }, a, b).sync();
+                ++s;
+            }
+        });
+    }
+    for (int r = 0; r < 60; ++r)
+    {
+        ts::Task<void> run = g.execute();
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+        while (!run.is_done() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        if (!run.is_done())
+        {
+            std::printf("MULTI-ACCESS HAMMER HANG at run %d\n", r);
+            std::fflush(stdout);
+            std::_Exit(3);
+        }
+    }
+    stop.store(true, std::memory_order_relaxed);
+    for (auto& h : hammers)
+        h.join();
+
+    TS_CHECK(!probe_violated(a));
+    TS_CHECK(!probe_violated(b));
+}
+
 // E5-shape hammer (the tsan `stress_pipe_reservation` shape, natively): repeated graph
 // runs over shared objects while spinning threads fire async reads/writes at the same
 // objects. Guards the graph-links + reader-run + join interplay under real contention;
@@ -378,7 +435,7 @@ void test_priority_does_not_reorder()
 //
 // White-box, because `writer_owner` is the one always-on piece of grant state and behavior
 // keys off it: `Deferred::commit()` applies inline exactly when the caller is the holder,
-// and `Guarded::access` takes its reentrant arm on the same test. Those two verbs are
+// and `Guarded::access` publishes it for an inline body. Those two verbs are
 // covered end-to-end elsewhere; these pin the invariant itself, so a regression is reported
 // here rather than as a mysterious extra write job or a deadlock.
 
@@ -458,7 +515,7 @@ void test_writer_owner_transfers_between_writes()
 
 // F3: the inline arms. An `access` on a free pipe runs on the caller's thread but is still a
 // real admission, so it publishes its own block as the owner for the body's duration. The
-// reentrant arm is the interesting half: an `access` from a task that already holds the
+// lent half is the interesting one: an `access` from a task that already holds the
 // write grant runs under that grant and touches the pipe not at all, so the owner must stay
 // the outer block - if it were republished (or cleared on the inner settle) `commit()`
 // would mis-dispatch for the rest of the outer body.
@@ -527,6 +584,7 @@ void run_pipe_tests()
     run("push uaf churn", test_push_uaf_churn);
     run("cancelled writer advances", test_cancelled_writer_advances);
     run("graph async hammer", test_graph_async_hammer);
+    run("graph multi-access hammer", test_graph_multi_access_hammer);
     run("worker-less deterministic", test_worker_less_deterministic);
     run("worker-less deep chain", test_worker_less_deep_chain);
     run("priority does not reorder", test_priority_does_not_reorder);

@@ -533,12 +533,12 @@ Where the functor may run:
   runs the functor immediately on the *calling* thread — no scheduling — and
   otherwise queues it. That fast path suits the many short critical sections
   typical of this API, at the cost of briefly blocking the caller when it takes
-  it. This is the default; reach for it unless you have a reason not to. It is
-  also **reentrant**: if the calling task already holds this object's write
-  access (a graph node's declared write, an enclosing write body), the functor
-  runs under that access rather than queueing behind it — so a helper that
-  takes a `Guarded<T>&` and calls `access` works whether or not its caller
-  happens to hold the object.
+  it. This is the default; reach for it unless you have a reason not to. An
+  object the calling task **already holds** is *lent* rather than acquired: if
+  the caller has the access this functor needs (a graph node's declared write,
+  an enclosing write body), the functor runs under that access instead of
+  queueing behind it — so a helper that takes a `Guarded<T>&` and calls `access`
+  works whether or not its caller happens to hold the object.
 - **`async`** always schedules the functor onto a worker, never the caller's
   thread. Use it for a heavy functor you don't want running inline (it would
   block the caller and hold the object longer), or when you specifically want
@@ -569,7 +569,8 @@ option: the verb chooses inline-vs-scheduled. Two notes:
   non-trivial — an inline `access` blocks the worker for the body's duration. If
   you want the attended `Access_op` result but never the inline arm (a heavy body
   whose result you still stay for), pass `.queued = true` — it skips only the
-  inline-when-free arm, keeping the reentrant arm that correctness needs.
+  inline-when-free arm. An object the calling task already holds is still lent
+  and still runs inline: that part is correctness, not opportunism.
 - The destructor waits until the pipe drains; the object outlives every
   pending accessor — including the one you just `sync()`ed. A task wakes its
   waiters before it releases the objects it held, so a returned `sync()` means
@@ -718,15 +719,36 @@ ts::access([](const Physics& p, Render& r) { r.mirror(p); }, physics, render);
 // options-first form: ts::access({ .priority = ts::Priority::high }, fn, objs...)
 ```
 
-The free functions `ts::access` / `ts::async` mirror the member verbs and both
-return a `Task<R>` (the multi-object form does not have the single-object
-`Access_op` fast path). `ts::async` always schedules. (The opportunistic inline
-fast path is not yet implemented across multiple objects, so multi-object
-`ts::access` currently schedules like `ts::async` — **WIP**.) Per-argument modes come from const-ness,
-as always. The library acquires the pipes in a canonical global order and holds
-them for the body — the standard deadlock-free discipline, shared with the
-static graph, so dynamic multi-object work and graph nodes can never deadlock
-each other.
+The free functions mirror the member verbs, at every arity: `ts::async` returns
+a `Task<R>` and always schedules; `ts::access` returns the caller-owned
+`ts::Access_op<Objects..., Body>` — the same operation handle `obj.access(fn)`
+returns, so a multi-object access allocates nothing either, and it is consumed
+the same way (`co_await`, `.sync()` from outside a task, `try_take()`).
+Per-argument modes come from const-ness, as always. The library acquires the
+pipes in a canonical global order and holds them for the body — the standard
+deadlock-free discipline, shared with the static graph, so dynamic multi-object
+work and graph nodes can never deadlock each other.
+
+`access` is opportunistic at every arity, in two steps:
+
+- Objects the calling task **already holds** are *lent*: no turn is taken on
+  them, because the access runs inside the caller's own grant window, which is
+  already the exclusion those objects need. This is the same protocol a nested
+  `graph.execute()` uses, and at one object it is what "a reentrant access runs
+  inline under the held grant" means. If every object is lent, the body runs
+  inline with no pipe interaction at all.
+- The rest are probed **all or nothing**: if every one of them is free right
+  now — nothing queued on it, and the reader/writer rules allow — the whole set
+  is admitted in one pass and the body runs on the calling thread. If any one of
+  them is busy, nothing is admitted and the operation enqueues through the
+  canonical cascade instead. As with a single object, a queued entry is never
+  jumped.
+
+One case is rejected rather than served: if the calling task holds only a *read*
+grant on an object the body writes, that is fatal in checked builds. A read
+grant cannot be lent to a writer, and enqueueing would put the access behind the
+caller's own hold — a deadlock the moment it is awaited. Declare the write on
+the calling task, or hand it to `ts::async` and do not wait for it.
 
 Generic lambdas follow the same spelling rule as everywhere else (§3.1):
 `const auto&` positions are reads, `auto&` positions are writes — or tag every
@@ -857,8 +879,9 @@ ts::launch(stream_textures, { .name = "stream_textures" });
 ```
 
 (The one exception is the multi-object `ts::access` / `ts::async`: they end in an
-object pack, so there is no call site to capture and they carry only an explicit
-`{.name = "..."}`.)
+object pack, so no defaulted `source_location` can follow and the verb has no
+site to capture. `{.name = ...}` is their whole identity — a literal, or
+`{.name = ts::Named{} }` to capture the call site by hand.)
 
 Render the dump with Graphviz (`dot -Tsvg frame.dot -o frame.svg`, or the
 repo's `show_graph.bat`) or paste it into an online viewer (e.g. edotor.net).
@@ -1253,14 +1276,15 @@ reference via structured bindings), or the callback `co_await
 ts::access(fn, a, b)` — each acquiring in one canonically-ordered step rather
 than nesting guards.
 
-There is exactly one exemption: an access
-to an object *this task already holds the write grant on* runs inline under that
-grant (waiting rule (b)), so it is settled before the `co_await` is evaluated and
-cannot suspend by construction.
+There is exactly one exemption: an access whose objects *this task already holds*
+is lent every one of them, so it takes no pipe turn, runs inline under those
+grants (waiting rule (b)), and is settled before the `co_await` is evaluated — it
+cannot suspend by construction. An access that still has to acquire something,
+even one object of several, is not exempt.
 
 ```cpp
 auto g = co_await ts::read_write(world);
-int n = co_await world.access([](const World& w) { return w.size(); });   // reentrant: fine
+int n = co_await world.access([](const World& w) { return w.size(); });   // lent: fine
 ```
 
 This rule has no runtime opt-out — it protects an invariant the implementation

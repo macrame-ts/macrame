@@ -320,6 +320,29 @@ Exceeding it is a compile error naming both.
 
 Phase 1 alone is a shippable improvement, which matters if the tag arrives before phase 2.
 
+**As landed (2026-08).** All three phases, in that order, plus M6 from
+`api-stability-pass.md` (the option `name` fields became `ts::Named`, so a multi-object verb
+can carry a call site). Three notes where the implementation differs from the sketch above:
+
+1. **Where the modes live.** §3 shows the instances as a typed tuple and the modes as a
+   compile-time pack threaded in from the verb. As landed, the op recomputes each position's
+   mode from its own template arguments - `detail::Op_traits` splits `Args...` and applies the
+   same tier rules the verbs use - so nothing has to be threaded through, and a *tagged*
+   position carries its declared mode in the type (`Access_op<Access_arg<T, M>, ..., Body>`,
+   produced only by the tagged verb's deduced return type). The instances are stored as
+   `const void*` in declaration order, cast back per position at the invoke, which serves the
+   body, the access context and the lend check from one array.
+2. **The probe's lock.** §4.4 specifies `std::scoped_lock` over a compile-time N. The lend
+   protocol makes the set a *runtime* count - the lent objects are not probed - so the probe
+   instead locks the bound pipes in ascending address order, which is the order they are
+   already sorted into. That is deadlock-free by the same argument the cascade uses, and
+   nothing else in the library ever holds two pipe mutexes at once.
+3. **The guard-rule exemption needed updating.** `reentrant_under_held_grant` (the one
+   exemption to `Rule::await_under_guard`) recognized a reentrant access by every bound pipe
+   being write-owned by the running task. An all-lent op binds no pipe at all, which is also
+   what a bare task looks like, so the fact is now recorded on the block
+   (`Flags::all_lent`, a spare bit) and the rule reads that.
+
 ## 9. Test plan
 
 The single-object `Access_op` cases apply at N>1 (bind/start/refire/dtor-waits/cancellation/

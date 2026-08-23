@@ -113,6 +113,10 @@ the explicit exemption (waits on running work only).
   (runs `fn` inline on the caller — the old opportunistic `access`) or when
   `writer_owner == current task` (reentrant, runs under the held grant — waiting rule (b));
   otherwise suspends until the turn arrives. Grant lives only for `fn`.
+  *(Superseded 2026-08 by the lend protocol, [multi-access-op-design.md](multi-access-op-design.md)
+  §7.2: the reentrant test is no longer `writer_owner == current task` but the caller's
+  `Access_context` granting the object, and it generalizes to any subset of a multi-object
+  access. The behaviour described here is the all-objects-lent case.)*
 - `obj.async(fn)` — the eager fire verb, unchanged: returns `Task<R>`, usable from any
   color (fire-and-forget from blue; awaitable from red).
 - Multi-object: `co_await ts::access(fn, objs...)` rides the same cascade; the guard
