@@ -58,6 +58,27 @@ arguments; it is a measurement that does not depend on the argument.
 
 ## 4. What catches them
 
+First, a rule about proportion, because everything below is a tool for *hunting* and reads
+as if it were the gate for *landing*. It is not. **The amount of testing is proportional to
+the magnitude of the change** - to what the change can actually break - and this document
+was itself followed too literally on the day it was written: three configurations, a
+ten-run repeat at a narrow width, and a full TSan pass, per part, for a struct rename, a
+docs edit, and moving one byte. Most of an hour of verification for changes the compiler
+verifies.
+
+| the change | what it can break | the proportionate gate |
+|---|---|---|
+| a type, a signature, a rename | call sites, at compile time | build it, run the suite once |
+| documentation | nothing executable | nothing |
+| a concurrent path - scheduler, pipe, guard, awaiter, `parallel_for` | timing | a short repeat at a narrow width, **and the negative check** |
+| a fix for a known intermittent | the same timing | the full apparatus below, at several times the observed period |
+
+Two things stay unconditional. The negative check on any concurrent change - cheap, and the
+only evidence that a test can fail - because the week this was written is a record of what
+skipping it costs. And anything a hook or CI already runs is not run again by hand: the
+pre-push hook runs the suite under TSan on every push that touches C++, so a manual TSan
+pass before pushing is duplication, not diligence.
+
 ### 4.1 Repeat the suite, as a first-class mode
 
 `macrame_playground --tests --repeat N`: run the suite N times in one process, stop at the
