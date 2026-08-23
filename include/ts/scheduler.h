@@ -133,6 +133,7 @@ struct Task_entry
 };
 
 class Worker_thread;
+struct Scheduler_profiling;   // the tools-side door into the profiling counters (defined below)
 
 // One queue per `Priority` value (high/normal/low), indexed by the enum.
 inline constexpr std::size_t priority_count = 3;
@@ -203,10 +204,22 @@ public:
         return idle_workers_.load(std::memory_order_acquire) >= worker_count() && all_empty();
     }
 
+private:
+    // Private: the public way to bring the scheduler up is `create_scheduler`. Built via
+    // `detail::make_scheduler` in the process-wide holder; ad-hoc `Scheduler s{cfg}` does not
+    // compile, so a second instance cannot be stood up by construction. Non-movable.
+    explicit Scheduler(Scheduler_config config = {});
+
+    // The busy<->idle transitions behind `quiescent`, fired by `Worker_thread` only.
     void worker_idle() noexcept { idle_workers_.fetch_add(1, std::memory_order_acq_rel); }
     void worker_busy() noexcept { idle_workers_.fetch_sub(1, std::memory_order_acq_rel); }
 
 #if TS_PROFILING
+    // The profiling counters and their arm/read verbs, reached from outside only through
+    // `detail::Scheduler_profiling` (below) - the trace bridges, `tools::Trace_stamps` and the
+    // worker-less oracle; none of it is user API.
+    friend struct detail::Scheduler_profiling;
+
     // Total wall time (raw `steady_clock` ticks) this scheduler's workers have spent
     // executing tasks - every task kind (graph nodes, `parallel_for` slices, async pipe
     // jobs, continuations). Feeds the trace's core-utilization metric: the busy delta over
@@ -357,12 +370,6 @@ public:
         }
     }
 #endif
-
-private:
-    // Private: the public way to bring the scheduler up is `create_scheduler`. Built via
-    // `detail::make_scheduler` in the process-wide holder; ad-hoc `Scheduler s{cfg}` does not
-    // compile, so a second instance cannot be stood up by construction. Non-movable.
-    explicit Scheduler(Scheduler_config config = {});
 
     // Find one task for worker `worker_index`, scanning: global high -> its own local deque
     // (LIFO, cache-hot) -> global normal -> global low -> steal `normal` from a random victim.
@@ -539,5 +546,50 @@ private:
     std::vector<std::atomic<long long>> owner_busy_;
 #endif
 };
+
+#if TS_PROFILING
+namespace detail
+{
+
+// The one door into `Scheduler`'s private profiling counters (the `Guarded_access` idiom):
+// static forwarders for the trace bridges in scheduler.cpp, the graph's `tools::Trace_stamps`
+// (arm, snapshot, read at the fold, disarm) and the worker-less ground-truth oracle (`body_ticks`).
+// Keeping the counters off the public class is what lets the scheduler's user surface stay
+// `submit` / `worker_count` / `single_threaded` / `quiescent`.
+struct Scheduler_profiling
+{
+    static constexpr int util_bucket_count = Scheduler::util_bucket_count;
+
+    static long long busy_ticks(const Scheduler& s) noexcept { return s.busy_ticks(); }
+    static long long task_count(const Scheduler& s) noexcept { return s.task_count(); }
+    static long long body_ticks(const Scheduler& s) noexcept { return s.body_ticks(); }
+    static long long orchestration_ticks(const Scheduler& s) noexcept { return s.orchestration_ticks(); }
+    static long long bucket_width(const Scheduler& s) noexcept { return s.bucket_width(); }
+    static bool busy_armed(const Scheduler& s) noexcept { return s.busy_armed(); }
+
+    static void add_body_ticks(Scheduler& s, int worker_index, long long dt) noexcept
+    {
+        s.add_body_ticks(worker_index, dt);
+    }
+    static void add_orchestration_ticks(Scheduler& s, int worker_index, long long dt) noexcept
+    {
+        s.add_orchestration_ticks(worker_index, dt);
+    }
+    static void add_owner_busy(Scheduler& s, int owner, long long dt) noexcept { s.add_owner_busy(owner, dt); }
+
+    static void arm_busy_tracking(Scheduler& s, long long origin, long long bucket_width, int owner_count = 0) noexcept
+    {
+        s.arm_busy_tracking(origin, bucket_width, owner_count);
+    }
+    static void disarm_busy_tracking(Scheduler& s) noexcept { s.disarm_busy_tracking(); }
+    static void read_owner_busy(const Scheduler& s, long long* out, int count) noexcept
+    {
+        s.read_owner_busy(out, count);
+    }
+    static void read_bucket_busy(const Scheduler& s, long long* out) noexcept { s.read_bucket_busy(out); }
+};
+
+} // namespace detail
+#endif
 
 } // namespace ts

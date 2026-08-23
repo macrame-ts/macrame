@@ -26,13 +26,13 @@ namespace detail
 std::atomic<int> trace_owner_armed{ 0 };
 void (*trace_owner_add)(int, long long) = +[](int owner, long long dt)
 {
-    global_scheduler().add_owner_busy(owner, dt);
+    detail::Scheduler_profiling::add_owner_busy(global_scheduler(), owner, dt);
 };
 // The body bridge: a functor's span is credited to body (B) on the worker that ran it. B is
 // add-only - machinery is derived by pure subtraction (`M = busy - B`), not accumulated.
 void (*trace_body_add)(long long) = +[](long long dt)
 {
-    global_scheduler().add_body_ticks(current_worker_index(), dt);
+    detail::Scheduler_profiling::add_body_ticks(global_scheduler(), current_worker_index(), dt);
 };
 // The orchestration bridge (the fourth bucket of the four-way subtraction split): `Trace_setup_scope`
 // (in static_task_graph.cpp's execute()) routes the per-run top-level setup+initial-dispatch span
@@ -43,7 +43,7 @@ void (*trace_body_add)(long long) = +[](long long dt)
 // span already - see `Trace_setup_scope`).
 void (*trace_orchestration_add)(long long) = +[](long long dt)
 {
-    global_scheduler().add_orchestration_ticks(current_worker_index(), dt);
+    detail::Scheduler_profiling::add_orchestration_ticks(global_scheduler(), current_worker_index(), dt);
 };
 }
 #endif

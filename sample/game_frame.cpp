@@ -1524,7 +1524,7 @@ std::string described_SVG_path(const char* base, const char* description)
 #endif
 
 #if TS_PROFILING
-// Convert a steady_clock tick count (the unit of `Scheduler::body_ticks()` etc.) to µs.
+// Convert a steady_clock tick count (the unit of the scheduler's profiling counters) to µs.
 double ticks_to_us(long long ticks)
 {
     return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::duration(ticks)).count();
@@ -1558,12 +1558,12 @@ double serial_ground_truth(int frames, Frame_variant variant, const char* descri
     graph.set_trace(&trace);
 
     ts::Scheduler& sched = ts::global_scheduler();
-    long long body0 = sched.body_ticks();
+    long long body0 = ts::detail::Scheduler_profiling::body_ticks(sched);
     auto t0 = std::chrono::steady_clock::now();
     for (int f = 0; f < frames; ++f)
         graph.execute().sync();
     auto t1 = std::chrono::steady_clock::now();
-    long long body1 = sched.body_ticks();
+    long long body1 = ts::detail::Scheduler_profiling::body_ticks(sched);
     graph.set_trace(nullptr);
 
     double total_us = std::chrono::duration<double, std::micro>(t1 - t0).count();

@@ -203,7 +203,30 @@ rule and a field-type change, so it is tag-gated.
 
 ---
 
-### M8 - `Scheduler`'s public surface is mostly not user API
+### M8 - `Scheduler`'s public surface is mostly not user API - DONE (2026-08-23)
+
+**Decision (author):** the scheduler stays independent from the upper layer, its interface
+stays minimal, and nothing about it should preclude several instances later. Done as a
+visibility change, not a relocation:
+
+- Public on `ts::Scheduler`: `submit(Task_func_ptr, void*, Priority)` (the dispatch seam the
+  task layer uses), `worker_count()`, `single_threaded()`, `quiescent()`. Plus, unchanged,
+  `Scheduler_config` / `Idle_policy` / `Priority` / `create_scheduler` / `destroy_scheduler` /
+  `scheduler_running` / `current_scheduler_config` / `global_scheduler` / `Scheduler_scope` /
+  `current_worker_index()`.
+- `ts::Task_func_ptr` stays public in `ts::`: it is the parameter type of a public verb, so it
+  must be nameable by anyone who calls `submit`; a `detail::` home with a public alias would
+  add a name without hiding anything.
+- Private: `worker_idle()` / `worker_busy()` (fired by `detail::Worker_thread`, a friend) and
+  the whole `TS_PROFILING` block - the accumulators, `arm/disarm_busy_tracking`, the `add_*`
+  sinks, the `read_*` folds, `util_bucket_count`, `Busy_slot` / `Bucket_row`. The tools reach
+  them only through `detail::Scheduler_profiling`, a friend struct of static forwarders
+  (`scheduler.h`, under `TS_PROFILING`) - the `detail::Guarded_access` idiom. Users rewired:
+  the three trace bridges in `src/scheduler.cpp`, `tools/trace_stamps.h`, and the worker-less
+  oracle in `sample/game_frame.cpp`. `scheduler.h` still includes nothing from the task or
+  guarded layer.
+- `current_worker_index` was already a function by the time this landed (the row's
+  `extern thread_local` premise was stale), so nothing moved there.
 
 **Defect.** Publishing 0.1.0 locks all of this as a compatibility promise:
 
