@@ -410,6 +410,9 @@ Interacts with **M2** (if `queued` is removed there, this closes with it).
 reads like a getter and collides conceptually with the `priority` *field* on
 three option structs. Rename to `set_priority()`? Breaking, cheap, tag-gated.
 
+**Decision (2026-08-23): renamed to `Graph_node::set_priority()`.** `after`/`before` stay bare -
+they are ordering verbs, not setters. DONE.
+
 ---
 
 ### A2 - the exceptions configuration does not reach consumers - DONE (2026-08-21)

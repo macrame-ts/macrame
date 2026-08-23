@@ -429,9 +429,9 @@ void test_node_priority_order()
 
     ts::Static_task_graph g;
     g.add_node(ts::Named{}, [](int& v) { v = 1; }, a);   // writer root -> the three readers run after it
-    g.add_node(ts::Named{}, [&seq, &low_ord](const int&) { low_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::low);
-    g.add_node(ts::Named{}, [&seq, &normal_ord](const int&) { normal_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::normal);
-    g.add_node(ts::Named{}, [&seq, &high_ord](const int&) { high_ord.store(seq.fetch_add(1)); }, a).priority(ts::Priority::high);
+    g.add_node(ts::Named{}, [&seq, &low_ord](const int&) { low_ord.store(seq.fetch_add(1)); }, a).set_priority(ts::Priority::low);
+    g.add_node(ts::Named{}, [&seq, &normal_ord](const int&) { normal_ord.store(seq.fetch_add(1)); }, a).set_priority(ts::Priority::normal);
+    g.add_node(ts::Named{}, [&seq, &high_ord](const int&) { high_ord.store(seq.fetch_add(1)); }, a).set_priority(ts::Priority::high);
     g.compile();
 
     g.execute().sync();
@@ -661,8 +661,8 @@ void test_graph_trace_priority()
     ts::Guarded<int> x{ ts::Named{}, 0 }, y{ ts::Named{}, 0 };
 
     ts::Static_task_graph g;
-    g.add_node("hi", [](int& v) { ++v; }, x).priority(ts::Priority::high);
-    g.add_node("lo", [](int& v) { ++v; }, y).priority(ts::Priority::low);
+    g.add_node("hi", [](int& v) { ++v; }, x).set_priority(ts::Priority::high);
+    g.add_node("lo", [](int& v) { ++v; }, y).set_priority(ts::Priority::low);
     g.compile();
 
     ts::tools::Graph_trace trace;

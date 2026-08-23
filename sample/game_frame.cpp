@@ -450,7 +450,7 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     // Physics pipeline.
     graph.add_node("broadphase", &tick_broadphase, world.bodies, world.broad_pairs);
     graph.add_node("narrowphase", &tick_narrowphase, world.broad_pairs, world.contacts);
-    graph.add_node("solver", &tick_solver, world.contacts, world.combat, world.velocities).priority(ts::Priority::high);
+    graph.add_node("solver", &tick_solver, world.contacts, world.combat, world.velocities).set_priority(ts::Priority::high);
     graph.add_node("finalize", &tick_finalize, world.velocities, world.bodies);
 
     // Propagation: this frame's transforms from animation + physics, staged grant-free
@@ -472,7 +472,7 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     auto particles = add_particles(graph, world, opt);
     auto UI_node = add_UI(graph, world, opt);
     auto submit = add_submit(graph, world, opt);
-    submit.priority(ts::Priority::high);
+    submit.set_priority(ts::Priority::high);
     // Submit consumes what the producers emit - intent, in both variants. The baseline
     // also has a `draw_lists` conflict pointing the same way, but relying on that would be
     // relying on the order the nodes happen to be added; the optimised variant stages
@@ -480,7 +480,7 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     submit.after(cmd_record, particles, UI_node);
 
     // Off-path leaves.
-    auto audio = graph.add_node("audio", &tick_audio, world.transforms.state(), world.audio_out).priority(ts::Priority::low);
+    auto audio = graph.add_node("audio", &tick_audio, world.transforms.state(), world.audio_out).set_priority(ts::Priority::low);
     auto vfx = graph.add_node("vfx", &tick_vfx, world.transforms.state(), world.particles, world.vfx);
     graph.add_node("replication", &tick_replication, world.combat, world.economy, world.quests, world.intents, world.replication);
     graph.add_node("stats", &tick_stats, world.combat, world.economy, world.bodies, world.visibility, world.stats);
@@ -489,11 +489,11 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     // edge to streaming (staging is grant-free), so it commits whatever has arrived - last
     // frame's loads are fine.
     graph.add_node("asset_commit", [&world](Assets& a) { (void)a; (void)world.assets_stream.commit(); },
-        world.assets).priority(ts::Priority::low);
+        world.assets).set_priority(ts::Priority::low);
     graph.add_node("gc", &tick_gc, world.assets, world.renderables, world.particles, world.gc);
     auto debug_overlay = graph.add_node("debug_overlay",   // bare generic lambda: modes probed
         [](const auto& economy, const auto& xf) { tick_debug_overlay(economy, xf); },
-        world.economy, world.transforms.state()).priority(ts::Priority::low);
+        world.economy, world.transforms.state()).set_priority(ts::Priority::low);
 
     // The flip publishes this frame's transforms. Cloth's version is a lever: the
     // baseline reads the fresh version (declared after the flip -> the frame's tail

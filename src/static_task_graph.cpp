@@ -111,7 +111,7 @@ Graph_node& Graph_node::before(const Graph_node& successor)
     return *this;
 }
 
-Graph_node& Graph_node::priority(Priority p)
+Graph_node& Graph_node::set_priority(Priority p)
 {
     if (graph_)
         graph_->nodes_[index_].priority = p;   // applied to the block in execute() (see re-arm)
@@ -649,7 +649,7 @@ Task<void> Static_task_graph::execute(Execution_options opts)
         b.num_locks.store(b.pipe_count, std::memory_order_relaxed);
         b.pipes_entered = 0;
         b.token = token;
-        b.flags.priority = nodes_[i].priority;          // pick up any Graph_node::priority set since last run
+        b.flags.priority = nodes_[i].priority;          // pick up any `Graph_node::set_priority` since last run
         b.flags.run_inline = nodes_[i].inline_dispatch; // so dispatch_ready takes the inline path for an inline node
     }
     run.remaining_nodes.store(static_cast<int>(nodes_.size()), std::memory_order_relaxed);

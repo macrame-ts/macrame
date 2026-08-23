@@ -64,7 +64,7 @@ public:
     Graph_node& before(const Graph_node& successor, const Nodes&... more);
 
     // Queue priority for this node when it is dispatched each run.
-    Graph_node& priority(Priority p);
+    Graph_node& set_priority(Priority p);
 
     // Dispatch this node inline: when it becomes ready, run it on the thread that settled
     // its last prerequisite (and acquired its objects) instead of queueing - but only if

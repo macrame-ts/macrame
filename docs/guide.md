@@ -829,7 +829,7 @@ Node capabilities:
   form reads as intent: `submit.after(cmd, particles, ui)` makes `submit` depend
   on all three — the same as `.after(cmd).after(particles).after(ui)`, but
   without reading like a sequence among them.
-- `node.priority(p)` — queue priority per node.
+- `node.set_priority(p)` — queue priority per node.
 - `node.set_inline()` — run the node on the thread that readied it when its
   objects are immediately available (low-latency chaining for small nodes).
 - Node bodies may fan out with **`ts::parallel_for`** (§4.5) — the chunks
@@ -1664,7 +1664,7 @@ demonstration incl. minimal setup floors: `sample/events.cpp`.
 
 `ts::Priority { high, normal, low }`, accepted by every route: `launch`
 options, `async`/`access` options, `parallel_for` options,
-`Graph_node::priority(p)`. On the option structs the field is
+`Graph_node::set_priority(p)`. On the option structs the field is
 `std::optional<Priority>`: unset inherits the calling task's priority;
 outside a task, `normal`. So an `async` issued from a `high` node runs
 `high` unless you say otherwise, and `{.priority = ts::Priority::low}`

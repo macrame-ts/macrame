@@ -720,7 +720,7 @@ already **measure** critical-path frequency in `--trace` but don't **feed it
 back** into dispatch; the game_frame optimisation does "parallelise the fattest
 critical bar" by hand. New sub-part: auto-derive the priority hint at `compile()`
 from the measured/structural criticality. Difficulty: medium — a compile-phase
-upward-rank pass writing into `Graph_node::priority`; the trace already computes
+upward-rank pass writing into `Graph_node::set_priority`; the trace already computes
 the input. Pairs with 2.8 (runtime escalation) and TODO 2.5.
 
 #### 2.27 Transient graph-scoped resources + lifetime aliasing
