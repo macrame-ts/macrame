@@ -15,7 +15,8 @@ Section 2 items are ready to implement as described. Section 3 items each carry
 options and a recommendation; reply by number. Section 4 is agreed post-1.0.
 
 **Status: every section 2 item landed on 2026-08-22** (M7 corrected on the way -
-see its row). Section 3 still needs decisions.
+see its row). From section 3, M1 landed in 2026-08 and M2 on 2026-08-23; the rest still
+need decisions.
 
 ---
 
@@ -114,6 +115,36 @@ sites in tests; guide/design/coroutine-first/task-internals mentions; the
 ---
 
 ### M2 - `Access_options::queued` is inert on most surfaces
+
+**Decided (author, 2026-08-22): split the structs so no field is inert. Implemented
+2026-08-23.** Not one of the three options below - a fourth: `Launch_options` was renamed
+**`Dispatch_options`** `{token, priority, name}` ("dispatch" is already the library's word:
+`dispatch_ready`, `run_block_dispatch`) and is now the parameter of every verb that always
+schedules - `ts::launch`, `Guarded::async`, the free `ts::async`, `Deferred::commit`,
+`Versioned::publish`. `Access_options` keeps `queued` and is taken only by the opportunistic
+verbs - `Guarded::access`, the free `ts::access`, `Versioned::read`, the `Access_op`
+constructors - which are the only ones with an inline arm to skip. `queued` is therefore
+unspellable where it cannot be honoured, and the compiler says so.
+
+**The two open choices, as resolved.**
+
+- *Inheritance vs two flat structs:* **two flat structs.** The premise that
+  `struct Access_options : Dispatch_options` keeps designated initializers working for the
+  common fields is false: a designator must name a *direct* non-static data member, and a base
+  subobject is not one, so `Access_options{.priority = p}` stops compiling (MSVC 19.51:
+  `error C7559: 'priority': designator does not name a direct non-static data member`). The
+  slicing that inheritance would buy is also not needed - no access verb hands its options to a
+  dispatch-taking internal (`Guarded::launch`, `commit_write` and the `async_build_*` tier are
+  reached only from `async`/`commit`), so there is nothing to slice.
+- *Deprecated alias vs plain rename:* **plain rename.** `Launch_options` is gone. Nothing is
+  released yet, the gate for this item is the tag, and an alias that outlives the tag is exactly
+  the compatibility promise the pass exists to avoid making.
+
+`Versioned::publish` also stopped dropping `opts.name`: it now takes a defaulted
+`source_location` like every other public verb, resolves `detail::named_from(opts, site)`, and
+puts that name on the returned gate, on the phase-1 task and on the phase-2 swap access.
+
+The original write-up follows.
 
 **Defect.** `queued` is a run-inline knob in negated spelling. It is honoured on
 `Guarded::access` only. It is silently ignored by multi-object `ts::access`/

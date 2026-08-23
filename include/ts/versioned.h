@@ -219,12 +219,17 @@ public:
     // resync continues past it, invisibly. An empty journal is a no-op. A
     // cancelled `opts.token` skips the step (commands stay staged for the next
     // publish); the returned task still completes - it is a phase gate, not the
-    // skipped work itself.
+    // skipped work itself. `opts.name` identifies the step - the returned gate and the swap
+    // access both carry it; left empty, the call site this verb captures does (`site` is the
+    // naming boundary, ts/named.h).
     [[nodiscard("await or sync the publish: ~Versioned is fatal while the swap is in flight")]]
-    Task<void> publish(Access_options opts = {})
+    Task<void> publish(Dispatch_options opts = {},
+                       std::source_location site = std::source_location::current())
     {
+        const Named name = detail::named_from(opts, site);
         Signal swapped;        // the returned handle: version visible
         Signal shadow_ready;   // gates the NEXT publish's phase 1
+        detail::set_task_name(detail::core_of(swapped), name);
 
         Task<void> prev;
         {
@@ -239,7 +244,7 @@ public:
         // the detail level (a waiter on `prev`'s block that submits phase 1 as a task at
         // the publish's priority): the public continuation verb is gone (coroutine-first),
         // and this chain runs on blue threads, so it cannot await.
-        auto phase1 = [this, swapped, shadow_ready, opts]() mutable
+        auto phase1 = [this, swapped, shadow_ready, opts, name]() mutable
         {
             if (opts.token.is_cancel_requested())
             {
@@ -267,13 +272,14 @@ public:
                 swap_replicas(front);
                 start_resync(std::move(shadow_ready));
                 swapped.trigger();
-            }, { .priority = opts.priority });
+            }, { .priority = opts.priority, .name = name });
         };
         detail::core_of(prev)->attach(
-            [phase1 = std::move(phase1), priority = opts.priority](void*, bool) mutable
+            [phase1 = std::move(phase1), priority = opts.priority, name](void*, bool) mutable
             {
                 auto core = detail::make_executable<void>(std::move(phase1), {});
                 core->flags.priority = priority;
+                detail::set_task_name(core, name);
                 detail::submit_ready(core);
             });
 

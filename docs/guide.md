@@ -289,8 +289,9 @@ ts::Task<void> b = ts::launch(io_work, { .priority = ts::Priority::low });
 ```
 
 `ts::launch(fn, opts)` runs `fn` as soon as a worker is free.
-`ts::Launch_options` carries `{ .token, .priority }` — a cancellation token
-(§4.5) and a queue priority (`high`, `normal`, `low`; §10.1).
+`ts::Dispatch_options` carries `{ .token, .priority, .name }` — a cancellation
+token (§4.5), a queue priority (`high`, `normal`, `low`; §10.1) and a debug
+label. Every verb that always schedules its body takes it.
 
 ### 4.2 Composing with `co_await`
 
@@ -559,10 +560,14 @@ Semantics of the per-object pipe:
 - **Non-blocking**: submission never blocks the caller; completion drives
   admission.
 
-Options are `ts::Access_options` — `{ .token, .priority, .name, .queued }`. The
-token and priority apply to `access` and `async` alike (a cancellation token, a
-scheduling priority); `.name` attaches a debug label. There is no `run_inline`
-option: the verb chooses inline-vs-scheduled. Two notes:
+There are two option structs, split so that no verb takes a field it cannot
+honour. `ts::Dispatch_options` — `{ .token, .priority, .name }` — goes to every
+verb that always schedules its body (`async`, `ts::launch`, `Deferred::commit`,
+`Versioned::publish`): a cancellation token, a scheduling priority, a debug
+label. `ts::Access_options` adds `.queued` and goes to the opportunistic verbs
+(`access`, `Versioned::read`), which are the only ones with an inline arm to
+skip. There is no `run_inline` option: the verb chooses inline-vs-scheduled.
+Two notes:
 
 - Whether a functor may run inline is chosen by the verb (`access` vs `async`),
   not by an option. From inside a graph node, prefer `async` for anything
@@ -1859,7 +1864,7 @@ error, not a behavior change. The replacements:
 | `Task_builder::set_inline` / `Task_options::run_inline` | deleted for dynamic tasks (graph nodes keep `Graph_node::set_inline`) |
 | `Task_builder::reset()` (reusable tasks) | call the coroutine again — one frame per run is the model; `Signal::reset()` remains the re-armable phase gate |
 | `ts::add_nested(task)` / `ts::nested(fn)` / `ts::Task_scope` | `ts::parallel_for` for grant-inheriting fan-out over the parent's data; `co_await` to compose; `ts::launch` for detached work (removed — see §4.5) |
-| `Task_options` | `Launch_options` (`launch`) or `Access_options` (`access`/`async`) |
+| `Task_options` | `Dispatch_options` (`launch`, `async`) or `Access_options` (`access`) |
 | retraction (blocking `sync()` running work inline) | deleted — a blue thread parks (that is fine); an in-task `sync()` is fatal, `co_await` instead |
 
 ---

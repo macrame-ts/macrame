@@ -3,7 +3,7 @@
 // The task layer. `Task<R>` is the one completion handle behind every async result
 // (`access`/`async`/`launch`/a graph run/a coroutine): `co_await` it inside a task,
 // `sync()`/`take()` it from outside (the blue boundary - blocking inside a task is fatal).
-// Also here: the option aggregates (`Access_options`, `Launch_options`), `ts::launch`
+// Also here: the option aggregates (`Dispatch_options`, `Access_options`), `ts::launch`
 // (run a bare functor on the scheduler, detached - it inherits no access), `Signal` (a
 // hand-triggered task: done-signal, barrier, the bridge for OS/GPU completions), and
 // `External_wait` (declare an off-pool completion so the deadlock net does not misfire).
@@ -55,40 +55,44 @@ struct Optional_awaitable
 
 } // namespace detail
 
-// Options for a `Guarded` access (`access` / `async`, single- and multi-object). The verb picks
-// inline-vs-enqueued by default (`access` runs inline when the object's pipe is free via
-// `pipe_try_inline`; `async` always enqueues); `queued` below is the one opt-out, and it is
-// honoured by `Guarded::access` only. `token` makes the body skippable before it runs (and is
-// forwarded to a trailing-`Cancellation_token` body for a mid-run early-out); `priority` sets
-// the queue position when enqueued.
+// Options for every verb that always schedules its body: `ts::launch`, `Guarded::async`, the
+// free `ts::async(fn, objs...)`, `Deferred::commit` and `Versioned::publish`. `token` makes the
+// body skippable before it runs (and is forwarded to a trailing-`Cancellation_token` body for a
+// mid-run early-out); `priority` sets its queue position.
+struct Dispatch_options
+{
+    Cancellation_token token = {};
+    Priority priority = Priority::normal;
+    // Optional debug identity for the task: a literal (`{.name = "hud"}`) or a call site
+    // (`{.name = ts::Named{}}`). Left empty, a verb that can capture one falls back to the site
+    // its own defaulted `std::source_location` recorded. The multi-object verbs end in an
+    // object pack, so no defaulted `source_location` is expressible after it and this field is
+    // the only identity they can carry - which is why it is a `Named` and not a literal.
+    Named name = Named(nullptr);
+};
+
+// Options for the opportunistic access verbs - `Guarded::access`, the free
+// `ts::access(fn, objs...)`, `Versioned::read` and the `Access_op` constructors. The same three
+// dispatch fields, plus the one knob only these verbs can honour: they pick inline-vs-enqueued
+// per fire (lend what the calling task already holds, run inline when every remaining object is
+// free, else enqueue), and `queued` is the opt-out. The split is what keeps every field live on
+// every surface that takes it - a verb that always enqueues takes `Dispatch_options`, which has
+// no knob to ignore.
+//
+// Not derived from `Dispatch_options`: a base subobject cannot be reached by a designator, so
+// `{.priority = p}` would stop compiling.
 struct Access_options
 {
     Cancellation_token token = {};
     Priority priority = Priority::normal;
-    // Optional debug identity for the access task: a literal (`{.name = "hud"}`) or a call
-    // site (`{.name = ts::Named{}}`). Left empty, a single-object verb falls back to the site
-    // its own defaulted `std::source_location` captured. The multi-object verbs end in an
-    // object pack, so no defaulted `source_location` is expressible after it and this field
-    // is the only identity they can carry - which is why it is a `Named` and not a literal.
+    // As `Dispatch_options::name`.
     Named name = Named(nullptr);
-    // `access` only (`async` always enqueues): never run the body inline on the calling
-    // thread - the attended-but-never-inline quadrant, for a heavy body whose result the
-    // caller still stays for. Skips only the inline-when-free arm; an access whose objects
-    // the calling task already holds is lent and runs inline regardless - lending is
-    // correctness, not opportunism: an access queued behind its own caller's held grant
-    // deadlocks when awaited.
+    // Never run the body inline on the calling thread - the attended-but-never-inline
+    // quadrant, for a heavy body whose result the caller still stays for. Skips only the
+    // inline-when-free arm; an access whose objects the calling task already holds is lent
+    // and runs inline regardless - lending is correctness, not opportunism: an access queued
+    // behind its own caller's held grant deadlocks when awaited.
     bool queued = false;
-};
-
-// Dispatch options for launching a standalone task (`ts::launch`). `token` makes it
-// skippable before it runs; `priority` sets its queue
-// position; `name` gives it a debug identity (a literal or `ts::Named{}` - left empty, the
-// launch site is captured by the verb, so an unnamed task is still identified).
-struct Launch_options
-{
-    Cancellation_token token = {};
-    Priority priority = Priority::normal;
-    Named name = Named(nullptr);
 };
 
 // The library-wide `[[nodiscard]]` policy for handle-returning verbs, stated once here
@@ -265,7 +269,7 @@ namespace detail
 // token either way. To fan work out over a node's owned data, use `ts::parallel_for` (its
 // helpers inherit the caller's grant) or acquire fresh via `obj.async` / `co_await obj.access`.
 template<typename Fn>
-auto build_bare_task(Fn&& fn, Launch_options opts, std::source_location site)
+auto build_bare_task(Fn&& fn, Dispatch_options opts, std::source_location site)
 {
     using R = detail::Task_result_t<Fn>;
     Task_ptr core = make_executable<R>(std::forward<Fn>(fn), std::move(opts.token));
@@ -279,7 +283,7 @@ auto build_bare_task(Fn&& fn, Launch_options opts, std::source_location site)
 
 // Launch a standalone task on the scheduler - a bare functor with no access target (the
 // primitive `async` for work that touches no guarded object). Returns a `Task<R>`; a
-// `Launch_options{token, priority}` makes it skippable before it runs and sets its queue
+// `Dispatch_options{token, priority}` makes it skippable before it runs and sets its queue
 // position. Dispatches through the `submit_ready` bridge (so this stays scheduler-
 // independent). The launched task inherits nothing from the launcher - its handle may be
 // dropped (the detached case), so the launcher's grant cannot be guaranteed to outlive the
@@ -295,7 +299,7 @@ auto build_bare_task(Fn&& fn, Launch_options opts, std::source_location site)
 // resulting `Named` is passed down explicitly, never re-defaulted in a helper.
 template<typename Fn>
     requires detail::Task_body<Fn>
-auto launch(Fn&& fn, Launch_options opts = {},
+auto launch(Fn&& fn, Dispatch_options opts = {},
             std::source_location site = std::source_location::current())
 {
     return detail::build_bare_task(std::forward<Fn>(fn), std::move(opts), site);

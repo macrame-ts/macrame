@@ -172,7 +172,7 @@ entry dead (lazy removal on pop). Because `Signal::trigger` is idempotent
 
 ```cpp
 // Detached delayed launch — fire-and-forget after a delay.
-void ts::launch_after(Duration d, Fn&& fn, Launch_options opts = {});
+void ts::launch_after(Duration d, Fn&& fn, Dispatch_options opts = {});
 ```
 
 Implemented as `sleep(d)` chained to the existing `launch` — no new dispatch

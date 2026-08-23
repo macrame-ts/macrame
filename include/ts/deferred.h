@@ -130,7 +130,7 @@ public:
     // grant it waits out (fatal under `TS_SAFETY_CHECKS`, a silent deadlock-on-sync
     // otherwise).
     [[nodiscard("await or sync the commit: ~Deferred is fatal while the write is in flight")]]
-    Task<void> commit(Access_options opts = {},
+    Task<void> commit(Dispatch_options opts = {},
                       std::source_location site = std::source_location::current())
     {
         detail::Pipe& pipe = detail::Guarded_access::pipe(*target_);

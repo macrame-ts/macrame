@@ -943,9 +943,9 @@ static_assert(op_matches_single_object_deduction<int, Op_compat_generic>);
 // extend this to several objects at once in one deadlock-free canonical order, and the same
 // ordering backs the static graph's per-node access and the coroutine held-grant guards.
 //
-// Both verbs take `Access_options` (task.h) = `{token, priority, name, queued}`. The verb picks
-// inline vs enqueued; `queued` is the one opt-out and only `access` can honour it (`async` is
-// enqueued by definition).
+// `access` takes `Access_options` (task.h) = `{token, priority, name, queued}` and `async`
+// takes `Dispatch_options` = the same minus `queued`: the verb picks inline vs enqueued, and
+// only `access` has an inline arm to opt out of (`async` is enqueued by definition).
 template<typename T>
 class Guarded
 {
@@ -1028,7 +1028,8 @@ public:
     //                                  compile (read bodies receive `const T&`)
     // Non-generic functors are introspected (`accessor_mode`); generic ones are classified by
     // the rvalue-bindability probe. Both accept a trailing `Cancellation_token`, and take
-    // `Access_options` = `{token, priority, name, queued}`; `queued` is read by `access` alone.
+    // `Access_options` = `{token, priority, name, queued}` on `access`, `Dispatch_options` =
+    // the same minus `queued` on `async`, which has no inline arm to skip.
     //
     //   access(fn) - opportunistic: runs `fn` on the calling thread when the object is free right
     //                 now (no scheduling), otherwise enqueues. Best for short functors. Because it
@@ -1074,7 +1075,7 @@ public:
     // async, read_write: always enqueued (never inline).
     template<typename Fn>
         requires detail::Read_write_accessor<Fn, T>
-    auto async(Fn&& fn, Access_options opts = {},
+    auto async(Fn&& fn, Dispatch_options opts = {},
                std::source_location site = std::source_location::current())
         -> Task<detail::Accessor_result_t<Fn, T, Access::read_write>>
     {
@@ -1085,7 +1086,7 @@ public:
     // async, read_only: always enqueued (never inline).
     template<typename Fn>
         requires detail::Read_only_accessor<Fn, T>
-    auto async(Fn&& fn, Access_options opts = {},
+    auto async(Fn&& fn, Dispatch_options opts = {},
                std::source_location site = std::source_location::current()) const
         -> Task<detail::Accessor_result_t<Fn, T, Access::read_only>>
     {
@@ -1097,7 +1098,7 @@ private:
     // The heap-block path behind `async` (and `Deferred::commit`'s recorded write): always
     // enqueued, detached custody. `access`'s inline/reentrant arms live on `Access_op`.
     template<typename R, Access mode, typename Inst, typename Fn>
-    Task<R> launch(Inst* inst, Fn&& fn, Access_options opts, Named name,
+    Task<R> launch(Inst* inst, Fn&& fn, Dispatch_options opts, Named name,
                    detail::Task_ptr* record = nullptr) const
     {
         // The body (stored in the block) runs `fn` under this object's access scope. If
@@ -1164,7 +1165,7 @@ struct Guarded_access
     // into `record` atomically with the enqueue (under the pipe mutex - see
     // `pipe_enqueue`), so the recorded handle can never lag FIFO order.
     template<typename T, typename Fn>
-    static Task<void> commit_write(Guarded<T>& t, Fn&& fn, Access_options opts, Named name, Task_ptr* record)
+    static Task<void> commit_write(Guarded<T>& t, Fn&& fn, Dispatch_options opts, Named name, Task_ptr* record)
     {
         return t.template launch<void, Access::read_write>(
             &t.instance_, std::forward<Fn>(fn), opts, name, record);
@@ -1256,7 +1257,7 @@ concept Object_arg = is_guarded_v<A> || is_access_arg_v<A>;
 // with `const T&` (`mode_ref`) so a mutating body under a read classification fails to compile.
 // The deduced / probed / tagged entry paths differ only in where `Modes...` come from.
 template<Access... Modes, std::size_t... I, typename Fn, typename... Ts>
-auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... objs)
+auto async_build_modes(Dispatch_options opts, std::index_sequence<I...>, Fn&& fn, Guarded<Ts>&... objs)
 {
     using R = std::invoke_result_t<Fn, Mode_ref_t<Modes, Ts>...>;
     auto instances = std::make_tuple(Guarded_access::instance(objs)...);
@@ -1277,7 +1278,7 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
     block->flags.priority = opts.priority;
     // Multi-object `ts::access`/`ts::async` end in an object pack, so no trailing defaulted
     // `source_location` is expressible and there is no call site for the verb to capture:
-    // `Access_options::name` is the whole identity, which is why it is a `Named` - spell
+    // `Dispatch_options::name` is the whole identity, which is why it is a `Named` - spell
     // `{.name = "hud"}` for a literal or `{.name = ts::Named{}}` to capture the call site.
     set_task_name(block, opts.name);
     // Insertion-sort by pipe address (canonical order), in place - the pack is small. A
@@ -1316,7 +1317,7 @@ auto async_build_modes(Access_options opts, std::index_sequence<I...>, Fn&& fn, 
 // Deduced path (bare args, introspectable functor): modes from the functor's parameter
 // const-ness; by-value / rvalue-ref resource parameters rejected.
 template<typename Args, std::size_t... I, typename Fn, typename... Ts>
-auto async_build(Access_options opts, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... objs)
+auto async_build(Dispatch_options opts, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... objs)
 {
     static_assert((std::is_lvalue_reference_v<std::tuple_element_t<I, Args>> && ...),
         "a guarded-resource parameter must be `T&` or `const T&`: taking it by value copies "
@@ -1329,7 +1330,7 @@ auto async_build(Access_options opts, std::index_sequence<I...> seq, Fn&& fn, Gu
 // Probed path (bare args, generic functor): modes from the per-position rvalue probe -
 // `const auto&`/`auto&&` = read, `auto&` = write. No tags needed.
 template<std::size_t... I, typename Fn, typename... Ts>
-auto async_build_probed(Access_options opts, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... objs)
+auto async_build_probed(Dispatch_options opts, std::index_sequence<I...> seq, Fn&& fn, Guarded<Ts>&... objs)
 {
     static_assert(std::invocable<Fn, Ts&...>,
         "multi-object access/async: functor parameters must match the Guarded objects "
@@ -1343,7 +1344,7 @@ auto async_build_probed(Access_options opts, std::index_sequence<I...> seq, Fn&&
 
 // Tagged path (`ts::as_read_only`/`as_read_write` on every arg): modes from the tags.
 template<std::size_t... I, typename Fn, typename... Objs>
-auto async_build_tagged(Access_options opts, std::index_sequence<I...> seq, Fn&& fn, Objs&&... objs)
+auto async_build_tagged(Dispatch_options opts, std::index_sequence<I...> seq, Fn&& fn, Objs&&... objs)
 {
     return async_build_modes<std::remove_cvref_t<Objs>::mode...>(
         std::move(opts), seq, std::forward<Fn>(fn), *objs.obj...);
@@ -1432,7 +1433,7 @@ detail::Access_arg<T, Access::read_write> as_read_write(Guarded<T>& g) { return 
 // block a graph node on it (same rule as single-object async).
 template<typename Fn, typename... Objs>
     requires (sizeof...(Objs) >= 1) && (detail::Object_arg<Objs> && ...)
-auto async(Access_options opts, Fn&& fn, Objs&&... objs)
+auto async(Dispatch_options opts, Fn&& fn, Objs&&... objs)
 {
     constexpr bool any_tagged = (detail::is_access_arg_v<Objs> || ...);
     if constexpr (any_tagged)
@@ -1462,7 +1463,7 @@ template<typename Fn, typename... Objs>
     requires (sizeof...(Objs) >= 1) && (detail::Object_arg<Objs> && ...)
 auto async(Fn&& fn, Objs&&... objs)
 {
-    return async(Access_options{}, std::forward<Fn>(fn), std::forward<Objs>(objs)...);
+    return async(Dispatch_options{}, std::forward<Fn>(fn), std::forward<Objs>(objs)...);
 }
 
 // Multi-object `access`: the attended sibling of `ts::async(fn, objs...)`, taking the same

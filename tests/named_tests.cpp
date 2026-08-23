@@ -6,6 +6,7 @@
 #include "ts/named.h"
 #include "ts/static_task_graph.h"
 #include "ts/task.h"
+#include "ts/versioned.h"
 
 #include <cstring>
 #include <string>
@@ -132,6 +133,27 @@ void test_multi_object_access_name()
 #endif
 }
 
+// 5c. `Versioned::publish` takes `Dispatch_options` and names the step it schedules: an
+// explicit `.name` reaches the returned gate, and an unnamed publish falls back to the call
+// site the verb captured (it dropped `opts.name` entirely before the M2 split).
+void test_publish_carries_name()
+{
+#if TS_SAFETY_CHECKS
+    ts::Versioned<int> versioned{ Named{ "scores" } };
+    ts::Task<void> sited = versioned.publish();
+    const Named& site_name = ts::detail::core_of(sited)->name;
+    TS_CHECK_MSG(is_this_file(site_name.file), "publish() must capture the CALLER's site");
+    TS_CHECK(!is_library_header(site_name.file));
+    TS_CHECK(site_name.literal == nullptr);
+    sited.sync();
+
+    ts::Task<void> named = versioned.publish({ .name = "flip" });
+    const Named& explicit_name = ts::detail::core_of(named)->name;
+    TS_CHECK(explicit_name.literal != nullptr && std::strcmp(explicit_name.literal, "flip") == 0);
+    named.sync();
+#endif
+}
+
 // 6. A graph node's block carries the node's identity, so a diagnostic that names the
 // task names the node - including the pipe entries the node takes, which are that block.
 void test_node_block_carries_name()
@@ -170,6 +192,7 @@ void run_named_tests()
     run("named launch captures call site", test_launch_captures_call_site);
     run("named access verb captures call site", test_access_verb_captures_call_site);
     run("named multi-object access", test_multi_object_access_name);
+    run("named publish carries name", test_publish_carries_name);
     run("named node block carries name", test_node_block_carries_name);
     run("named object captures construction site", test_object_captures_construction_site);
 }
