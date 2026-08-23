@@ -15,8 +15,8 @@ Section 2 items are ready to implement as described. Section 3 items each carry
 options and a recommendation; reply by number. Section 4 is agreed post-1.0.
 
 **Status: every section 2 item landed on 2026-08-22** (M7 corrected on the way -
-see its row). From section 3, M1 landed in 2026-08 and M2 on 2026-08-23; the rest still
-need decisions.
+see its row). From section 3, M1 landed in 2026-08 and M2 and S9 on 2026-08-23; the rest
+still need decisions.
 
 ---
 
@@ -32,8 +32,8 @@ The list in `TODO.md` "Inconsistencies to resolve" predates the `Access_op` and
    ownership, not just dispatch. See **M1**.
 3. **Stale `async`/`access` comments** - reopened by both reworks. See **S3**.
 4. **`pipe` vs `queue` terminology** - the recorded decision ("queue in the user
-   docs, pipe in the deep docs") was never implemented and is now arguably
-   backwards. See **S9**.
+   docs, pipe in the deep docs") was never implemented; it now is, without the
+   reversal the audit proposed. See **S9**.
 
 Two more from that list, for completeness: the reservation path still heap-boxes
 one closure per held-grant acquisition (`detail/pipe.h`, `pipe_acquire`'s
@@ -309,6 +309,21 @@ The blocking `parallel_for` not taking one is defensible; the async one is not.
 
 ### S9 - ratify pipe vs queue, then make the API agree
 
+**Decided (author, 2026-08-22): the opposite of the recommendation below - keep the field name
+`queued`, and take "pipe" out of the user guide instead. Implemented 2026-08-23, docs only.**
+"Pipe" is an internal term for an internal type; a user never has to learn it, so the guide no
+longer contains the word. The concept is spelled "the object's queue", "its turn" and
+"admission", and §1's glossary defines those in place of the old **pipe** entry. Nothing else
+moves: `design.md`, `pipe-rebase.md`, `task-internals.md` and the headers keep **pipe**, where
+`Pipe` is the real type name and the audience is the right one. No API change, so this item
+stopped being tag-gated.
+
+Two corrections to the write-up below. The guide used the word 24 times, not counting the
+unrelated "pipeline"/"pipelined". `README.md` never used it at all - the occurrence the audit
+counted is the substring inside "pipelines" - so it needed no edit and got none.
+
+The original write-up follows.
+
 The recorded decision was "queue in README and user guide, pipe in the deep
 docs". Reality: the guide *defines* "pipe" as a first-class term and uses it
 throughout, and the headers use it heavily. The only place a **user types** the
@@ -452,12 +467,13 @@ workaround.
 ## 5. Sequencing
 
 **Tag-gated** (field/overload shape, or visibility): M1, M2, M3, M4, M5, M6, M8,
-S2, S6, S9, S10. These land before `v0.1.0` or not at all.
+S2, S6, S10. These land before `v0.1.0` or not at all.
 
 **Additive but grouped with them:** M9, M10, S1, S4, S5, S7, S12. (M7 turned out
 to be a documentation fix - see its row - so it is not tag-gated at all.)
 
-**Free, any time:** S3, S8, S11, S13. (A2 is done.)
+**Free, any time:** S3, S8, S9, S11, S13. (S9 resolved as a docs-only change - see
+its row; A2 is done.)
 
 **M5** is worth taking regardless of the rest: Shipping does not compile for a
 host that uses the ensure hook.

@@ -1441,9 +1441,13 @@ change after public. Feed the going-public "API-stability pass".
    probe, else the queued cascade) — see §1.2 and [multi-access-op-design.md](multi-access-op-design.md).
 3. **Stale `async` comments after the split — FIXED.** Swept `guarded.h` (`default_scheduler`,
    `pipe_try_inline`, the two access/async doc blocks).
-4. **`pipe` vs `queue` terminology — deferred to the docs review.** Decision: use **queue** in
-   README + user guide (no "pipe"); keep **pipe** in the deeper docs (design/internals), and on
-   first use there explain the term + reference UE task pipes (with a doc link) as the exemplar.
+4. **`pipe` vs `queue` terminology — DONE (2026-08-23, API-stability S9).** The original
+   decision stands and is now implemented: `docs/guide.md` no longer contains the word - the
+   concept is spelled "the object's queue", "its turn" and "admission", and the glossary defines
+   those instead. `README.md` never used it. **Pipe** stays in the internal docs
+   (design/internals/pipe-rebase) and in the headers, where `Pipe` is the real type name. The
+   field keeps the name `queued` (author decision): it is the only place a user types the
+   concept, and it is already in the user vocabulary.
 5. **Reservation path still heap-boxes a closure — folded into the allocation campaign.**
    `Pipe::Job::on_acquired` (`move_only_function`) allocates on the graph / multi-async
    reservation path (unlike the allocation-free block/async dispatch); the tunable-SBO

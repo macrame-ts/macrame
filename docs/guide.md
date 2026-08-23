@@ -42,8 +42,9 @@ Terminology used throughout, defined once:
 - The **harness** is the runtime checker: instrumented methods verify the
   calling task actually holds a grant for the object, and abort with a
   diagnostic if not.
-- The **pipe** is the per-object queue inside `Guarded<T>` that admits readers
-  concurrently and writers exclusively, in submission order.
+- Every `Guarded<T>` has its own **queue** of pending accessors. An accessor
+  waits for its **turn**; admission is concurrent for readers and exclusive for
+  writers, in submission order.
 
 Everything lives in namespace `ts`. Exceptions are disabled by design: all
 non-recoverable failures call `ts::fatal`, which prints a message plus a stack
@@ -154,7 +155,7 @@ graph.add_node("nav_step", [](Physics& p, const Nav& n) { /* writes p, reads n *
                physics, nav);
 ```
 
-This one convention drives everything: the pipe's reader/writer admission,
+This one convention drives everything: each object's reader/writer admission,
 the graph's derived ordering edges, and the harness's grants.
 
 The same rule extends to **generic lambdas**: write `const auto&` for a read
@@ -505,7 +506,7 @@ world.async([](World& w) { w.expensive_rebuild(); });          // heavy: always 
 return*. Both declare the same access (write / read, from const-ness). `async`
 returns a free-standing `Task<R>` — dispatch it, await it, `sync()` it, or drop
 it (fire-and-forget). `access` returns a caller-owned `Access_op<T, Body>`: the
-whole operation — result storage, body, pipe entry — lives in that handle, so an
+whole operation — result storage, body, queue entry — lives in that handle, so an
 `access` **allocates nothing**. It is *attended* — you consume the result exactly
 once:
 
@@ -515,9 +516,9 @@ once:
   dangle-free; `op.take()` is the explicit consuming move; `op.try_take()`
   never blocks (empty until settled, also legal inside a task); and
   `co_await op.as_optional()` waits but yields empty on cancellation.
-- The handle is **pinned** — non-copyable and non-movable, because the pipe's
-  FIFO holds its embedded entry's address. Store a `Task<R>` from `async` if you
-  need a movable handle; keep the `Access_op` local otherwise.
+- The handle is **pinned** — non-copyable and non-movable, because the object's
+  queue holds its embedded entry's address. Store a `Task<R>` from `async` if
+  you need a movable handle; keep the `Access_op` local otherwise.
 - Destroying an `Access_op` whose access has not settled is a bug the destructor
   reports (`TS_ENSURE`) and then blocks on. So a *discarded* `access` for a write
   is only safe when it ran inline; if it may enqueue, either `.sync()` it or use
@@ -550,7 +551,7 @@ Where the functor may run:
 prerequisite. `access` is about a free object at call time. Different
 mechanisms; only the node one is called "inline".)
 
-Semantics of the per-object pipe:
+Semantics of the per-object queue:
 
 - **FIFO**: accessors run in submission order. A read observes exactly the
   writes submitted before it — this ordering is the correctness contract,
@@ -576,7 +577,7 @@ Two notes:
   whose result you still stay for), pass `.queued = true` — it skips only the
   inline-when-free arm. An object the calling task already holds is still lent
   and still runs inline: that part is correctness, not opportunism.
-- The destructor waits until the pipe drains; the object outlives every
+- The destructor waits until the queue drains; the object outlives every
   pending accessor — including the one you just `sync()`ed. A task wakes its
   waiters before it releases the objects it held, so a returned `sync()` means
   "this task settled", not "the object is free"; the destructor's drain is what
@@ -623,9 +624,9 @@ The suspended twin of the blocked-thread deadlock is also detected: two
 coroutines that each *hold* an object and `co_await` the other's object
 deadlock with **no thread parked** — both frames are suspended, every
 worker is free, and the frames simply never resume. The safety harness
-records wait edges at every suspension on a pipe and fatals the moment
-an edge closes a cycle, naming both tasks and both objects (§8.2 has the
-rule that avoids the shape in the first place).
+records wait edges at every suspension on an object's queue and fatals the
+moment an edge closes a cycle, naming both tasks and both objects (§8.2 has
+the rule that avoids the shape in the first place).
 
 ### 5.0.2 Lock ranks for dynamically-awaited objects
 
@@ -729,10 +730,10 @@ a `Task<R>` and always schedules; `ts::access` returns the caller-owned
 `ts::Access_op<Objects..., Body>` — the same operation handle `obj.access(fn)`
 returns, so a multi-object access allocates nothing either, and it is consumed
 the same way (`co_await`, `.sync()` from outside a task, `try_take()`).
-Per-argument modes come from const-ness, as always. The library acquires the
-pipes in a canonical global order and holds them for the body — the standard
-deadlock-free discipline, shared with the static graph, so dynamic multi-object
-work and graph nodes can never deadlock each other.
+Per-argument modes come from const-ness, as always. The library takes the
+objects' turns in one canonical global order and holds them for the body — the
+standard deadlock-free discipline, shared with the static graph, so dynamic
+multi-object work and graph nodes can never deadlock each other.
 
 `access` is opportunistic at every arity, in two steps:
 
@@ -741,7 +742,7 @@ work and graph nodes can never deadlock each other.
   already the exclusion those objects need. This is the same protocol a nested
   `graph.execute()` uses, and at one object it is what "a reentrant access runs
   inline under the held grant" means. If every object is lent, the body runs
-  inline with no pipe interaction at all.
+  inline without queueing on anything at all.
 - The rest are probed **all or nothing**: if every one of them is free right
   now — nothing queued on it, and the reader/writer rules allow — the whole set
   is admitted in one pass and the body runs on the calling thread. If any one of
@@ -966,7 +967,7 @@ where the whole frame runs serially with no idle to confound it, so
 `(total − body) / total` is the *complete* framework cost by pure subtraction.
 The **gap** between the
 multi-worker overhead and the serial floor is the framework overhead only workers pay —
-cross-thread dispatch, pipe hand-off, park/wake — the cost of the
+cross-thread dispatch, object hand-off, park/wake — the cost of the
 parallelism, not a measurement error. Overhead is an upper bound: it is
 measured with tracing on, which adds a per-task clock bracket, so cross-check
 against the untraced task throughput if it matters. Each significant chain wait is also drawn in place:
@@ -1054,9 +1055,9 @@ the inner run starts. Two things make that work, and both are automatic:
   behind the grant its own caller is holding while that caller waits for it: a
   deadlock. Ordering *within* the inner graph is unaffected — its compiled
   conflict edges still sequence its own nodes on a lent object — and code
-  outside sees nothing different, because the pipe never learns about the lend:
-  an unrelated `async` still queues behind the outer node's hold. Nesting
-  composes to any depth.
+  outside sees nothing different, because the object's queue never learns about
+  the lend: an unrelated `async` still queues behind the outer node's hold.
+  Nesting composes to any depth.
 - **Scope join.** The inner run joins the calling task's scope, so you may fire
   it without awaiting and still be sure it finished before the caller
   completes. Pass `{.detach = true}` for a run that should genuinely outlive
@@ -1087,7 +1088,7 @@ and `run_frame_graph_free` in `sample/game_frame.cpp` — over the same `World`
 and the same system bodies, so the difference is only in how the schedule is
 produced. What the comparison shows:
 
-**Safety is the pipe's, not the graph's.** A hand-composed system still takes a
+**Safety is the object's, not the graph's.** A hand-composed system still takes a
 mode-aware turn on every object it declares, so two conflicting systems never
 overlap and the harness still fatals on an undeclared touch. Dropping the graph
 costs you nothing here.
@@ -1095,8 +1096,8 @@ costs you nothing here.
 **Order is the graph's.** `compile()` derives every conflict edge from the
 declarations the nodes already carry. Written by hand, each of those edges is an
 explicit `co_await` somewhere in the chain coroutines the frame is cut into, plus
-the joins that fold them back together. Do not expect the pipe's FIFO to stand in
-for the conflict edges: a multi-object access enters its links one at a time in
+the joins that fold them back together. Do not expect the objects' FIFO order
+to stand in for the conflict edges: a multi-object access enters its links one at a time in
 canonical order, so a system blocked on its first object has not yet taken its
 slot on the later ones and a system launched after it walks straight past. Launching the sample's node
 list in declaration order with no explicit awaits runs `frustum_cull` before
@@ -1248,7 +1249,7 @@ exception to catch (§10.5).
 
 ### 8.2 Awaitable access guards
 
-The pipe doubles as an asynchronous reader/writer lock:
+An object's queue doubles as an asynchronous reader/writer lock:
 
 ```cpp
 ts::Task<void> update(ts::Guarded<World>& world)
@@ -1282,7 +1283,7 @@ ts::access(fn, a, b)` — each acquiring in one canonically-ordered step rather
 than nesting guards.
 
 There is exactly one exemption: an access whose objects *this task already holds*
-is lent every one of them, so it takes no pipe turn, runs inline under those
+is lent every one of them, so it takes no turn at all, runs inline under those
 grants (waiting rule (b)), and is settled before the `co_await` is evaluated — it
 cannot suspend by construction. An access that still has to acquire something,
 even one object of several, is not exempt.
@@ -1486,8 +1487,8 @@ four and one run in twenty-five — so run the canary in a loop rather than once
 
 ## 9. `Deferred<T>` and `Versioned<T>` — staged writes
 
-The pipe serializes readers against every writer. When a target has *many*
-producers of small writes and many readers — or when readers must see updates
+An object's queue serializes readers against every writer. When a target has
+*many* producers of small writes and many readers — or when readers must see updates
 in atomic batches — staging beats direct writes. Two types share the
 machinery (a **journal** of staged commands):
 
@@ -1538,7 +1539,7 @@ Contracts, briefly (full statements live in
 - **The inline path's task carries no ordering**: when `commit()` applies
   inline (you held the grant), the returned task settled *before* the apply —
   it answers `is_done()` truthfully but provides no happens-before edge.
-  Observers of the data order through the object's pipe, which orders.
+  Observers of the data order through the object's queue, which orders.
 - **Commit from the grant holder, not grant-inheriting sub-work**: inside a
   node/body that holds the write grant, call `commit()` there. Calling it from
   sub-work running under the *inherited* grant (a `parallel_for` helper, a
@@ -1776,7 +1777,7 @@ world.async([](World& w)
 });
 ```
 
-A body returns into the library's own frames — a worker's dispatch loop, a pipe
+A body returns into the library's own frames — a worker's dispatch loop, an object
 release, a coroutine resume — which hold grants, lock counts and refcounts, and
 which may be compiled with no exception support at all. So a body that lets one
 escape is fatal, on every path that runs one: `ts::launch`, `access` / `async`,
@@ -1829,7 +1830,7 @@ and `sync()` from a blue thread (blocking is what blue threads do).
 ### 11.3 Fire-and-forget is fine
 
 `async` returning a `Task` does not mean you must keep it. Dropping the
-handle is safe; the pipe still runs the job. Keep it only if you need the
+handle is safe; the object's queue still runs the job. Keep it only if you need the
 result, completion, or cancellation.
 
 ### 11.4 Choosing the tool
