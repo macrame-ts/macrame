@@ -238,8 +238,22 @@ private:
         long long sum = 0;
         for (const Busy_slot& slot : busy_)
         {
-            sum += slot.ticks.load(std::memory_order_relaxed);
-            long long started = slot.started.load(std::memory_order_relaxed);
+            // Consistent per-slot pair: `run_task`'s completion stores `ticks += span` and then
+            // `started = 0` (release order), so a reader interleaving the two could count the
+            // span twice (inflating a begin snapshot) or - reading `ticks` before the add and
+            // `started` after the clear - drop the whole span (deflating the fold's end
+            // snapshot; a preempted straggler's span is milliseconds, enough to push the
+            // derived `M = busy - B` negative). Re-reading `ticks` around the `started` load
+            // and retrying on change yields a pair from one side of the completion: `started`
+            // nonzero means the add has not happened (count in-flight, no double), zero means
+            // any completed span is already in `ticks`.
+            long long ticks, started;
+            do
+            {
+                ticks = slot.ticks.load(std::memory_order_acquire);
+                started = slot.started.load(std::memory_order_acquire);
+            } while (slot.ticks.load(std::memory_order_acquire) != ticks);
+            sum += ticks;
             if (started != 0 && now > started)
                 sum += now - started;
         }
@@ -464,9 +478,12 @@ private:
             // The whole span is on-worker busy; the functor bracket inside `func_` already
             // credited its own part to body (B) via `trace_body_add`. Machinery is derived by
             // pure subtraction (`M = busy - B`) at the fold, so nothing is booked here.
+            // Release order, ticks before started: a `busy_ticks` reader that sees
+            // `started == 0` must find the span already in `ticks` (see the reader's
+            // confirm-retry loop for the interleavings).
             slot.ticks.store(slot.ticks.load(std::memory_order_relaxed) + (t1 - t0),
-                             std::memory_order_relaxed);
-            slot.started.store(0, std::memory_order_relaxed);
+                             std::memory_order_release);
+            slot.started.store(0, std::memory_order_release);
             // Distribute the task's [t0,t1] busy span across the utilization time buckets it
             // spans (relative to the run origin). Armed-only; most tasks touch one bucket.
             long long bw = bucket_width_.load(std::memory_order_relaxed);
