@@ -2,60 +2,42 @@
 
 # Quick start
 
-How to get it running. The [user guide](guide.md) has the full tour of every
-layer.
+This guide explains how to get the framework running. For a complete tour of every layer, please refer to the [user guide](guide.md).
 
 ## Get the code
 
-No package registry yet (pre-1.0), but macrame builds as a normal CMake **static
-library** with no external dependencies. Clone it, then consume it either way:
+There is no package registry available yet for pre-1.0 releases. However, Macrame builds as a standard CMake static library with no external dependencies. You can clone the repository and consume it in one of two ways.
 
-```
+```text
 git clone <repo-url> macrame
 ```
 
-- **CMake** — `add_subdirectory(macrame)` and link `macrame::macrame`; or install
-  it (`cmake --install`) and `find_package(macrame CONFIG REQUIRED)` + link
-  `macrame::macrame`.
-- **By hand** — add `include/` to your include path and compile the six library
-  `.cpp` under `src/` into your build (`access`, `fatal`, `guarded`, `scheduler`,
-  `static_task_graph`, `worker_thread`; headers under `include/ts/`). The other
-  `src/*.cpp` — `main.cpp`, `mem_profile.cpp` — belong to the dev driver, not the
-  library.
+*   **CMake.** You can use `add_subdirectory(macrame)` and link `macrame::macrame`. Alternatively, you can install it using `cmake --install`, then find it with `find_package(macrame CONFIG REQUIRED)` and link `macrame::macrame`.
+*   **By hand.** Add the `include/` directory to your include path and compile the six library `.cpp` files located under `src/` into your build. These files are `access`, `fatal`, `guarded`, `scheduler`, `static_task_graph`, and `worker_thread`. The headers are located under `include/ts/`. Other source files like `main.cpp` and `mem_profile.cpp` belong to the development driver, not the library itself.
 
-C++23. The library neither throws nor catches, and it does not ask your code to
-do the same: compile your translation units with exceptions on or off as you
-prefer. The one rule is that an exception must not escape a task body - that is
-fatal (guide §10.5). To build macrame itself without exception support, for a
-program that is exceptions-off throughout, configure
-`-DMACRAME_NO_EXCEPTIONS=ON`; the setting then rides on the `macrame::macrame`
-target, because on MSVC it has to be program-wide.
+The library requires C++23. It does not throw or catch exceptions, and it does not require your code to do so. You can compile your translation units with exceptions enabled or disabled based on your preference. The only strict rule is that an exception must not escape a task body, as this will result in a fatal error (see guide section 10.5). If you want to build Macrame itself without exception support for an entirely exceptions-off program, configure it with `-DMACRAME_NO_EXCEPTIONS=ON`. This setting applies to the `macrame::macrame` target, which is required program-wide on MSVC.
 
-Include everything through the umbrella header, or the individual headers if you
-prefer:
+You can include the entire library through the umbrella header, or use individual headers if preferred.
 
 ```cpp
-#include "ts/ts.h"   // the whole public API, in namespace ts
+#include "ts/ts.h" // Includes the whole public API in the ts namespace.
 ```
 
 ## Build
 
-- **Visual Studio 2022+**: open `macrame.slnx` (x64), build, run. MSVC or
-  clang-cl.
-- **CMake**: presets for `windows-msvc`, `windows-clang-cl`, `windows-shipping`,
-  `linux-clang`, and `linux-tsan`.
+*   **Visual Studio 2022 and later.** Open the `macrame.slnx` solution file (x64), build, and run using MSVC or clang-cl.
+*   **CMake.** Presets are available for `windows-msvc`, `windows-clang-cl`, `windows-shipping`, `linux-clang`, and `linux-tsan`.
 
-  ```
-  cmake --preset windows-msvc
-  cmake --build --preset windows-msvc
-  ```
+```text
+cmake --preset windows-msvc
+cmake --build --preset windows-msvc
+```
 
-C++23 is required. Exceptions are disabled project-wide: non-recoverable failures
-call `ts::fatal` (message + stack trace + abort) rather than throwing.
+As a reminder, C++23 is required. In the provided build configurations, exceptions are disabled project-wide. Non-recoverable failures call `ts::fatal`, which prints a message and stack trace before aborting, rather than throwing an exception.
 
 ## Hello, task
 
-Launch a unit of work and wait for its result:
+Here is how you launch a unit of work and wait for its result.
 
 ```cpp
 #include "ts/ts.h"
@@ -63,52 +45,38 @@ Launch a unit of work and wait for its result:
 
 int main()
 {
-    ts::create_scheduler();        // once, at startup — one worker per hardware thread
+    ts::create_scheduler(); // Bring the scheduler up once at startup. The default creates one worker per hardware thread.
     ts::Task<int> t = ts::launch([] { return 6 * 7; });
-    std::printf("%d\n", t.sync()); // blocks until done, prints 42
+    std::printf("%d\n", t.sync()); // Blocks until the task is done, then prints 42.
 }
 ```
 
-Bring the scheduler up explicitly with `ts::create_scheduler()` before any work
-(it is heavy, so it never starts lazily; a default gives one worker per hardware
-thread). It is torn down at program exit, or call `ts::destroy_scheduler()`.
-`sync()` is the only call that blocks; launching never does.
+You must bring the scheduler up explicitly with `ts::create_scheduler()` before executing any work. Because initialization is heavy, it never starts lazily. It is torn down automatically at program exit, or you can manually call `ts::destroy_scheduler()`. The `sync()` method is the only call that blocks. Launching a task never blocks.
 
 ## Guard a shared object
 
-Wrap a thread-unsafe object in `Guarded<T>`. The only way in is handing a
-function to `access`. The parameter's const-ness declares what you do: a
-non-`const` parameter is a write (exclusive), a `const` parameter is a read
-(concurrent with other reads). The reference your function receives is valid for
-that call only. Storing it past the call sidesteps the safety checks
-([limits.md](limits.md) §2.3):
+You can wrap a thread-unsafe object in `Guarded<T>`. The only way to interact with the object is by handing a function to the `access` method. The parameter's const-ness declares your intent: a non-const parameter requests exclusive write access, while a const parameter requests concurrent read access. The reference your function receives is valid only for that specific call. Storing it past the call will sidestep the safety checks.
 
 ```cpp
-ts::Guarded<std::vector<int>> numbers{ ts::Named{"numbers"} }; // the name is for diagnostics and traces
+ts::Guarded<std::vector<int>> numbers{ ts::Named{"numbers"} }; // The name is used for diagnostics and traces.
 
-numbers.access([](std::vector<int>& v) { v.push_back(1); }).sync(); // write: exclusive
-size_t n = numbers.access([](const std::vector<int>& v) // read: concurrent
+numbers.access([](std::vector<int>& v) { v.push_back(1); }).sync(); // Exclusive write access.
+
+size_t n = numbers.access([](const std::vector<int>& v) // Concurrent read access.
 {
     return v.size();
 }).sync();
+
 std::printf("%zu\n", n);
 ```
 
-Accesses run on the object in submission order: the write runs alone, reads run
-together. `access` is *opportunistic*. If the object is free right now it runs
-your function immediately on the calling thread (no scheduling); otherwise it
-queues. That makes it the right default for the short functions typical of this
-API. `access` returns a caller-owned operation handle (`ts::Access_op`), so it
-allocates nothing. Take the result with `.sync()`, or `co_await` the handle
-from a coroutine. For a heavy function you'd rather not run on the calling
-thread, use `async(fn)` instead: same access rules, but always scheduled onto
-a worker, returning a free-standing `ts::Task<R>`.
+Access requests are processed in submission order. Writes run alone, and reads run together. The `access` method is opportunistic. If the object is currently free, it runs your function immediately on the calling thread without scheduling it. This makes it the ideal default for short functions. The method returns a caller-owned operation handle (`ts::Access_op`), meaning it requires zero allocations. You can retrieve the result using `.sync()`, or by awaiting the handle from a coroutine. 
+
+If you have a heavy function that you prefer not to run on the calling thread, you can use `async(fn)` instead. It follows the same access rules but is always scheduled onto a worker thread and returns a free-standing `ts::Task<R>`.
 
 ## Make it safe by construction
 
-Add `TS_CHECK_ACCESS()` to your type's methods and the runtime harness will fault
-(with a stack trace) if any code touches the object without a declared grant — a
-stray reference, a missed declaration, a task the graph doesn't know about:
+You can add the `TS_CHECK_ACCESS()` macro to your type's methods. The runtime harness will then fault with a stack trace if any code touches the object without a declared grant. This catches issues like stray references, missed declarations, or tasks that the graph does not know about.
 
 ```cpp
 #include "ts/ts.h"
@@ -123,13 +91,9 @@ private:
 };
 ```
 
-Now `Guarded<Inventory>` is a thread-safe API for `Inventory`, and violations are
-caught the moment they happen instead of racing silently.
+By doing this, `Guarded<Inventory>` becomes a thread-safe API for the `Inventory` class. Any access violations are caught the moment they happen instead of silently causing race conditions.
 
 ## Where to next
 
-- The [user guide](guide.md) — every layer with examples: dependency graphs,
-  coroutines, cancellation, `parallel_for`, and the staged-write patterns
-  (`Deferred`/`Versioned`).
-- The [design rationale](design.md) — why it works this way, and what was tried
-  and rejected.
+*   The [user guide](guide.md) contains examples for every layer, covering dependency graphs, coroutines, cancellation, `parallel_for`, and staged-write patterns like `Deferred` and `Versioned`.
+*   The [design rationale](design.md) explains why the framework works this way, as well as what alternative approaches were tried and rejected.
