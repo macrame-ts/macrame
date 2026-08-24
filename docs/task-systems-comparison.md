@@ -3,7 +3,7 @@
 (Companion documents: [guide.md](guide.md) — user guide; [design.md](design.md)
 — how this survey's findings shaped the library.)
 
-*Research compiled 2026-06. Focus: concurrent task schedulers relevant to game engines and high-performance C++, with an eye toward design, performance, and ease of use. Written to inform the design of this project. The Unreal section is grounded in a direct read of the engine source (`LowLevelTasks` backend in `Engine/Source/Runtime/Core`), not just the public docs.*
+*Focus: concurrent task schedulers relevant to game engines and high-performance C++, with an eye toward design, performance, and ease of use. Written to inform the design of this project.*
 
 ---
 
