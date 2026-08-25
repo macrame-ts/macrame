@@ -55,7 +55,7 @@ You must bring the scheduler up explicitly with `ts::create_scheduler()` before 
 
 ## Guard a shared object
 
-You can wrap a thread-unsafe object in `Guarded<T>`. The only way to interact with the object is by handing a function to an access verb (`access`, or `async` below). The parameter's const-ness declares your intent: a non-const parameter requests exclusive write access, while a const parameter requests concurrent read access. The reference your function receives is valid only for that specific call. Storing it past the call will sidestep the safety checks.
+You can wrap a thread-unsafe object in `Guarded<T>`. The only way to interact with the object is by handing a function. The parameter's const-ness declares your intent: a non-const parameter requests exclusive write access, while a const parameter requests concurrent read access. The reference your function receives is valid only for that specific call. Storing it past the call will sidestep the safety checks.
 
 ```cpp
 ts::Guarded<std::vector<int>> numbers{ ts::Named{"numbers"} }; // The name is used for diagnostics and traces.
