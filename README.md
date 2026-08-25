@@ -49,7 +49,7 @@ Most task systems schedule work and leave shared-data safety up to the user, or 
 Macrame separates these concerns. You declare the data your logic accesses and whether that access is read-only or read/write. The framework then derives the ordering and exclusion needed for safety. The runtime harness verifies that nothing touches shared state without declaring it first, aborting with a stack trace instead of allowing a race condition. Dependencies remain available for genuine ordering, but they are no longer overloaded to represent data sharing.
 
 ```cpp
-ts::Guarded<Inventory> inventory{ "inventory" };
+ts::Guarded<Inventory> inventory{ ts::Named{ "inventory" } };
 // The parameter's const-ness is the access mode declaration.
 inventory.access([](Inventory& inv) { inv.add(sword); }).sync(); // `T&`: exclusive read/write access
 auto n = inventory.access([](const Inventory& inv) { return inv.count(); }).sync(); // `const T&`: read-only, concurrent with other readers
@@ -66,7 +66,7 @@ Here is a brief look at how the framework operates in practice.
 You can wrap a thread-unsafe object in `Guarded<T>`. You pass it a functor, and the parameter's const-ness declares your access type. A mutable reference requests exclusive write access, while a const reference requests "shared" read access.
 
 ```cpp
-ts::Guarded<Inventory> inventory{ "inventory" };
+ts::Guarded<Inventory> inventory{ ts::Named{ "inventory" } };
 
 // `access` - runs on the calling thread if the object is free right now, otherwise waits
 // its turn. Zero-allocation. Best for short functors.
@@ -98,10 +98,10 @@ This eliminates the need to use locks. Concurrent writes are serialised, reads r
 Each subsystem is represented by its own `Guarded<T>`. You declare what each node reads and writes, and `compile()` derives the schedule from the access conflicts. Explicit ordering is only needed for business logic, not to prevent data races:
 
 ```cpp
-ts::Guarded<Physics> physics{ "physics" };
-ts::Guarded<Animation> anim{ "anim" };
-ts::Guarded<Audio> audio{ "audio" };
-ts::Guarded<Renderer> renderer{ "renderer" };
+ts::Guarded<Physics> physics{ ts::Named{ "physics" } };
+ts::Guarded<Animation> anim{ ts::Named{ "anim" } };
+ts::Guarded<Audio> audio{ ts::Named{ "audio" } };
+ts::Guarded<Renderer> renderer{ ts::Named{ "renderer" } };
 
 ts::Static_task_graph frame;
 
@@ -133,7 +133,7 @@ The two physics readers (`pose`, `mix`) run in parallel. `render` waits for both
 `Deferred<T>` implements the command list pattern. Instead of mutating shared state directly, each producer *records* its intended changes into a buffer. A single later step applies them all at once. Recording requires no access to the target, allowing producers to run in parallel without blocking each other or any readers.
 
 ```cpp
-ts::Guarded<World> world{ "world" };
+ts::Guarded<World> world{ ts::Named{ "world" } };
 ts::Deferred<World> staged{ world };
 
 // Producers record changes into the buffer. Each producer uses its own recorder.
@@ -152,7 +152,7 @@ staged.commit().sync();
 `Versioned<T>` implements the double buffer pattern. It keeps two copies of the state: a published version for readers, and a next version being prepared. Readers get a stable view for the whole frame, while producers build the next version without interrupting them.
 
 ```cpp
-ts::Versioned<Poses> poses{ "poses" };
+ts::Versioned<Poses> poses{ ts::Named{ "poses" } };
 
 // Producers build the next version without blocking readers.
 ts::Recorder<Poses> rec = poses.recorder();
