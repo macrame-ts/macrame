@@ -64,12 +64,11 @@ inline constexpr bool introspectable_v =
 
 // Rvalue-bindability probe for generic functors: position `P` gets an rvalue `T&&`, every
 // other position an lvalue `T&`. `auto&` cannot bind an rvalue ([temp.deduct.call]) ->
-// `read_write`; `const auto&` / `auto&&` can -> `read_only`. Declaration-level only - the
-// body is never instantiated by the probe, so this is exact and SFINAE-safe. (An `auto&&`
-// parameter that mutates is mis-probed as a read, but Part of the same design makes that a
-// compile error: read positions are invoked with `const T&`, so `auto&&` deduces `const T&`
-// and the mutation fails to compile. The one undetectable residual is an `auto` by-value
-// parameter - it probes as a read and copies; writes hit the copy. Documented in the guide.)
+// `read_write`; `const auto&` / `auto&&` can -> `read_only`. (An `auto&&` parameter that
+// mutates is mis-probed as a read, but the same design makes that a compile error: read
+// positions are invoked with `const T&`, so `auto&&` deduces `const T&` and the mutation
+// fails to compile. An `auto` by-value parameter also probes as a read - the copy probe
+// below turns that into a compile error where `T` permits.)
 template<std::size_t P, std::size_t K, typename T>
 using Probe_arg_t = std::conditional_t<P == K, T&&, T&>;
 
@@ -79,11 +78,45 @@ constexpr bool probe_binds_rvalue(std::index_sequence<K...>)
     return std::invocable<Fn, Probe_arg_t<P, K, Ts>...>;
 }
 
+// A non-copyable, non-movable stand-in derived from `T`. A reference parameter binds it; an
+// `auto` by-value parameter must copy-initialize from it, which is ill-formed in a
+// SFINAE-clean way - the signal that the position would silently copy the object and
+// discard writes. Deriving from `T` keeps the body compiling during the probe (members
+// resolve through the base, and the stand-in converts to `const T&` where passed on).
+template<typename T>
+struct Non_copyable : T
+{
+    Non_copyable(const Non_copyable&) = delete;
+    Non_copyable(Non_copyable&&) = delete;
+};
+
+// The stand-in requires a derivable `T`; for a final or non-class `T` the copy probe is
+// skipped and an `auto` by-value parameter remains a silent copy (documented residual).
+template<typename T>
+inline constexpr bool copy_probe_viable = std::is_class_v<T> && !std::is_final_v<T>;
+
+// Position `P` gets a `Non_copyable<T>` lvalue, every other position stays `T&`.
+template<std::size_t P, std::size_t K, typename T>
+using Copy_probe_arg_t = std::conditional_t<P == K, Non_copyable<T>&, T&>;
+
+template<typename Fn, std::size_t P, typename... Ts, std::size_t... K>
+constexpr bool probe_accepts_non_copyable(std::index_sequence<K...>)
+{
+    return std::invocable<Fn, Copy_probe_arg_t<P, K, Ts>...>;
+}
+
 template<typename Fn, std::size_t P, typename... Ts>
 constexpr Access probed_mode()
 {
-    return probe_binds_rvalue<Fn, P, Ts...>(std::index_sequence_for<Ts...>{})
-        ? Access::read_only : Access::read_write;
+    constexpr bool is_read = probe_binds_rvalue<Fn, P, Ts...>(std::index_sequence_for<Ts...>{});
+    if constexpr (is_read && copy_probe_viable<std::tuple_element_t<P, std::tuple<Ts...>>>)
+    {
+        static_assert(probe_accepts_non_copyable<Fn, P, Ts...>(std::index_sequence_for<Ts...>{}),
+            "an 'auto' by-value parameter copies the object and discards writes - spell it "
+            "'const auto&' (read) or 'auto&' (write); if the body intentionally copies (e.g. "
+            "returns the object by value), tag the argument with ts::as_read_only instead");
+    }
+    return is_read ? Access::read_only : Access::read_write;
 }
 
 // Trailing-token detection over an introspected parameter tuple `Args` with `N` declared
@@ -121,7 +154,9 @@ constexpr Mode_ref_t<M, T> mode_ref(T* p) { return *p; }
 //    parameter's const-ness decides - `const T&` = read_only, `T&` = read_write. A by-value
 //    or rvalue-ref resource parameter is rejected outright.
 //  - generic (templated `operator()`): the rvalue probe - `const auto&`/`auto&&` = read_only,
-//    `auto&` = read_write. Token-arity aware (a trailing `Cancellation_token` is allowed).
+//    `auto&` = read_write - plus the copy probe, which rejects a by-value `auto` parameter
+//    where `T` is a non-final class. Token-arity aware (a trailing `Cancellation_token` is
+//    allowed).
 template<typename Fn, typename T>
 constexpr Access accessor_mode()
 {
@@ -150,8 +185,18 @@ constexpr Access accessor_mode()
     }
     else
     {
-        return (std::invocable<Fn, T&&> || std::invocable<Fn, T&&, const Cancellation_token&>)
-            ? Access::read_only : Access::read_write;
+        constexpr bool is_read = std::invocable<Fn, T&&> || std::invocable<Fn, T&&, const Cancellation_token&>;
+        if constexpr (is_read && copy_probe_viable<T>)
+        {
+            // The copy probe: a read-classified position must also bind a non-copyable lvalue,
+            // which an `auto` by-value parameter cannot (it would silently copy the resource).
+            static_assert(std::invocable<Fn, Non_copyable<T>&>
+                    || std::invocable<Fn, Non_copyable<T>&, const Cancellation_token&>,
+                "an 'auto' by-value parameter copies the object and discards writes - spell it "
+                "'const auto&' (read) or 'auto&' (write); if the body intentionally copies (e.g. "
+                "returns the object by value), tag the argument with ts::as_read_only instead");
+        }
+        return is_read ? Access::read_only : Access::read_write;
     }
 }
 
@@ -164,8 +209,11 @@ template<typename Fn, typename A>
 concept Async_accessor = std::invocable<Fn, A> || std::invocable<Fn, A, const Cancellation_token&>;
 
 // The accessor gates: mode classification first, invocability second - the order is
-// load-bearing. `accessor_mode` classifies without ever instantiating a body
-// (introspection / the rvalue probe), while `Async_accessor` probes invocability -
+// load-bearing. `accessor_mode` classifies without instantiating a body against `const T&`
+// (introspection / the rvalue probe; the copy probe does instantiate a read-classified body,
+// but with a `Non_copyable<T>&`, where a read body compiles and only a deliberate
+// copy-the-parameter body fails - the documented tag escape), while `Async_accessor` probes
+// invocability -
 // and probing a generic lambda deduces its return type, which instantiates the body;
 // for a mutating body probed against `const T&` that is a hard error, not a
 // substitution failure. Conjunctions short-circuit, so a failed mode gate rejects

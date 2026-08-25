@@ -185,14 +185,20 @@ multi-object `ts::access`/`ts::async`, and `add_node`):
 | `const T&` / `const auto&` | read (concurrent) | compile error |
 | `T` by value or `T&&` | rejected (`static_assert`) | — |
 | `auto&&` | read | compile error (read bodies receive `const T&`) |
-| `auto` by value | read | silent copy; avoid this spelling |
+| `auto` by value | rejected (`static_assert`) | — |
 
-Two rows need explanation. A by-value resource parameter is rejected outright
-because it would copy the resource and silently discard writes. The one
-spelling the library cannot police is the generic by-value `auto`, which is
-indistinguishable from `const auto&` at the declaration level, so do not write
-it. Every read position hands the body a `const T&`, which makes mutating
-under a read classification a compile error rather than a runtime surprise.
+Two rows need explanation. A by-value resource parameter is rejected, generic
+or not, because it would copy the resource and silently discard writes. For
+the generic spelling the rejection comes from a second probe that offers the
+position a non-copyable stand-in, which a reference parameter binds and a
+by-value parameter cannot copy. Two consequences follow. If the body
+intentionally copies the object, for example by returning it by value, the
+probe cannot compile it, so tag the argument with `ts::as_read_only` instead.
+And for a final or non-class type no stand-in can be derived, so the check is
+skipped there and a generic by-value parameter remains a silent copy; avoid
+the spelling for those types. Every read position hands the body a `const
+T&`, which makes mutating under a read classification a compile error rather
+than a runtime surprise.
 
 If you prefer declaring access explicitly at the call site instead of relying
 on parameter spelling, tag every object with `ts::as_read_only` /

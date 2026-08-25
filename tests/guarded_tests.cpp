@@ -65,7 +65,21 @@ void must_not_compile(ts::Guarded<int>& g)
     g.async([](const auto& v) { ++v; });    // mutating body under a read classification:
                                             // read bodies receive `const T&`
 }
+void must_not_compile_generic_by_value(ts::Guarded<tests::Counter>& g)
+{
+    g.async([](auto v) { (void)v; });       // generic by-value param on a class type: the copy
+                                            // probe's static_assert (silent-copy rejection)
+}
 #endif
+
+// The copy probe's boundaries. A generic read on a class type still probes read (the probe
+// instantiates the body with a `Non_copyable<Counter>&`, which resolves through the base).
+// For a final class no stand-in can be derived, so the check is skipped and a generic
+// by-value parameter stays the documented silent-copy residual - it must keep compiling.
+static_assert(Async_on_const<tests::Counter, Generic_read>, "copy probe passes a real read body");
+struct Final_counter final { int n = 0; };
+using Generic_by_value = decltype([](auto v) { (void)v; });
+static_assert(Async_on_const<Final_counter, Generic_by_value>, "final type: copy probe skipped, residual documented");
 static_assert(std::is_same_v<
     decltype(std::declval<ts::Guarded<int>&>().async(std::declval<Int_read>())), ts::Task<int>>);
 static_assert(std::is_same_v<
