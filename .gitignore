@@ -386,3 +386,4 @@ claude_update.bat
 
 # VS per-user launch arguments
 *.args.json
+tmp/
