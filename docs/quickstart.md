@@ -2,20 +2,20 @@
 
 # Quick start
 
-This guide explains how to get the framework running. For a complete tour of every layer, please refer to the [user guide](guide.md).
+This guide explains how to get the framework running. For a complete tour of every layer, see the [user guide](guide.md).
 
 ## Get the code
 
-There is no package registry available yet for pre-1.0 releases. However, Macrame builds as a standard CMake static library with no external dependencies. You can clone the repository and consume it in one of two ways.
+Macrame is not published to a package registry yet (pre-1.0). However, it builds as a standard CMake static library with no external dependencies. You can clone the repository and consume it in one of two ways.
 
 ```text
 git clone <repo-url> macrame
 ```
 
 *   **CMake.** You can use `add_subdirectory(macrame)` and link `macrame::macrame`. Alternatively, you can install it using `cmake --install`, then find it with `find_package(macrame CONFIG REQUIRED)` and link `macrame::macrame`.
-*   **By hand.** Add the `include/` directory to your include path and compile the six library `.cpp` files located under `src/` into your build. These files are `access`, `fatal`, `guarded`, `scheduler`, `static_task_graph`, and `worker_thread`. The headers are located under `include/ts/`. Other source files like `main.cpp` and `mem_profile.cpp` belong to the development driver, not the library itself.
+*   **By hand.** Add the `include/` directory to your include path and compile the library `.cpp` files located under `src/` into your build. These files are `access`, `fatal`, `guarded`, `scheduler`, `static_task_graph`, and `worker_thread`. The headers are located under `include/ts/`. Other source files like `main.cpp` and `mem_profile.cpp` belong to the development driver, not the library itself.
 
-The library requires C++23. It does not throw or catch exceptions, and it does not require your code to do so. You can compile your translation units with exceptions enabled or disabled based on your preference. The only strict rule is that an exception must not escape a task body, as this will result in a fatal error (see guide section 10.5). If you want to build Macrame itself without exception support for an entirely exceptions-off program, configure it with `-DMACRAME_NO_EXCEPTIONS=ON`. This setting applies to the `macrame::macrame` target, which is required program-wide on MSVC.
+The library requires C++23. It does not throw or catch exceptions, and it does not require your code to do so. You can compile your translation units with exceptions enabled or disabled based on your preference. The only strict rule is that an exception must not escape a task body, as this will result in a fatal error (see guide section 10.5). If you want to build Macrame itself without exception support for an entirely exceptions-off program, configure it with `-DMACRAME_NO_EXCEPTIONS=ON`. The setting rides on the `macrame::macrame` target as a usage requirement, because on MSVC it has to be program-wide.
 
 You can include the entire library through the umbrella header, or use individual headers if preferred.
 
@@ -25,7 +25,7 @@ You can include the entire library through the umbrella header, or use individua
 
 ## Build
 
-*   **Visual Studio 2022 and later.** Open the `macrame.slnx` solution file (x64), build, and run using MSVC or clang-cl.
+*   **Visual Studio 2022 and later.** Open the `macrame.slnx` solution file (x64) and build; the projects use the clang-cl toolset. MSVC builds via the CMake presets.
 *   **CMake.** Presets are available for `windows-msvc`, `windows-clang-cl`, `windows-shipping`, `linux-clang`, and `linux-tsan`.
 
 ```text
@@ -33,7 +33,7 @@ cmake --preset windows-msvc
 cmake --build --preset windows-msvc
 ```
 
-As a reminder, C++23 is required. In the provided build configurations, exceptions are disabled project-wide. Non-recoverable failures call `ts::fatal`, which prints a message and stack trace before aborting, rather than throwing an exception.
+As a reminder, C++23 is required. Non-recoverable failures call `ts::fatal`, which prints a message and stack trace before aborting, rather than throwing an exception — the library never throws in any configuration.
 
 ## Hello, task
 
@@ -55,7 +55,7 @@ You must bring the scheduler up explicitly with `ts::create_scheduler()` before 
 
 ## Guard a shared object
 
-You can wrap a thread-unsafe object in `Guarded<T>`. The only way to interact with the object is by handing a function to the `access` method. The parameter's const-ness declares your intent: a non-const parameter requests exclusive write access, while a const parameter requests concurrent read access. The reference your function receives is valid only for that specific call. Storing it past the call will sidestep the safety checks.
+You can wrap a thread-unsafe object in `Guarded<T>`. The only way to interact with the object is by handing a function to an access verb (`access`, or `async` below). The parameter's const-ness declares your intent: a non-const parameter requests exclusive write access, while a const parameter requests concurrent read access. The reference your function receives is valid only for that specific call. Storing it past the call will sidestep the safety checks.
 
 ```cpp
 ts::Guarded<std::vector<int>> numbers{ ts::Named{"numbers"} }; // The name is used for diagnostics and traces.
@@ -70,7 +70,7 @@ size_t n = numbers.access([](const std::vector<int>& v) // Concurrent read acces
 std::printf("%zu\n", n);
 ```
 
-Access requests are processed in submission order. Writes run alone, and reads run together. The `access` method is opportunistic. If the object is currently free, it runs your function immediately on the calling thread without scheduling it. This makes it the ideal default for short functions. The method returns a caller-owned operation handle (`ts::Access_op`), meaning it requires zero allocations. You can retrieve the result using `.sync()`, or by awaiting the handle from a coroutine. 
+Access requests are processed in submission order. Writes run alone, and reads run together. The `access` method is opportunistic. If the object is currently free, it runs your function immediately on the calling thread without scheduling it. This makes it the ideal default for short functions. The method returns a caller-owned operation handle (`ts::Access_op`), meaning it requires zero allocations. You can retrieve the result using `.sync()`, or by awaiting the handle from a coroutine.
 
 If you have a heavy function that you prefer not to run on the calling thread, you can use `async(fn)` instead. It follows the same access rules but is always scheduled onto a worker thread and returns a free-standing `ts::Task<R>`.
 
