@@ -95,24 +95,6 @@ bool scheduler_running() noexcept;
 // The config the running scheduler was created with. Fatal if none is running.
 Scheduler_config current_scheduler_config();
 
-// RAII sugar over create/destroy for scope-bound use (main, tests, a sample tracing on a
-// fixed worker count). On entry it brings the scheduler up with `config`; if one is already
-// running it reconfigures - teardown + recreate - and restores the previous config on exit.
-// The single-instance way to run a block on a specific worker count. Same coarse
-// teardown+recreate semantics as the free functions; use at quiescent points only.
-class Scheduler_scope
-{
-public:
-    explicit Scheduler_scope(Scheduler_config config);
-    ~Scheduler_scope();
-
-    Scheduler_scope(const Scheduler_scope&) = delete;
-    Scheduler_scope& operator=(const Scheduler_scope&) = delete;
-
-private:
-    std::optional<Scheduler_config> prev_;   // the config to restore on exit, if one was running
-};
-
 using Task_func_ptr = void(*)(void* data);
 
 namespace detail

@@ -1,3 +1,4 @@
+#include "scheduler_scope.h"
 #include "pipe_tests.h"
 #include "ts/guarded.h"
 #include "ts/scheduler.h"

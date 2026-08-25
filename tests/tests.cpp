@@ -1,4 +1,5 @@
 ﻿#include "tests.h"
+#include "scheduler_scope.h"
 #include "test_util.h"
 #include "ts/access.h"
 #include "ts/guarded.h"

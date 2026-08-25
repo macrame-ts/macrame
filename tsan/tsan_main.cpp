@@ -6,6 +6,7 @@
 // Run after every major change: a clean exit means TSan found no data races in
 // these workloads; a race prints a report and (with halt_on_error) exits nonzero.
 
+#include "scheduler_scope.h"
 #include <cstddef>
 
 // Single-file samples (no headers) - see sample/game_frame.cpp,

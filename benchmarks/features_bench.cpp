@@ -1,3 +1,4 @@
+#include "scheduler_scope.h"
 #include "benchmarks.h"
 #include "bench_harness.h"
 

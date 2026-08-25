@@ -71,6 +71,9 @@
     <ClInclude Include="tools\graph_trace.h">
       <Filter>tools</Filter>
     </ClInclude>
+    <ClInclude Include="tools\scheduler_scope.h">
+      <Filter>tools</Filter>
+    </ClInclude>
     <ClInclude Include="tools\graph_introspect.h">
       <Filter>tools</Filter>
     </ClInclude>

@@ -63,6 +63,7 @@
 // locks. The library turns it into a safe parallel schedule from the access
 // declarations alone; the systems never learn about threading.
 
+#include "scheduler_scope.h"
 #include "ts/access.h"
 #include "ts/deferred.h"
 #include "ts/guarded.h"

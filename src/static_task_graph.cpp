@@ -594,8 +594,7 @@ Task<void> Static_task_graph::execute(Execution_options opts)
     }
 #endif
 
-    // Runs on the one global scheduler (whatever a `Scheduler_scope` currently has it
-    // configured as).
+    // Runs on the one global scheduler, whatever it is currently configured as.
     Scheduler& scheduler = global_scheduler();
 
     // Reuse the run state built at compile() (one run at a time; a full get() barrier

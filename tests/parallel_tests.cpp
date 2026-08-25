@@ -1,3 +1,4 @@
+#include "scheduler_scope.h"
 #include "parallel_tests.h"
 #include "ts/parallel_for.h"
 #include "harness.h"

@@ -100,16 +100,14 @@ ts::destroy_scheduler();                        // Optional; it is torn down at 
 ```
 
 There are no ad-hoc scheduler objects to construct, and you never hold an
-instance, because nothing needs one. For a bounded region on a specific worker
-count, the RAII type `Scheduler_scope` brings one up, or reconfigures a
-running one by tearing it down and recreating it, and restores the previous
-configuration on exit:
+instance, because nothing needs one. To run a region on a different
+configuration, tear the scheduler down and create a new one at a quiescent
+point:
 
 ```cpp
-{
-    ts::Scheduler_scope sched{ { .num_workers = 4 } };
-    // graph.execute(), ts::launch(...), etc. run on the 4-worker scheduler here
-}   // The previous configuration is restored, or torn down if none was running.
+ts::destroy_scheduler();
+ts::create_scheduler({ .num_workers = 4 });
+// graph.execute(), ts::launch(...), etc. run on the 4-worker scheduler here
 ```
 
 `graph.execute()` and `ts::launch`/`async` all use this one scheduler; nothing
@@ -118,7 +116,7 @@ takes a scheduler argument. Calling any of them with no scheduler running is fat
 ### 2.1 Single-threaded (worker-less) mode
 
 ```cpp
-ts::Scheduler_scope serial{ { .single_threaded = true } };
+ts::create_scheduler({ .single_threaded = true });
 graph.execute().sync();   // The whole run happens on this thread, deterministically.
 ```
 
@@ -1745,10 +1743,10 @@ ts::create_scheduler({
 
 Creating a second scheduler while one is running is fatal, since there is
 exactly one per process, and using the scheduler with none running is fatal
-too, since there is no lazy spawn. For a bounded region, the RAII type
-`ts::Scheduler_scope` brings one up, or reconfigures a running one by
-teardown and recreate, and restores the previous configuration on exit. It is
-the way to run a block on a specific worker count.
+too, since there is no lazy spawn. Reconfiguring means tearing the scheduler
+down and creating a new one, done at a quiescent point. Restoring the previous
+configuration afterwards works the same way, with `current_scheduler_config()`
+providing the config to restore.
 
 Idle policies decide what a worker does when it finds no work. `spin` never
 sleeps, giving the lowest latency while burning idle cores. `spin_then_block`,
@@ -1951,9 +1949,8 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
   threshold. Several planned optimizations (pools, arenas, a typed command
   tier) are designed but not landed.
 - Scheduler selection, partial. There is one process-wide scheduler, created
-  explicitly with `create_scheduler`; `ts::Scheduler_scope` reconfigures it
-  by teardown and recreate so a scoped block runs on a chosen worker count.
-  What remains WIP is ambient per-call selection, meaning two live schedulers
+  explicitly with `create_scheduler` and reconfigured by teardown and
+  recreate. What remains WIP is ambient per-call selection, meaning two live schedulers
   running at once with individual `launch`/`async`/`execute` calls routed
   between them.
 - Platform breadth, WIP. Developed on Windows (MSVC/clang-cl); the test suite

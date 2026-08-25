@@ -1,4 +1,5 @@
 ﻿#include "coroutine_tests.h"
+#include "scheduler_scope.h"
 #include "harness.h"
 
 #include "ts/coroutine_support.h"

@@ -1,3 +1,4 @@
+#include "scheduler_scope.h"
 #include "scheduler_tests.h"
 #include "ts/scheduler.h"
 #include "harness.h"

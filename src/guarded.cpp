@@ -75,23 +75,6 @@ Scheduler_config current_scheduler_config()
     return g_config;
 }
 
-Scheduler_scope::Scheduler_scope(Scheduler_config config)
-{
-    if (scheduler_running())
-    {
-        prev_ = current_scheduler_config();   // reconfigure: restore this on exit
-        destroy_scheduler();
-    }
-    create_scheduler(config);
-}
-
-Scheduler_scope::~Scheduler_scope()
-{
-    destroy_scheduler();
-    if (prev_)
-        create_scheduler(*prev_);
-}
-
 namespace detail
 {
 

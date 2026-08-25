@@ -41,6 +41,7 @@
     <ClInclude Include="tools\dot_writer.h" />
     <ClInclude Include="tools\graph_introspect.h" />
     <ClInclude Include="tools\graph_trace.h" />
+    <ClInclude Include="tools\scheduler_scope.h" />
     <ClInclude Include="tools\trace_stamps.h" />
     <ClInclude Include="include\ts\task.h" />
     <ClInclude Include="include\ts\cancellation.h" />

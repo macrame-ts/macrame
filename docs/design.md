@@ -434,8 +434,8 @@ Priorities and idle policies are inert in this mode by design.
 #### A single worker pool
 
 There is a single process-wide scheduler, brought up explicitly with
-`create_scheduler` and reconfigured by teardown and recreation through the
-RAII `Scheduler_scope`. It is never created lazily, because a scheduler is
+`create_scheduler` and reconfigured by teardown and recreation. It is never
+created lazily, because a scheduler is
 heavy, and there is never a set of coexisting pools. This is an invariant,
 not a default. `Scheduler`'s constructor is private, and the sole way to
 build one is a `detail::make_scheduler` factory reserved for the global

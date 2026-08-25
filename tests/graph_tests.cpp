@@ -1,3 +1,4 @@
+#include "scheduler_scope.h"
 #include "graph_tests.h"
 #include "ts/coroutine_support.h"
 #include "ts/guarded.h"
