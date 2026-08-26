@@ -247,4 +247,9 @@ they land. **Re-run the secrets scrub (below) immediately before flipping.**
 ## Trailing (fine to do in the open)
 
 - [ ] Benchmark regression baseline (postponed — not blocking).
-- [ ] Announcement, if desired.
+- [ ] **Announcement** — the post text, per-channel rollout plan (r/cpp first, then
+      r/gameenginedevs/r/gamedev, Show HN day 3+, then Slack/Discord/aggregators/social),
+      and the copy/paste posting checklist live in `tmp/announcement.md` (local, gitignored),
+      with the 2x PNG of the trace at `tmp/game_frame_trace.png`. Before posting: swap the
+      post's interactive-SVG link to the GitHub Pages URL (Pages item above), and re-verify
+      the post's code snippets still compile (they were compile-checked 2026-08-25).
