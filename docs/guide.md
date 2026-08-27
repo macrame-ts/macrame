@@ -1,34 +1,33 @@
 # User guide
 
-This is the user guide to the library. It covers what the library does, how to
-use each layer, and how to choose between them. It assumes you are comfortable
-with threads, mutexes, and atomics, but not with game engines; examples that
-come from game engines are explained as they appear. For the reasoning behind
-the design, and what was tried and rejected, read [design.md](design.md). For
-internals, see the deeper documents listed at the [end](#further-reading).
-
-Status note: the library is pre-1.0. APIs are stable in shape but not frozen;
-areas marked WIP below are actively evolving.
+> For the reasoning behind the design, and what was tried and rejected, read
+> [design.md](design.md). For internals, see the deeper documents listed at
+> the [end](#further-reading).
+>
+> Samples are gamedev-based for illustration, you don't need to know anything
+> about gamedev.
+>
+> The library is pre-1.0. APIs are stable in shape but not frozen; areas
+> marked WIP below are actively evolving.
 
 ---
 
 ## 1. What this library is
 
 A C++23 task system. It provides a work-stealing thread-pool scheduler plus
-the layers a real application needs on top of it: dependencies, cancellation,
-coroutines, data-parallel loops, and access-declared concurrency.
+the layers a real application needs on top of it: tasks, dependencies,
+cancellation, coroutines, data-parallel loops, and access-declared concurrency.
 
 > You declare which shared data each piece of work reads or writes. The
-> library schedules around the conflicts, and a runtime harness catches any
-> access you did not declare.
+> library schedules around the conflicts, and a runtime harness catches
+> violations.
 
 That inverts the usual model. Instead of guarding data with locks and hoping
 every code path remembers to take them, you attach the data to its guard
 (`Guarded<T>`), and the only way to reach the data is by declaring the access.
-From those declarations the library derives safe parallel schedules
-mechanically.
+The library derives safe parallel schedules mechanically from these declarations.
 
-Terminology used throughout, defined once:
+Terminology:
 
 - A **task** is a unit of work (usually a lambda) that the scheduler runs on
   a worker thread. Its handle is `ts::Task<R>` where `R` is the result type.
@@ -47,7 +46,7 @@ Terminology used throughout, defined once:
   waits for its **turn**; admission is concurrent for readers and exclusive for
   writers, in submission order.
 
-Everything lives in namespace `ts`. The library itself uses no exceptions. All
+Everything lives in namespace `ts` ("Task System"). The library itself uses no exceptions. All
 non-recoverable failures call `ts::fatal`, which prints a message plus a stack
 trace and aborts. Most safety checking is gated by `TS_SAFETY_CHECKS`, which
 is on by default.
@@ -88,7 +87,7 @@ a `Task`, so it allocates nothing. Consume the result once, with `.sync()` or
 with `co_await` from a coroutine. Do not discard the handle for a write you
 want to happen; use `async` for fire-and-forget (see §5).
 
-The scheduler is a single process-wide instance, and you bring it up
+The scheduler is a singleton, and you bring it up
 explicitly. A scheduler is heavy, so it never starts lazily. Create it once at
 startup, before any scheduled work; creating a second one is fatal, because
 there is exactly one:
@@ -101,8 +100,7 @@ ts::destroy_scheduler();                        // Optional; it is torn down at 
 
 There are no ad-hoc scheduler objects to construct, and you never hold an
 instance, because nothing needs one. To run a region on a different
-configuration, tear the scheduler down and create a new one at a quiescent
-point:
+configuration, tear the scheduler down and create a new one:
 
 ```cpp
 ts::destroy_scheduler();
@@ -132,8 +130,6 @@ and the harness, and everything runs in a deterministic order. Use it for:
   one thread.
 - Deterministic tests. The same inputs give the same execution order, every
   run.
-- Platforms or builds without threads, and very small workloads where waking
-  a worker costs more than the parallelism returns.
 
 A few semantics are worth knowing. A task body runs before `launch`/`async`
 returns, so launching while holding your own lock runs the body under that
@@ -149,10 +145,8 @@ single-threaded program.
 
 ### 3.1 Declaring access
 
-Access is declared by parameter const-ness. A functor taking `T&` declares a
-write, and one taking `const T&` declares a read. You saw this in `access`
-above. The static graph (§6) uses the same rule across multiple objects at
-once:
+Access mode is defined by parameter const-ness. A functor taking `T&` declares a
+write, and one taking `const T&` declares a read. The static graph (§6) uses the same rule:
 
 ```cpp
 graph.add_node("nav_step", [](Physics& p, const Nav& n) { /* writes p, reads n */ },
@@ -247,11 +241,10 @@ required mode, and a stack trace. The check costs about a nanosecond, and with
 `TS_SAFETY_CHECKS=0` it compiles out entirely.
 
 The harness validates intent rather than observing collisions. Conventional
-tools, such as ThreadSanitizer or a game engine's access detector like
-Unreal's `FRWAccessDetector`, catch a data race only when it actually happens,
+tools, such as ThreadSanitizer or a runtime race detector, catch a data race only when it actually happens,
 meaning two threads touch the data in the same window. A dormant violation
 that did not happen to race on a given run stays invisible until the timing
-shifts with a different core count, a production build, or a slower frame. The
+shifts with a different core count or a production build. The
 harness checks something different. The question is not "is another thread
 touching this right now?" but "did the running task declare this access?". An
 undeclared access therefore faults the first time its code path runs,
@@ -271,7 +264,7 @@ Two limits you should understand:
 - Safety is only as complete as the declarations. The graph can only order
   around access it knows about; a task touching an object it never declared
   is exactly what the harness exists to catch at runtime. Treat a harness
-  abort as a real bug, never as noise.
+  abort as a real bug, not as noise.
 
 Structurally gated sub-work inherits grants. A `parallel_for` chunk, or a
 coroutine segment after a suspension, carries the parent's grants, so fanning
@@ -282,7 +275,7 @@ so the grant provably outlives it.
 A detached `ts::launch` inherits nothing. Its handle may be dropped, so it can
 outlive the parent's access scope. An inherited grant would then race whoever
 holds the object next, and the harness would catch that only on a late touch,
-or not at all in a shipping build. Running the child under an empty context
+or not at all in a shipping build (with the harness compiled out). Running the child under an empty context
 instead makes any touch of the parent's guarded data fault deterministically,
 on the first access, in every checked run. To fan out over the parent's data,
 use `ts::parallel_for`, whose chunks inherit the parent's grant and join
@@ -316,7 +309,8 @@ suspended:
 ```cpp
 ts::Task<int> pipeline()
 {
-    int a = co_await ts::launch(step_one);              // Sequencing: this runs after step_one.
+    int a = co_await ts::launch(step_one);
+    // Sequencing: this runs after step_one.
     int b = co_await ts::launch([a] { return step_two(a); });
     co_return a + b;
 }
@@ -342,7 +336,7 @@ the same contract as `sync()` (§4.3). Loops, branches, and early returns
 across asynchronous steps read as straight-line code. There is no callback
 vocabulary to learn, and no callback-flavored types to thread results through.
 If a prerequisite was cancelled, awaiting a `Task<void>` simply resumes, while
-awaiting a cancelled value task is fatal, so check `is_cancelled()` first
+awaiting a cancelled value task (a task with a non-void result) is fatal, so check `is_cancelled()` first
 (§4.4).
 
 One structural rule is worth knowing, the coroutine-lambda trap. A coroutine
@@ -543,7 +537,7 @@ For a member that must outlive one call, an `Access_op` also has a deferred
 form. Default-construct it unbound and then call `bind(target, body)` followed
 by `start()`, or construct it as `Access_op(ts::dormant, target, body)` to
 store it without firing. A `start()` refires a settled op with the same
-storage, allocation-free.
+storage, allocation-free, can be called multiple times.
 
 Where the functor may run:
 
@@ -551,15 +545,14 @@ Where the functor may run:
   functor immediately on the calling thread, with no scheduling, and otherwise
   it queues the functor. That fast path suits the many short critical sections
   typical of this API, at the cost of briefly blocking the caller when it
-  takes it. This is the default; reach for it unless you have a reason not to.
+  takes it. Use it by default unless you have a reason not to.
   An object the calling task already holds is lent rather than acquired. If
   the caller has the access this functor needs, such as a graph node's
   declared write or an enclosing write body, the functor runs under that
   access instead of queueing behind it. A helper that takes a `Guarded<T>&`
   and calls `access` therefore works whether or not its caller happens to hold
   the object.
-- `async` always schedules the functor onto a worker, never the caller's
-  thread. Use it for a heavy functor you do not want running inline, since it
+- `async` always schedules the functor onto a worker, never inline. Use it for a heavy functor you do not want running inline, since it
   would block the caller and hold the object longer, or when you specifically
   want fire-and-forget submission that never blocks.
 
@@ -1573,8 +1566,7 @@ holds the target's write grant, such as a graph node that declared the write
 or an `async`/`access` write body, it applies inline under that grant, with
 no second access acquisition, and returns an already settled task. Called
 from anywhere else, it enqueues one ordinary async write on the target and
-returns that write's completion. One verb covers both cases; the old
-`commit_async` is gone.
+returns that write's completion.
 
 The contracts, briefly; the full statements live in
 [deferred-versioned-state.md](deferred-versioned-state.md):
