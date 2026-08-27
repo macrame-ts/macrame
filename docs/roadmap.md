@@ -272,15 +272,6 @@ built-in profiling.
   code. This is the strongest available test of the design and the best source of
   API pressure, so it is prioritised over synthetic samples.
 
-## 11. API stability
-
-Small frictions surfaced during development are being resolved before they become
-costly to change once public: whether the `Access_options` and task-launch option
-aggregates share a base or stay split, and a final terminology and naming sweep.
-These are near-term and land with the API-stability review.
-
----
-
 ## Contributing and influence
 
 Contributions of every size are welcome; see [CONTRIBUTING.md](../CONTRIBUTING.md).
@@ -309,4 +300,3 @@ to [TODO.md](TODO.md), and `PF` numbers refer to the pattern review in
 | 8. Platform and portability | 3.6, 10.2 | PF 2.49 |
 | 9. Tooling, benchmarks and CI | 10.1, 10.3-10.12, 10.15, 10.16 | - |
 | 10. Validation and adoption | 9.5 | - |
-| 11. API stability | 1.8; inconsistency sweep | - |
