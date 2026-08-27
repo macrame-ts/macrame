@@ -170,7 +170,7 @@ poses.publish().sync();
 The graph profiles itself. Using the `--trace` flag runs a mock game frame and renders the average run. The measured critical path is pinned to the top lane, parallel work is packed into rows below, and dead-time bands show where the critical chain waited.
 <!-- NOTE: the interactive link below is the GitHub Pages URL (Pages serving /docs from
      master) - dead until Pages is enabled at the flip. -->
-The SVG output is interactive and includes hover tooltips with per-node stats and access declarations, and view-toggle buttons. Because GitHub strips scripts from images, the picture below is static. You can open the interactive version in a browser or view the file locally. It displays an aggregation of all frames, providing a high-level picture of the entire session.
+The SVG output is interactive and includes hover tooltips with per-node stats and access declarations, and view-toggle buttons. Because GitHub strips scripts from images, the picture below is static. You can open the [interactive version](https://macrame-ts.github.io/macrame/game_frame_trace.html) in a browser or view the file locally. It displays an aggregation of all frames, providing a high-level picture of the entire session.
 
 ![Traced game frame](docs/media/game_frame_trace.svg)
 
