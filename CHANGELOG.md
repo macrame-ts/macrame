@@ -1,9 +1,8 @@
 # Changelog
 
-Notable changes per version. Dates are the version's completion, not a release date —
-nothing has been tagged or published yet.
+Notable changes per version.
 
-## 0.1.0 — unreleased (2026-08)
+## 0.1.0 — 2026-08-27
 
 The library goes public as 0.1.0 (author, 2026-08): nothing was ever tagged, so the
 pre-transformation API shape has no released version to be distinguished from. What
