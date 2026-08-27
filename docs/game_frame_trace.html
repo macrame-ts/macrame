@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Macrame - the game_frame trace</title>
+<style>
+  body { margin: 0; padding: 2rem 1rem; background: #1e1f1c; color: #d8d8d2;
+         font: 16px/1.6 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 62rem; margin: 0 auto; }
+  h1, h2 { color: #f5f5f0; line-height: 1.25; }
+  a { color: #a6e22e; }
+  code { background: #2b2c27; padding: 0.1em 0.35em; border-radius: 3px;
+         font: 0.9em/1.4 Consolas, "Cascadia Mono", monospace; }
+  .trace { width: 100%; margin: 1.5rem 0; border: 1px solid #3a3b36; border-radius: 4px;
+           background: #272822; }
+  .trace object { width: 100%; height: auto; aspect-ratio: 1442 / 883; display: block; }
+  .hint { color: #9a9a90; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>The <code>game_frame</code> sample, traced</h1>
+
+<p><a href="https://github.com/macrame-ts/macrame"><code>game_frame</code></a> is a mock game-engine
+frame of ~30 systems - physics, animation, AI, audio, rendering and their neighbours - built on
+Macrame's static task graph. Each system is a <code>Guarded</code> object; each node declares what
+it reads and writes, and the schedule is derived from those declarations. The sample builds the
+same frame in two variants from the same system bodies: a straightforward <em>baseline</em>, and an
+<em>optimised</em> variant whose changes (snapshotting last frame's data, splitting the fattest
+critical nodes, deferred staging) were all chosen by reading this trace.</p>
+
+<p>The graph profiles itself. Running the sample with <code>--trace</code> executes a few hundred
+frames and renders the <em>average</em> run - not one lucky frame - as the interactive SVG below.</p>
+
+<div class="trace">
+  <object type="image/svg+xml" data="media/game_frame_trace.svg">
+    <img src="media/game_frame_trace.svg" alt="game_frame trace">
+  </object>
+</div>
+<p class="hint">If the tooltips don't respond, open the SVG
+<a href="media/game_frame_trace.svg">in its own tab</a>.</p>
+
+<h2>What you are looking at</h2>
+
+<p>The headline gives the verdict first: core utilization, critical-path dead time split by cause
+(core-bound / dependency-bound), and the core-time breakdown (body / framework overhead / idle).
+Below it, the frame: each bar is a node's median run, packed into rows that carry no thread
+identity - row occupancy over time <em>is</em> average concurrency. The band across the top shows
+core utilization over time.</p>
+
+<ul>
+  <li><strong>Orange-bordered nodes</strong> sit on the measured critical path; the border's share
+      reflects how often the node bound the frame across runs.</li>
+  <li><strong>Hatched bands</strong> are critical dead time - places where the critical chain
+      waited. Pink hatching means it waited on a dependency (a scheduling problem you can fix by
+      cutting an edge); orange means the cores were simply busy (the frame is compute-bound).</li>
+  <li><strong>Edges</strong>: solid arrows are explicit ordering; dashed ones were derived from the
+      declared data access. Pink edges carry the critical chain.</li>
+  <li>The <strong>ranking table</strong> at the bottom orders nodes by expected contribution to the
+      critical chain - the answer to "where does optimising help most".</li>
+</ul>
+
+<h2>How to use it</h2>
+
+<p>Hover any node for its stats (mean, P95, spread), its declared accesses, and its incoming and
+outgoing edges coloured by criticality. Hover highlights the incident edges. The buttons along the
+top toggle views: <em>Critical focus</em> dims everything off the chain, <em>Dead-time focus</em>
+isolates the waits, <em>Cone</em> restricts the view to one node's ancestors and descendants, and
+<em>Edge type</em> filters explicit versus derived edges.</p>
+
+<p>The workflow the sample demonstrates: find the orange spine, check whether its dead time is
+pink (cut the dependency - snapshot last frame's data, stage writes) or orange (split the fat
+nodes so the work spreads), apply one lever, re-trace. The optimised variant of
+<code>game_frame</code> is nothing more than a few iterations of that loop; the levers and their
+measured effect are documented in the repo's
+<a href="https://github.com/macrame-ts/macrame/blob/master/docs/example-frame-optimization.md">worked
+optimisation example</a>.</p>
+
+</main>
+</body>
+</html>
