@@ -74,7 +74,7 @@ in its own rpmalloc heap (MBs while a capture runs).
 
 What we get: live remote timeline of concrete runs; per-zone statistics,
 full duration histograms, and "find zone" queries — which subsumes two
-`tracing-ideas.md` *consider* items (per-node histogram, exemplar-run capture)
+earlier *consider* ideas (per-node histogram, exemplar-run capture)
 without us storing a sample; lock-contention analysis on the pipe mutex;
 callstack sampling alongside instrumentation; memory zones later if wanted.
 What stays ours: the average-run view, criticality frequency, CPM/slack, the

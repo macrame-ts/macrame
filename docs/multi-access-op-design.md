@@ -321,7 +321,7 @@ Exceeding it is a compile error naming both.
 Phase 1 alone is a shippable improvement, which matters if the tag arrives before phase 2.
 
 **As landed (2026-08).** All three phases, in that order, plus M6 from
-`api-stability-pass.md` (the option `name` fields became `ts::Named`, so a multi-object verb
+the API-stability pass (the option `name` fields became `ts::Named`, so a multi-object verb
 can carry a call site). Three notes where the implementation differs from the sketch above:
 
 1. **Where the modes live.** §3 shows the instances as a typed tuple and the modes as a
