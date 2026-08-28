@@ -194,9 +194,10 @@ macrame_private_flags(macrame)
 macrame_atomic_flags(macrame)
 
 # ThreadSanitizer instrumentation lives on the library too, so ts_tsan catches races in the
-# scheduler/pipe core (non-Windows; TSan has no Windows runtime).
+# scheduler/pipe core (non-Windows; TSan has no Windows runtime). Off by default - a plain
+# consumer build must not be instrumented; the linux-tsan preset turns it on.
 if(NOT WIN32)
-    option(TS_TSAN "Build with ThreadSanitizer" ON)
+    option(TS_TSAN "Build with ThreadSanitizer" OFF)
     if(TS_TSAN)
         target_compile_options(macrame PUBLIC -fsanitize=thread -O1 -g)
         target_link_options(macrame PUBLIC -fsanitize=thread)
