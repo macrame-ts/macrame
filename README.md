@@ -188,7 +188,7 @@ The framework is layered and composable. You can use as much or as little as you
 - Static task graphs. These are directed acyclic graphs built once and run multiple times. Edges are derived from access conflicts, and executions reuse compiled nodes to avoid memory allocations. Visualisation and profiling tools are included to track parallelism metrics.
 - Design patterns. Utilities like `Deferred<T>`, `Versioned<T>` and others provide high-level building blocks.
 
-The current unreleased version (v0.1.0) has a stable API shape, though it is not completely frozen. The changelog outlines the contents of this version. Certain areas are actively evolving, including performance optimizations, a platform abstraction layer, task-local storage and more. See [docs/roadmap.md](docs/roadmap.md) for more details on future plans.
+Version 0.1.0 has a stable API shape, though it is not completely frozen. The changelog outlines the contents of this version. Certain areas are actively evolving, including performance optimizations, a platform abstraction layer, task-local storage and more. See [docs/roadmap.md](docs/roadmap.md) for more details on future plans.
 
 ---
 
@@ -199,7 +199,7 @@ The concurrency behaviour is checked several ways:
 - A comprehensive test suite that includes subprocess death tests for every fatal path.
 - Clean results from ThreadSanitizer and AddressSanitizer.
 - Deterministic end-to-end samples that compare independent runs for consistency.
-- A runtime harness to detect data-access violations and deadlocks.
+- A runtime harness to detect data-access violations and deadlocks in checked builds.
 
 ---
 

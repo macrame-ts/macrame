@@ -55,7 +55,9 @@ is on by default.
 
 ## 2. Quick start
 
-Launch a task, get its result:
+Launch a task, get its result. The scheduler must already be up when any
+work is launched; it is created once at startup with `ts::create_scheduler`,
+shown later in this section:
 
 ```cpp
 #include "ts/task.h"
@@ -469,11 +471,11 @@ ts::launch([&mesh]
 }).sync();   // Returns only after all four chunks have finished.
 ```
 
-Inside a coroutine body the same call gates a mid-body consume. The loop has
+Inside a task body the same call gates a mid-body consume. The loop has
 finished when `parallel_for` returns, so its output is ready on the next line:
 
 ```cpp
-ts::Task<void> frame_section()
+void frame_section()
 {
     ts::parallel_for(2, [&](int i) { i == 0 ? build_shadow_list() : build_visible_list(); });
     merge_lists();   // Both lists are done here, so it is safe to consume their output.
@@ -1566,6 +1568,7 @@ rec.stage([](Score_board& b) { b.add("bob", 5); });
 
 // Later, at a point you choose:
 ts::Task<void> applied = staged.commit();                // One write applies everything.
+applied.sync();                                          // Or co_await it from a coroutine.
 ```
 
 `commit()` auto-dispatches on grant ownership. Called from the task that

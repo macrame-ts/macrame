@@ -9,10 +9,20 @@ This guide explains how to get the framework running. For a complete tour of eve
 Macrame is not published to a package registry yet (pre-1.0). However, it builds as a standard CMake static library with no external dependencies. You can clone the repository and consume it in one of two ways.
 
 ```text
-git clone <repo-url> macrame
+git clone https://github.com/macrame-ts/macrame.git macrame
 ```
 
-*   **CMake.** You can use `add_subdirectory(macrame)` and link `macrame::macrame`. Alternatively, you can install it using `cmake --install`, then find it with `find_package(macrame CONFIG REQUIRED)` and link `macrame::macrame`.
+*   **CMake.** You can use `add_subdirectory(macrame)` and link `macrame::macrame`. Alternatively, you can install it using `cmake --install`, then find it with `find_package(macrame CONFIG REQUIRED)` and link `macrame::macrame`. A minimal consumer project looks like this:
+
+    ```cmake
+    cmake_minimum_required(VERSION 3.25)
+    project(app LANGUAGES CXX)
+
+    add_subdirectory(macrame)   # or, after cmake --install: find_package(macrame CONFIG REQUIRED)
+
+    add_executable(app main.cpp)
+    target_link_libraries(app PRIVATE macrame::macrame)
+    ```
 *   **By hand.** Add the `include/` directory to your include path and compile the library `.cpp` files located under `src/` into your build. These files are `access`, `fatal`, `guarded`, `scheduler`, `static_task_graph`, and `worker_thread`. The headers are located under `include/ts/`. Other source files like `main.cpp` and `mem_profile.cpp` belong to the development driver, not the library itself.
 
 The library requires C++23. It never throws exceptions, and it does not require your code to use them. You can compile your translation units with exceptions enabled or disabled based on your preference. The only strict rule is that an exception must not escape a task body, as this will result in a fatal error (see guide section 10.5). If you want to build Macrame itself without exception support for an entirely exceptions-off program, configure it with `-DMACRAME_NO_EXCEPTIONS=ON`. The setting rides on the `macrame::macrame` target as a usage requirement, because on MSVC it has to be program-wide.
@@ -31,6 +41,9 @@ You can include the entire library through the umbrella header, or use individua
 ```text
 cmake --preset windows-msvc
 cmake --build --preset windows-msvc
+
+cmake --preset linux-clang        # on Linux
+cmake --build --preset linux-clang
 ```
 
 As a reminder, C++23 is required. Non-recoverable failures call `ts::fatal`, which prints a message and stack trace before aborting, rather than throwing an exception — the library never throws in any configuration.
