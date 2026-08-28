@@ -86,6 +86,8 @@ Scheduler::Scheduler(Scheduler_config config)
     uint32_t num_workers = config.num_workers;
     if (num_workers == 0)
         num_workers = std::thread::hardware_concurrency();
+    if (num_workers == 0)
+        num_workers = 1;   // hardware_concurrency() may return 0 (unknown); never build a worker-less pool by accident
     if (single_threaded_)
         num_workers = 0;   // worker-less: no deques, no workers; `submit` runs tasks inline
 
