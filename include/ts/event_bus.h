@@ -41,7 +41,7 @@
 //    the destructor) outside tasks only; a disconnect racing a still-staged install wins.
 //    No sub/unsub from inside a handler.
 //  - Each publish stages a closure (heap past the SBO) - sized for sparse notifications,
-//    not per-entity firehoses; the typed-lane plan is in `docs/command-buffer-design.md`.
+//    not per-entity firehoses; the typed-lane plan is in `docs/internals/command-buffer-design.md`.
 //
 // Not the right tool for heavy flows whose consumers deserve their own schedule - those
 // want a dedicated batch object and a conflict-derived edge (the `Damage_events` tier in

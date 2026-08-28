@@ -2,7 +2,7 @@
 
 **The canonical collection point for profiler-guided design and automatic perf
 analysis.** Ideas, findings, and the closed-loop design live here; the
-[TODO.md](TODO.md) items (2.4 profiler-guided optimization, 2.5 rank-shaped
+[TODO.md](../TODO.md) items (2.4 profiler-guided optimization, 2.5 rank-shaped
 dispatch, 2.11 yield points, 2.12 frame-boundary overlap) are the work-item
 index and point back to this document for the design detail — add new design
 thinking here, not scattered across the TODO. The measurement tooling
@@ -161,7 +161,7 @@ out on `current_scheduler` corrected this: honest single-pool numbers are
 critical path 2.65 → 6.1 ms), and the frame is correctly critical-path-bound
 (~46–47% average utilization, peaking in the parallel stretches). The
 optimised-vs-baseline contrast survives (6.8 vs 7.6 ms). **The
-[example-frame-optimization.md](example-frame-optimization.md) numbers predate
+[example-frame-optimization.md](../example-frame-optimization.md) numbers predate
 this fix and need a refresh.**
 
 Done (2026-07): **task volume.** A per-worker task counter in `run_task` (armed

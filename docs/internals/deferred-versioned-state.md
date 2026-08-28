@@ -1,13 +1,13 @@
 # Deferred/Versioned: development state handoff
 
-(User-facing usage: [guide.md](guide.md) §9; condensed rationale:
-[design.md](design.md) §6.)
+(User-facing usage: [guide.md](../guide.md) §9; condensed rationale:
+[design.md](../design.md) §6.)
 
 Written 2026-07 at the wrap of the staged-write development push (commits
 `99b1b25`..`785fc93`). Intended to be absorbed by the main development session:
 what shipped, the load-bearing mechanisms and their WHY, verification state,
 and the ranked plan for what comes next. Design history and rationale live in
-`docs/command-buffer-design.md` (§7 = outcome); this doc is the operational
+`docs/internals/command-buffer-design.md` (§7 = outcome); this doc is the operational
 summary + the forward plan.
 
 ## 1. What shipped (commit by commit)

@@ -19,7 +19,7 @@ namespace
 {
 
 // 1. Compile-out state. `await_under_guard` is the one rule a shipping build keeps by
-// default (docs/waiting-rule-policy.md §2), so it is on in every configuration this suite
+// default (docs/internals/waiting-rule-policy.md §2), so it is on in every configuration this suite
 // builds in; the advisory rules track `TS_SAFETY_CHECKS`.
 void test_compiled_in_set()
 {
@@ -75,7 +75,7 @@ void test_relaxed_scope_refuses_structural()
 
 // 4. Reach, part 1: a relaxation opened in a task body does not leak into a detached
 // `ts::launch`. A detached child's handle may outlive the launcher's scope, so it runs as a
-// fresh context on its own worker and sees no relaxation (docs/coroutine-first.md §2). The
+// fresh context on its own worker and sees no relaxation (docs/internals/coroutine-first.md §2). The
 // grant-inheriting form that does carry the relaxation is a coroutine segment - part 2 below.
 void test_relaxed_scope_inherited_by_child()
 {

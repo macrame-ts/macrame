@@ -195,7 +195,7 @@ void test_death_context_overflow(){ TS_CHECK(ts::test::expect_death("access_cont
 // it; its guarded access after the node released must fault (the stale-grant fatal).
 void test_death_stale_grant()   { TS_CHECK(ts::test::expect_death("stale_inherited_grant")); }
 // A detached `ts::launch` inherits no grant, so a body touching the launcher's guarded data
-// faults deterministically as undeclared access (docs/coroutine-first.md §2).
+// faults deterministically as undeclared access (docs/internals/coroutine-first.md §2).
 void test_death_detached_launch(){ TS_CHECK(ts::test::expect_death("detached_launch_undeclared")); }
 
 // Companion to the detached-launch death test: the sanctioned form. `ts::parallel_for` helpers

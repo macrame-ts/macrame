@@ -1,9 +1,9 @@
 #pragma once
 
 // Rule policy - which waiting-rule checks exist in this build, and how a program opts out
-// of one for a scope. Design of record: docs/waiting-rule-policy.md.
+// of one for a scope. Design of record: docs/internals/waiting-rule-policy.md.
 //
-// The waiting rules (docs/coroutine-first.md §2) are enforced by runtime checks that fatal.
+// The waiting rules (docs/internals/coroutine-first.md §2) are enforced by runtime checks that fatal.
 // Each one can be wrong for a program that upholds the rule by means the library cannot see
 // (an external lock discipline, a phase invariant, a platform guarantee), so every check
 // answers two questions, decided per rule and stated in the table below:
@@ -66,7 +66,7 @@
 #define TS_RULE_ON(bit) (((TS_RULES_EFFECTIVE) & (bit)) != 0)
 #define TS_RULES_ANY ((TS_RULES_EFFECTIVE) != 0)
 
-// The deadlock report's third tier (docs/waiting-rule-policy.md §7): a registry of every
+// The deadlock report's third tier (docs/internals/waiting-rule-policy.md §7): a registry of every
 // live suspension - who is suspended, what they await, what they hold. Tiers 1 and 2 come
 // free; this one costs a linked-list insert/remove per suspension, so it is a switch.
 //

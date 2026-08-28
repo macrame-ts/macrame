@@ -2,7 +2,7 @@
 
 // Coroutine support - makes `ts::Task<R>` awaitable and provides a `promise_type`
 // so a coroutine can return `Task<R>` and `co_await` other tasks. Header-only;
-// coroutines are mandatory (docs/coroutine-first.md), so the library assumes a
+// coroutines are mandatory (docs/internals/coroutine-first.md), so the library assumes a
 // coroutine-capable toolchain. Tasks are eager (`initial_suspend = suspend_never`): a body
 // runs on the caller's thread until its first real suspension, and awaiting an
 // already-settled task never suspends. A coroutine task costs one allocation (the frame),
@@ -351,7 +351,7 @@ struct Task_awaiter
         // The guard-across-suspension rule was already checked at `co_await` entry
         // (`await_ready`), so reaching here means it passed.
 #if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
-        // Waits-for edges (docs/coroutine-first.md §2): suspending on a pipe job while this
+        // Waits-for edges (docs/internals/coroutine-first.md §2): suspending on a pipe job while this
         // context holds grants - the job's turn cannot arrive until its pipes drain, so a
         // held-grant cycle through them is the suspended-ABBA deadlock. Recorded before the
         // attach (the segment's `current_access` is still installed here); cleared at
@@ -520,7 +520,7 @@ struct Promise_base : Coroutine_block
     std::vector<Task_ptr>* prev_scope_ = nullptr;
     // The frame's rule relaxation (`ts::Relaxed_scope`), carried across suspensions the same
     // way: a `Relaxed_scope` entered in the body must still be in effect when the body resumes
-    // on another worker, and must not leak onto that worker (docs/waiting-rule-policy.md §4).
+    // on another worker, and must not leak onto that worker (docs/internals/waiting-rule-policy.md §4).
     Relaxed_carrier relaxed_;
 
     Promise_base()
@@ -859,7 +859,7 @@ struct Access_awaiter
         registered_ = true;
 #endif
 #if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
-        // Waits-for edge (docs/coroutine-first.md §2): a deferred acquire is a genuine
+        // Waits-for edge (docs/internals/coroutine-first.md §2): a deferred acquire is a genuine
         // suspension on this pipe; record {each held grant -> pipe_} and cycle-check.
         // `current_access` is still the segment's context here (`exit_segment` restores
         // task identity, not the access scope). Cleared at `await_resume`.

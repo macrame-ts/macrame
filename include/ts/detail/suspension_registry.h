@@ -1,6 +1,6 @@
 #pragma once
 
-// The deadlock report's third tier (docs/waiting-rule-policy.md §7): a registry of every
+// The deadlock report's third tier (docs/internals/waiting-rule-policy.md §7): a registry of every
 // live suspension - which task is suspended, what it awaits, and what it holds. The
 // quiescence net (`Rule::deadlock_net`) can say "nothing can make progress"; this says who
 // was stuck on what, which is the difference between a report and a debugging session.

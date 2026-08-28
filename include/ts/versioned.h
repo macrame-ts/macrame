@@ -55,7 +55,7 @@ enum class Resync
 // finish first, so the exclusive window is tiny. Access control is `Guarded`'s: readers
 // declare an ordinary read on the front (`state()`), so the harness and any
 // `Static_task_graph` treat it like a normal guarded object. (Swap/resync mechanics:
-// `docs/deferred-versioned-state.md`.)
+// `docs/internals/deferred-versioned-state.md`.)
 //
 // Use (dynamic tasks):
 //   ts::Versioned<Transforms> tf{ ts::Named{"transforms"} };  // owns both replicas

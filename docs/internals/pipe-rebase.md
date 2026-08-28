@@ -2,7 +2,7 @@
 
 Consolidates TODO 1.14 (+ its two addenda), the task-internals §6 retraction addendum,
 and the `FPipe` note in task-systems-comparison.md into one design. Companion:
-`docs/pipe-rebase-tests.md` (the test plan). Status: design, 2026-07-31, branch
+`docs/internals/pipe-rebase-tests.md` (the test plan). Status: design, 2026-07-31, branch
 `pipe-rebase`. Read this before touching `src/guarded.cpp` / the pipe.
 
 The tests are labelled R1..R10 to match the concern labels here.

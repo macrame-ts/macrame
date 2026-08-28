@@ -1,6 +1,6 @@
 # Task internals — structure, lifecycle, allocation
 
-(Start with [guide.md](guide.md) for usage and [design.md](design.md) for the
+(Start with [guide.md](../guide.md) for usage and [design.md](../design.md) for the
 rationale narrative; this document is the deep design-of-record.)
 
 Design of record for the dynamic task object: what a task *is*, the states it
@@ -9,7 +9,7 @@ it is allocated. Distilled from the design discussion; grounded in the Unreal
 Engine Tasks system (`Engine/Source/Runtime/Core/.../Tasks/TaskPrivate.{h,cpp}`),
 with the differences that matter for *our* access-safety model called out.
 
-**Status:** implemented, coroutine-first (docs/coroutine-first.md). Composition
+**Status:** implemented, coroutine-first (docs/internals/coroutine-first.md). Composition
 is `co_await`; the callback vocabulary this document once specified (`then`,
 `when_all`, builders, retraction, dynamic-task inline dispatch) was built,
 validated, and then deleted in the coroutine-first transformation — those
@@ -197,7 +197,7 @@ nested completes : n = --num_locks; if n == execution_flag -> Close()
   executing from birth); the final awaiter drops the self-lock at `co_return`.
 - Above `execution_flag`, the count is outstanding nested tasks; the last one to
   hit `execution_flag` closes the parent. This above-the-flag regime *is* the
-  implicit scope of docs/coroutine-first.md §4.3 — evaluated against a separate
+  implicit scope of docs/internals/coroutine-first.md §4.3 — evaluated against a separate
   scope object during the coroutine-first deletions and kept: the counter
   already counts exactly the scope's members, and a scope object would add
   state without deleting any transition.
@@ -633,7 +633,7 @@ TSan): the block settles exactly once, either way.
   cooperative cancellation (§11); the fused coroutine frame (`Task_promise`
   embedding the block); the blue-boundary blocking rule with the in-task fatal
   (§6); the circular-wait detector for suspended-ABBA deadlocks
-  (docs/coroutine-first.md §2); allocation-free graph re-runs (§7.1, ~19% faster
+  (docs/internals/coroutine-first.md §2); allocation-free graph re-runs (§7.1, ~19% faster
   on the 8-node `graph` benchmark than per-run blocks).
 - **Historical record (built, validated, deleted 2026-08 in coroutine-first):**
   `then` rebased onto proper prerequisite-linked tasks; `when_all` with the

@@ -1,7 +1,7 @@
 # Static Task Graphs vs. Dynamic Task Spawning: Evidence Review
 
-*Research compiled 2026-07. Companion to [task-systems-comparison.md](task-systems-comparison.md)
-(system-by-system survey) and [design.md](design.md). Purpose: ground the
+*Research compiled 2026-07. Companion to [task-systems-comparison.md](../task-systems-comparison.md)
+(system-by-system survey) and [design.md](../design.md). Purpose: ground the
 `Static_task_graph` layer's positioning in what other ecosystems actually measured,
 complained about, and converged on — user testimonials, issue trackers, papers with
 numbers, and conference talks, not marketing claims. Findings are mapped onto this

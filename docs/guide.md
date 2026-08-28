@@ -493,7 +493,7 @@ use of the object. When you need genuinely independent work, launch it
 detached with `ts::launch`, which inherits nothing, and have it take its own
 turn on the object via `obj.async(...)` or `co_await obj.access(...)`. When it
 needs last-frame data, read a `Versioned` snapshot. When it produces outward
-writes, stage them with `Deferred`. See docs/coroutine-first.md §4.3 for the
+writes, stage them with `Deferred`. See docs/internals/coroutine-first.md §4.3 for the
 full rationale and the field survey behind the removal.
 
 ---
@@ -1393,7 +1393,7 @@ To drop a check from a build entirely, including its state, define
 `TS_ENABLED_RULES` to an OR of `TS_RULE_*` bits, one value per binary, like
 `TS_SAFETY_CHECKS`. The defaults are everything in checked builds and
 `TS_RULE_AWAIT_UNDER_GUARD` in shipping builds. The full table and rationale
-are in [waiting-rule-policy.md](waiting-rule-policy.md).
+are in [waiting-rule-policy.md](internals/waiting-rule-policy.md).
 
 ### 8.4 Thread-local state
 
@@ -1579,7 +1579,7 @@ from anywhere else, it enqueues one ordinary async write on the target and
 returns that write's completion.
 
 The contracts, briefly; the full statements live in
-[deferred-versioned-state.md](deferred-versioned-state.md):
+[deferred-versioned-state.md](internals/deferred-versioned-state.md):
 
 - Staging is grant-free. It touches only the journal, is safe from any
   thread, and never contends with the target's readers.
@@ -1986,11 +1986,11 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
 
 - [design.md](design.md) — the design rationale: why these primitives, what
   was tried and rejected, and how it compares to other systems.
-- [task-internals.md](task-internals.md) — dynamic-task internals (control
+- [task-internals.md](internals/task-internals.md) — dynamic-task internals (control
   block, lifecycle, coroutine frames, completion gating).
-- [command-buffer-design.md](command-buffer-design.md) — the design study
+- [command-buffer-design.md](internals/command-buffer-design.md) — the design study
   behind `Deferred`/`Versioned`, including the UE research.
-- [deferred-versioned-state.md](deferred-versioned-state.md) — the staged-
+- [deferred-versioned-state.md](internals/deferred-versioned-state.md) — the staged-
   write layer's contracts and mechanisms, in full.
 - [task-systems-comparison.md](task-systems-comparison.md) — survey of UE
   Tasks, TBB, Taskflow, folly, Rayon/Tokio, and others.

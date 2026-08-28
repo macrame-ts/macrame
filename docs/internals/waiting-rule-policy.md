@@ -1,6 +1,6 @@
 # Rule policy — escape hatches and shipping defaults for the waiting-rule checks
 
-Design of record for [TODO](TODO.md) 6.15. Implemented in `include/ts/rules.h`.
+Design of record for [TODO](../TODO.md) 6.15. Implemented in `include/ts/rules.h`.
 
 The waiting rules ([coroutine-first.md](coroutine-first.md) §2) say what a task may suspend
 on while it holds a grant. Each rule is enforced by a runtime check that fatals. A user can
@@ -108,7 +108,7 @@ grants already follow:
   leak onto that worker. Restoring a saved *value* is thread-agnostic, which is what makes
   this correct where `Access_guard`'s saved *pointer* is not (§3).
 - **Not onto other threads.** A detached `ts::launch` inherits neither the grant nor the
-  relaxation: it is a fresh context (docs/coroutine-first.md §2), so an opt-out opened in the
+  relaxation: it is a fresh context (docs/internals/coroutine-first.md §2), so an opt-out opened in the
   launcher does not silently follow a child that outlives the launcher's scope. The same holds
   for a `parallel_for` helper on another worker: `Parallel_base` snapshots the caller's
   `Access_context` and trace owner, not `detail::relaxed_rules`, so the helpers run checked
@@ -265,7 +265,7 @@ document.
 ### 7.2 What the registry costs, measured
 
 The registry was going to be debug-only on the assumption that per-suspension bookkeeping is
-expensive. It was measured instead (numbers and method in [TODO](TODO.md) 6.13):
+expensive. It was measured instead (numbers and method in [TODO](../TODO.md) 6.13):
 
 - **~30 ns per suspension**, uncontended.
 - **Zero measurable cost on real frame workloads** — the `game_frame` benchmarks, graph and

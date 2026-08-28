@@ -6,7 +6,7 @@
 // dispatch and destroy trampolines, the block-naming helpers, the `Current_task` TLS, the
 // body-shape traits, and the scheduler-free seams the block dispatches through
 // (`submit_ready`, `pipe_enter_first`, the deadlock-net internals). The design detail
-// lives on the entities themselves; internals: docs/task-internals.md.
+// lives on the entities themselves; internals: docs/internals/task-internals.md.
 
 #include "ts/access.h"   // grant inheritance for launched/parallel_for sub-work (snapshot_access)
 #include "ts/cancellation.h"   // the block holds a `Cancellation_token`
@@ -179,7 +179,7 @@ struct Pipe_link;
 // `release()` when the count drops to `pipe_count` (a task with ordinary prerequisites),
 // or directly by a creation site with none (`async`, a data-ready graph node). The
 // remaining pipes are entered by the sequential canonical cascade as earlier turns
-// arrive (docs/pipe-rebase.md §0.2). `record`, when non-null, receives the block under
+// arrive (docs/internals/pipe-rebase.md §0.2). `record`, when non-null, receives the block under
 // the first pipe's mutex (the enqueue-and-record seam; see guarded.h).
 void pipe_enter_first(Task_control_block* blk, Task_ptr* record = nullptr);
 
@@ -190,7 +190,7 @@ void pipe_enter_first(Task_control_block* blk, Task_ptr* record = nullptr);
 // `void* result_ptr` (nullptr => no result: `void`/bodyless); a body, when present,
 // hangs off an `Executable<Body,R>` wrapper (or a coroutine promise frame) that derives
 // from the block, so a `Task_control_block*` recovers it with a `static_cast` (see
-// docs/task-internals.md §2).
+// docs/internals/task-internals.md §2).
 // Continuations receive `(result_ptr-or-nullptr, cancelled)` so they propagate a
 // cancellation to their own subsequent. `settle()` is idempotent - the first settle
 // wins (so a bodyless block can be triggered; see `Signal`). Result-consumption contract:
@@ -205,13 +205,13 @@ struct Task_control_block
     // in line 0, so starting a task touches one line - good locality - but line 0 also holds the
     // write-hot atomics (`refcount`, `num_locks`), so a handle copy/drop or an indegree decrement
     // on another core can false-share it during a parallel graph run. That tradeoff is unmeasured;
-    // see docs/TODO.md 4.8 (cache-line alignment audit). See docs/task-internals.md §2.
+    // see docs/TODO.md 4.8 (cache-line alignment audit). See docs/internals/task-internals.md §2.
 
     // Intrusive strong refcount (see `Task_ptr`) + `num_locks`. Two 32-bit atomics packed
     // adjacent = one 8-byte slot, no padding. `refcount` starts at 0 (first `Task_ptr` -> 1).
     // `num_locks`: below `execution_flag` it counts unmet prerequisites (gate execution);
     // once the body starts the flag is set and it counts pending nested tasks (gate
-    // completion). See docs/task-internals.md §4/§7.
+    // completion). See docs/internals/task-internals.md §4/§7.
     static constexpr std::uint32_t execution_flag = 0x8000'0000u;
     std::atomic<std::uint32_t> refcount{ 0 };
     std::atomic<std::uint32_t> num_locks{ 0 };
@@ -225,7 +225,7 @@ struct Task_control_block
     // Unlike a continuation it is not consumed, so a reused block (e.g. a re-armed graph
     // node) keeps it across runs - an alloc-free completion hook. Null for most tasks.
     void (*on_complete)(Task_control_block*) = nullptr;
-    // The task's pipe entries (docs/pipe-rebase.md §0.2): an array of `pipe_count` links
+    // The task's pipe entries (docs/internals/pipe-rebase.md §0.2): an array of `pipe_count` links
     // embedded in the owning allocation (`Piped_executable` or the graph's per-node slab),
     // in canonical (ascending pipe-address) order. Null / 0 for a non-pipe task.
     // `pipe_count` doubles as the `release()` trigger threshold (pipes are entered when it
@@ -845,7 +845,7 @@ inline void Task_control_block::sync_wait(const Task_ptr& blk)
     // before parking, or nothing ever would. No-op otherwise.
     drain_serial_pending();
 #if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
-    // `Rule::in_task_sync` (docs/coroutine-first.md §4.1, TODO 6.10): `sync()`/`take()`
+    // `Rule::in_task_sync` (docs/internals/coroutine-first.md §4.1, TODO 6.10): `sync()`/`take()`
     // inside a task is illegal whether or not the target has already settled. The check
     // used to fire only when the wait would genuinely park, which inverted its coverage:
     // a call whose target is usually settled never tripped in development, then parked a

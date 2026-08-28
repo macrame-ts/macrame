@@ -9,7 +9,7 @@
 // Single-file samples (by design - no headers): the mock game-engine frame
 // (sample/game_frame.cpp), the physics machine/extract decomposition
 // (sample/physics.cpp), the blackboard pattern recipe of
-// docs/command-buffer-design.md §7.4 (sample/blackboard.cpp), and the
+// docs/internals/command-buffer-design.md §7.4 (sample/blackboard.cpp), and the
 // delegate/event recipe (sample/events.cpp).
 namespace sample
 {

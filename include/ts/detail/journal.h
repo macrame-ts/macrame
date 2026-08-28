@@ -17,7 +17,7 @@ namespace ts
 // The shared staging machinery under `Deferred<T>` (journal + single live state,
 // deferred.h) and `Versioned<T>` (journal + two replicas, versioned.h): per-
 // producer slots with contention-free staging, an atomic cut, and a
-// deterministic drain order. See docs/command-buffer-design.md.
+// deterministic drain order. See docs/internals/command-buffer-design.md.
 //
 // v1 notes: commands are type-erased closures (`std::move_only_function`), one
 // small allocation per command when the capture outgrows the SBO - the

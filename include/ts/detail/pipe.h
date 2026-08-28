@@ -6,8 +6,8 @@
 // (`pipe_enter_first`, `advance_pipe_links`, `pipe_acquire`/`pipe_release`, `pipe_try_inline`), the
 // waits-for cycle detector hooks, and the pipe-task block builders (`Piped_executable`,
 // `make_piped_executable`, `bind_pipe_link`). Public `Guarded<T>` + verbs: ts/guarded.h;
-// access-mode deduction: ts/detail/access_deduction.h. Internals: docs/pipe-rebase.md §0; the
-// per-node turn mechanism: docs/task-internals.md §10.
+// access-mode deduction: ts/detail/access_deduction.h. Internals: docs/internals/pipe-rebase.md §0; the
+// per-node turn mechanism: docs/internals/task-internals.md §10.
 
 #include "ts/access.h"
 #include "ts/detail/pipe_link.h"
@@ -28,7 +28,7 @@ namespace ts
 namespace detail
 {
 
-// A per-object reader/writer pipe (the evolved mutex pipe, docs/pipe-rebase.md §0.2).
+// A per-object reader/writer pipe (the evolved mutex pipe, docs/internals/pipe-rebase.md §0.2).
 // Entries are admitted in FIFO order; consecutive readers run concurrently, a writer runs
 // alone (no readers, no other writer). Different objects have independent pipes and run in
 // parallel. Non-blocking: callers never wait; admission is completion-driven, and an
@@ -72,7 +72,7 @@ struct Pipe
 #endif
 
     // The block currently holding this pipe's write grant, null outside a write window
-    // (docs/pipe-rebase.md §0.2). Always-on: behavior keys off it (`Deferred::commit`
+    // (docs/internals/pipe-rebase.md §0.2). Always-on: behavior keys off it (`Deferred::commit`
     // applies inline when the caller is the holder), so it cannot live behind
     // `TS_SAFETY_CHECKS`. Written under `mutex` at write admission/release; read lock-free
     // by the ownership check. Identity only - never dereferenced.
@@ -152,7 +152,7 @@ bool pipe_acquire(Scheduler& scheduler, Pipe& pipe, Access mode, std::move_only_
 void pipe_release(Scheduler& scheduler, Pipe& pipe, Access mode);
 
 #if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
-// Waits-for cycle detector (docs/coroutine-first.md §2). At a genuine suspension on a
+// Waits-for cycle detector (docs/internals/coroutine-first.md §2). At a genuine suspension on a
 // pipe - a deferred coroutine guard acquire, or awaiting a pipe-job task - the awaiters
 // record one edge per held grant: {pipe the suspending context holds -> pipe it awaits}.
 // Held pipes come from `held`'s epoch sources; a cycle among the recorded edges is the
@@ -172,7 +172,7 @@ void circular_wait_clear(const void* ticket) noexcept;
 #endif
 
 // An executable pipe task: the `Executable` wrapper plus its embedded per-pipe links -
-// one allocation for block + result + body + links (docs/pipe-rebase.md §0.2). Derives
+// one allocation for block + result + body + links (docs/internals/pipe-rebase.md §0.2). Derives
 // from `Executable` (itself block-backed), so the intrusive handle's `Task_control_block*`
 // recovers the whole wrapper with a `static_cast` as usual.
 template<typename Body, typename R, std::size_t N>

@@ -769,7 +769,7 @@ void tick_streaming(ts::Guarded<Asset_source>& asset_source, ts::Deferred<Assets
     read_all(input);
 
     // The loads run detached, fire-and-forget. Kicked off through a detached `ts::launch`, which
-    // inherits none of this node's grants (docs/coroutine-first.md §2): the loader created inside
+    // inherits none of this node's grants (docs/internals/coroutine-first.md §2): the loader created inside
     // it snapshots an empty context, so it holds nothing while it awaits `asset_source`. Four
     // loads fire eagerly and run concurrently; the coroutine stages each result as it arrives and
     // counts the batch after the last. `inflight` gates the teardown flush (see ~World): bumped

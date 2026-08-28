@@ -1,6 +1,6 @@
 <!-- Design for API-stability item M1, option (b): a caller-owned operation handle for
-     multi-object access. Companion to docs/access-op-design.md (single-object) and
-     docs/pipe-rebase.md section 0 (the cascade). -->
+     multi-object access. Companion to docs/internals/access-op-design.md (single-object) and
+     docs/internals/pipe-rebase.md section 0 (the cascade). -->
 
 # Multi-object `Access_op`: design
 
@@ -127,7 +127,7 @@ table.
 
 ### 4.2 The same conclusion, reached independently
 
-`docs/static-order-checking-and-ww-mutex.md` §2.4 already evaluated batch multi-acquire for a
+`docs/internals/static-order-checking-and-ww-mutex.md` §2.4 already evaluated batch multi-acquire for a
 different purpose (the suspended-ABBA hole) and arrived at the same shape, as the cheaper
 alternative to a full `ww_mutex`:
 

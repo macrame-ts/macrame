@@ -9,8 +9,8 @@ pre-transformation API shape has no released version to be distinguished from. W
 follows is the state 0.1.0 ships as, not a delta against a published predecessor.
 
 Two large transformations, developed together on the `pipe-rebase` branch and merged as a
-unit. Both change public API. Designs of record: [docs/coroutine-first.md](docs/coroutine-first.md)
-and [docs/pipe-rebase.md](docs/pipe-rebase.md) §0.
+unit. Both change public API. Designs of record: [docs/internals/coroutine-first.md](docs/internals/coroutine-first.md)
+and [docs/internals/pipe-rebase.md](docs/internals/pipe-rebase.md) §0.
 
 ### Coroutine-first: composition is `co_await`
 
@@ -35,7 +35,7 @@ and [docs/pipe-rebase.md](docs/pipe-rebase.md) §0.
   patterns (read-only inheritance, parent relinquishes, child re-acquires) are covered by
   `Versioned`, node-splitting, and the access verbs. `detail::add_nested` survives internally
   as the completion-gating for coroutine graph nodes and nested graph runs. See
-  [docs/coroutine-first.md](docs/coroutine-first.md) §4.3.
+  [docs/internals/coroutine-first.md](docs/internals/coroutine-first.md) §4.3.
 
 **Changed:**
 
@@ -105,7 +105,7 @@ and [docs/pipe-rebase.md](docs/pipe-rebase.md) §0.
   body last, so `Access_op<T, Body>` still names exactly the single-object op it always did.
   One consume vocabulary, one dispatch policy, and no allocation at any arity. `ts::async`
   is unchanged - it remains the detached verb at every arity.
-  See [docs/multi-access-op-design.md](docs/multi-access-op-design.md).
+  See [docs/internals/multi-access-op-design.md](docs/internals/multi-access-op-design.md).
 - Dispatch, at every arity: objects the calling task **already holds** are *lent* - no turn is
   taken on them, because the access runs inside the caller's grant window, which is already the
   exclusion those objects need (the same protocol a nested `graph.execute()` uses; at one

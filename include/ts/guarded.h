@@ -6,7 +6,7 @@
 // exclusive write). The full model is documented on `class Guarded<T>` below. The per-object
 // serializer it rides lives in `detail/pipe.h`, the compile-time access-mode deduction in
 // `detail/access_deduction.h`. User guide: docs/guide.md §5; serializer internals and the evolved
-// cascade: docs/pipe-rebase.md §0.
+// cascade: docs/internals/pipe-rebase.md §0.
 
 #include "ts/access.h"
 #include "ts/detail/access_deduction.h"
@@ -39,7 +39,7 @@ void submit_closure(Scheduler& scheduler, std::move_only_function<void()> closur
 // `submit_ready` (task.h), but to an explicitly resolved scheduler rather than
 // `global_scheduler()`. The graph run caches its scheduler once (`Run_state::scheduler`)
 // and dispatches every node through this, so the per-node dispatch skips the `g_fast`
-// re-resolve (Opt 1 in docs/graph-regression-callgrind.md §4).
+// re-resolve (Opt 1 in docs/internals/graph-regression-callgrind.md §4).
 void submit_ready_on(Scheduler& scheduler, Task_ptr block);
 
 // `submit_borrowed` (task.h) to an explicitly resolved scheduler - the cached-scheduler
@@ -201,7 +201,7 @@ struct Op_target
 }
 
 // `Access_op<Objects..., Body>` - the caller-owned operation state the `access` verbs return
-// (docs/access-op-design.md, docs/multi-access-op-design.md). `access` is the ATTENDED verb: the
+// (docs/internals/access-op-design.md, docs/internals/multi-access-op-design.md). `access` is the ATTENDED verb: the
 // caller stays for the result, so the operation's whole state - completion core, result storage,
 // body, one pipe entry per object - lives in the returned object instead of a heap block, and an
 // access allocates nothing. `async` remains the detached verb and keeps returning a heap-backed
@@ -258,7 +258,7 @@ public:
     Access_op(const Access_op&) = delete;
     Access_op& operator=(const Access_op&) = delete;
 
-    // Lifecycle (docs/access-op-design.md §10.1): unbound -> dormant -> in flight -> settled,
+    // Lifecycle (docs/internals/access-op-design.md §10.1): unbound -> dormant -> in flight -> settled,
     // with `start()` the only verb that touches the pipe. The eager form (`world.access(fn)`)
     // is bind + start fused; these give members the deferred spellings. Single-owner: none of
     // start/bind/sync/destroy synchronize against each other.
@@ -329,7 +329,7 @@ private:
     // entry per object. `caller_owned` custody: the machinery holds no ref on it, ever (Flags
     // doc).
     //
-    // Two orderings, deliberately (docs/multi-access-op-design.md §3). The pipe arrays are in
+    // Two orderings, deliberately (docs/internals/multi-access-op-design.md §3). The pipe arrays are in
     // CANONICAL (ascending pipe-address) order, because that is what makes the cascade
     // deadlock-free and it is the order graph nodes take their objects in. The instance arrays
     // are in DECLARATION order, because that is the order the body takes its parameters and the
@@ -613,7 +613,7 @@ Access_op<Args...>::Access_op(Body body, Access_options opts, Named name,
     fire();
 }
 
-// The lend protocol (docs/multi-access-op-design.md §7.2), the same one a nested graph run uses
+// The lend protocol (docs/internals/multi-access-op-design.md §7.2), the same one a nested graph run uses
 // (`Static_task_graph::bind_links_for_run`): ask the calling task's `Access_context` - keyed by
 // instance address - whether it already holds a grant covering what this object needs. It does
 // exactly when the op runs inside that grant's window, which is already the exclusion the
@@ -911,7 +911,7 @@ bool access_op_started(const Access_op<Args...>& op) noexcept
 }
 
 // The single-object spelling `Access_op<T, Body>` must keep meaning exactly what it meant
-// before the type became variadic (docs/multi-access-op-design.md §7.1) - enforced here rather
+// before the type became variadic (docs/internals/multi-access-op-design.md §7.1) - enforced here rather
 // than asserted in prose: one object, the mode `accessor_mode` deduces, and the result
 // `Accessor_result_t` computes under it.
 template<typename T, typename Body>

@@ -23,7 +23,7 @@ namespace
 
 // Pipe contention: N producer threads hammer one object's reader/writer pipe with a
 // read-heavy async mix (`read_pct`% reads). This is the fixture the pipe rebase must be
-// validated non-regressive against (docs/pipe-rebase.md R10): it stresses the current
+// validated non-regressive against (docs/internals/pipe-rebase.md R10): it stresses the current
 // `Pipe::mutex` on every enqueue/admission - the cost the lock-free tail is meant to
 // remove without hurting the uncontended path. 100% reads isolates admission throughput
 // (readers never serialize); mixing writes adds serialization + the writer/reader handoff.
@@ -122,7 +122,7 @@ std::vector<double> bench_launch_sync()
 }
 
 // Coroutine task creation + boundary sync: the fused frame+block path (one allocation,
-// docs/coroutine-first.md §5.1). Target: at or below `launch` above.
+// docs/internals/coroutine-first.md §5.1). Target: at or below `launch` above.
 static ts::Task<int> trivial_coro() { co_return 1; }
 
 std::vector<double> bench_coro_sync()
@@ -160,7 +160,7 @@ std::vector<double> bench_coro_chain()
 // path: this measures the per-stage coroutine cost (frame allocation + promise setup +
 // settled-await + destruction) with no scheduler in the picture. `coro chn` minus this is
 // the round-trip (submit, worker wake, cross-thread resume), which is what that benchmark is
-// actually dominated by - see docs/pipe-rebase.md §0.4.
+// actually dominated by - see docs/internals/pipe-rebase.md §0.4.
 static ts::Task<int> add_one_coro(int v) { co_return v + 1; }
 
 static ts::Task<int> nest_coro(int chain)
@@ -239,7 +239,7 @@ std::vector<double> bench_graph_execute()
 
 // Uncontended single-object floor: a read `access` + boundary `sync()` on a free pipe, one
 // thread - the pure mechanism cost with zero contention (the Access_op acceptance metric,
-// docs/access-op-design.md §7 phase 0), reported beside the bare-mutex floor it is measured
+// docs/internals/access-op-design.md §7 phase 0), reported beside the bare-mutex floor it is measured
 // against.
 std::vector<double> bench_access_floor()
 {

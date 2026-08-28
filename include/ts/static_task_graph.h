@@ -7,7 +7,7 @@
 // declared data access instead of being hand-wired: the schedule stays correct as systems
 // change, and the same declarations are the safety harness's ground truth. This header carries
 // `Static_task_graph`, the `Graph_node` build-time handle, and `Execution_options`.
-// User guide: docs/guide.md §6; per-node acquisition and its hazards: docs/task-internals.md §10.
+// User guide: docs/guide.md §6; per-node acquisition and its hazards: docs/internals/task-internals.md §10.
 
 #include "ts/access.h"
 #include "ts/scheduler.h"
@@ -179,7 +179,7 @@ public:
     // `{.single_threaded = true}` mode (the scheduler owns no threads and every task executes
     // inline at submit, so the whole run happens deterministically on the calling thread).
     //
-    // nested runs (docs/coroutine-first.md §4.8). Calling `execute()` from inside a task -
+    // nested runs (docs/internals/coroutine-first.md §4.8). Calling `execute()` from inside a task -
     // typically `co_await inner.execute()` in a graph node - is supported, and two things
     // happen by default:
     //  - **Lending.** Every object this graph declares that the calling task already holds a
@@ -449,7 +449,7 @@ void Static_task_graph::fill_node_modes(Node& node, std::index_sequence<I...>, F
         };
         if constexpr (std::is_same_v<decltype(call_body()), Task<void>>)
         {
-            // A coroutine node body (docs/coroutine-first.md §4.4): the returned frame's
+            // A coroutine node body (docs/internals/coroutine-first.md §4.4): the returned frame's
             // task gates the node's completion via the nested mechanism - the node
             // completes (releasing grants and successors) when the frame completes, not
             // at the first suspension. The frame inherits the node's grant snapshot at

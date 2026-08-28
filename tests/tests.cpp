@@ -316,7 +316,7 @@ void run_death_scenario(const char* name)
     }
     else if (std::strcmp(name, "detached_launch_undeclared") == 0)
     {
-        // A detached `ts::launch` inherits no grant (docs/coroutine-first.md §2): a child that
+        // A detached `ts::launch` inherits no grant (docs/internals/coroutine-first.md §2): a child that
         // touches the launcher's guarded data runs under an empty context, so the harness
         // faults on the first access - deterministically, in every checked run. (Contrast the
         // stale-grant scenario above, where an inherited grant lets an early touch pass and

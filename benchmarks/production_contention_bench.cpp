@@ -15,7 +15,7 @@ namespace
 
 // --- the generalized production lock-contention case ----------------------------------
 //
-// Distilled from 41 cited production reports (docs/lock-contention-research.md): parallel
+// Distilled from 41 cited production reports (docs/internals/lock-contention-research.md): parallel
 // work items, arriving in bursts, each performing private work plus one tiny exclusive
 // touch of a shared singleton service - which occasionally executes a much longer
 // maintenance operation under the same lock. Pure mocks on purpose: a plain std::thread

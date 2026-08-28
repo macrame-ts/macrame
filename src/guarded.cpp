@@ -151,7 +151,7 @@ void submit_ready(Task_ptr block)
     submit_ready_on(global_scheduler(), std::move(block));
 }
 
-// ===== the evolved mutex pipe (docs/pipe-rebase.md §0.2) ====================================
+// ===== the evolved mutex pipe (docs/internals/pipe-rebase.md §0.2) ====================================
 //
 // One mutex per pipe guards the admission state and the intrusive queue of the tasks' own
 // embedded `Pipe_link`s. An admitted entry's turn fires `release()` on its owner - the pipe
@@ -422,7 +422,7 @@ bool pipe_try_inline(const Task_ptr& block)
     const std::uint8_t count = block->pipe_count;
     {
         // All or nothing: nothing is admitted unless every pipe passes, so a failed probe is
-        // invisible to every other participant (docs/multi-access-op-design.md §4.4). No user
+        // invisible to every other participant (docs/internals/multi-access-op-design.md §4.4). No user
         // code runs under the mutexes - the critical section is N checks and N admits.
         Locked_pipes locked(block->pipe_links, count);
         for (std::uint8_t i = 0; i < count; ++i)
@@ -530,7 +530,7 @@ const char* pipe_name(const Pipe* pipe, char* buf, std::size_t size) noexcept
 #endif
 
 #if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
-// ===== circular-wait detector (docs/coroutine-first.md §2) ================================
+// ===== circular-wait detector (docs/internals/coroutine-first.md §2) ================================
 //
 // One process-wide registry of {held pipe -> awaited pipe} edges, recorded by the coroutine
 // awaiters at a genuine suspension on a pipe and cleared at resume. A cycle among the edges
@@ -631,7 +631,7 @@ bool circular_wait_record(const Access_context* held, const void* ticket, const 
                         "'%s' holding '%s' awaits '%s' - a suspended ABBA deadlock (no thread "
                         "parks; the frames simply never resume). Prefer the access hierarchy: declare "
                         "the object on the node, read a Versioned snapshot, or stage via Deferred "
-                        "(docs/coroutine-first.md section 2)",
+                        "(docs/internals/coroutine-first.md section 2)",
                         task_name(waiter, waiter_buf, sizeof waiter_buf),
                         pipe_name(held_pipe, held_buf, sizeof held_buf),
                         pipe_name(awaited_pipe, awaited_buf, sizeof awaited_buf),

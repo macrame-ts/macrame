@@ -1,7 +1,7 @@
 # Command buffers: design study
 
-(User-facing usage: [guide.md](guide.md) §9; condensed rationale:
-[design.md](design.md) §6. This is the full design study.)
+(User-facing usage: [guide.md](../guide.md) §9; condensed rationale:
+[design.md](../design.md) §6. This is the full design study.)
 
 > **Current operational state and API live in
 > [deferred-versioned-state.md](deferred-versioned-state.md).** This is the design

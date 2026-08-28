@@ -1,6 +1,6 @@
 # Retraction vs. pool-exhaustion deadlocks — prior-art survey
 
-Evidence that the deadlock class our **task retraction** (`docs/task-internals.md` §6)
+Evidence that the deadlock class our **task retraction** (`docs/internals/task-internals.md` §6)
 is designed to prevent is a recurring, well-documented failure in every comparable
 work-stealing/thread-pool system. Retraction lets a thread that blocks on a task run
 that task's un-started dependency subtree *inline on the waiting thread* (claimed via
@@ -93,7 +93,7 @@ same scheduler**: the waiter runs it rather than depending on a free worker exis
   diagnosed (§3). Retraction alone would not fix an ad-hoc `std::mutex` held across a
   parallel call; our answer to that is the access model, not retraction.
 
-### 2.4 Java `ForkJoinPool` (the closest peer — see also `docs/task-internals.md` §6 discussion)
+### 2.4 Java `ForkJoinPool` (the closest peer — see also `docs/internals/task-internals.md` §6 discussion)
 
 - **Reported pattern:** blocking inside the common pool (parallel streams, nested
   `CompletableFuture.join()`) exhausts it — "all worker threads switched to WAIT after
@@ -244,7 +244,7 @@ class. Precise mapping:
    the TPS01-J class, the FJP-join class, the Taskflow-nested-wait class, the
    Rayon-nested-scope class.
 2. **Handled by another mechanism, not retraction:** blocking under an access scope on
-   **non-retractable** work — pipe/`async` jobs (why: `docs/task-internals.md` §6 and the
+   **non-retractable** work — pipe/`async` jobs (why: `docs/internals/task-internals.md` §6 and the
    pipe-rebase note in `docs/TODO.md` §1.14 — pipe ordering is not a `prerequisite`
    chain, so `retract` cannot see it). Here the **blocking-sync diagnostic**
    (`blocking_sync_diagnose`, `TS_SAFETY_CHECKS`) fires a `TS_ENSURE` at the call site —

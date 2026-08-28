@@ -6,7 +6,7 @@ option analysis, the recommended shape, and a rigorous performance-impact
 assessment the author asked for. Terminology note: we **launch** tasks, we do not
 *spawn* them.
 
-Companion: [pattern-farming.md](pattern-farming.md) §2.2 (motivation, and the
+Companion: [pattern-farming.md](../pattern-farming.md) §2.2 (motivation, and the
 items this unlocks). Grounded in a read of `include/ts/scheduler.h`,
 `src/scheduler.cpp` (the `Event_count` park, `signal_submit`, `wait_for_work`,
 `run_serial`/`drain_serial_pending`), `include/ts/task.h` (`Signal`,

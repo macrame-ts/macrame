@@ -7,7 +7,7 @@ is, what shape it takes, which fixes worked — and derive from it a
 representative benchmark (`benchmarks/production_contention_bench.cpp`) plus an
 honest map of where this library helps and where it does not.*
 
-Companion: [task-systems-comparison.md](task-systems-comparison.md) (the
+Companion: [task-systems-comparison.md](../task-systems-comparison.md) (the
 scheduler-level survey). Sections numbered for reference.
 
 ---

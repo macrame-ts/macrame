@@ -1119,7 +1119,7 @@ void test_reader_node_overlaps_async()
     TS_CHECK(gate.met());
 }
 
-// --- Nested graph runs (docs/coroutine-first.md §4.8) ----------------------
+// --- Nested graph runs (docs/internals/coroutine-first.md §4.8) ----------------------
 
 // An outer node holds a write grant on `x` and awaits an inner graph that
 // also writes `x`. Without lending the inner node's pipe turn queues behind the outer node's

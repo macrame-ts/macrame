@@ -13,7 +13,7 @@ namespace ts
 // A reusable phase gate for cross-frame work: tasks `co_await gate.next()` to park until the
 // start of the next frame, and the frame loop calls `open()` once per frame to release them.
 //
-// The pattern it serves (docs/coroutine-first.md §4.7): a task that suspends on something
+// The pattern it serves (docs/internals/coroutine-first.md §4.7): a task that suspends on something
 // outside the schedule - an I/O completion, a GPU fence, a multi-frame job - resumes at an
 // arbitrary moment, possibly in the middle of a frame, where the systems it wants to touch are
 // mid-update. Awaiting the gate after the external wait realigns it to a frame boundary:
@@ -61,7 +61,7 @@ public:
         // From here until the next `open()`, work is parked on something only the frame
         // loop - a non-worker thread - can release. Register that with the deadlock net,
         // or a frame whose workers happen to run dry while a task waits for the boundary
-        // reports as deadlocked (docs/waiting-rule-policy.md §7). Armed on demand rather
+        // reports as deadlocked (docs/internals/waiting-rule-policy.md §7). Armed on demand rather
         // than for the gate's lifetime, so a gate nobody is waiting on masks nothing.
         if (!pending_)
             pending_.emplace();

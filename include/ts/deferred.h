@@ -47,7 +47,7 @@ namespace ts
 // The staging machinery (`detail::Journal`, `Recorder`, `Parallel_recorder`) is shared
 // with `Versioned<T>`: reach for `Versioned<T>` when readers need a stable snapshot of the
 // whole state across a cycle (double buffering), `Deferred<T>` when you just want to batch
-// writes and apply them at a chosen point. See `docs/command-buffer-design.md`.
+// writes and apply them at a chosen point. See `docs/internals/command-buffer-design.md`.
 template<typename T>
 class Deferred
 {

@@ -19,7 +19,7 @@ namespace ts
 {
 
 // How items map to the `max_workers` parallel executors. Only the claim grain differs; the
-// worker loop is identical. See docs/task-internals.md.
+// worker loop is identical. See docs/internals/task-internals.md.
 enum class Balance
 {
     guided,       // default: grain shrinks as work drains (big early -> low overhead; small late
@@ -303,7 +303,7 @@ inline int effective_workers(int max_workers, int items)
 // Fan out `max_workers - 1` helpers on the one process-wide `global_scheduler()` (with the
 // single-global collapse there is no other pool a task could belong to), participate on
 // the calling thread, then wait out the still-running helpers. The wait is the one
-// sanctioned in-task block (docs/coroutine-first.md §4.1): the caller has already drained
+// sanctioned in-task block (docs/internals/coroutine-first.md §4.1): the caller has already drained
 // every unclaimed chunk itself, so it parks only on chunks running on workers right now -
 // bounded, deadlock-free. It waits on the group state directly, never through
 // `sync_wait`, so the in-task blocking fatal does not apply.

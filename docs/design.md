@@ -43,7 +43,7 @@ library. That intersection is what this library provides. The full survey is
 in [task-systems-comparison.md](task-systems-comparison.md).
 
 Two facts from the research sharpen this position
-([research-deepdive.md](research-deepdive.md) §15, §2). First, the industry
+([research-deepdive.md](internals/research-deepdive.md) §15, §2). First, the industry
 already ships static frame skeletons. Unreal's tick system (`ETickingGroup`
 phases, per-function tick prerequisites, opt-in `bRunOnAnyThread`) is a
 coarse declared frame graph that has sat in the engine for a decade. It is
@@ -124,7 +124,7 @@ child, `ts::nested` / `Task_scope`. That was removed. A concurrent
 grant-inheriting child can race its parent on shared mutable state, and the
 harness cannot see it because both sides declared the access.
 `parallel_for`'s synchronous join is the gated form that survives. See
-docs/coroutine-first.md §4.3.)
+docs/internals/coroutine-first.md §4.3.)
 
 Where inheritance does apply, it is bounded by grant-window validity. Each
 pipe carries a write epoch with seqlock parity, bumped at write-grant
@@ -298,7 +298,7 @@ ownership-carrying block path as every other task, and that was not free. It
 cost roughly 9% more per node than the pre-transformation block. In frame
 terms that is under 1% of wall time, since framework overhead is only ~4–10%
 of a real `game_frame`
-(see [profiler-guided-optimization.md](profiler-guided-optimization.md)).
+(see [profiler-guided-optimization.md](internals/profiler-guided-optimization.md)).
 This section records the measured cause, because the intuitive one is wrong.
 It also records the recovery, which not only erased the regression but took
 the per-node machinery below the old block by slimming a completion cost both
@@ -306,7 +306,7 @@ versions shared.
 
 Deterministic instruction counting puts it at 522 to 648 instructions per
 node and attributes it precisely
-([graph-regression-callgrind.md](graph-regression-callgrind.md)). The
+([graph-regression-callgrind.md](internals/graph-regression-callgrind.md)). The
 measurement used callgrind on two isolated Shipping-like builds with a
 1000-empty-node worker-less driver, so machinery dominates. The tempting
 explanation, covering the coroutine-capable completion path, the
@@ -568,7 +568,7 @@ the temporary form `obj.access(fn).sync()` stays dangle-free. The handle is
 non-movable because it is pinned; the pipe's FIFO holds its embedded entry's
 address. Destroying it unsettled is the caller-owned analog of dropping an
 in-flight refcount, a checked bug that then blocks. The full rationale is
-`docs/access-op-design.md` (TODO 1.19).
+`docs/internals/access-op-design.md` (TODO 1.19).
 
 ### 4.3 One composition mechanism (historical: builders, `then`, `when_all`)
 
@@ -841,7 +841,7 @@ guarantee.
 ## 5. Coroutines: the composition model
 
 Coroutine support began as an additive layer and was then made the
-foundation (the coroutine-first transformation, `docs/coroutine-first.md`).
+foundation (the coroutine-first transformation, `docs/internals/coroutine-first.md`).
 Composition is coroutines, and the callback vocabulary is gone (§4.3). The
 main design points follow.
 
@@ -970,7 +970,7 @@ launched sub-work alongside the grant snapshot. That is wider than lexical
 scope, and deliberately so, since the child inherits the grant and with it
 the hazard the claim is about. The full taxonomy, the defaults, and the
 obligations a new check inherits are in
-[waiting-rule-policy.md](waiting-rule-policy.md).
+[waiting-rule-policy.md](internals/waiting-rule-policy.md).
 
 ### 5.3 Thread-local access through out-of-line accessors
 
@@ -1031,9 +1031,9 @@ as users meet it, including a canary test for their own build, is covered in
 The pipe's FIFO answer degrades in the many-small-writers case. Every write
 serializes against every reader, and readers observe a timing-dependent
 prefix of the write stream. The staged-write layer answers this. Its design
-study is [command-buffer-design.md](command-buffer-design.md) and its
+study is [command-buffer-design.md](internals/command-buffer-design.md) and its
 operational contracts are in
-[deferred-versioned-state.md](deferred-versioned-state.md).
+[deferred-versioned-state.md](internals/deferred-versioned-state.md).
 
 The essence is that a command buffer is a recording front-end terminating in
 an ordinary `Guarded` write. `Deferred<T>` mints per-producer recorders.
@@ -1291,16 +1291,16 @@ decisions above exist for it.
 
 Project documents:
 
-- [task-internals.md](task-internals.md): the dynamic-task design of
+- [task-internals.md](internals/task-internals.md): the dynamic-task design of
   record, covering the control block, lifecycle, lock-counter, coroutine
   frames, and completion gating.
 - [task-systems-comparison.md](task-systems-comparison.md): the survey of
   UE Tasks, TBB, Taskflow, HPX, folly, Marl, Rayon/Tokio, Go, GCD, and the
   scheduler literature.
-- [command-buffer-design.md](command-buffer-design.md): the staged-write
+- [command-buffer-design.md](internals/command-buffer-design.md): the staged-write
   design study, including the UE rendering research and the full
   lazy-`Guarded` analysis.
-- [deferred-versioned-state.md](deferred-versioned-state.md):
+- [deferred-versioned-state.md](internals/deferred-versioned-state.md):
   `Deferred`/`Versioned` contracts, mechanisms, and the forward plan.
 
 External systems referenced above: Unreal Engine Tasks / RDG /

@@ -250,7 +250,7 @@ void stress_pipe_sync_then_destroy()
 
 // Reservation coexistence: a graph run holding shared objects per-node while async hammers
 // the same objects - the per-node acquire must exclude a writer node from any async and
-// let a reader node overlap an async read (the docs/task-internals.md §10 race). TSan on
+// let a reader node overlap an async read (the docs/internals/task-internals.md §10 race). TSan on
 // the payload; the oracle also asserts the invariant.
 void stress_pipe_reservation()
 {
@@ -402,7 +402,7 @@ void stress_graph_nested()
     }
 }
 
-// Nested graph runs under the lend protocol (docs/coroutine-first.md §4.8): an outer node
+// Nested graph runs under the lend protocol (docs/internals/coroutine-first.md §4.8): an outer node
 // holds write grants and awaits an inner graph over the same objects, so every inner node
 // runs on the lent grant with no pipe turn of its own. External asyncs hammer the objects
 // throughout - they see only the outer node's hold, since the pipe never sees the lend, so

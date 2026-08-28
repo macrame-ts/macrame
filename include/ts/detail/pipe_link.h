@@ -12,7 +12,7 @@ namespace detail
 struct Task_control_block;
 struct Pipe;
 
-// A task's entry in one pipe's admission queue (docs/pipe-rebase.md §0.2). Embedded in the
+// A task's entry in one pipe's admission queue (docs/internals/pipe-rebase.md §0.2). Embedded in the
 // owning task's allocation - `Piped_executable` for `async`, the graph's per-node slab -
 // never heap-allocated on its own, so the pipe hot path allocates nothing. All fields are
 // written either once at bind time or under the owning pipe's mutex; there is no lock-free

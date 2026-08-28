@@ -9,7 +9,7 @@
 // `External_wait` (declare an off-pool completion so the deadlock net does not misfire).
 // Cooperative cancellation lives in ts/cancellation.h (included here, so it remains
 // available through this header); the control block behind the handle in
-// ts/detail/task_block.h. User guide: docs/guide.md §4; internals: docs/task-internals.md.
+// ts/detail/task_block.h. User guide: docs/guide.md §4; internals: docs/internals/task-internals.md.
 
 #include "ts/cancellation.h"
 #include "ts/fatal.h"
@@ -264,7 +264,7 @@ namespace detail
 // installs): a detached launch's handle may be dropped, so the launcher's grant cannot be
 // guaranteed to outlive the child, and an undeclared touch of the launcher's guarded data
 // faults deterministically on the first access rather than racing the launcher's closing
-// grant window (docs/coroutine-first.md §2). The raw body keeps its shape (a
+// grant window (docs/internals/coroutine-first.md §2). The raw body keeps its shape (a
 // trailing-`Cancellation_token` overload is preserved), so `Executable::run` forwards the
 // token either way. To fan work out over a node's owned data, use `ts::parallel_for` (its
 // helpers inherit the caller's grant) or acquire fresh via `obj.async` / `co_await obj.access`.
@@ -310,7 +310,7 @@ auto launch(Fn&& fn, Dispatch_options opts = {},
 // dedicated engine thread, a `Frame_gate`'s next `open()`. Hold one for as long as that
 // wakeup is outstanding.
 //
-// This is the deadlock net's escape (`Rule::deadlock_net`, docs/waiting-rule-policy.md §7).
+// This is the deadlock net's escape (`Rule::deadlock_net`, docs/internals/waiting-rule-policy.md §7).
 // The net fires when the scheduler is quiescent and nothing is registered here - so a
 // forgotten registration produces a false deadlock report, which is why the report names
 // this type. It is not suppressible by scope: the net observes the whole process, so there

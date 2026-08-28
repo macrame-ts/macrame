@@ -1,9 +1,9 @@
 # Roadmap
 
 Internal working roadmap. Public-facing docs: [guide.md](guide.md) (user guide),
-[design.md](design.md) (rationale). Deep dives: [task-internals.md](task-internals.md),
-[deferred-versioned-state.md](deferred-versioned-state.md),
-[command-buffer-design.md](command-buffer-design.md),
+[design.md](design.md) (rationale). Deep dives: [task-internals.md](internals/task-internals.md),
+[deferred-versioned-state.md](internals/deferred-versioned-state.md),
+[command-buffer-design.md](internals/command-buffer-design.md),
 [task-systems-comparison.md](task-systems-comparison.md).
 
 Legend: `[ ]` open · `[~]` partial/WIP · `[S]` shelved (designed, not scheduled).
@@ -27,11 +27,11 @@ death tests), documented, and CI-gated.
   synchronously). The `ts::nested` / `Task_scope` / `join_nested` scoped-launch verbs were
   REMOVED (2026-08, an unsafe concurrent grant-inheriting child — coroutine-first.md §4.3);
   `detail::add_nested` survives as graph-internal completion-gating.
-  Inheritance is gated-only (docs/coroutine-first.md §2). Cooperative cancellation (+ `Cancel_callback` + trailing-
+  Inheritance is gated-only (docs/internals/coroutine-first.md §2). Cooperative cancellation (+ `Cancel_callback` + trailing-
   `Cancellation_token` body early-out), `Signal` (+ `reset()`) as the awaitable event.
   Deleted with the transformation: `then`, `when_all`, the `ts::task` builder + `after`,
   retraction/deep-retraction, executable task reuse, the inline-dispatch trampoline
-  (`set_inline`/`run_inline`) — see [coroutine-first.md](coroutine-first.md) §3/§8.
+  (`set_inline`/`run_inline`) — see [coroutine-first.md](internals/coroutine-first.md) §3/§8.
 - **Guarded / access** — awaitable `co_await obj.access(fn)` (inline when the pipe is free or
   the caller already owns the write grant, else suspends) + eager `async` (returns `Task<R>`,
   callable from any color), const-ness deduction, multi-object `ts::access`/`ts::async`
@@ -41,7 +41,7 @@ death tests), documented, and CI-gated.
   prerequisites, one unified multi-object cascade serving dynamic multi-object `async` AND
   graph nodes (deleting `Multi_async_state`, `acquire_next`, `preheld`, the explicit graph
   handoff), always-on `writer_owner` grant ownership. Design of record:
-  [pipe-rebase.md](pipe-rebase.md) §0.
+  [pipe-rebase.md](internals/pipe-rebase.md) §0.
 - **Static graph** — access-conflict-derived edges + explicit `after`/`before`, per-node
   mode-aware acquire (objects free in the gaps), coroutine node bodies, per-node implicit
   scope, allocation-free re-runs.
@@ -77,11 +77,11 @@ IDs — when an item is done, mark it, don't renumber.
 
    *Standing priority (author, 2026-07): anything that strengthens the harness
    is P1 by default — the runtime oracle is the library's signature safety
-   property and its coverage gaps (§13.6 of [research-deepdive.md](research-deepdive.md))
+   property and its coverage gaps (§13.6 of [research-deepdive.md](internals/research-deepdive.md))
    are where every comparable system's real-world failures concentrated.*
 
    1. `[~]` **(P1) Zero-alloc inline `access`** — void→done-sentinel, small-R→SBO handle, large/deferred→heap. [§D1]
-   2. `[x]` **(P1) Multi-object `ts::access` inline — DONE (2026-08, [multi-access-op-design.md](multi-access-op-design.md)).** `ts::access(fn, objs...)` returns one caller-owned `Access_op<Objects..., Body>` at every arity (the type became variadic, objects first and body last, so the single-object spelling `Access_op<T, Body>` is unchanged — asserted, not just claimed). Dispatch matches the single-object verb: objects the calling task already holds are **lent** (no turn taken, the graph's `bind_links_for_run` protocol — this subsumes the reentrant arm, and a read holder where the body writes is fatal), and the remaining pipes are probed **all or nothing** under their mutexes at once, admitting every one or none. `ts::async` is unchanged.
+   2. `[x]` **(P1) Multi-object `ts::access` inline — DONE (2026-08, [multi-access-op-design.md](internals/multi-access-op-design.md)).** `ts::access(fn, objs...)` returns one caller-owned `Access_op<Objects..., Body>` at every arity (the type became variadic, objects first and body last, so the single-object spelling `Access_op<T, Body>` is unchanged — asserted, not just claimed). Dispatch matches the single-object verb: objects the calling task already holds are **lent** (no turn taken, the graph's `bind_links_for_run` protocol — this subsumes the reentrant arm, and a read holder where the body writes is fatal), and the remaining pipes are probed **all or nothing** under their mutexes at once, admitting every one or none. `ts::async` is unchanged.
    3. `[x]` **(P1) Generic-lambda / `auto&` deduction — DONE (A3+A4, 2026-07).** Introspecting a generic lambda's parameter const-ness is impossible (templated `operator()`), but classification is not: the **rvalue-bindability probe** classifies each bare-arg position at declaration level — `const auto&`/`auto&&` binds an rvalue → read, `auto&` cannot → write — so generic lambdas deduce under the SAME "const = read" spelling rule as non-generic ones, no tags required. **A3**: every read position (deduced, probed, or tagged) invokes the body with `const T&` (`mode_ref`), so mutating under a read classification is a compile error — and the constraint/return-type machinery evaluates the mode gate FIRST (`accessor_mode`, `Accessor_result`) because probing a generic lambda's invocability against `const T&` deduces its return type, which instantiates the BODY — a hard error for a mutating body, not SFINAE. **Q1**: by-value / rvalue-ref resource params are `static_assert`-rejected wherever introspectable (a by-value copy silently discards writes); the generic `auto` by-value spelling is undetectable at declaration level — documented residual. Tags `ts::as_read_only(g)`/`as_read_write(g)` (names ratified; match the `Access` enum and coroutine guards) remain as the explicit-declaration style, the escape for an `auto&&` that must write, and permit conservative write-over-declaration (write tag over a `const T&` param serializes, legally). One unified builder per surface (`async_build_modes` / `fill_node_modes`) serves the deduced/probed/tagged tiers. Tests: probed single-object read-overlap/write-serialization + classification static_asserts, probed multi-object (incl. mixed spellings) + over-declared write, probed graph nodes; `#if 0` blocks document the compile-time rejections. 356→369 checks; clean MSVC + clang-cl + MSBuild, TSan clean.
    4. `[ ]` **(P1, raised 2026-07 — harness item) Access-check completeness** — clang-tidy "every public method calls `TS_CHECK_ACCESS()`" + a `Guarded_value<T>` for POD/no-method types. [§D2]
    5. `[ ]` **(P2) Adopted `Guarded`** — wrap an existing instance (borrow) via an `adopt` ctor tag; access key = borrowed address. **Ownership-transfer note (2026-07, T22):** an adopted object handed between owners needs an explicit re-bind ritual (Chromium's `DETACH_FROM_SEQUENCE` — the first access after detach re-binds the checker), NOT implicit adoption. Frame it as an escape hatch, discouraged for general use; the owned-`Guarded` path (in-place construction, harness-instrumented methods) stays the recommended default.
@@ -92,11 +92,11 @@ IDs — when an item is done, mark it, don't renumber.
 
    10. `[ ]` **(P2) Whole-object granularity serialization** — think through the mitigation
        menu beyond current guidance (sharding/`Versioned` placement, sub-object grants via 1.6,
-       split-along-the-seams doc patterns); [research-deepdive.md](research-deepdive.md) §13/§19
+       split-along-the-seams doc patterns); [research-deepdive.md](internals/research-deepdive.md) §13/§19
        maps how Bevy (per-component + filters) and Unity (per-container, escape attributes)
        evolved under the same pressure. Flagged by the 2026-07 research pass.
    11. `[x]` **(P1) Grant-generation validity check — DONE (2026-07).** The stale
-       inherited-grant hole ([research-deepdive.md](research-deepdive.md) §13.6.5) is closed via
+       inherited-grant hole ([research-deepdive.md](internals/research-deepdive.md) §13.6.5) is closed via
        a per-pipe **write-epoch with seqlock parity** (`Pipe::write_epoch`): bumped at write-grant
        acquire + release (under the pipe mutex, relaxed) and by +2 on a graph write handoff
        (which elides both pipe ops); reader traffic never bumps. Every `Access_context` entry
@@ -144,7 +144,7 @@ IDs — when an item is done, mark it, don't renumber.
        bounded poll so a miss fails instead of hanging). 503 checks green; full run (samples +
        benchmarks) zero failures; Shipping compiles.
    13. `[S]` **Escaped-reference hardening (T21) — analyzed, SHELVED (author, 2026-07).**
-       Decision document: [escaped-refs-hardening.md](escaped-refs-hardening.md). Findings:
+       Decision document: [escaped-refs-hardening.md](internals/escaped-refs-hardening.md). Findings:
        (a) `Granted<T>` confirmed in the noise quadrant — five-system precedent survey
        (Chromium raw_ptr conceding `.get()` and winning via quarantine not deref checks; folly
        stating the launder hole verbatim; MSVC's checked-in-release default reversed) shows
@@ -155,7 +155,7 @@ IDs — when an item is done, mark it, don't renumber.
        acquire/release edges — catches stashed raw `T&` on Windows where TSan doesn't exist)
        both viable; author verdict: B "interesting but too limited, maybe in the future"; A
        shelved with it. Page protection rejected on numbers. Escaped-ref coverage remains
-       TSan's job per [limits.md](limits.md); revisit on a real adoption-blocking incident.
+       TSan's job per [limits.md](internals/limits.md); revisit on a real adoption-blocking incident.
    14. `[x]` **DONE, but NOT as designed (2026-08) — the lock-free chain was implemented,
        stress-tested, and RETIRED; what shipped is the evolved mutex pipe.** The R10 gate came
        back negative (22 producers on one pipe: 798 ns/op vs ~1050 ns/op uncontended — the
@@ -168,8 +168,8 @@ IDs — when an item is done, mark it, don't renumber.
        `Multi_async_state`/`acquire_next`/`preheld`/explicit handoff deleted), always-on
        `writer_owner`, and the `wait_until_idle` drain kept as a CV notified under the mutex
        (verified immune to the UE `FPipe` teardown UAF, which is a lock-free-notify artifact).
-       Design of record + the retirement evidence: [pipe-rebase.md](pipe-rebase.md) §0;
-       tests [pipe-rebase-tests.md](pipe-rebase-tests.md). The addenda below are kept as the
+       Design of record + the retirement evidence: [pipe-rebase.md](internals/pipe-rebase.md) §0;
+       tests [pipe-rebase-tests.md](internals/pipe-rebase-tests.md). The addenda below are kept as the
        engineering record — note that the `Deferred::last_commit_` race they describe IS
        dissolved (the enqueue-and-record seam under the pipe mutex; `commit_mutex_` deleted),
        and the retraction addendum is moot (retraction is gone with the coroutine-first
@@ -214,7 +214,7 @@ IDs — when an item is done, mark it, don't renumber.
        + reader/writer admission in `dispatch`), NOT in the block's `prerequisites`.
        `retract` (`task.h`) walks only `prerequisites`, so it is blind to pipe admission
        order — a pipe job flagged `retractable` could be run out of turn while still queued
-       behind a conflicting writer (the exact race [task-internals.md](task-internals.md) §6
+       behind a conflicting writer (the exact race [task-internals.md](internals/task-internals.md) §6
        cites). So pipe blocks are marked non-retractable (`run_pipe_job`, `guarded.cpp`:
        "pipe blocks are not retractable and never inline-dispatched"), and a blocking
        `sync()` on one parks a worker — caught only by the blocking-sync diagnostic, never
@@ -304,7 +304,7 @@ IDs — when an item is done, mark it, don't renumber.
        per-touch block allocation, i.e. the `Access_op` work.
 
    19. `[ ]` **(P1, planned 2026-08-18) `Access_op` - caller-owned operation state for `access`.**
-       Design of record: [access-op-design.md](access-op-design.md). The one-sentence model: the
+       Design of record: [access-op-design.md](internals/access-op-design.md). The one-sentence model: the
        block allocation is the price of detachment, not of `R` - `access` returns the operation
        state itself (eager, pinned once queued, dtor-checked), `async` keeps the heap handle for
        the leavers; zero-alloc attended access for any `R`, no SBO tiers. Pipe layer unchanged
@@ -324,10 +324,10 @@ IDs — when an item is done, mark it, don't renumber.
 
 2. **Static task graph**
    1. `[ ]` **(P1) Typed graph chaining** — a node consumes prerequisite-node results (nodes are void-only now); a `Graph_node` may then mint a per-run `Task<R>`.
-   2. `[ ]` **(P2, raised within-band) Ambiguity detection** — `compile({.ambiguity = Warn|Error|Ignore})` determinism diagnostic; needs edge provenance; feeds profiler-guided reorder. **Research validation (2026-07, [research-static-vs-dynamic.md](research-static-vs-dynamic.md)):** ordering ambiguity is the top user-facing failure of access-derived schedules — Bevy shipped exactly this diagnostic (`ambiguity_detection`) after its stageless rework because users hit nondeterministic system order in practice. **PARKED (author, 2026-07).** Full analysis in [ordering-ambiguity.md](ordering-ambiguity.md): our declaration-index orientation is deterministic, so we lack Bevy's per-frame-nondeterminism bug class — the residual is *hidden, unratified* orientation (a refactor that swaps two `add_node` lines silently flips gameplay). The proposed feature (conflict provenance + a fragile-orientation lint + a commutativity annotation feeding the optimizer) is rescoped as optimizer infrastructure, not a safety feature — but the annotation-cost question (pairwise = combinatorial; object-level = the mitigation, unproven) is unresolved. Do nothing until real usage data (start with the tiebreak-only pair count on `game_frame`). Provenance itself is still needed by 2.4/2.5 and the DOT dump regardless.
+   2. `[ ]` **(P2, raised within-band) Ambiguity detection** — `compile({.ambiguity = Warn|Error|Ignore})` determinism diagnostic; needs edge provenance; feeds profiler-guided reorder. **Research validation (2026-07, [research-static-vs-dynamic.md](internals/research-static-vs-dynamic.md)):** ordering ambiguity is the top user-facing failure of access-derived schedules — Bevy shipped exactly this diagnostic (`ambiguity_detection`) after its stageless rework because users hit nondeterministic system order in practice. **PARKED (author, 2026-07).** Full analysis in [ordering-ambiguity.md](internals/ordering-ambiguity.md): our declaration-index orientation is deterministic, so we lack Bevy's per-frame-nondeterminism bug class — the residual is *hidden, unratified* orientation (a refactor that swaps two `add_node` lines silently flips gameplay). The proposed feature (conflict provenance + a fragile-orientation lint + a commutativity annotation feeding the optimizer) is rescoped as optimizer infrastructure, not a safety feature — but the annotation-cost question (pairwise = combinatorial; object-level = the mitigation, unproven) is unresolved. Do nothing until real usage data (start with the tiebreak-only pair count on `game_frame`). Provenance itself is still needed by 2.4/2.5 and the DOT dump regardless.
    3. `[ ]` **(P3, pulled up 2026-08) Pipelined execution** — more than one `execute()` in flight (frame overlap). **Now also the relaxation path for nested graph runs** (6.9a): the v1 rule there is one instance per concurrent user, because a pre-compiled inner graph invoked from two concurrently-running parents collides with one-run-at-a-time. Run-queueing / pipelined runs is the general fix, so a demonstrated shared-inner-graph case promotes this item rather than adding new machinery.
    4. `[ ]` **(P2) Profiler-guided optimization** — reorder/rebucket from measured durations. **Manual dry-run done (2026-07, game_frame); the headline finding is about measurement, not levers.** Five configurations were tried (placement of staleness-tolerant `Versioned` readers early-vs-tail × priority ranking none/high-low/spine-high): all cells measured 4.9–5.6 ms within one session window, while the SAME baseline configuration measured 4.15 ms in an earlier window and 5.3 ms later — **cross-window ambient drift (~25%) dwarfed every within-window delta (~5–10%)**, so no lever's sign is established at single-run resolution. Everything below is therefore prerequisites + hypotheses to re-test under proper methodology:
-      - **Measurement methodology is prerequisite #1**: interleaved runs (A/B/A/B to cancel drift), medians over N, controlled load, and the per-lane timeline capture from the graph-viz session (docs/graph-viz-handoff.md) — without this, optimization conclusions are noise. Ties to 10.1 (benchmark regression infra). **Capture landed (2026-07)**: `Graph_trace` streams per-node medians/variance, per-edge binding gaps, measured critical-path frequency, dispatch waits, and the critical-dead-time headline (makespan − critical work). First validated findings, from the permanent 4-worker starved run: dead time 22.5% vs 2.4% on 12 workers (scheduling- vs dependency-bound, now a one-line diagnosis); the priority lever is REFUTED for the occupancy case, and the ordering lever half-confirmed (gap closed, makespan −10% regression — `after` is completion-to-start). Full experiment record, lessons (makespan is the objective, dead time the diagnostic; the chain-extension guard; the missing yield/start-ordering primitive), and the three-tier tuner design in [profiler-guided-optimization.md](profiler-guided-optimization.md). Remaining prerequisite: interleaved A/B methodology.
+      - **Measurement methodology is prerequisite #1**: interleaved runs (A/B/A/B to cancel drift), medians over N, controlled load, and the per-lane timeline capture from the graph-viz session (docs/graph-viz-handoff.md) — without this, optimization conclusions are noise. Ties to 10.1 (benchmark regression infra). **Capture landed (2026-07)**: `Graph_trace` streams per-node medians/variance, per-edge binding gaps, measured critical-path frequency, dispatch waits, and the critical-dead-time headline (makespan − critical work). First validated findings, from the permanent 4-worker starved run: dead time 22.5% vs 2.4% on 12 workers (scheduling- vs dependency-bound, now a one-line diagnosis); the priority lever is REFUTED for the occupancy case, and the ordering lever half-confirmed (gap closed, makespan −10% regression — `after` is completion-to-start). Full experiment record, lessons (makespan is the objective, dead time the diagnostic; the chain-extension guard; the missing yield/start-ordering primitive), and the three-tier tuner design in [profiler-guided-optimization.md](internals/profiler-guided-optimization.md). Remaining prerequisite: interleaved A/B methodology.
       - **Mechanistic hypotheses recorded** (plausible, magnitudes unproven): (1) naive early gap-filling delays the serial spine — a ready critical-path node waits for a worker to finish its current slice, nothing evicts a runner → keep-out zones / finer filler granularity / reservation may be needed; (2) the current `Priority` enum cannot serve as rank: `low` is valve-gated background (a mislabeled dependency — hand-labeling got nav→ai and ui→submit wrong, which automated upward-rank would not — stalls its dependents), and `high` dispatches via the global MPMC queues instead of the per-worker deques (M2: only `normal` goes local) — a structural cost. Prerequisite either way: a rank mechanism native to the local-deque path (rank-ordered pop within `normal`, or M2 stage 5), plus **slice priority inheritance** — done (2026-07): `parallel_for`/`parallel_for_async` helpers now inherit the calling task's priority by default (`Parallel_options::priority` overrides), so a node's slices dispatch at the node's class rather than always `normal`.
       - **Info the optimizer needs**: per-node wall duration as (total_work, parallel_width) — a sliced node's wall depends on free workers, a scalar misleads; medians + variance; the edge list WITH provenance (conflict-derived = semantic, immovable; explicit = intent; version-choice reader→flip / flip→reader = movable IFF the user annotates the read staleness-OK); per-lane timelines; worker count.
       - **Sanctioned lever taxonomy**: (a) dispatch order among ready nodes — HEFT-style list scheduling by upward rank (blocked on the rank mechanism); (b) DAG shape via user-annotated semantic relaxations only — staleness-OK `Versioned` readers become a binary placement choice per reader, a small discrete search evaluable OFFLINE by simulating the captured cost model; (c) commutative-pair reordering (needs 2.2's provenance); (d) node fusion — merge nodes below the dispatch-cost floor that share an edge without losing parallelism (a PGO-time lever; see also 2.10's per-node cost numbers). The optimizer proposes; the user ratifies semantic moves.
@@ -335,7 +335,7 @@ IDs — when an item is done, mark it, don't renumber.
       - Validation fixture: game_frame (hand-derived chain ≈2.6 ms, 26.9 ms work); a simulator must reproduce measured timelines before its proposals are trusted.
    5. `[ ]` **(P2) Compile-time rank → native dispatch shaping.** Compute upward rank per node at `compile()` (longest path to sink; weights = node priority now, measured durations once 2.4's capture exists; reuses the Kahn order, O(V+E) once). At run the graph shapes dispatch WITHOUT the scheduler's priority classes — avoiding `high`'s global-queue detour and `low`'s valve (2.4's blockers): (a) rank-aware successor submission order when one completion releases several ready nodes (owner deques pop LIFO — submit lowest-rank first so the settling worker pops the highest; thieves take the other end); (b) inline-successor selection by rank (`set_inline` currently picks without regard to importance). Converts `Graph_node::set_priority` from a queue-class request into a rank weight. Related: D6's static effective-priority pass should ride this mechanism (not the Priority classes) until M2 stage 5; priority-as-conflict-tiebreak belongs behind 2.2's opt-in (it changes observed values). Sequence AFTER the graph-viz timing capture — 2.4's dry-run showed dispatch-shaping effects are unmeasurable without it.
    6. `[ ]` **(P3, downgraded 2026-07 — author unconvinced; revisit on a demonstrated
-      disabled-writer-stalls-readers case) Per-run node enable predicate (conditional execution).** The research pass's one design challenge ([research-static-vs-dynamic.md](research-static-vs-dynamic.md) — every mature static-graph system grew a dynamic escape; pure DAGs fail on data-dependent control flow first): the graph has no in-graph skip/branch. The cheap 80%: a per-run predicate on a node, evaluated before acquisition — a disabled node acquires nothing, completes immediately, releases successors (render graphs' conditional-pass-execution pattern). Preserves acyclicity, the derived-edge story, and the safety model; deliberately NOT Taskflow-style condition tasks (their weak/strong-dependency semantics carry documented race/deadlock pitfalls). Full loops/branches stay out of scope — dynamic tasks and `co_await` are the escape for data-dependent shape, as designed.
+      disabled-writer-stalls-readers case) Per-run node enable predicate (conditional execution).** The research pass's one design challenge ([research-static-vs-dynamic.md](internals/research-static-vs-dynamic.md) — every mature static-graph system grew a dynamic escape; pure DAGs fail on data-dependent control flow first): the graph has no in-graph skip/branch. The cheap 80%: a per-run predicate on a node, evaluated before acquisition — a disabled node acquires nothing, completes immediately, releases successors (render graphs' conditional-pass-execution pattern). Preserves acyclicity, the derived-edge story, and the safety model; deliberately NOT Taskflow-style condition tasks (their weak/strong-dependency semantics carry documented race/deadlock pitfalls). Full loops/branches stay out of scope — dynamic tasks and `co_await` are the escape for data-dependent shape, as designed.
    7. `[x]` **(P1) Serial execution mode — DONE as GLOBAL worker-less mode (2026-07).**
       Rescoped from graph-only `execute({.serial=true})` to the UE shape after reading UE's
       source (zero workers when threads unavailable; `LaunchInternal` executes inline at launch,
@@ -365,19 +365,19 @@ IDs — when an item is done, mark it, don't renumber.
       pipe, the same paths release, and `~Guarded` fatals while any compiled graph still
       references it, naming the object via `debug_name`. Moves are balanced by construction
       (registrations ride the `distinct_pipes_` vector; moved-from is empty)
-      ([research-deepdive.md](research-deepdive.md) §10.2; Taskflow #82 precedent). Tests:
+      ([research-deepdive.md](internals/research-deepdive.md) §10.2; Taskflow #82 precedent). Tests:
       `guarded_outlived_by_graph` + `graph_destroyed_mid_run` death scenarios, and a
       recompile/move/move-assign-overwrite balance test; 490 checks green, Shipping + stress
       clean.
    9. `[ ]` **(P3) Over-declaration diagnostic** — report objects a node declared but never
       accessed (silent lost parallelism; RDG's unused-declaration warnings are the precedent —
-      [research-deepdive.md](research-deepdive.md) §7.4). Caveat (author, 2026-07): conditional
+      [research-deepdive.md](internals/research-deepdive.md) §7.4). Caveat (author, 2026-07): conditional
       early-out bodies legitimately skip declared accesses — aggregate across runs ("never
       accessed in any of N runs") and provide a per-node "may-skip" annotation before warning.
    10. `[ ]` **(P2) Publish cost numbers** — measured `compile()` cost, per-node dispatch cost
        (queued / `set_inline` / handoff), and a "merge nodes below X µs" guideline; makes
        per-frame rebuild a measured option instead of an anti-pattern and answers the first
-       sophisticated-evaluator question ([research-deepdive.md](research-deepdive.md) §9.4,
+       sophisticated-evaluator question ([research-deepdive.md](internals/research-deepdive.md) §9.4,
        §12.2). Ties to 10.1.
    11. `[ ]` **(P2, author 2026-07) Yield points inside long-running nodes.** The 4-worker
        game_frame trace made the failure concrete: a ready critical-path node (economy) waited
@@ -431,7 +431,7 @@ IDs — when an item is done, mark it, don't renumber.
    13. `[ ]` **(P3, doc + demonstrate — T20) Pre-compiled graph variants pattern.** For discrete
        mode sets (game-loading vs in-game driving vs boss fight vs cutscene), the intended answer
        to occasional shape change is "keep N compiled graphs, pick one per mode" rather than
-       rebuild machinery ([research-deepdive.md](research-deepdive.md) §9.4). Document the
+       rebuild machinery ([research-deepdive.md](internals/research-deepdive.md) §9.4). Document the
        pattern — but only worth promoting if a fixture demonstrates a *significant* per-variant
        scheduling difference (a cutscene graph genuinely out-scheduling the driving graph on the
        same work); build that demonstration before writing it up, else it is unsubstantiated
@@ -462,7 +462,7 @@ IDs — when an item is done, mark it, don't renumber.
        removal beyond the dispatch hop and (3) scheduler `submit`/`run_serial` ~80/node are untouched
        (structural). Historical root-cause analysis retained below.
        Callgrind (deterministic, 1000-empty-node worker-less driver, two Shipping-like
-       builds; full report [graph-regression-callgrind.md](graph-regression-callgrind.md))
+       builds; full report [graph-regression-callgrind.md](internals/graph-regression-callgrind.md))
        root-caused the ~9%/node graph-execute regression vs the pre-transformation block:
        **522 → 648 instructions/node**, and it is NOT the completion/`add_nested`/`execution_flag`
        path (byte-identical, settle is cheaper now) but the **ownership-carrying dispatch
@@ -492,7 +492,7 @@ IDs — when an item is done, mark it, don't renumber.
        `submit`+`run_serial` ~80/node. (4) re-arm field resets ~68/node (batchable). (5)
        `global_scheduler()` per dispatch ~11/node. Targets 1–3 could reclaim ~half the per-node
        machinery for the functor-node case without touching the async/coroutine paths. Full
-       report: [graph-regression-callgrind.md](graph-regression-callgrind.md).
+       report: [graph-regression-callgrind.md](internals/graph-regression-callgrind.md).
    17. `[x]` **(P2, author 2026-08 — DONE at the C4 review, 2026-08-17) `execute()` in a loop
        without `sync()` — API reconsideration.** Resolved as `[[nodiscard]]` on `execute()`
        (the handle is the run's only completion signal and the one-run rule's sequencing
@@ -659,7 +659,7 @@ IDs — when an item is done, mark it, don't renumber.
       under the held grant), and suspends only when it would actually have to wait.
    2. `[x]` **DONE (2026-08, 6.4 stage 1).** Coroutine-frame / control-block fusion — one alloc for frame + block, not two. `Task_promise<R>` carries `Task_control_block core` as its FIRST member (so the block pointer doubles as the promise pointer) plus the result storage, and the block's `destroy` thunk destroys the coroutine frame. A coroutine task therefore allocates exactly the frame; coroutines reduce allocations rather than adding them, as the item required. Remaining allocation work is 4.1 (routing `operator new` on the promise to a size-class pool).
    3. `[ ]` **(P3)** Priority setter on the promise (it stores one; no config channel yet).
-   4. `[x]` **DONE (2026-08, branch `pipe-rebase`) — coroutine-first transformation.** The shakeup: static graph + coroutines for everything dynamic; `then`/`when_all`/builder-`after`/retraction/reuse/inline-trampoline removed; `Task_scope` nursery + implicit per-frame scopes + coroutine graph nodes + awaitable access verb added; every illegal case a fatal with a companion how-to test. (`ts::nested` / `Task_scope` / `join_nested` were subsequently REMOVED, 2026-08 — an unsafe concurrent grant-inheriting child; see coroutine-first.md §4.3.) Design of record + staged plan: [coroutine-first.md](coroutine-first.md). Landed §7 stages 1–6; the remaining §11 action list is tracked as 6.9 below. Subsumed 6.1 (the awaitable access verb IS inline-when-free) and delivered 6.2 (frame/block fusion — the promise embeds the block, so a coroutine task is one allocation). Note the inline-dispatch trampoline was removed only from the DYNAMIC surface: `Graph_node::set_inline` and the `dispatch_ready`/`inline_pending` machinery survive as graph-internal.
+   4. `[x]` **DONE (2026-08, branch `pipe-rebase`) — coroutine-first transformation.** The shakeup: static graph + coroutines for everything dynamic; `then`/`when_all`/builder-`after`/retraction/reuse/inline-trampoline removed; `Task_scope` nursery + implicit per-frame scopes + coroutine graph nodes + awaitable access verb added; every illegal case a fatal with a companion how-to test. (`ts::nested` / `Task_scope` / `join_nested` were subsequently REMOVED, 2026-08 — an unsafe concurrent grant-inheriting child; see coroutine-first.md §4.3.) Design of record + staged plan: [coroutine-first.md](internals/coroutine-first.md). Landed §7 stages 1–6; the remaining §11 action list is tracked as 6.9 below. Subsumed 6.1 (the awaitable access verb IS inline-when-free) and delivered 6.2 (frame/block fusion — the promise embeds the block, so a coroutine task is one allocation). Note the inline-dispatch trampoline was removed only from the DYNAMIC surface: `Graph_node::set_inline` and the `dispatch_ready`/`inline_pending` machinery survive as graph-internal.
    5. `[x]` **DONE (2026-08) — circular-wait detector** (`TS_SAFETY_CHECKS`). The suspended-ABBA deadlock (a task holding G1 suspends awaiting G2's turn while a G2-holder awaits G1) parks no thread — both frames suspended, all workers free, the run silently never completes; graph-invisible by definition (the accesses are undeclared). At suspension-on-a-pipe record edge {holder's grants -> awaited pipe} (the harness knows both), clear at resume, cycle-check on insert, fatal naming both tasks + both objects. Gates blessing waiting-rule case (c) (coroutine-first.md §2) in the guide.
       **Scope ruling (2026-08, field survey): keep it on GRANT edges; do not generalize it to
       arbitrary `Task`/`Signal` await edges.** That generalization is what Linux has failed to
@@ -801,7 +801,7 @@ IDs — when an item is done, mark it, don't renumber.
       its "why".
 
    9. `[~]` **(P1, author 2026-08) Coroutine-first post-initial action list.** The queue behind
-      the landed transformation, from [coroutine-first.md](coroutine-first.md) §11. In order:
+      the landed transformation, from [coroutine-first.md](internals/coroutine-first.md) §11. In order:
       (a) `[x]` **nested graph runs v1 — DONE (2026-08).** The lend protocol landed as
       designed: `bind_links_for_run` intersects the compiled access set with the caller's
       `Access_context` at every `execute()` and re-binds the `compile()`-time link slab to the
@@ -834,7 +834,7 @@ IDs — when an item is done, mark it, don't renumber.
       stress with the `Rw_probe` oracle + TSan, and if it holds, relax the task-internals
       contract line to "safe, nondeterministic cross-graph ordering"); (f) parameter-grants
       sugar for shipped library sub-graphs (compile-time intent check only).
-      Open discussion queue: [coroutine-first.md](coroutine-first.md) §10 (waiting-rule
+      Open discussion queue: [coroutine-first.md](internals/coroutine-first.md) §10 (waiting-rule
       relaxations, HALO reality on MSVC/clang-cl, the graph-free usage model).
 
    10. `[x]` **(P1, author 2026-08) Check the rule, not the incident — structural in-task
@@ -886,7 +886,7 @@ IDs — when an item is done, mark it, don't renumber.
        Deliberately narrow: a READ access under a READ guard is NOT exempt (it reaches the
        pipe, and a queued writer -- blocked by our own read hold -- makes it suspend). New
        death scenario `await_settled_under_guard` covers the shape §2.3(f) of
-       [static-order-checking-and-ww-mutex.md](static-order-checking-and-ww-mutex.md)
+       [static-order-checking-and-ww-mutex.md](internals/static-order-checking-and-ww-mutex.md)
        identified as passing undiagnosed; companions `co await under guard, split` and
        `co reentrant access under guard`. Original text follows.
        The `access_guard_depth > 0` check lives in `await_suspend`, so a `co_await` that happens to
@@ -1088,7 +1088,7 @@ IDs — when an item is done, mark it, don't renumber.
        opt out per scope. Prior art: Go `runtime/lockrank.go`, Williams' `hierarchical_mutex`,
        Linux `CONFIG_PROVE_RAW_LOCK_NESTING`, Boyapati et al. OOPSLA'02 (the type-level version).
        **Free static complement — EVALUATED (2026-08), adopt narrowly.** Full report with
-       compiler output: [static-order-checking-and-ww-mutex.md](static-order-checking-and-ww-mutex.md).
+       compiler output: [static-order-checking-and-ww-mutex.md](internals/static-order-checking-and-ww-mutex.md).
        clang-cl **22.1.3 ships in VS 18 Community**, so `ACQUIRED_BEFORE` is default-on under
        plain `-Wthread-safety`, and the flag is silent over the current headers — enabling it
        costs nothing today. Two claims in the earlier draft of this item were **wrong** and are
@@ -1110,7 +1110,7 @@ IDs — when an item is done, mark it, don't renumber.
 
    15. `[x]` **(P1, author 2026-08 — big, design first) Escape hatches for the waiting rules,
        with a declared shipping policy — DONE (2026-08).** Design of record:
-       [waiting-rule-policy.md](waiting-rule-policy.md); mechanism in `include/ts/rules.h`.
+       [waiting-rule-policy.md](internals/waiting-rule-policy.md); mechanism in `include/ts/rules.h`.
        Landed: a flat `ts::Rule` enum mirroring `TS_RULE_*` preprocessor bits (so a disabled
        rule's code AND state vanish), three classes over it, `ts::Relaxed_scope` +
        `ts::set_default_relaxed_rules`, and `TS_ENABLED_RULES` with the same
@@ -1174,7 +1174,7 @@ IDs — when an item is done, mark it, don't renumber.
        The classic lever is exactly what coroutine-first deleted on purpose: **awaiting a
        not-yet-started task runs it inline on the awaiting thread** (retraction). It was deleted
        because as a *blocking* mechanism it could not be made safe under access control (see
-       [retraction-vs-pool-exhaustion.md](retraction-vs-pool-exhaustion.md) and coroutine-first
+       [retraction-vs-pool-exhaustion.md](internals/retraction-vs-pool-exhaustion.md) and coroutine-first
        §3) — but the suspension-based form is a different proposition: a suspended awaiter holds
        no thread, so the pool-exhaustion argument that killed it does not apply. What must be
        re-derived from scratch: whether running the awaited task inline is safe with respect to
@@ -1187,7 +1187,7 @@ IDs — when an item is done, mark it, don't renumber.
 
    18. `[ ]` **(P3, evaluated 2026-08) `TS_CAPABILITY` / `TS_ACQUIRED_BEFORE` macros — a free
        static mirror of 6.14's ranks.** Report + compiler output:
-       [static-order-checking-and-ww-mutex.md](static-order-checking-and-ww-mutex.md).
+       [static-order-checking-and-ww-mutex.md](internals/static-order-checking-and-ww-mutex.md).
        Ship thin macros wrapping Clang's thread-safety attributes (no-ops on MSVC, verified
        zero-noise; clang-cl 22.1.3 ships in VS 18, so `ACQUIRED_BEFORE` is default-on under
        plain `-Wthread-safety` and is silent over the current headers) plus a guide recipe for
@@ -1270,7 +1270,7 @@ IDs — when an item is done, mark it, don't renumber.
        and the un-checkable footgun 7.3 argued against).
 
 7. **Deferred / Versioned**
-   1. `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.
+   1. `[ ]` **(P2) Main chain** ([deferred-versioned-state.md](internals/deferred-versioned-state.md) §6) — journal `mem_profile` baseline → per-journal bump arena → record-stream slots → typed command tier (`Deferred<T,Cmd>`) → sort keys / hooks / dirty-set → render-queue fixture.
    2. `[ ]` **(P2) Lock-free `stage()`** — kill the per-slot mutex (it exists ONLY for the dynamic stage-vs-cut race; single producer per slot otherwise — handoff doc §5). Falls out of 7.1's arena step: single-producer chunked bump allocation makes `stage` a lock-free bump, and the cut becomes a chain-head exchange. `Parallel_recorder` already gives thread-keyed slots (per-worker + overflow lane); this removes the last lock on the staging path. Split out of 7.1 for referenceability — implement together with the arena.
    3. `[x]` **DONE (2026-08) — a task's captured resources are now destroyed before it settles,
        not at refcount-zero.** Was: a functor task's `Executable` held `Body body;` as a plain
@@ -1303,7 +1303,7 @@ IDs — when an item is done, mark it, don't renumber.
 9. **Research / shelved**
    1. `[S]` **std::execution senders** — shelved; model the concepts for interop, prototype *access-context-as-env* as the one novel spike; do **not** re-found the engine on senders (the monomorphic runtime block earns its keep). [§D7]
    2. `[ ]` **(research note — T13.4) Async I/O story.** Untouched so far. The library is CPU-compute-first; async I/O (file/socket/GPU-transfer completion) is a different axis — a blocked I/O wait must not tie up a worker. Today the sanctioned bridge is `Signal`: an external completion (OS overlapped-IO callback, GPU fence, `io_uring` CQE) calls `signal.trigger()`, and a `co_await` on that `Signal` resumes CPU work — fire-the-IO, suspend, never block a worker. (2026-08: the coroutine-first cross-frame pattern, coroutine-first.md §4.7, makes this the first-class shape rather than an idiom, which is what pulled 6.6 out of this note.) That covers "react to completion" without an I/O runtime. What we deliberately do NOT provide (and probably shouldn't, cf. Rayon/Tokio being separate pools by design): an I/O reactor, readiness polling, or a socket/timer API. Open question to revisit only on demonstrated demand: whether a thin `Signal`-from-OS-completion helper (register an OVERLAPPED / fd / fence, get a `Signal`) is worth packaging, or stays a documented idiom. Ties to the Signal-examples doc item (10.4).
-   3. `[ ]` **(research note — T25) CPU transient aliasing.** Render graphs reuse one block of memory for two scratch resources whose lifetimes don't overlap ([research-deepdive.md](research-deepdive.md) §4.4), derived from declared first-write/last-read. The CPU analogue for us would be per-node *declared transient buffers* with `compile()` computing [first-writer, last-reader] windows and aliasing storage across non-overlapping windows — a potential differentiator, but it needs a task-system feature we don't have: a *declared transient-resource* concept distinct from a `Guarded` object (a scratch buffer owned by the graph, not a persistent guarded instance). The coarse version already exists (the per-run bump arena, 4.6 — everything dies at run end); the fine version is speculative and gated on that new concept. Record only; act only if a concrete workload needs graph-derived scratch-memory reuse.
+   3. `[ ]` **(research note — T25) CPU transient aliasing.** Render graphs reuse one block of memory for two scratch resources whose lifetimes don't overlap ([research-deepdive.md](internals/research-deepdive.md) §4.4), derived from declared first-write/last-read. The CPU analogue for us would be per-node *declared transient buffers* with `compile()` computing [first-writer, last-reader] windows and aliasing storage across non-overlapping windows — a potential differentiator, but it needs a task-system feature we don't have: a *declared transient-resource* concept distinct from a `Guarded` object (a scratch buffer owned by the graph, not a persistent guarded instance). The coarse version already exists (the per-run bump arena, 4.6 — everything dies at run end); the fine version is speculative and gated on that new concept. Record only; act only if a concrete workload needs graph-derived scratch-memory reuse.
 
    4. `[ ]` **(P2, research, author 2026-07) Survey high-level parallelisation patterns to
       generalise.** A research pass over the broad parallel-programming pattern catalog
@@ -1314,7 +1314,7 @@ IDs — when an item is done, mark it, don't renumber.
       buffers. Output: a ranked candidate list with "already covered / cheap idiom / worth a
       primitive / out of scope" verdicts, feeding 5.1's primitive menu and the samples. Complements
       the existing engine research ([task-systems-comparison.md](task-systems-comparison.md),
-      [research-deepdive.md](research-deepdive.md)) which studied task SYSTEMS; this studies parallel
+      [research-deepdive.md](internals/research-deepdive.md)) which studied task SYSTEMS; this studies parallel
       PATTERNS.
    5. `[ ]` **(P1, research, author 2026-07) Find a real integration / validation target.** A deep
       research pass for potential applications of the library, with the concrete goal of finding an
@@ -1325,17 +1325,17 @@ IDs — when an item is done, mark it, don't renumber.
       (workload shape, existing threading model, integration surface, license, community activity)
       and a recommended target to prototype against. The strongest available validation of the
       design and the best source of real API pressure, so prioritize it. Ties to the going-public
-      story ([going-public.md](going-public.md)).
+      story (tmp/docs/going-public.md - internal, not in the repo).
 
 10. **Tooling / infra**
     1. `[ ]` **(P2)** Benchmark regression baseline + compare step (store medians, flag regressions). *(postponed — not blocking)* Also assert **allocation-free re-runs** here (T19): `execute()` on a compiled graph should show 0 allocs via `--memprofile` on the 2nd+ run — a cheap regression guard for the re-arm design, folded into this step rather than a standalone test.
     2. `[ ]` **(P2)** Proper ASan build config (reachable via `/p:EnableASAN=true` today); portable TSan build story.
     3. `[ ]` **(P3, docs — T13.1/T13.2) Renderer-pattern samples.** Single-file samples, not out-of-box machinery (the author's call — these are idioms over existing primitives, not new API): (a) **parallel command-list recording** — fork records into an indexed slot array (chunk i → slot i), a sequential tail submits slots in order (GPU exec order = submission order); shows `parallel_for` + ordered-slot join. (b) **dynamic reprioritization** — the PSO-compile pattern: a queued background task that must jump the queue when its result becomes needed this frame; cancel-and-relaunch-at-higher-priority is the viable mechanism and the user can already do it — the sample documents the idiom; only add a helper if the raw form proves error-prone. (c) **RHI-stream-as-pipe** — the render/RHI split as a `Pipe`/`Deferred` ordered stream fed from many recording threads (incl. inside `parallel_for`), rather than a dedicated named thread — reinforcing 3.2's named-thread-free stance.
     4. `[ ]` **(P2, docs — T13.5) `Signal` usage examples.** `Signal` is under-documented for how much it enables: external-completion bridge (GPU fence / OS async-IO callback → `trigger()` → `then`), manual join/barrier, phase gate, one-shot broadcast, reusable phase gate via `reset()`. A worked set of examples in guide.md (and the async-IO idiom from 9.2). Author flagged Signals as an interesting, under-covered primitive.
-    5. `[ ]` **(P3, docs — T24) Same-program comparison appendix.** A short "same task graph in ours / Taskflow / TBB flow graph" appendix — we win the wiring count by construction (derived edges = zero `precede`/`make_edge` calls), the measurable form of the ergonomics claim ([research-deepdive.md](research-deepdive.md) §14). Low priority; informative value uncertain until written.
-    6. `[ ]` **(P1-cheap, docs) "Declaration order is program order" contract.** One paragraph in guide.md making explicit the contract the graph already implements (conflicting nodes run in `add_node` order — the STF/pipe-FIFO philosophy applied to the graph). Removes the "invisible edge" surprise the derived-edge model risks; prerequisite framing for the ordering-ambiguity discussion ([ordering-ambiguity.md](ordering-ambiguity.md) §4.1). Do with the next docs pass.
-    7. `[ ]` **(P2, docs) Layered-disclosure front page + scope statement.** guide.md should let a reader be productive with the six core functions before meeting `Deferred`/`Versioned`/coroutines/`parallel_for` (API-surface width is the adoption risk, [research-deepdive.md](research-deepdive.md) §14); and state once, plainly, the scope boundary (O(100)-node coarse frame skeletons; problem-given million-node graphs are Taskflow/HPC territory — §16).
-    8. `[ ]` **(P2, docs) Known-limits section.** Draft written in [limits.md](limits.md) (2026-07): the honest catalog of what the harness and access declarations do NOT catch — coverage gaps (uninstrumented methods, PODs, escaped refs, sub-object escapes, stale inherited grants, shipping builds) and the failures no declaration system can catch (semantic/order races, deadlock-by-misuse, the completeness hazard), plus the TSan-as-complement posture. Refine and fold into guide.md.
+    5. `[ ]` **(P3, docs — T24) Same-program comparison appendix.** A short "same task graph in ours / Taskflow / TBB flow graph" appendix — we win the wiring count by construction (derived edges = zero `precede`/`make_edge` calls), the measurable form of the ergonomics claim ([research-deepdive.md](internals/research-deepdive.md) §14). Low priority; informative value uncertain until written.
+    6. `[ ]` **(P1-cheap, docs) "Declaration order is program order" contract.** One paragraph in guide.md making explicit the contract the graph already implements (conflicting nodes run in `add_node` order — the STF/pipe-FIFO philosophy applied to the graph). Removes the "invisible edge" surprise the derived-edge model risks; prerequisite framing for the ordering-ambiguity discussion ([ordering-ambiguity.md](internals/ordering-ambiguity.md) §4.1). Do with the next docs pass.
+    7. `[ ]` **(P2, docs) Layered-disclosure front page + scope statement.** guide.md should let a reader be productive with the six core functions before meeting `Deferred`/`Versioned`/coroutines/`parallel_for` (API-surface width is the adoption risk, [research-deepdive.md](internals/research-deepdive.md) §14); and state once, plainly, the scope boundary (O(100)-node coarse frame skeletons; problem-given million-node graphs are Taskflow/HPC territory — §16).
+    8. `[ ]` **(P2, docs) Known-limits section.** Draft written in [limits.md](internals/limits.md) (2026-07): the honest catalog of what the harness and access declarations do NOT catch — coverage gaps (uninstrumented methods, PODs, escaped refs, sub-object escapes, stale inherited grants, shipping builds) and the failures no declaration system can catch (semantic/order races, deadlock-by-misuse, the completeness hazard), plus the TSan-as-complement posture. Refine and fold into guide.md.
     9. `[ ]` **(P2, trace — handoff to the tracing session) Serial-baseline trace lane.**
        Worker-less (`single_threaded`) graph runs are excluded from the parallel trace fold
        (their starts are cumulative serial offsets; dispatch-wait measures the trampoline;
@@ -1349,7 +1349,7 @@ IDs — when an item is done, mark it, don't renumber.
        `static_task_graph.cpp` already passes the skip flag).
     10. `[ ]` **(P2, trace) Internal profiling: decompose M to optimise the machinery.**
         The ranked 6-point plan in
-        [profiler-guided-optimization.md](profiler-guided-optimization.md) ("Internal
+        [profiler-guided-optimization.md](internals/profiler-guided-optimization.md) ("Internal
         profiling" section). Start with 1+2: (1) split machinery into named phases —
         dispatch/submit already have bridges; add per-worker **acquire** (`pipe_acquire`/
         handoff) and **completion** (successor release + dep-counter + object release)
@@ -1386,7 +1386,7 @@ IDs — when an item is done, mark it, don't renumber.
         answered (it does not: an awaited inner run suspends the outer frame, holding no worker).
 
     13. `[x]` **DONE (2026-08) — Wave-2 `writer_owner` tests F1–F4**
-        ([pipe-rebase-tests.md](pipe-rebase-tests.md) §F), in `pipe_tests` §F. Re-scoped for the
+        ([pipe-rebase-tests.md](internals/pipe-rebase-tests.md) §F), in `pipe_tests` §F. Re-scoped for the
         evolved pipe: **F1** (owner set inside a write body, null outside — plus the other half
         of the invariant, that a READER hold publishes no owner, or `commit()` would take its
         inline arm under a read grant) and **F4** (each pipe of a multi-object write names the
@@ -1412,7 +1412,7 @@ IDs — when an item is done, mark it, don't renumber.
         matches paying a wake in each direction). So there is no allocation-shaped gap here
         (6.2 already landed), and the lever if it ever matters is the worker-loop half of 6.8
         or the idle policy, NOT 4.1/6.2. Full verdict in
-        [pipe-rebase.md](pipe-rebase.md) §0.4; keep both benchmark lines.
+        [pipe-rebase.md](internals/pipe-rebase.md) §0.4; keep both benchmark lines.
 
     15. `[x]` **(P1-cheap, CI) Gate Shipping (`TS_SAFETY_CHECKS=0`) on every push — DONE.**
         The safety-gated surface grew substantially (circular-wait detector state, grant epochs,
@@ -1461,7 +1461,7 @@ change after public. Feed the going-public "API-stability pass".
 2. **Multi-object `ts::access` ≠ opportunistic — FIXED (2026-08).** Was: single-object `access`
    runs inline when free while multi-object `ts::access` scheduled like `ts::async`. Both now
    share one caller-owned `Access_op` and one dispatch policy (lend, then all-or-nothing inline
-   probe, else the queued cascade) — see §1.2 and [multi-access-op-design.md](multi-access-op-design.md).
+   probe, else the queued cascade) — see §1.2 and [multi-access-op-design.md](internals/multi-access-op-design.md).
 3. **Stale `async` comments after the split — FIXED.** Swept `guarded.h` (`default_scheduler`,
    `pipe_try_inline`, the two access/async doc blocks).
 4. **`pipe` vs `queue` terminology — DONE (2026-08-23, API-stability S9).** The original
@@ -1486,7 +1486,7 @@ change after public. Feed the going-public "API-stability pass".
    enforced instead of argued: a link-time tripwire in `access.h` (`#pragma detect_mismatch`
    on MSVC-family; a config-named anchor symbol, defined in `access.cpp`, elsewhere) makes a
    mixed-config link fail with a diagnostic. The same convention governs the shelved
-   interval-grant entry layout ([escaped-refs-hardening.md](escaped-refs-hardening.md) §6.1)
+   interval-grant entry layout ([escaped-refs-hardening.md](internals/escaped-refs-hardening.md) §6.1)
    if revived.
 7. **Entity-naming approach — RESOLVED (author-designed, 2026-08).** Ratified as the leading
    `ts::Named` wrapper, unified across all three entity kinds: `Node_name` is deleted and

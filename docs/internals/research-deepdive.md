@@ -3,8 +3,8 @@
 *Deep-research pass, 2026-07. Companion to
 [research-static-vs-dynamic.md](research-static-vs-dynamic.md) (the original
 evidence review, referenced as "the original doc"),
-[task-systems-comparison.md](task-systems-comparison.md), and
-[design.md](design.md). Sources: primary docs, papers, GitHub
+[task-systems-comparison.md](../task-systems-comparison.md), and
+[design.md](../design.md). Sources: primary docs, papers, GitHub
 issues/discussions, and forum threads, gathered 2026-07; the full source
 index is in §20. Abbreviations are expanded at first use.*
 
@@ -18,8 +18,8 @@ brief it addresses.*
 
 *Deep-research pass, 2026-07. Companion to
 [research-static-vs-dynamic.md](research-static-vs-dynamic.md) (the original
-evidence review), [task-systems-comparison.md](task-systems-comparison.md), and
-[design.md](design.md). Every paragraph is numbered (§N.M) for reference in
+evidence review), [task-systems-comparison.md](../task-systems-comparison.md), and
+[design.md](../design.md). Every paragraph is numbered (§N.M) for reference in
 discussion. Abbreviations are expanded at first use.*
 
 ---

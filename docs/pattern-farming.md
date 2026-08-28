@@ -30,7 +30,7 @@ Legend: ✅ approved · ❌ rejected · 🕓 undecided (revisit) · 🔬 design 
 | Item | Status | Notes |
 |---|---|---|
 | 2.1 `when_any` + loser policy | ✅ approved, **mid-pri** | Do with the rest of Cluster A, one by one. Added: loser policy (cancel / detach / let-run), the Cobalt-gap spec, 5.3 rewrite. |
-| 2.2 timer primitive | 🔬 design ready | [timer-primitive-design.md](timer-primitive-design.md): timer thread + min-heap, zero-cost when unarmed. Awaiting author decision. |
+| 2.2 timer primitive | 🔬 design ready | [timer-primitive-design.md](internals/timer-primitive-design.md): timer thread + min-heap, zero-cost when unarmed. Awaiting author decision. |
 | 2.3 timeout/deadline | 🕓 undecided | Expanded with the partial-result / anytime-algorithm flavor per author. |
 | 2.4 linked / child tokens (+ reason) | 🕓 undecided | Rewritten for clarity per author. |
 | 2.5 structured task-group scope | 🕓 undecided | Terminology fixed (launch, not spawn). |
@@ -50,7 +50,7 @@ public library (`include/ts/event_bus.h`, in the umbrella; guide §9.4;
 `dispatch_fn()`/`publish_fn()` naming ratified — `_fn` = a functor run later
 under the declared grant); follow-ups: dedicated test group, the typed-lane
 tier it motivates; (d) the timer design doc
-([timer-primitive-design.md](timer-primitive-design.md)) — awaiting verdict.
+([timer-primitive-design.md](internals/timer-primitive-design.md)) — awaiting verdict.
 
 ---
 
@@ -228,7 +228,7 @@ over drop-cancellation systems.
 
 #### 2.2 Timer / delayed-dispatch primitive — **foundational, we have none**
 
-**Status: 🔬 design delegated — doc ready: [timer-primitive-design.md](timer-primitive-design.md).**
+**Status: 🔬 design delegated — doc ready: [timer-primitive-design.md](internals/timer-primitive-design.md).**
 Recommendation: a lazily-created, scheduler-owned **timer thread with a
 `steady_clock` min-heap**, each fire delivered as a `Signal` trigger handed to the
 scheduler via a low-priority `launch` — structurally identical to
@@ -381,7 +381,7 @@ the scope cannot exit until all finish, governed by a policy:
 (race — 2.1 generalized), or **supervise** (a sibling failure doesn't tear down
 the cohort). This is the safe half of what we removed: `ts::nested`/`Task_scope`
 were deleted as unsafe *grant-inheriting* concurrent children
-([coroutine-first.md](coroutine-first.md) §4.3) — a group of **detached**
+([coroutine-first.md](internals/coroutine-first.md) §4.3) — a group of **detached**
 (`ts::launch`, no grant inheritance) children joined at scope end is a different,
 safe animal, and fills the gap `parallel_for` (homogeneous, known count) doesn't.
 
@@ -541,7 +541,7 @@ Work runs in parallel (arbitrary completion order) but is emitted downstream in
 user-specified sequence with a no-gap gate — token *t* releases only once *t-1*
 has passed. TBB `sequencer_node`. This is precisely the documented "pipe FIFO
 does NOT stand in for conflict edges" trap from the graph-free experiment
-([coroutine-first.md](coroutine-first.md) §10.5): a system blocked on its first
+([coroutine-first.md](internals/coroutine-first.md) §10.5): a system blocked on its first
 object hasn't taken its slot on later ones, so a later launch overtakes it —
 losing a frame of draw commands *silently*. A `Guarded` sink stashing early
 tokens in an indexed buffer, firing the awaiting frame only when `next_expected`

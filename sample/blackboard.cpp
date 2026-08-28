@@ -1,5 +1,5 @@
 // The blackboard pattern on `Versioned<T>` - the pattern recipe of
-// docs/command-buffer-design.md §7.4, executable. The pattern needs no library
+// docs/internals/command-buffer-design.md §7.4, executable. The pattern needs no library
 // support beyond the existing primitives.
 //
 // A stealth-guard toy: the world ticks a patrolling player; a senses system

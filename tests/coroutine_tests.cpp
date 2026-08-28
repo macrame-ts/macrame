@@ -901,7 +901,7 @@ void test_coroutine_graph_node()
     TS_CHECK(successor_runs.load() == 2);
 }
 
-// Companion for the circular-wait fatal (docs/coroutine-first.md §2 hierarchy, step 1):
+// Companion for the circular-wait fatal (docs/internals/coroutine-first.md §2 hierarchy, step 1):
 // the same cross-object communication with both objects declared - compile() derives the
 // conflict edges and orders the nodes, so neither suspends and no cycle can form.
 Task<void> declared_pair_body(tests::Counter& own, tests::Counter& other)

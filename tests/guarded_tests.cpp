@@ -522,7 +522,7 @@ void test_op_void_result()
     TS_CHECK(read_value(d) == 42);
 }
 
-// The member spelling the flattened Body exists for (docs/access-op-design.md §10 tier 1): a
+// The member spelling the flattened Body exists for (docs/internals/access-op-design.md §10 tier 1): a
 // named functor as `Body`, the op a directly-declared member, constructed in place by
 // guaranteed elision through the `access` return.
 void test_op_member_storage()

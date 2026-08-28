@@ -8,8 +8,8 @@ deliberate shakeup: no existing mechanism is sacred; every change that alters sh
 behavior or API is flagged in §8. Guiding goals (CLAUDE.md): UX, performance, rich
 functionality.
 
-Companions: `docs/pipe-rebase.md` §0 (the evolved pipe this builds on),
-`docs/retraction-vs-pool-exhaustion.md` (+ its §7 outcome), `docs/task-internals.md`
+Companions: `docs/internals/pipe-rebase.md` §0 (the evolved pipe this builds on),
+`docs/internals/retraction-vs-pool-exhaustion.md` (+ its §7 outcome), `docs/internals/task-internals.md`
 (to be rewritten at the end of this plan).
 
 ## 1. The end-state model

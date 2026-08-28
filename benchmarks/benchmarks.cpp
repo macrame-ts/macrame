@@ -10,7 +10,7 @@
 //                               coroutine-resume decomposition grid
 //   staged_commands_bench.cpp - the Deferred closure-tier cost series
 //   production_contention_bench.cpp - the generalized production lock-contention case
-//                               (docs/lock-contention-research.md), pure mutex baseline
+//                               (docs/internals/lock-contention-research.md), pure mutex baseline
 //   production_contention_lib_bench.cpp - the same workload architected on the library
 //                               (staged touches, per-wave commit, apply-lane slow op)
 //   game_frame_bench.cpp      - graph vs graph-free frame composition

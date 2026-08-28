@@ -23,7 +23,7 @@
 > shows the measured baseline→optimised endpoints; the two levers' individual
 > contributions are qualitative — the sample builds only the two endpoint variants,
 > not the split-only intermediate. See
-> [profiler-guided-optimization.md](profiler-guided-optimization.md).
+> [profiler-guided-optimization.md](internals/profiler-guided-optimization.md).
 
 This walks through the `game_frame` sample as an optimisation exercise. It has
 two variants of the same ~30-system frame, built from the *same* system bodies:
@@ -214,4 +214,4 @@ that point instead of guessing.
 The mechanics behind the metrics (streaming aggregation, the measured critical
 path, the dead-time and utilization definitions) are in
 [guide.md §6.2](guide.md); the ranked tuner design this exercise motivates is in
-[profiler-guided-optimization.md](profiler-guided-optimization.md).
+[profiler-guided-optimization.md](internals/profiler-guided-optimization.md).

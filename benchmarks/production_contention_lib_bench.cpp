@@ -21,7 +21,7 @@ namespace
 // sync): same wave-released items, same private work and jitter, same touch work, same
 // rare slow maintenance op, same totals. What changes is the architecture - this is the
 // workload built from scratch the way this library intends, i.e. the research's fix
-// hierarchy (docs/lock-contention-research.md §4) applied as primitives rather than
+// hierarchy (docs/internals/lock-contention-research.md §4) applied as primitives rather than
 // bespoke heroics:
 //
 //  - every touch is a grant-free stage into a `Parallel_recorder` (per-worker lanes) -

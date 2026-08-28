@@ -6,7 +6,7 @@ design; it is written BEFORE the implementation so the black-box tests land firs
 regression oracle and the rewrite is validated against them.
 
 Status: design agreed 2026-07-31. Implementation of the tests proceeds in two waves
-(see §2). The rebase itself is designed in `docs/pipe-rebase.md` (to be written).
+(see §2). The rebase itself is designed in `docs/internals/pipe-rebase.md` (to be written).
 
 ## 1. What is being tested (the concerns)
 
