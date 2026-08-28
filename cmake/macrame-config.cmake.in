@@ -1,9 +1,11 @@
 @PACKAGE_INIT@
 
-# macrame is a static, exceptions-off, C++23 library. A consumer's own translation units must
-# be compiled with the same TS_SAFETY_CHECKS / TS_PROFILING values the library was built with
-# (propagated as PUBLIC defs on the imported target) and with exceptions disabled - see the
-# guide. This config just imports the target; the usage requirements ride on it.
+# macrame is a static C++23 library. A consumer's own translation units must be compiled
+# with the same TS_SAFETY_CHECKS / TS_PROFILING values the library was built with
+# (propagated as PUBLIC defs on the imported target). The library never throws and builds
+# with exceptions on or off; a package built with MACRAME_NO_EXCEPTIONS carries
+# _HAS_EXCEPTIONS=0 as a usage requirement, which is program-wide on MSVC - see the guide.
+# This config just imports the target; the usage requirements ride on it.
 include(CMakeFindDependencyMacro)
 # The library links Threads::Threads PUBLIC on non-Windows (a static lib's -pthread must
 # reach the consumer's link line); resolve the imported target before the targets file

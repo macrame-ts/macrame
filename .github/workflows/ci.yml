@@ -194,3 +194,31 @@ jobs:
           sudo ./llvm.sh 21
       - name: TSan stress (tsan/run.sh)
         run: CXX=clang++-21 bash tsan/run.sh
+
+  # The Linux twin of windows-consumer: install the package, then the standalone consumer
+  # builds against it via find_package and runs. This is the job that catches Linux-only
+  # packaging defects - a sanitizer flag leaking through the export, a missing
+  # Threads::Threads usage requirement, tools/ headers the install forgot - which the
+  # Windows consumer job structurally cannot see.
+  linux-consumer:
+    name: Linux / clang-21 / consumer (find_package)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang 21
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lsb-release wget software-properties-common gnupg
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 21
+      - name: Build + install the library
+        run: |
+          cmake --preset linux-clang -DCMAKE_CXX_COMPILER=clang++-21 -DMACRAME_BUILD_DRIVER=OFF
+          cmake --build --preset linux-clang --target macrame
+          cmake --install build/linux-clang --prefix ${{ github.workspace }}/_install
+      - name: Consumer find_package + build + run
+        run: |
+          cmake -S tests/consumer -B _consumer -DCMAKE_CXX_COMPILER=clang++-21 "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/_install"
+          cmake --build _consumer
+          ./_consumer/macrame_consumer
