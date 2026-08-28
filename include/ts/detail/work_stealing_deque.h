@@ -56,7 +56,16 @@ public:
     bool take(T& out)
     {
         std::int64_t b = bottom_.load(std::memory_order_relaxed) - 1;
-        bottom_.store(b, std::memory_order_relaxed);
+        // Release: a thief's acquire load of `bottom` in steal() may read THIS store (the
+        // pop's decrement) rather than a push's release store. C++20 (P0982) removed
+        // same-thread plain stores from release sequences, so a relaxed store here leaves
+        // the cells below `b` formally unpublished to that thief - the reference algorithm
+        // (Le/Pop/Cohen/Nardelli, PPoPP 2013) relied on the C11 release-sequence rule its
+        // relaxed store had. Unreachable on current hardware (x86 TSO; ARM STLR
+        // propagation), so this is abstract-machine correctness plus a real happens-before
+        // edge for TSan. Free on x86 (same instruction); STLR next to the existing fence on
+        // ARM.
+        bottom_.store(b, std::memory_order_release);
         std::atomic_thread_fence(std::memory_order_seq_cst);
         std::int64_t t = top_.load(std::memory_order_relaxed);
 
