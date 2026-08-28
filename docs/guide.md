@@ -331,8 +331,11 @@ ts::Task<Scene> load_scene()
 }
 ```
 
-`co_await task` resumes with the result by `const&`. It is non-consuming, with
-the same contract as `sync()` (§4.3). Loops, branches, and early returns
+`co_await task` on an lvalue handle resumes with the result by `const&`. It
+is non-consuming, with the same contract as `sync()` (§4.3). Awaiting an
+rvalue task, as in `co_await ts::launch(...)` or the joins above, is a
+consuming await: the temporary handle dies with the statement, so the result
+is moved out and returned by value, mirroring `take()`. Loops, branches, and early returns
 across asynchronous steps read as straight-line code. There is no callback
 vocabulary to learn, and no callback-flavored types to thread results through.
 If a prerequisite was cancelled, awaiting a `Task<void>` simply resumes, while
@@ -1283,7 +1286,11 @@ int r = pipeline().sync();   // A coroutine returning Task<R> is itself a task.
 ```
 
 `co_await task` suspends the coroutine until the task settles and resumes
-with the result, a `const R&` with the same contract as `sync()`. A coroutine
+with the result. On an lvalue handle that is a `const R&` with the same
+contract as `sync()`, non-consuming; on an rvalue, as both launches above,
+the result is moved out and yielded by value, mirroring `take()` - the
+temporary handle dies with the statement, so a reference into it would
+dangle. A coroutine
 task starts eagerly, meaning the body runs to its first genuine suspension on
 the calling thread, and while suspended it holds no worker. Deep chains
 resume iteratively with a bounded stack, and each resumed segment carries the

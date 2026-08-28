@@ -454,6 +454,37 @@ struct Optional_awaiter : Task_awaiter<R>
     }
 };
 
+// `co_await` on an RVALUE task - the consuming await. The temporary handle dies at the end
+// of the full expression and the awaiter (often the last owner) releases the block with it,
+// so resuming with `const R&` into the block's storage would let
+// `const R& r = co_await ts::launch(...);` dangle. Instead `await_resume` moves the result
+// out and returns it by value, mirroring `take()`: awaiting an rvalue task is its last
+// consume (it claims the block's consume flag under `TS_SAFETY_CHECKS`). The wait itself
+// (handshake, rule checks, the cancelled-value fatal) is `Task_awaiter`'s, unchanged.
+template<typename R>
+struct Consuming_task_awaiter : Task_awaiter<R>
+{
+    using Task_awaiter<R>::Task_awaiter;
+
+    R await_resume()
+    {
+        this->end_wait();
+        if constexpr (!std::is_void_v<R>)
+        {
+            if (this->core_->cancelled)
+                ts::fatal("co_await on a cancelled task has no result; check is_cancelled() first");
+#if TS_SAFETY_CHECKS
+            if (this->core_->result_consumed.exchange(true, std::memory_order_acq_rel))
+            {
+                ts::fatal("co_await on an rvalue task whose result was already consumed - the "
+                          "consuming await moves the result out, so it must be the last consume");
+            }
+#endif
+            return std::move(*static_cast<R*>(this->core_->result_ptr));
+        }
+    }
+};
+
 // In `ts::detail`, not `ts`: the argument is `detail::Optional_awaitable`, so that is where
 // ADL looks for the operator.
 template<typename R>
@@ -1069,18 +1100,23 @@ using Multi_access_awaiter = detail::Multi_access_awaiter<Mode, Ts...>;
 template<typename R>
 using Task_awaiter = detail::Task_awaiter<R>;
 
-// `co_await task` -> suspend until `task` settles, then resume with its result (`const R&`,
-// non-consuming; `void` for a void task). ADL finds these in namespace `ts`.
+// `co_await task` -> suspend until `task` settles, then resume with its result (`void` for
+// a void task). ADL finds these in namespace `ts`. An LVALUE await resumes with `const R&`,
+// non-consuming - the handle outlives the statement, so the reference stays valid and any
+// number of awaits (or a later `sync()`) observe the result.
 template<typename R>
 Task_awaiter<R> operator co_await(const Task<R>& t)
 {
     return detail::Task_awaiter<R>(detail::core_of(t));
 }
 
+// An RVALUE await is a consuming await: the temporary handle dies with the statement, so
+// the result is moved out and returned by value, mirroring `take()` (see
+// `detail::Consuming_task_awaiter`).
 template<typename R>
-Task_awaiter<R> operator co_await(Task<R>&& t)
+detail::Consuming_task_awaiter<R> operator co_await(Task<R>&& t)
 {
-    return detail::Task_awaiter<R>(detail::core_of(t));
+    return detail::Consuming_task_awaiter<R>(detail::core_of(t));
 }
 
 namespace detail

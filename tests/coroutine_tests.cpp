@@ -15,7 +15,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <future>
+#include <memory>
 #include <optional>
+#include <string>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -1031,6 +1033,94 @@ void test_frame_gate_release_priority()
     TS_CHECK(woke2.load() == 4);
 }
 
+// --- rvalue task await: the consuming await ---------------------------------------------
+
+// Copyable probe that records a move out of the awaited task's storage: the consuming
+// rvalue await moves the stored result (the source reads moved-from afterwards), while the
+// old non-consuming semantics would copy and leave it intact - so the assertion flips
+// deterministically if the consuming path regresses.
+struct Move_probe
+{
+    int value = 0;
+    bool moved_from = false;
+    Move_probe() = default;
+    explicit Move_probe(int v) : value(v) {}
+    Move_probe(const Move_probe&) = default;
+    Move_probe& operator=(const Move_probe&) = default;
+    Move_probe(Move_probe&& o) noexcept : value(o.value) { o.moved_from = true; }
+    Move_probe& operator=(Move_probe&& o) noexcept
+    {
+        value = o.value;
+        o.moved_from = true;
+        return *this;
+    }
+};
+
+// Awaiting a prvalue task yields the result by value: the bound object stays valid after
+// the full expression even though the temporary handle (the block's last owner) is gone.
+Task<void> co_rvalue_binds(std::atomic<int>& ok)
+{
+    auto s = co_await ts::launch([] { return std::string(64, 'x'); });   // heap storage, no SSO mask
+    if (s.size() == 64 && s.front() == 'x' && s.back() == 'x')
+        ok.store(1, std::memory_order_release);
+}
+
+void test_rvalue_await_returns_by_value()
+{
+    std::atomic<int> ok{ 0 };
+    co_rvalue_binds(ok).sync();
+    TS_CHECK(ok.load() == 1);
+}
+
+// The consuming semantics proper: the rvalue await moves the result out of the task's
+// storage, mirroring take().
+Task<void> co_rvalue_consume(ts::Task<Move_probe>& source, Move_probe& out)
+{
+    out = co_await std::move(source);
+}
+
+void test_rvalue_await_consumes()
+{
+    ts::Task<Move_probe> t = ts::launch([] { return Move_probe{ 7 }; });
+    Move_probe out;
+    co_rvalue_consume(t, out).sync();
+    TS_CHECK(out.value == 7);        // the moved-out result arrived intact
+    TS_CHECK(t.sync().moved_from);   // the stored result was moved out, not copied
+}
+
+// Move-only result: compiles only because the rvalue await returns by value.
+Task<void> co_rvalue_move_only(std::atomic<int>& got)
+{
+    auto p = co_await ts::launch([] { return std::make_unique<int>(5); });
+    got.store(p ? *p : -1, std::memory_order_release);
+}
+
+void test_rvalue_await_move_only()
+{
+    std::atomic<int> got{ 0 };
+    co_rvalue_move_only(got).sync();
+    TS_CHECK(got.load() == 5);
+}
+
+// The lvalue await stays non-consuming: two awaits and a later sync() all observe the
+// result in place.
+Task<void> co_lvalue_twice(ts::Task<std::string>& t, std::atomic<int>& matches)
+{
+    const std::string& a = co_await t;
+    const std::string& b = co_await t;   // settled -> no suspension, same storage
+    if (a == "payload" && b == "payload")
+        matches.store(1, std::memory_order_release);
+}
+
+void test_lvalue_await_non_consuming()
+{
+    ts::Task<std::string> t = ts::launch([] { return std::string("payload"); });
+    std::atomic<int> matches{ 0 };
+    co_lvalue_twice(t, matches).sync();
+    TS_CHECK(matches.load() == 1);
+    TS_CHECK(t.sync() == "payload");
+}
+
 } // namespace
 
 void run_coroutine_tests()
@@ -1065,6 +1155,10 @@ void run_coroutine_tests()
     run("co await cancelled checked", test_await_cancelled_checked);
     run("co await as_optional", test_await_as_optional);
     run("try_take non-blocking", test_try_take);
+    run("co rvalue await returns by value", test_rvalue_await_returns_by_value);
+    run("co rvalue await consumes the result", test_rvalue_await_consumes);
+    run("co rvalue await move-only result", test_rvalue_await_move_only);
+    run("co lvalue await non-consuming", test_lvalue_await_non_consuming);
 #if TS_SAFETY_CHECKS
     run_if(with_rule_in_task_sync, "TS_RULE_IN_TASK_SYNC off", "death: sync on a settled task in a task", test_death_sync_settled_in_task);
     run_if(with_rule_await_under_guard, "TS_RULE_AWAIT_UNDER_GUARD off", "death: await a settled task under a guard", test_death_await_settled_under_guard);
