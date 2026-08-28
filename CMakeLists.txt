@@ -193,6 +193,17 @@ endif()
 macrame_private_flags(macrame)
 macrame_atomic_flags(macrame)
 
+# A static library carries no link flags of its own, so its thread dependency must ride the
+# exported target: Threads::Threads PUBLIC (with THREADS_PREFER_PTHREAD_FLAG, so it spells
+# -pthread rather than bare -lpthread) reaches a find_package/add_subdirectory consumer's
+# link line. The private -pthread in macrame_private_flags keeps covering our own targets'
+# compile side. The install config runs the matching find_dependency(Threads).
+if(NOT WIN32)
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+    find_package(Threads REQUIRED)
+    target_link_libraries(macrame PUBLIC Threads::Threads)
+endif()
+
 # ThreadSanitizer instrumentation lives on the library too, so ts_tsan catches races in the
 # scheduler/pipe core (non-Windows; TSan has no Windows runtime). Off by default - a plain
 # consumer build must not be instrumented; the linux-tsan preset turns it on.
