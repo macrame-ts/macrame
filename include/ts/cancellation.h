@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <exception>   // the callback seam reports `what()` when there is one (`invoke_cancel_callback`)
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -39,6 +40,37 @@ struct Cancel_state : Ref_counted<Cancel_state>
     std::thread::id firing_thread{};
     std::condition_variable done;              // notified when `firing` finishes
 };
+
+// Defined in guarded.cpp - the shared escaped-exception report (see `invoke_user_body`,
+// task_block.h). Redeclared here because this header sits below the task layer and must
+// not include it; a cancel callback is user code, so an exception escaping one reports
+// through the same seam as a task body's.
+[[noreturn]] void escaped_exception_diagnose(const char* what) noexcept;
+
+// The cancel-callback body boundary - `invoke_user_body`'s contract in miniature: an
+// exception must not leave the callback (it would unwind into `request_cancel`'s loop or
+// the registering constructor, both of which hold bookkeeping an unwind would corrupt).
+// The handlers exist only where the calling TU has exceptions enabled, exactly like the
+// task-body seam.
+inline void invoke_cancel_callback(std::move_only_function<void()>& fn) noexcept
+{
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
+    try
+    {
+        fn();
+    }
+    catch (const std::exception& e)
+    {
+        escaped_exception_diagnose(e.what());
+    }
+    catch (...)
+    {
+        escaped_exception_diagnose(nullptr);
+    }
+#else
+    fn();
+#endif
+}
 
 } // namespace detail
 
@@ -102,7 +134,7 @@ public:
         if (state_->requested.load(std::memory_order_relaxed))
         {
             lock.unlock();
-            fn_();   // already requested -> fire now, on this thread
+            detail::invoke_cancel_callback(fn_);   // already requested -> fire now, on this thread
         }
         else
         {
@@ -150,20 +182,24 @@ inline void Cancellation_source::request_cancel()
 {
     if (!state_)
         return;
-    std::unique_lock lock(state_->mutex);
-    if (state_->requested.exchange(true, std::memory_order_release))
+    // Pin the state for the whole call: a callback is free to destroy this
+    // `Cancellation_source` (a self-cancelling owner), which drops `state_` mid-loop - the
+    // local keeps the `Cancel_state` alive, and `this` is never touched past this line.
+    detail::Ref_ptr<detail::Cancel_state> state = state_;
+    std::unique_lock lock(state->mutex);
+    if (state->requested.exchange(true, std::memory_order_release))
         return;   // already requested
-    while (!state_->callbacks.empty())
+    while (!state->callbacks.empty())
     {
-        Cancel_callback* cb = state_->callbacks.back();
-        state_->callbacks.pop_back();
-        state_->firing = cb;
-        state_->firing_thread = std::this_thread::get_id();
+        Cancel_callback* cb = state->callbacks.back();
+        state->callbacks.pop_back();
+        state->firing = cb;
+        state->firing_thread = std::this_thread::get_id();
         lock.unlock();
-        cb->fn_();               // run outside the lock (may re-enter / register more)
+        detail::invoke_cancel_callback(cb->fn_);   // run outside the lock (may re-enter / register more)
         lock.lock();
-        state_->firing = nullptr;
-        state_->done.notify_all();
+        state->firing = nullptr;
+        state->done.notify_all();
     }
 }
 

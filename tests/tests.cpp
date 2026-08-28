@@ -892,6 +892,14 @@ void run_death_scenario(const char* name)
     {
         throwing_coroutine().sync();
     }
+    else if (std::strcmp(name, "cancel_callback_throws") == 0)
+    {
+        // A cancel callback is user code: an exception escaping one dies in the
+        // cancel-callback seam (`detail::invoke_cancel_callback`), like a task body's.
+        ts::Cancellation_source src;
+        ts::Cancel_callback cb(src.token(), [] { throw std::runtime_error("from a cancel callback"); });
+        src.request_cancel();
+    }
     else if (std::strcmp(name, "body_result_move_throws_launch") == 0)
     {
         // Worker-less, so the body runs inline on this thread and an escape is catchable here

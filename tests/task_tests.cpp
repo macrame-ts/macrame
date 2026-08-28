@@ -321,6 +321,23 @@ void test_cancel_callback_stateless_token()
     TS_CHECK(fired.load() == 0);        // no source -> no fire, ever
 }
 
+void test_cancel_callback_destroys_source()
+{
+    // A callback destroys its own `Cancellation_source` mid-fire: `request_cancel` pins the
+    // shared state at entry, so the loop never touches the freed source and the remaining
+    // callback still fires. Fired in reverse registration order, so the destroyer
+    // (registered last) runs first.
+    auto src = std::make_unique<ts::Cancellation_source>();
+    std::atomic<int> fired{ 0 };
+    ts::Cancel_callback keeper(src->token(), [&fired] { fired.fetch_add(1); });
+    ts::Cancel_callback destroyer(src->token(), [&] { src.reset(); fired.fetch_add(1); });
+    src->request_cancel();
+    TS_CHECK(!src);                     // the source died inside the request
+    TS_CHECK(fired.load() == 2);        // both callbacks fired off the pinned state
+}
+
+void test_death_cancel_callback_throws() { TS_CHECK(ts::test::expect_death("cancel_callback_throws")); }
+
 // --- I: standalone `launch` (bare scheduler task, body in the block) --------
 
 void test_launch_value()
@@ -584,6 +601,9 @@ void run_task_tests()
     run("cancel callback deregister", test_cancel_callback_deregister);
     run("cancel callback multiple", test_cancel_callback_multiple);
     run("cancel callback stateless token", test_cancel_callback_stateless_token);
+    run("cancel callback destroys its source", test_cancel_callback_destroys_source);
+    run_if(with_exceptions, "built without exceptions", "death: cancel callback throws",
+        test_death_cancel_callback_throws);
     run("launch value", test_launch_value);
     run("launch void", test_launch_void);
     // TODO 7.3 regression guard: the body (and its captured resources) is destroyed in the
