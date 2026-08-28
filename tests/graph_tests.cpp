@@ -1011,6 +1011,7 @@ void test_death_duplicate_object() { TS_CHECK(ts::test::expect_death("graph_dupl
 void test_death_undeclared()       { TS_CHECK(ts::test::expect_death("graph_undeclared")); }
 void test_death_guarded_outlived() { TS_CHECK(ts::test::expect_death("guarded_outlived_by_graph")); }
 void test_death_graph_mid_run()    { TS_CHECK(ts::test::expect_death("graph_destroyed_mid_run")); }
+void test_death_graph_moved_mid_run() { TS_CHECK(ts::test::expect_death("graph_moved_from_mid_run")); }
 // The sharp same-object diagnostic (a node syncing an access to an object it holds --
 // the certain-deadlock shape); subprocess because the child genuinely deadlocks after
 // reporting (it aborts once the report is observed).
@@ -1450,6 +1451,7 @@ void run_graph_tests()
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: undeclared access", test_death_undeclared);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: Guarded outlived by graph", test_death_guarded_outlived);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: graph destroyed mid-run", test_death_graph_mid_run);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: graph move-constructed mid-run", test_death_graph_moved_mid_run);
     run_if(with_rule_in_task_sync, "TS_RULE_IN_TASK_SYNC off", "death: sync own object (sharp diagnostic)", test_death_sync_own_object);
     run("lifetime registration balance", test_lifetime_registration_balance);
 }

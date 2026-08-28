@@ -235,6 +235,20 @@ void run_death_scenario(const char* name)
             ts::Task<void> run = g.execute();   // remaining_nodes set at execute entry
         }   // ~Static_task_graph with the run in flight -> fatal
     }
+    else if (std::strcmp(name, "graph_moved_from_mid_run") == 0)
+    {
+        ts::Guarded<int> a{ ts::Named{}, 0 };
+        ts::Signal go;   // never triggered: the run stays in flight
+        ts::Static_task_graph g;
+        g.add_node(ts::Named{}, [&go](int&) { go.sync(); }, a);
+        g.compile();
+        ts::Task<void> run = g.execute();
+        ts::Static_task_graph moved(std::move(g));   // move-construct with the run in flight -> fatal
+        // With the fatal absent (a regression) the move succeeds; exit hard before anything
+        // touches the moved-from graph, so the parent's `expect_death` fails rather than
+        // hanging on the gated node or crashing through the stale back-pointers.
+        std::_Exit(0);
+    }
     else if (std::strcmp(name, "stale_inherited_grant") == 0)
     {
         ts::Guarded<Counter> c{ ts::Named{} };

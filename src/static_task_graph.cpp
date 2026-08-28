@@ -49,10 +49,29 @@ struct Graph_node_block : detail::Block_backed<Graph_node_block>
 
 // Defined here, where Run_state is complete (the header's `run_` unique_ptr needs it).
 Static_task_graph::Static_task_graph() = default;
-Static_task_graph::Static_task_graph(Static_task_graph&&) noexcept = default;
+
+// Move construction requires quiescence, like destruction: scheduled node blocks and the
+// `Run_state` keep the source's address until the next `execute()` refreshes their
+// back-pointers, so moving mid-run leaves them dangling. The check rides the first
+// initializer, before anything leaves `other`; the pipes' `graph_refs` registrations ride
+// the move with `distinct_pipes_`, so nothing is released here. The one hand-listed member
+// move (a move-assign reconstructs through it) - keep the list in sync with the class.
+Static_task_graph::Static_task_graph(Static_task_graph&& other) noexcept
+    : nodes_((other.check_quiescent("move-constructed from"), std::move(other.nodes_)))
+    , explicit_edges_(std::move(other.explicit_edges_))
+    , distinct_pipes_(std::move(other.distinct_pipes_))
+    , pipe_instances_(std::move(other.pipe_instances_))
+    , pipe_modes_(std::move(other.pipe_modes_))
+    , node_links_(std::move(other.node_links_))
+    , lent_(std::move(other.lent_))
+    , links_lent_(other.links_lent_)
+    , run_(std::move(other.run_))
+    , compiled_(other.compiled_)
+    , trace_(other.trace_)
+{}
 
 #if TS_SAFETY_CHECKS
-void Static_task_graph::check_quiescent_and_release_pipes(const char* where) noexcept
+void Static_task_graph::check_quiescent(const char* where) noexcept
 {
     if (run_ && run_->remaining_nodes.load(std::memory_order_acquire) != 0)
     {
@@ -62,11 +81,18 @@ void Static_task_graph::check_quiescent_and_release_pipes(const char* where) noe
             where);
         ts::fatal(msg);
     }
+}
+
+void Static_task_graph::check_quiescent_and_release_pipes(const char* where) noexcept
+{
+    check_quiescent(where);
     // A moved-from graph's vector is empty (the registrations rode the move); a
     // never-compiled graph's likewise.
     for (detail::Pipe* p : distinct_pipes_)
         p->graph_refs.fetch_sub(1, std::memory_order_release);
 }
+#else
+void Static_task_graph::check_quiescent(const char*) noexcept {}
 #endif
 
 Static_task_graph::~Static_task_graph()

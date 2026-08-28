@@ -128,9 +128,10 @@ class Static_task_graph
     friend class Graph_node;
 
 public:
-    // Movable so a graph can be built-and-returned (e.g. `build_frame_graph`). 
-    // Under `TS_SAFETY_CHECKS` the destructor (and a move-assign
-    // overwrite) fatals while a run is in flight.
+    // Movable so a graph can be built-and-returned (e.g. `build_frame_graph`).
+    // Under `TS_SAFETY_CHECKS` the destructor, the move constructor and a move-assign
+    // overwrite all fatal while a run is in flight (scheduled node blocks keep the
+    // source's address until the next `execute()` refreshes them).
     Static_task_graph();
     ~Static_task_graph();
     Static_task_graph(Static_task_graph&&) noexcept;
@@ -310,10 +311,13 @@ private:
     // `execute()`; a plain top-level run resolves an empty lend set and rebinds nothing.
     void bind_links_for_run(bool detach);
 
+    // Fatal (`TS_SAFETY_CHECKS`) if a run is in flight - `where` names the misuse; a no-op
+    // in shipping. The move constructor calls it before the members leave the source.
+    void check_quiescent(const char* where) noexcept;
 #if TS_SAFETY_CHECKS
-    // Fatal if a run is in flight (`where` names the misuse); balance the pipes'
-    // `graph_refs` for the current `distinct_pipes_`. Called by the destructor (which a
-    // move-assign overwrite routes through).
+    // `check_quiescent`, then balance the pipes' `graph_refs` for the current
+    // `distinct_pipes_`. Called by the destructor (which a move-assign overwrite routes
+    // through); not by the move constructor - the registrations ride the move.
     void check_quiescent_and_release_pipes(const char* where) noexcept;
 #endif
 
