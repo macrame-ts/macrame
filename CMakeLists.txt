@@ -245,7 +245,7 @@ if(WIN32 AND MACRAME_BUILD_DRIVER)
 endif()
 
 # ============================ The TSan stress driver (non-Windows) ============================
-if(NOT WIN32)
+if(NOT WIN32 AND MACRAME_BUILD_DRIVER)
     # The playground's own sources, instrumented, with the stress stages folded in as the
     # `--tsan-stress` mode (`TS_TSAN_NO_MAIN` turns tsan_main.cpp's entry into
     # `ts::tsan::run_all`, the same seam the Windows build already compiles it through). One
