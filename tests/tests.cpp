@@ -228,10 +228,12 @@ void run_death_scenario(const char* name)
     else if (std::strcmp(name, "graph_destroyed_mid_run") == 0)
     {
         ts::Guarded<int> a{ ts::Named{}, 0 };
-        ts::Signal go;   // never triggered: the run stays in flight
+        std::atomic<bool> hold{ false };   // never set: the run stays in flight. A spin, not a
+                                           // sync() - an in-task sync() is itself fatal, and the
+                                           // scenario must abort for the lifecycle fatal, not that.
         {
             ts::Static_task_graph g;
-            g.add_node(ts::Named{}, [&go](int&) { go.sync(); }, a);
+            g.add_node(ts::Named{}, [&hold](int&) { while (!hold.load(std::memory_order_acquire)) std::this_thread::yield(); }, a);
             g.compile();
             ts::Task<void> run = g.execute();   // remaining_nodes set at execute entry
         }   // ~Static_task_graph with the run in flight -> fatal
@@ -239,9 +241,9 @@ void run_death_scenario(const char* name)
     else if (std::strcmp(name, "graph_moved_from_mid_run") == 0)
     {
         ts::Guarded<int> a{ ts::Named{}, 0 };
-        ts::Signal go;   // never triggered: the run stays in flight
+        std::atomic<bool> hold{ false };   // never set: the run stays in flight (spin, not sync - see above)
         ts::Static_task_graph g;
-        g.add_node(ts::Named{}, [&go](int&) { go.sync(); }, a);
+        g.add_node(ts::Named{}, [&hold](int&) { while (!hold.load(std::memory_order_acquire)) std::this_thread::yield(); }, a);
         g.compile();
         ts::Task<void> run = g.execute();
         ts::Static_task_graph moved(std::move(g));   // move-construct with the run in flight -> fatal
