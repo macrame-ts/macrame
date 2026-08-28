@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ts/detail/event_count.h"
+#include "ts/fatal.h"
 #include "ts/detail/mpmc_queue.h"
 #include "ts/priority.h"
 #include "ts/detail/thread_local.h"   // the barrier `current_worker_index()`'s slot sits behind
@@ -313,6 +314,19 @@ private:
     // before a makespan estimate exists). Arming clears the per-worker bucket rows.
     void arm_busy_tracking(long long origin, long long bucket_width, int owner_count = 0) noexcept
     {
+#if TS_SAFETY_CHECKS
+        // Tracing is single-consumer: the counters, bucket rows, and the per-owner sink are
+        // scheduler-wide, cleared and resized here - a second traced run arming while one is
+        // armed would race those writes and mix both runs' data. Deterministic for the
+        // realistic misuse (a nested traced run started from a traced run's task); a true
+        // cross-thread simultaneous arm can slip the load, which is acceptable for a checked
+        // diagnostic. Per-run metric sinks were considered and deliberately parked: utilization
+        // and idle are pool-global on a shared pool, so concurrent traced runs would stay
+        // mutually contaminated wherever the counters live (docs/TODO.md).
+        if (busy_tracking_.load(std::memory_order_relaxed) != 0)
+            ts::fatal("a traced graph run is already armed - trace one run at a time "
+                      "(detach the trace from one graph, or run them sequentially)");
+#endif
         bucket_origin_.store(origin, std::memory_order_relaxed);
         bucket_width_.store(bucket_width, std::memory_order_relaxed);
         if (bucket_width > 0)

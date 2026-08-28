@@ -1003,6 +1003,25 @@ void test_graph_trace_body_only_in_timed_span()
 #endif
 }
 
+// An empty traced run: begin_run arms the busy tracking, and the early empty-graph return
+// must still fold (the calling thread is the settling thread there) - before the fix the
+// arm leaked and every later run double-armed.
+void test_graph_trace_empty_run_disarms()
+{
+#if TS_PROFILING
+    ts::Static_task_graph g;
+    g.compile();
+    ts::tools::Graph_trace trace;
+    g.set_trace(&trace);
+    g.execute().sync();
+    TS_CHECK(!ts::detail::Scheduler_profiling::busy_armed(ts::global_scheduler()));
+    g.execute().sync();   // a second traced run arms and disarms cleanly
+    TS_CHECK(!ts::detail::Scheduler_profiling::busy_armed(ts::global_scheduler()));
+#endif
+}
+
+void test_death_overlapping_traced_runs() { TS_CHECK(ts::test::expect_death("overlapping_traced_runs")); }
+
 void test_death_cycle()            { TS_CHECK(ts::test::expect_death("graph_cycle")); }
 void test_death_before_compile()   { TS_CHECK(ts::test::expect_death("execute_before_compile")); }
 void test_death_compile_twice()    { TS_CHECK(ts::test::expect_death("graph_compile_twice")); }
@@ -1443,6 +1462,9 @@ void run_graph_tests()
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: nested run mode conflict", test_death_nested_run_mode_conflict);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: nested run with an unquiet scope", test_death_nested_run_unquiet_scope);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: execute while a run is in flight", test_death_execute_in_flight);
+    run_if(with_profiling, "TS_PROFILING=0", "graph trace empty run disarms", test_graph_trace_empty_run_disarms);
+    run_if(with_profiling && with_harness, "TS_PROFILING=0 or TS_SAFETY_CHECKS=0",
+           "death: overlapping traced runs", test_death_overlapping_traced_runs);
     run("death: cycle", test_death_cycle);
     run("death: execute before compile", test_death_before_compile);
     run("death: compile twice (build-once)", test_death_compile_twice);

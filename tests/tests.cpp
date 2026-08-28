@@ -1,4 +1,5 @@
 ﻿#include "tests.h"
+#include "graph_trace.h"
 #include "scheduler_scope.h"
 #include "test_util.h"
 #include "ts/access.h"
@@ -284,6 +285,32 @@ void run_death_scenario(const char* name)
         parent().sync();      // guard released at scope exit (epoch moved)
         go.trigger();
         stray.sync();         // the write runs under the stale inherited grant -> fatal
+    }
+    else if (std::strcmp(name, "overlapping_traced_runs") == 0)
+    {
+        // Tracing is single-consumer: a second traced run arming while one is armed is
+        // fatal at `arm_busy_tracking`. The inner run is detached (no lend needed) and
+        // fired from the outer traced run's node body, so its `begin_run` arms nested.
+        ts::Guarded<Counter> a{ ts::Named{} };
+        ts::Guarded<Counter> b{ ts::Named{} };
+        ts::Static_task_graph inner;
+        inner.add_node(ts::Named{}, [](Counter& k) { k.increment(); }, b);
+        inner.compile();
+        ts::tools::Graph_trace inner_trace;
+        inner.set_trace(&inner_trace);
+
+        ts::Task<void> stray;
+        ts::Static_task_graph outer;
+        outer.add_node(ts::Named{}, [&inner, &stray](Counter& k)
+        {
+            k.increment();
+            stray = inner.execute({ .detach = true });   // arms while the outer run is armed -> fatal
+        }, a);
+        outer.compile();
+        ts::tools::Graph_trace outer_trace;
+        outer.set_trace(&outer_trace);
+        outer.execute().sync();
+        stray.sync();   // regressed build: both runs complete and the child exits 0 (death test fails)
     }
     else if (std::strcmp(name, "detached_launch_undeclared") == 0)
     {

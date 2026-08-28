@@ -691,6 +691,10 @@ Task<void> Static_task_graph::execute(Execution_options opts)
 
     if (nodes_.empty())
     {
+        // The calling thread is the settling thread here: fold (which disarms the busy
+        // tracking begin_run armed) before completing, mirroring the node-settle path.
+        // Without this an empty traced run left the tracking armed forever.
+        run.stamps.fold(trace_, false);
         run.done->complete();
         return result;
     }

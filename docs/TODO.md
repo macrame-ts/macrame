@@ -1425,6 +1425,17 @@ IDs — when an item is done, mark it, don't renumber.
 
 ---
 
+    17. `[ ]` **(P3, parked by design — per-run trace metric sinks.)** Tracing's counter layer
+        (busy/body/orchestration slots, bucket rows, the per-owner sink) is scheduler-global and
+        single-consumer; overlapping traced runs are fatal since 2026-08-28 (`arm_busy_tracking`).
+        Moving the counters into per-run sinks (a sink pointer riding the task, inherited like
+        `current_trace_owner`) is tractable (~2-3 days: block/TLS plumbing, fold rewiring, the
+        worker-less oracle and `Scheduler_profiling` seam, tests) but was deliberately parked:
+        utilization and idle are properties of the shared pool, so concurrent traced runs would
+        produce mutually contaminated headline numbers wherever the counters live - only
+        attribution (B, per-node busy, task counts) can be made per-run. Revisit if a real user
+        asks to trace two graphs concurrently, and ship with that caveat stated.
+
 ## Inconsistencies to resolve (pre-public sweep)
 
 Small API/doc frictions introduced or exposed this session — cheap to fix, costly to
