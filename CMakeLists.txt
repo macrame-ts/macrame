@@ -155,7 +155,10 @@ function(macrame_private_flags target)
         target_compile_options(${target} PRIVATE /Zi)
         target_link_options(${target} PRIVATE /DEBUG /OPT:REF /OPT:ICF)
     else()
-        target_compile_options(${target} PRIVATE -pthread)
+        target_compile_options(${target} PRIVATE -pthread
+            # GCC warns that hardware_destructive_interference_size varies with -mtune; the
+            # uses are test-local padding, not ABI, so the reminder is noise here.
+            $<$<CXX_COMPILER_ID:GNU>:-Wno-interference-size>)
         target_link_options(${target} PRIVATE -pthread)
     endif()
 endfunction()

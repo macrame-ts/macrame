@@ -417,7 +417,7 @@ struct Task_control_block
     class Inline_queue
     {
     public:
-        TS_DETAIL_NO_INLINE static void push_and_drain(const Task_ptr& blk);
+        static void push_and_drain(const Task_ptr& blk);   // noinline: see the definition
 
     private:
         inline static thread_local std::vector<Task_ptr> pending_;
@@ -600,7 +600,7 @@ struct Task_control_block
     static void sync_wait(const Task_ptr& blk);
 };
 
-inline void Task_control_block::Inline_queue::push_and_drain(const Task_ptr& blk)
+TS_DETAIL_NO_INLINE inline void Task_control_block::Inline_queue::push_and_drain(const Task_ptr& blk)
 {
     pending_.push_back(blk);
     if (draining_)
@@ -643,7 +643,7 @@ inline void intrusive_inc(Task_control_block* p) noexcept
 class Destroy_queue
 {
 public:
-    TS_DETAIL_NO_INLINE static void push_and_drain(Task_control_block* blk) noexcept;
+    static void push_and_drain(Task_control_block* blk) noexcept;   // noinline: see the definition
 
 private:
     inline static thread_local Task_control_block** items_ = nullptr;
@@ -652,7 +652,7 @@ private:
     inline static thread_local bool draining_ = false;
 };
 
-inline void Destroy_queue::push_and_drain(Task_control_block* blk) noexcept
+TS_DETAIL_NO_INLINE inline void Destroy_queue::push_and_drain(Task_control_block* blk) noexcept
 {
     if (size_ == cap_)
     {

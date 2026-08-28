@@ -222,3 +222,18 @@ jobs:
           cmake -S tests/consumer -B _consumer -DCMAKE_CXX_COMPILER=clang++-21 "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/_install"
           cmake --build _consumer
           ./_consumer/macrame_consumer
+
+  # GCC coverage: build the library and the whole driver with g++, run the suite. GCC 14
+  # ships C++23 coroutines and <stacktrace> (via stdc++exp, probed by CMake); an external
+  # reviewer's GCC 13 build passing is what promoted this from roadmap to CI.
+  linux-gcc:
+    name: Linux / GCC-14 / tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure + build
+        run: |
+          cmake --preset linux-gcc -DCMAKE_CXX_COMPILER=g++-14
+          cmake --build --preset linux-gcc -j 4
+      - name: Tests
+        run: ./build/linux-gcc/ts_tsan --tests

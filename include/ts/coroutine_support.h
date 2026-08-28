@@ -276,14 +276,14 @@ class Resume_queue
 public:
     // Queue a resume and, unless a drain is already running on this thread, run the whole
     // chain iteratively.
-    TS_DETAIL_NO_INLINE static void push_and_drain(Resume_item item);
+    static void push_and_drain(Resume_item item);   // noinline: see the definition
 
 private:
     inline static thread_local std::vector<Resume_item> pending_;
     inline static thread_local bool draining_ = false;
 };
 
-inline void Resume_queue::push_and_drain(Resume_item item)
+TS_DETAIL_NO_INLINE inline void Resume_queue::push_and_drain(Resume_item item)
 {
     pending_.push_back(item);
     if (draining_)

@@ -1962,18 +1962,19 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
   running at once with individual `launch`/`async`/`execute` calls routed
   between them.
 - Platform breadth, WIP. Developed on Windows (MSVC/clang-cl); the test suite
-  also runs on Linux under Clang/TSan. No macOS, console, or mobile support
-  claims yet.
-- Benchmarks and CI. CI runs the suite (MSVC, clang-cl, Shipping,
-  Linux/TSan); a benchmark suite exists (`--bench`), and benchmark regression
-  tracking is WIP.
+  also runs on Linux under GCC and Clang, including TSan. No macOS, console,
+  or mobile support claims yet.
+- Benchmarks and CI. CI runs the suite (MSVC, clang-cl, Shipping, Linux GCC
+  and Clang, TSan); a benchmark suite exists (`--bench`), and benchmark
+  regression tracking is WIP.
 - Cross-entity mutation inside `parallel_for`, where item *i* writes item
   *j*. The gather/apply mailbox primitives are researched and designed but
   not yet shipped. Interaction coloring, the other half of this space, is
   shipped (`ts::parallel_for_colored`, §7).
-- Generic by-value parameters (`[](auto v)`) in access-deduced positions
-  classify as reads and copy the resource, so writes hit the copy silently.
-  This is undetectable at the declaration level (§3.1); use references.
+- Generic by-value parameters (`[](auto v)`) in access-deduced positions are a
+  compile error for class types that can be derived from (the copy probe,
+  §3.1). For final and non-class types no probe is possible, and the spelling
+  silently copies the resource there; use references.
 - One run per graph instance. A compiled graph runs one execution at a time
   (checked, §6.3), so a sub-graph shared by two concurrently running parents
   needs one instance per caller. Queued and pipelined runs are on the

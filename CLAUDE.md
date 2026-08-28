@@ -10,7 +10,7 @@ Experienced engine programmer. Designed and implemented UE Tasks System at Epic 
 
 ## Stack
 
-- C++23 (MSVC/clang-cl on Windows, Visual Studio solution)
+- C++23 (MSVC/clang-cl on Windows, GCC/clang on Linux; Visual Studio solution)
 - No external dependencies
 - Lock-free/low-contention concurrency preferred
 

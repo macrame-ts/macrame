@@ -199,7 +199,7 @@ using Cloth = Float_store;
 using Particles = Float_store;
 using Audio_out = Float_store;
 using Vfx = Float_store;
-using UI = Float_store;
+using UI_store = Float_store;
 using Replication = Float_store;
 using Stats = Float_store;
 using GC = Float_store;
@@ -266,7 +266,7 @@ struct World
     ts::Guarded<Particles> particles{ ts::Named{"particles"}, entity_count };
     ts::Guarded<Audio_out> audio_out{ ts::Named{"audio_out"}, entity_count };
     ts::Guarded<Vfx> vfx{ ts::Named{"vfx"}, entity_count };
-    ts::Guarded<UI> UI{ ts::Named{"UI"}, entity_count };
+    ts::Guarded<UI_store> UI{ ts::Named{"UI"}, entity_count };
     ts::Guarded<Replication> replication{ ts::Named{"replication"}, entity_count };
     ts::Guarded<Stats> stats{ ts::Named{"stats"}, entity_count };
     ts::Guarded<GC> gc{ ts::Named{"gc"}, entity_count };
@@ -358,7 +358,7 @@ void tick_shadow(const Transforms& prev_xf, const Skeletons&, Shadow_map&);
 // draw producers (return the batch size for the queue; see the add_* helpers)
 int tick_cmd_record(const Vis_final&, const Shadow_map&, const Renderables&);
 int tick_particles(const Transforms& prev_xf, Particles&);
-int tick_UI(const Quests&, UI&, bool parallel);
+int tick_UI(const Quests&, UI_store&, bool parallel);
 // post-flip reader + leaves
 void tick_cloth(const Transforms& xf, Cloth&);
 void tick_audio(const Transforms& prev_xf, Audio_out&);
@@ -602,11 +602,11 @@ ts::Graph_node add_UI(ts::Static_task_graph& graph, World& world, bool opt)
     if (!opt)
     {
         return graph.add_node("UI",
-            [](const Quests& quests, UI& u, Draw_lists& draws) { draws.push_batch(tick_UI(quests, u, false)); },
+            [](const Quests& quests, UI_store& u, Draw_lists& draws) { draws.push_batch(tick_UI(quests, u, false)); },
             world.quests, world.UI, world.draw_lists);
     }
     return graph.add_node("UI",   // L3: stage grant-free; L2: parallel layout
-        [rec = world.draw_staged.recorder()](const Quests& quests, UI& u) mutable
+        [rec = world.draw_staged.recorder()](const Quests& quests, UI_store& u) mutable
         {
             int n = tick_UI(quests, u, true);
             rec.stage([n](Draw_lists& d) { d.push_batch(n); });
@@ -1057,7 +1057,7 @@ int tick_particles(const Transforms& prev_xf, Particles& particles)
 
 // UI layout: serial in the baseline (a critical bar), per-widget parallel in the
 // optimised variant.
-int tick_UI(const Quests& quests, UI& u, bool parallel)
+int tick_UI(const Quests& quests, UI_store& u, bool parallel)
 {
     read_all(quests);
     if (parallel)   // L2
@@ -1281,7 +1281,7 @@ ts::Task<void> gf_cmd_record(World& world, ts::Task<void> occlusion_cull, ts::Ta
 ts::Task<void> gf_UI(World& world, ts::Task<void> quests)
 {
     co_await quests;
-    co_await ts::async([](const Quests& q, UI& widgets, Draw_lists& draws)
+    co_await ts::async([](const Quests& q, UI_store& widgets, Draw_lists& draws)
         { draws.push_batch(tick_UI(q, widgets, false)); },
         world.quests, world.UI, world.draw_lists);
 }

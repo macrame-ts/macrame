@@ -41,6 +41,17 @@
             }
         },
         {
+            "name": "linux-gcc",
+            "displayName": "Linux (GCC)",
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_CXX_COMPILER": "g++",
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "TS_TSAN": "OFF"
+            }
+        },
+        {
             "name": "linux-tsan",
             "displayName": "Linux (clang + ThreadSanitizer stress driver)",
             "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
@@ -57,6 +68,7 @@
         { "name": "windows-clang-cl", "configurePreset": "windows-clang-cl", "configuration": "Release" },
         { "name": "windows-shipping", "configurePreset": "windows-shipping", "configuration": "Release" },
         { "name": "linux-clang", "configurePreset": "linux-clang" },
+        { "name": "linux-gcc", "configurePreset": "linux-gcc" },
         { "name": "linux-tsan", "configurePreset": "linux-tsan" }
     ]
 }

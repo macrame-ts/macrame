@@ -36,7 +36,7 @@ You can include the entire library through the umbrella header, or use individua
 ## Build
 
 *   **Visual Studio 2022 and later.** Open the `macrame.slnx` solution file (x64) and build; the projects use the clang-cl toolset. MSVC builds via the CMake presets.
-*   **CMake.** Presets are available for `windows-msvc`, `windows-clang-cl`, `windows-shipping`, `linux-clang`, and `linux-tsan`.
+*   **CMake.** Presets are available for `windows-msvc`, `windows-clang-cl`, `windows-shipping`, `linux-clang`, `linux-gcc`, and `linux-tsan`.
 
 ```text
 cmake --preset windows-msvc
