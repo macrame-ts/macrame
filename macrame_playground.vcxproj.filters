@@ -78,6 +78,9 @@
     <ClCompile Include="tests\event_bus_tests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
+    <ClCompile Include="tests\docs_snippets.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
     <ClCompile Include="tests\graph_tests.cpp">
       <Filter>tests</Filter>
     </ClCompile>

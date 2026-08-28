@@ -66,6 +66,7 @@ set(TS_DRIVER_SOURCES
     tests/access_tests.cpp
     tests/coroutine_tests.cpp
     tests/deferred_tests.cpp
+    tests/docs_snippets.cpp
     tests/event_bus_tests.cpp
     tests/graph_tests.cpp
     tests/guarded_tests.cpp
