@@ -4,6 +4,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+// As in src/fatal.cpp: <version> defines the feature-test macro; without it libstdc++
+// leaves __cpp_lib_stacktrace undefined here and the guard silently disables traces.
+#include <version>
 
 // Same guard as src/fatal.cpp: `std::stacktrace` is C++23 but not in every stdlib the
 // Linux TSan build sees, and a failing check's message plus the sanitizer's own backtrace

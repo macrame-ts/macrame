@@ -3,6 +3,10 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+// The feature-test macro below is defined by a library header, not the compiler: without
+// <version> first, libstdc++ never defines __cpp_lib_stacktrace here and the check
+// silently disables stack traces (MSVC's STL defines the macros from any header).
+#include <version>
 
 // std::stacktrace is C++23 but not yet in every stdlib (e.g. some libstdc++/libc++
 // configs used for the Linux TSan build). Use it when available; otherwise the
