@@ -172,6 +172,38 @@ target_include_directories(macrame PUBLIC
 target_include_directories(macrame PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 target_compile_features(macrame PUBLIC cxx_std_23)
 
+# libstdc++ ships <stacktrace>'s implementation as a separate archive (GCC 13+: stdc++exp);
+# without it std::stacktrace::current() is an undefined reference at link. Probe at configure
+# time: a plain link first (MSVC and libc++ need nothing; a future libstdc++ may fold it in),
+# then with the archive. PUBLIC: the flag must reach the driver targets and installed
+# consumers (it exports as a plain -lstdc++exp in the targets file). The probe needs the real
+# language level - without it <version> reports no __cpp_lib_stacktrace and the plain probe
+# passes vacuously.
+if(NOT WIN32)
+    include(CheckCXXSourceCompiles)
+    set(_ts_stacktrace_probe [[
+#include <version>
+#if !defined(__cpp_lib_stacktrace)
+#error no stacktrace library support
+#endif
+#include <stacktrace>
+int main() { return static_cast<int>(std::stacktrace::current().size()); }
+]])
+    set(CMAKE_REQUIRED_FLAGS "-std=c++23")
+    check_cxx_source_compiles("${_ts_stacktrace_probe}" TS_STACKTRACE_LINKS_PLAIN)
+    if(NOT TS_STACKTRACE_LINKS_PLAIN)
+        set(CMAKE_REQUIRED_LIBRARIES stdc++exp)
+        check_cxx_source_compiles("${_ts_stacktrace_probe}" TS_STACKTRACE_NEEDS_STDCPPEXP)
+        unset(CMAKE_REQUIRED_LIBRARIES)
+        if(TS_STACKTRACE_NEEDS_STDCPPEXP)
+            target_link_libraries(macrame PUBLIC stdc++exp)
+        else()
+            message(STATUS "std::stacktrace unavailable or unlinkable; ts::fatal stack traces will be absent")
+        endif()
+    endif()
+    unset(CMAKE_REQUIRED_FLAGS)
+endif()
+
 # Config-consistency (load-bearing): a consumer's own TUs must compile with the SAME values the
 # library was built with, or the layouts diverge (ODR) and the access.h detect_mismatch link
 # tripwire fires. TS_SAFETY_CHECKS / TS_PROFILING are only defined when OFF (their headers
