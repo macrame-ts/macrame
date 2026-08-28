@@ -276,6 +276,86 @@ void test_single_threaded_chain_order()
 
 } // namespace
 
+// The global-normal valve: an external submit (which lands in the global normal queue, the
+// injector) must be served while workers are saturated with self-replenishing LOCAL chains -
+// without the valve it waits until some worker's own deque empties, i.e. until a chain ends.
+// Two spinning seeds pin both workers first, so each chain lives in its own worker's deque
+// and neither worker ever reaches the steal path while the chains run.
+namespace
+{
+struct Valve_chain
+{
+    ts::Scheduler* scheduler = nullptr;
+    std::atomic<int>* seeds_running = nullptr;
+    std::atomic<int> left{ 0 };
+    std::atomic<int>* chains_done = nullptr;
+
+    static void seed(void* p)
+    {
+        auto* c = static_cast<Valve_chain*>(p);
+        c->seeds_running->fetch_add(1, std::memory_order_acq_rel);
+        while (c->seeds_running->load(std::memory_order_acquire) < 2)
+            std::this_thread::yield();   // both workers occupied before either chain starts
+        step(p);
+    }
+
+    static void step(void* p)
+    {
+        auto* c = static_cast<Valve_chain*>(p);
+        if (c->left.fetch_sub(1, std::memory_order_acq_rel) > 1)
+            c->scheduler->submit(&step, c, ts::Priority::normal);   // worker submit -> own deque, LIFO
+        else
+            c->chains_done->fetch_add(1, std::memory_order_acq_rel);
+    }
+};
+
+struct Valve_probe
+{
+    std::atomic<int>* chains_done = nullptr;
+    std::atomic<int> done_when_served{ -1 };
+
+    static void run(void* p)
+    {
+        auto* pr = static_cast<Valve_probe*>(p);
+        pr->done_when_served.store(pr->chains_done->load(std::memory_order_acquire),
+                                   std::memory_order_release);
+    }
+};
+} // namespace
+
+void test_global_normal_valve()
+{
+    ts::Scheduler_scope pool{ { .num_workers = 2 } };
+    ts::Scheduler& scheduler = ts::global_scheduler();
+
+    std::atomic<int> seeds_running{ 0 };
+    std::atomic<int> chains_done{ 0 };
+    Valve_chain chains[2];
+    for (Valve_chain& c : chains)
+    {
+        c.scheduler = &scheduler;
+        c.seeds_running = &seeds_running;
+        c.left.store(20000, std::memory_order_relaxed);
+        c.chains_done = &chains_done;
+    }
+    scheduler.submit(&Valve_chain::seed, &chains[0], ts::Priority::normal);
+    scheduler.submit(&Valve_chain::seed, &chains[1], ts::Priority::normal);
+    while (seeds_running.load(std::memory_order_acquire) < 2)
+        std::this_thread::yield();
+
+    // External thread -> the global normal queue. The valve serves it within ~61 local
+    // takes; without the valve it waits for a chain to finish first.
+    Valve_probe probe;
+    probe.chains_done = &chains_done;
+    scheduler.submit(&Valve_probe::run, &probe, ts::Priority::normal);
+    while (probe.done_when_served.load(std::memory_order_acquire) < 0)
+        std::this_thread::yield();
+    TS_CHECK(probe.done_when_served.load(std::memory_order_acquire) == 0);
+
+    while (chains_done.load(std::memory_order_acquire) < 2)
+        std::this_thread::yield();   // drain before the scope tears the pool down
+}
+
 void run_scheduler_tests()
 {
     std::printf("\n[scheduler] tests\n");
@@ -294,6 +374,7 @@ void run_scheduler_tests()
     run("single-threaded: inline at submit", test_single_threaded_inline);
     run("single-threaded: FIFO chain order", test_single_threaded_chain_order);
     run("stress 100k", test_stress);
+    run("external normal submit is not starved by local chains", test_global_normal_valve);
     run("death: second create_scheduler is fatal (singleton)",
         []{ TS_CHECK(ts::test::expect_death("scheduler_double_create")); });
     run("death: global_scheduler with none running",

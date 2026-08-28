@@ -574,6 +574,18 @@ IDs — when an item is done, mark it, don't renumber.
       Diagnose with an empty-task flood at hw vs 2x across idle policies; until then, oversubscribed
       bench rows are not valid proxies for pool-oversubscription behavior.
 
+   10. `[ ]` **(P2, external review 2026-08-28) Stop-token-aware workers for partial-construction
+       unwind.** If constructing worker N throws (thread-creation failure at startup,
+       exceptions-on builds only), the scheduler dtor never runs and the N-1 built workers'
+       `~jthread` joins hang: `request_stop` is inert because the worker loop checks only
+       `quit_`. Fix shape (audited): give the worker lambda a `std::stop_token`, register a
+       `std::stop_callback` that notifies the eventcount, and extend the exit check with
+       `st.stop_requested()` - one extra bool on the idle re-scan path only. Exceptions-off
+       configs terminate at the throw instead, so this is a niche startup-resource-exhaustion
+       hang, not a shipping-config defect. Companion finding, decided as documented behavior:
+       the MPMC overflow deque drains only when the ring empties (unbounded reordering under
+       permanent saturation, self-healing on any dip) - the header states it; no change.
+
 4. **Allocation / control block**
    **Prior art (UE `FTask`, verified from source — concrete shapes for the items below):** `FTask` is exactly one cache line (`LOWLEVEL_TASK_SIZE = PLATFORM_CACHE_LINE_SIZE`) with the body stored INLINE via an SBO `TTaskDelegate` sized to the remaining bytes — validates 4.2 (size the tunable-SBO `Function` buffer so the common task functor never heaps). Per-size-class recycling is `TLockFreeFixedSizeAllocator_TLSCache<256, cacheline>` (TLS-cached, fixed-size, lock-free) — the concrete shape for 4.1 (each `Exec<Body,R>`/`Result_block<R>` instantiation is constant-size per type, so one free-list per size class). An oversized/overaligned closure falls back to a 64 KB-block linear (arena) allocator (`TConcurrentLinearAllocator`) — validates 4.6's SBO-overflow-to-arena path. Executable-task init refcount is 2 (one external handle + one in-system).
    1. `[ ]` **(P2)** Per-type recycling free-list (`Exec`/`Result_block`/bare block).

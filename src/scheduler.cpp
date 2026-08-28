@@ -259,6 +259,16 @@ void Scheduler::signal_submit()
 // every ~61/31"). Low priority still means low: it just gets guaranteed occasional progress.
 constexpr int low_valve_threshold = 64;
 
+// Serve the global `normal` queue after this many consecutive OWN-deque takes. The global
+// normal queue is the injector for every external submit; without this valve a worker whose
+// local deque never empties (a self-replenishing chain: each task submits successors LIFO)
+// starves external work indefinitely - and the low valve then inverts priority, giving
+// global low guaranteed progress while global normal gets none. Go's scheduler checks its
+// global run queue every 61 scheduling ticks for exactly this reason; same constant. Cost:
+// one thread-local increment and a predicted branch per local take, plus one empty MPMC pop
+// attempt every 61st.
+constexpr int global_valve_threshold = 61;
+
 // Find one task for `worker_index`: global high (strict) -> own local deque (LIFO) -> global
 // normal -> steal `normal` from a random victim -> global low. A per-worker aging counter
 // forces `low` ahead of normal once in a while (the starvation valve).
@@ -274,7 +284,8 @@ constexpr int low_valve_threshold = 64;
 // important normal successor as the LIFO top so it is taken locally, never left steal-only.)
 bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
 {
-    static thread_local int since_low = 0;   // consecutive high/normal tasks taken by this worker
+    static thread_local int since_low = 0;      // consecutive high/normal tasks taken by this worker
+    static thread_local int since_global = 0;   // consecutive own-deque takes by this worker
 
     if (queues_[0].pop(out))                                   // global high (strict)
     {
@@ -282,19 +293,41 @@ bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
         return true;
     }
     // Valve: if we've taken many high/normal in a row, serve one low before normal/local.
-    if (since_low >= low_valve_threshold && queues_[2].pop(out))
+    // Reset on a failed pop too: with no low work queued nothing is aging, and the reset
+    // both caps the counter (a signed int under a normal/high-only saturated workload
+    // reached overflow - UB - in reachable time) and drops the failed-pop tax every scan
+    // once the threshold was crossed with no low work present.
+    if (since_low >= low_valve_threshold)
     {
+        if (queues_[2].pop(out))
+        {
+            since_low = 0;
+            return true;
+        }
         since_low = 0;
-        return true;
+    }
+    // Valve: after many consecutive own-deque takes, serve the global normal queue (the
+    // injector for external submits) before the local deque, so a self-replenishing local
+    // chain cannot lock external work out (see `global_valve_threshold`).
+    if (since_global >= global_valve_threshold)
+    {
+        since_global = 0;
+        if (queues_[1].pop(out))
+        {
+            ++since_low;
+            return true;
+        }
     }
     if (local_normal_[static_cast<std::size_t>(worker_index)]->take(out))   // own deque, LIFO
     {
         ++since_low;
+        ++since_global;
         return true;
     }
     if (queues_[1].pop(out))                                   // global normal (overflow + external)
     {
         ++since_low;
+        since_global = 0;
         return true;
     }
 
