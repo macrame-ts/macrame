@@ -26,6 +26,7 @@
     <ClCompile Include="benchmarks\staged_commands_bench.cpp" />
     <ClCompile Include="sample\blackboard.cpp" />
     <ClCompile Include="sample\coloring.cpp" />
+    <ClCompile Include="sample\lazy_bvh.cpp" />
     <ClCompile Include="sample\events.cpp" />
     <ClCompile Include="sample\game_frame.cpp" />
     <ClCompile Include="sample\physics.cpp" />

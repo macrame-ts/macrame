@@ -48,6 +48,9 @@
     <ClCompile Include="sample\blackboard.cpp">
       <Filter>sample</Filter>
     </ClCompile>
+    <ClCompile Include="sample\lazy_bvh.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
     <ClCompile Include="sample\coloring.cpp">
       <Filter>sample</Filter>
     </ClCompile>

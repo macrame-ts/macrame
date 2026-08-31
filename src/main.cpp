@@ -21,6 +21,7 @@ void run_blackboard_sample();
 void run_events_sample();
 void run_coloring_sample();
 void run_scope_access_sample();
+void run_lazy_BVH_sample();
 }
 
 #include <cstdio>
@@ -195,6 +196,7 @@ int main(int argc, char** argv)
     sample::run_events_sample();
     sample::run_coloring_sample();
     sample::run_scope_access_sample();
+    sample::run_lazy_BVH_sample();
     run_benchmarks();
 
     return ts::test::summary();

@@ -49,6 +49,7 @@ set(TS_SAMPLE_SOURCES
     sample/coloring.cpp
     sample/events.cpp
     sample/game_frame.cpp
+    sample/lazy_bvh.cpp
     sample/physics.cpp
     sample/scope_access.cpp
 )
