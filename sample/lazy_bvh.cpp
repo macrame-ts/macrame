@@ -38,11 +38,17 @@ namespace sample
 namespace
 {
 
+// The build has to be two things for the pattern to be visible: expensive, so the other casts
+// reach the object while it is still running, and split into enough pieces for `parallel_for`
+// to spread across the pool. `build_pieces` is that split - `parallel_for` needs an item count,
+// and any number comfortably above the worker count will do. A query is cheap by comparison,
+// which is why they can all run concurrently once the build is done.
 constexpr int ray_count = 16;
-constexpr int build_chunks = 512;      // how wide the build fans out
-constexpr int build_spin = 2000;       // per chunk: the build is the expensive part
-constexpr int query_spin = 50;
+constexpr int build_pieces = 512;
+constexpr int build_work = 2000;
+constexpr int query_work = 50;
 
+// `volatile` so the loop survives optimization; without it there is no build to wait for.
 void spin(int iterations)
 {
     volatile int sink = 0;
@@ -68,14 +74,14 @@ public:
     void build()
     {
         TS_CHECK_ACCESS();
-        ts::parallel_for(build_chunks, [](int) { spin(build_spin); });
+        ts::parallel_for(build_pieces, [](int) { spin(build_work); });
         built_ = true;
     }
 
     void closest_hit() const
     {
         TS_CHECK_ACCESS();
-        spin(query_spin);
+        spin(query_work);
     }
 
 private:
@@ -101,6 +107,9 @@ bool cast_all()
     for (ts::Task<void>& cast : casts)
         cast.sync();   // outside any task, so blocking here is the sanctioned boundary verb
 
+    // Every cast completed, so the object must have ended up built. That it was built exactly
+    // once is structural rather than checked here: `build()` runs only under the exclusive
+    // write grant, behind the double-check.
     return bvh.access([](const BVH& b) { return b.is_built(); }).sync();
 }
 
@@ -116,8 +125,8 @@ void stress_lazy_BVH(int frames)
 
 void run_lazy_BVH_sample()
 {
-    std::printf("lazy BVH sample: %d rays cast against a BVH built on first use, %s\n",
-                ray_count, cast_all() ? "built once and cast" : "FAILED (bug)");
+    std::printf("lazy BVH sample: %d concurrent casts against a BVH built on first use, %s\n",
+                ray_count, cast_all() ? "all completed with the BVH built" : "FAILED (bug)");
 }
 
 } // namespace sample
