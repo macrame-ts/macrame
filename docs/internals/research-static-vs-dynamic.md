@@ -398,10 +398,13 @@ where data decides; and a bridge that keeps the two composable.**
 
 This library's equivalents, mapped:
 
-- **Subflow / dynamic-in-node** → `ts::nested` inside a graph node: node
-  completion (successors + object release) gates on nested tasks, and nested work
-  inherits the node's `Access_context`. This is Taskflow's subflow with an access
-  story attached.
+- **Subflow / dynamic-in-node** → dynamic work inside a graph node:
+  `ts::parallel_for` fans out under the node's grant (an `Access_context`
+  snapshot, synchronous join), and a coroutine node body or a nested graph run
+  gates node completion (successors + object release) through
+  `detail::add_nested`. This is Taskflow's subflow with an access story
+  attached. (Originally written against `ts::nested`, removed 2026-08 —
+  coroutine-first.md §4.3.)
 - **Dynamic work outside the graph** → `Guarded::async` / multi-object
   `ts::access` share `pipe_acquire`/`pipe_release` with graph nodes in canonical
   address order — concurrent dynamic access queues behind a node holding the

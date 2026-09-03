@@ -217,9 +217,10 @@ player; per-level system sets (water sim only in water levels); server tick grap
 whose per-zone nodes follow player population.
 
 **§2.4 — Why dynamic tasks alongside the graph only partially substitute for
-(3).** Functionally they do substitute: a static "shadows" node can
-`ts::nested`-spawn one task per visible light under its grant, and this is the
-designed answer. What is lost, precisely:
+(3).** Functionally they do substitute: a static "shadows" node can fan out one
+task per visible light under its grant via `ts::parallel_for` (the designed
+answer since `ts::nested`'s removal, coroutine-first.md §4.3). What is lost,
+precisely:
 
 1. **Successor granularity.** The nested tasks gate the *node's* completion;
    every successor of "shadows" waits for *all* lights, even a successor that
@@ -1048,7 +1049,11 @@ increasing order of subtlety:
    grant ("task outlived the access scope it inherited from") — turns a
    silent race into a diagnostic. Alternative (blunter): inherit into
    `ts::nested` only; plain `launch` from a granted scope gets an empty
-   context.
+   context. [Closed since this report: both arms landed — `ts::launch` now
+   inherits nothing (and `ts::nested` itself was later removed outright,
+   coroutine-first.md §4.3), and the surviving inherited snapshots
+   (`parallel_for` helpers, coroutine segments) carry a per-pipe write-epoch
+   validity window checked at access. See limits.md §2.5.]
 6. **Semantic races the declarations can't express** — check-then-act
    across two accesses (read version, then write assuming it), lost-update
    patterns, deadlock via `sync()` misuse: correctly ordered, correctly
@@ -1170,8 +1175,9 @@ supply exactly the missing piece. Consider this framing for design.md's
 positioning section.
 
 **§15.4 — Q4.4/4.5: solvable by dynamic tasks?** 4.4 (closed-world
-composition): substantially yes — `ts::nested` + inherited grants is the
-sanctioned "spawn from a library callback" path, and `Guarded::async`
+composition): substantially yes — `ts::parallel_for` under the caller's grant
+(the fan-out that replaced the removed `ts::nested`, coroutine-first.md §4.3)
+is the sanctioned "spawn from a library callback" path, and `Guarded::async`
 composes with the graph through the pipes (most systems' seam is unsound;
 ours is the differentiator). Residual: dynamically spawned work is invisible
 to graph-level planning (§2.4) — accept and document. 4.5 (load
