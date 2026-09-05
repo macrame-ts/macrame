@@ -132,13 +132,24 @@ public:
     // set once from the first available makespan estimate (ticks), and 0 until one exists (the
     // first run goes un-bucketed - negligible over a long trace). Fixing it keeps the buckets
     // comparable across runs for the per-bucket Welford.
+    // The utilization bucket width for the next run: derived from the first folded run's
+    // makespan, then grown by doubling whenever a longer run has been seen, so the buckets
+    // cover the P95 run so far. Doubling keeps the history mergeable exactly
+    // (`on_run_complete` coarsens the accumulated buckets pairwise when the width grows);
+    // only the run that first exceeds the covered span loses its overflow (the scheduler
+    // clamps at `n * width` for that one run).
     long long fixed_bucket_width_ticks(int n) const
     {
-        if (fixed_bucket_width_ticks_ != 0)
-            return fixed_bucket_width_ticks_;
         if (makespan_.n == 0 || n <= 0)
-            return 0;
-        fixed_bucket_width_ticks_ = static_cast<long long>((makespan_.mean / ticks_to_us) / n);
+            return fixed_bucket_width_ticks_;   // 0 until a run has been folded
+        if (fixed_bucket_width_ticks_ == 0)
+            fixed_bucket_width_ticks_ = std::max<long long>(1, static_cast<long long>((makespan_.mean / ticks_to_us) / n));
+        // Cover the P95 makespan (or the mean while P95 has too few samples), not the absolute
+        // maximum: one stalled run must not coarsen the whole wash.
+        const double p95 = makespan_.n >= 5 ? makespan_P95_.value() : makespan_.mean;
+        const long long longest = static_cast<long long>(std::max(makespan_.mean, p95) / ticks_to_us);
+        while (fixed_bucket_width_ticks_ * n < longest)
+            fixed_bucket_width_ticks_ *= 2;
         return fixed_bucket_width_ticks_;
     }
 
@@ -172,7 +183,28 @@ public:
         {
             if (static_cast<int>(util_buckets_.size()) != util_bucket_count)
                 util_buckets_.assign(static_cast<size_t>(util_bucket_count), {});
-            util_bucket_width_us_ = static_cast<double>(bucket_width_ticks) * ticks_to_us;
+            const double width_us = static_cast<double>(bucket_width_ticks) * ticks_to_us;
+            // The width grew (a longer run was seen): coarsen the history pairwise to the new
+            // width. Two equal-width buckets' mean utilizations average exactly; the spread is
+            // carried over approximately (only the mean is drawn).
+            while (util_bucket_width_us_ > 0.0 && width_us > util_bucket_width_us_ * 1.5)
+            {
+                const size_t half = util_buckets_.size() / 2;
+                for (size_t b = 0; b < half; ++b)
+                {
+                    const Welford& lo = util_buckets_[2 * b];
+                    const Welford& hi = util_buckets_[2 * b + 1];
+                    Welford m;
+                    m.n = std::min(lo.n, hi.n);
+                    m.mean = (lo.mean + hi.mean) * 0.5;
+                    m.m2 = (lo.m2 + hi.m2) * 0.25;
+                    util_buckets_[b] = m;
+                }
+                for (size_t b = half; b < util_buckets_.size(); ++b)
+                    util_buckets_[b] = {};
+                util_bucket_width_us_ *= 2.0;
+            }
+            util_bucket_width_us_ = width_us;
             double denom = static_cast<double>(worker_count) * static_cast<double>(bucket_width_ticks);
             for (int b = 0; b < util_bucket_count; ++b)
             {
@@ -236,6 +268,7 @@ public:
         makespan_min_ = std::min(makespan_min_, mk);
         makespan_max_ = std::max(makespan_max_, mk);
         makespan_.add(mk);
+        makespan_P95_.add(mk);
 
         // Task volume: every task the scheduler ran in the window (nodes + parallel_for
         // slices + async + continuations), so it far exceeds the node count - the real
@@ -303,6 +336,7 @@ public:
         four_orch_us_ = {};
         critical_work_ = {};
         makespan_ = {};
+        makespan_P95_ = { 0.95 };
         makespan_min_ = 0.0;
         makespan_max_ = 0.0;
         core_util_ = {};
@@ -692,12 +726,13 @@ private:
     bool in_edges_dirty_ = true;
     Welford critical_work_;   // per-run sum of chain node durations, µs
     Welford makespan_;
+    P2 makespan_P95_{ 0.95 };            // the utilization buckets are sized to cover this
     double makespan_min_ = 0.0;
     double makespan_max_ = 0.0;
     Welford core_util_;   // per-run busy / (workers x window), [0,1]
     std::vector<Welford> util_buckets_;      // per time-bucket true utilization, [0,1]
     double util_bucket_width_us_ = 0.0;      // width of each util bucket, µs (0 = none yet)
-    mutable long long fixed_bucket_width_ticks_ = 0;   // fixed once from the makespan estimate
+    mutable long long fixed_bucket_width_ticks_ = 0;   // from the first run's makespan, doubled to cover the longest run seen
     long long runs_ = 0;
     long long tasks_total_ = 0;   // total tasks (every kind) run across the trace
     Welford tasks_per_run_;       // tasks per run
