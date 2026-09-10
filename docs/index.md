@@ -27,8 +27,7 @@ resources.
 - [Limits of the model](internals/limits.md) — what the harness and access declarations do not
   catch.
 
-<!-- Uncomment once docs/parallelising-godot.md exists:
 ## Case studies
 
-- [Parallelising Godot](parallelising-godot.md) — 
--->
+- [Parallelising Godot to get 6x speedup](https://github.com/Andriy06/godot) — Godot 4.8-dev
+  parallelised with Macrame. An experiment, not for production.
