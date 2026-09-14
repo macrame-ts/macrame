@@ -379,7 +379,7 @@ IDs — when an item is done, mark it, don't renumber.
        per-frame rebuild a measured option instead of an anti-pattern and answers the first
        sophisticated-evaluator question ([research-deepdive.md](internals/research-deepdive.md) §9.4,
        §12.2). Ties to 10.1.
-   11. `[ ]` **(P2, author 2026-07) Yield points inside long-running nodes.** The 4-worker
+   11. `[x]` **(P2, author 2026-07 — DONE 2026-09) Yield points inside long-running nodes.** The 4-worker
        game_frame trace made the failure concrete: a ready critical-path node (economy) waited
        ~0.9 ms behind a long off-path runner (audio) — nothing evicts a runner, and priority
        cannot help work that is already running (measured: audio at `low` changed neither its
@@ -389,6 +389,12 @@ IDs — when an item is done, mark it, don't renumber.
        `ts::yield()` polling a "critical work pending" signal vs coroutine nodes (`co_await`
        suspension already exists for tasks) vs auto-slicing via `parallel_for` guidance. Relates
        to 2.4's keep-out-zone hypothesis and 2.5's rank (what "higher-rank pending" means).
+       **Landed (2026-09):** `ts::yield()` (task.h) runs one queued `Priority::high` entry inline
+       on the yielding worker's stack and returns - no suspension, so functor nodes and
+       `parallel_for` bodies can yield, and the continuation keeps its core; `parallel_for`
+       yields at every chunk claim. Rationale: design.md §3 "Yield points". Open: a pending
+       signal finer than the `high` class (2.5's rank), and a yield inside a resumed coroutine
+       segment defers any resume the nested task triggers until the segment returns (guide §13).
    12. `[ ]` **(P2, author 2026-07 — raised from the 2.3 adjacency) Frame-boundary overlap for
        designated nodes.** Distinct from 2.3 (whole-graph pipelining): let specific off-path
        tails (audio mix, streaming finalization) spill past the run's settle into the next

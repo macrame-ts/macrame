@@ -33,15 +33,16 @@ two variants of the same ~30-system frame, built from the *same* system bodies:
 - **optimised** — the same frame after reading its own trace, with the levers
   the visualization makes obvious applied in an `optimise()` section.
 
-Generate both traces (on an 8-worker scheduler) plus the structure dump with:
+Generate the traces (on an 8-worker scheduler) plus the structure dump with:
 
 ```
 macrame_playground --trace 200
-show_graph.bat            # renders the DOT and opens both average-run SVGs
+show_graph.bat            # renders the DOT and opens the average-run SVGs
 ```
 
 producing `sample_game_frame_avg_baseline.svg`,
-`sample_game_frame_avg_optimised.svg`, and `sample_game_frame.dot`.
+`sample_game_frame_avg_optimised.svg`, `sample_game_frame_avg_fixed_rate.svg`
+(the third variant, §5.1), and `sample_game_frame.dot`.
 
 The point of the exercise is not the exact percentage it ends up saving. It is
 *which* optimisations the trace says are worth trying, and which ones it says to skip. It ends by showing what a *finished*
@@ -192,6 +193,35 @@ frame, rearranging has nothing left to exploit — every core is busy. From here
 faster means **cutting work** (a smaller scene, cheaper systems) or **adding
 cores**, not restructuring the graph. The trace tells you when you have reached
 that point instead of guessing.
+
+### 5.1 A third variant: physics and networking on their own clocks
+
+`Frame_variant::fixed_rate` is the optimised frame with the physics pipeline
+(broadphase → narrowphase → solver → finalize) moved into a 60 Hz graph and
+networking into a 30 Hz graph, each driven by a `ts::Periodic` clock beside the
+frame loop ([guide.md §6.6](guide.md)). The frame stages physics inputs and
+outgoing network data through `Deferred`, reads the ticks' published snapshots
+through `Versioned`, and propagation interpolates between the two newest
+physics ticks. `--trace` writes its average run as
+`sample_game_frame_avg_fixed_rate.svg`; the tick graphs run on the same
+workers, untraced.
+
+| | baseline | optimised | fixed rate |
+|---|---|---|---|
+| frame time | 19.01 ms | 16.93 ms | 17.12 ms |
+| core utilization | 86.2 % | 95.4 % | 95.6 % |
+| critical path dead time | 9.8 % | 9.3 % | 10.6 % |
+
+*(2026-09, 8 workers, 100 traced frames, one run each.)*
+
+The physics chain leaves the frame's critical path, and the frame time does not
+move. That is the core-bound reading from above applied to a new lever: the
+optimised frame already keeps every core busy, and at one tick per frame the
+tick's work still needs those cores, whichever graph it belongs to. On this
+fixture the variant's value is structural: the frame graph has one shape
+however many ticks fall into a frame, the tick rate no longer depends on the
+frame rate, and the overload policy lives in one driver. A frame with idle cores
+or a physics chain on its critical path would also gain time.
 
 ## 6. What carries over to a real frame
 

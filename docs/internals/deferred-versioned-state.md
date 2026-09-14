@@ -251,8 +251,9 @@ bytewise hash/copy for trivially-copyable `T`; `Versioned` ctor arg forwarding
 **Parked, awaiting a forcing use case:** `Access::append` derivation /
 `add_flush_node`; cross-target commands (physics says: decompose instead);
 reserved handles from `stage()` (id-allocator pattern is the documented
-answer); `read_pair()` for interpolation; triple-buffer `Versioned` (the name
-already permits it silently); parallel apply inside a commit (API-invisible;
+answer); triple-buffer `Versioned` (the name already permits it silently; the
+interpolation case landed 2026-09 as `History::current_and_previous` +
+`read_last_versions`, which is exactly a third replica); parallel apply inside a commit (API-invisible;
 only if a flush becomes the critical path).
 
 ## 7. Selection guidance (when to use what — condensed from the fixtures)
