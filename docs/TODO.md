@@ -379,7 +379,7 @@ IDs — when an item is done, mark it, don't renumber.
        per-frame rebuild a measured option instead of an anti-pattern and answers the first
        sophisticated-evaluator question ([research-deepdive.md](internals/research-deepdive.md) §9.4,
        §12.2). Ties to 10.1.
-   11. `[ ]` **(P2, author 2026-07) Yield points inside long-running nodes.** The 4-worker
+   11. `[x]` **(P2, author 2026-07 — DONE 2026-09) Yield points inside long-running nodes.** The 4-worker
        game_frame trace made the failure concrete: a ready critical-path node (economy) waited
        ~0.9 ms behind a long off-path runner (audio) — nothing evicts a runner, and priority
        cannot help work that is already running (measured: audio at `low` changed neither its
@@ -389,6 +389,14 @@ IDs — when an item is done, mark it, don't renumber.
        `ts::yield()` polling a "critical work pending" signal vs coroutine nodes (`co_await`
        suspension already exists for tasks) vs auto-slicing via `parallel_for` guidance. Relates
        to 2.4's keep-out-zone hypothesis and 2.5's rank (what "higher-rank pending" means).
+       **Landed (2026-09):** `ts::yield()` (task.h) runs one queued entry of a higher class
+       inline (`normal` -> `high`; `low` -> `high`, then the global `normal` queue) on the
+       yielding worker's stack and returns - no suspension, so functor nodes and `parallel_for`
+       bodies can yield, and the continuation keeps its core; `parallel_for` yields at every
+       chunk claim. Rationale: design.md §3 "Yield points". A resume the nested task causes runs
+       at the yield point, also inside a resumed segment (the nested dispatch sets the resume
+       and inline trampolines aside; nesting is bounded to one level). Open: a pending signal
+       finer than the priority classes (2.5's rank).
    12. `[ ]` **(P2, author 2026-07 — raised from the 2.3 adjacency) Frame-boundary overlap for
        designated nodes.** Distinct from 2.3 (whole-graph pipelining): let specific off-path
        tails (audio mix, streaming finalization) spill past the run's settle into the next
@@ -645,6 +653,14 @@ IDs — when an item is done, mark it, don't renumber.
       concrete.
    8. `[ ]` **(P2, author 2026-08) Cache-line alignment audit across components.** A systematic pass over every hot shared structure for cache-line placement: separate fields written by different threads onto distinct lines (`alignas(std::hardware_destructive_interference_size)` where warranted), keep fields read/written together on one line, and check array elements for false sharing between adjacent entries. Inventory to cover: `Task_control_block` (the size-ordered cluster is packing-motivated, not sharing-motivated — line 0 packs the write-hot atomics `refcount`/`num_locks` together AND with the read-only dispatch-read set `execute`/`result_ptr`/`pipe_links`/`flags`/`token`, trading one-line dispatch locality against handle-churn/indegree writes false-sharing that line; `refcount` is ~23% of per-node machinery per the graph-regression callgrind, so measure whether isolating the write-hot atomics onto their own line beats the locality win), the evolved `Pipe` (all queue state now lives under one mutex, so the interesting question shifted: is `writer_owner` — read lock-free by every `commit()` ownership check — on the right line relative to the mutex and the queue head, and does a coroutine frame's embedded link share a line with hot promise state), `Pipe_link` arrays (adjacent links of one task live on one line; different lines' traffic collides — measure before padding, links are per-task not global), scheduler queues/deques (Chase-Lev top/bottom, MPMC slots; `Busy_slot`/`Bucket_row` are already padded — verify the rest), journal slots, `Event_count`. Measure with the existing benchmarks (contention series + R10 pipe fixture) — padding trades memory for isolation, so each change needs a number, not a vibe.
       **Reaffirmed + rescoped (author, 2026-08): the WHOLE implementation, not just the inventory above** — treat every hot or shared structure in `include/`+`src/` as in scope, and rederive the field-level analysis from the CURRENT layout rather than the specifics written above, which are now stale: `Task_control_block` changed twice since (the coroutine-first slimming to 264 B, then B2 dropping `dispatch_arg`/collapsing `run_state`→`body_claimed` to 248 B, plus the `TS_DEBUG_NAMES`-gated `Named` field), so the `num_locks`/`refcount` line-sharing claim must be re-checked against the real struct. Dump the actual offsets (a `static_assert(offsetof(...))` probe or the debugger's layout view) as the first step, identify which fields are touched by which threads on the hot paths (settle vs dispatch vs refcount vs the harness), then place the destructive-interference boundaries — measured, per the rule above. Do this after the perf-baseline/graph-regression work settles (it may itself surface a false-sharing culprit worth folding in).
+   9. `[ ]` **(P3, 2026-09) Allocation-free `Periodic::next()`.** Each `next()` allocates one
+      timed block: the returned task, with the timer bookkeeping embedded. A `Periodic` could own
+      one block and re-arm it every tick, the way `Signal::reset()` re-arms a signal, which makes a
+      steady-state tick allocation-free. It needs a reusable settle for an executable block (result
+      and state reset while no awaiter is attached), which blocks lack since executable-task reuse
+      was deleted with the coroutine-first transformation. A 60 Hz clock costs 60 allocations a
+      second today, so this waits for a workload with many clocks, or for the per-type free-list
+      (4.1), which would absorb the cost without an API change.
 
 5. **Fork-join / parallel_for**
    1. `[ ]` **(P2) Intra-system entity interactions** — ship the primitive menu: `parallel_gather_apply` (mailbox), `parallel_for_colored` + `Interaction_coloring`, `Accumulator` (commutative), `Union_find` helper, + triage docs. Open author questions. [§D5]

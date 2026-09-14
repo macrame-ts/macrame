@@ -6,9 +6,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <memory>
+#include <mutex>
 #include <numeric>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -453,6 +456,48 @@ void test_colored_edges()
     TS_CHECK(calls.load() == 6);   // 2 non-empty items x 3 rounds
 }
 
+// A chunk boundary is a yield point: once both workers are inside a normal parallel_for, a high
+// task queued behind it starts within about one chunk, not after the rest of the loop (~380 ms).
+void test_parallel_for_yields_to_high()
+{
+    using Clock = std::chrono::steady_clock;
+    ts::Scheduler_scope pool{ { .num_workers = 2 } };
+    std::mutex executors_mutex;
+    std::set<std::thread::id> executors;
+    std::atomic<int> executor_count{ 0 };
+    std::atomic<long long> high_started_at{ 0 };
+    ts::Task<void> loop = ts::launch([&]
+    {
+        ts::parallel_for(40, [&](int)
+        {
+            {
+                std::scoped_lock lock(executors_mutex);
+                if (executors.insert(std::this_thread::get_id()).second)
+                    executor_count.fetch_add(1);
+            }
+            const auto until = Clock::now() + std::chrono::milliseconds(20);
+            while (Clock::now() < until)
+            {
+            }
+        }, { .balance = ts::Balance::unbalanced });
+    });
+    // Both workers must be inside the loop before the high task is queued: an idle worker would
+    // take it straight from the queue, and the test would measure nothing.
+    const auto give_up = Clock::now() + std::chrono::seconds(2);
+    while (executor_count.load() < 2 && Clock::now() < give_up)
+        std::this_thread::yield();
+    TS_CHECK(executor_count.load() == 2);
+    const Clock::time_point queued_at = Clock::now();
+    ts::Task<void> high = ts::launch([&]
+    {
+        high_started_at.store(Clock::now().time_since_epoch().count());
+    }, { .priority = ts::Priority::high });
+    high.sync();
+    loop.sync();
+    const auto latency = Clock::time_point(Clock::duration(high_started_at.load())) - queued_at;
+    TS_CHECK(latency < std::chrono::milliseconds(150));
+}
+
 } // namespace
 
 void run_parallel_tests()
@@ -476,4 +521,5 @@ void run_parallel_tests()
     run("parallel_for_colored counts", test_colored_counts);
     run("parallel_for_colored determinism across concurrency", test_colored_determinism);
     run("parallel_for_colored edges", test_colored_edges);
+    run("parallel_for yields to a queued high task between chunks", test_parallel_for_yields_to_high);
 }

@@ -851,7 +851,10 @@ Node capabilities:
   form reads as intent: `submit.after(cmd, particles, ui)` makes `submit`
   depend on all three, the same as `.after(cmd).after(particles).after(ui)`
   but without reading like a sequence among them.
-- `node.set_priority(p)` sets the node's queue priority.
+- `node.set_priority(p)` sets the node's queue priority, and
+  `graph.set_default_priority(p)` sets it for every node that has not set its
+  own, including nodes added later. The latter is the spelling for a graph
+  whose whole run is urgent, such as a fixed-rate graph with a deadline (§6.6).
 - `node.set_inline()` runs the node on the thread that readied it when its
   objects are immediately available, which gives low-latency chaining for
   small nodes.
@@ -1206,6 +1209,99 @@ This also reserves room. Because direction carries no meaning, a future
 critical path. Programs that wrote their intent down keep working; programs that
 leaned on declaration order would silently change behaviour.
 
+### 6.6 Fixed-rate graphs
+
+Some subsystems want a clock of their own rather than the frame's. Physics
+has a solver tuned to a fixed step, and its results should not depend on
+frame timing; networking sends and consumes snapshots at a fixed tick. The
+usual game loop runs them inside the frame with an accumulator, zero, one or
+several steps per frame. That couples the two rates: the frame graph has to
+express a variable number of ticks, the frame that owes catch-up ticks
+stalls on them, and a slow step can force more catch-up, which slows the step
+further.
+
+The alternative is a second compiled graph with its own clock, beside the
+frame graph on the same scheduler. The tick graph owns its state and talks to
+the frame through two objects, a `Deferred` for inputs and a `Versioned` for
+outputs:
+
+```cpp
+ts::Guarded<Physics_world> world{ ts::Named{"world"} };
+ts::Deferred<Physics_world> intents{ world };                               // frame -> tick
+ts::Versioned<Poses, ts::History::current_and_previous> poses{ ts::Named{"poses"} };   // tick -> frame
+
+ts::Static_task_graph physics;
+auto step = physics.add_node("step", [&intents, out = poses.recorder()](Physics_world& w) mutable
+{
+    (void)intents.commit();          // Inline: this node holds the write grant.
+    w.step(1.0f / 60.0f);
+    out.stage([p = w.positions()](Poses& s) { s.assign(p); });
+}, world);
+physics.add_node("publish", ts::publish_fn(poses), poses.state()).after(step);
+physics.set_default_priority(ts::Priority::high);
+physics.compile();
+```
+
+A coroutine drives it from a `ts::Periodic` clock (§10.6) and owns the
+overload policy, which here runs at most two missed ticks per wake and lets
+simulated time slow down beyond that:
+
+```cpp
+ts::Task<void> run_ticks(ts::Static_task_graph& graph, ts::Periodic& clock)
+{
+    for (;;)
+    {
+        int due = co_await clock.next();   // Grid points since the last tick; 0 once stopped.
+        if (due == 0)
+            co_return;
+        for (int i = 0; i < std::min(due, 2); ++i)
+            co_await graph.execute();
+    }
+}
+```
+
+The frame graph stages into `intents` from any node and reads `poses`. A node
+that declared a read on `poses.state()` reads the two newest versions lent
+(§9.2) and interpolates by where the frame falls between them:
+
+```cpp
+frame.add_node("render", [&poses](const Poses&, Frame_out& out)
+{
+    auto [previous, current, stamps] = poses.read_last_versions();
+    out.draw(lerp(previous, current, stamps.fraction_at(std::chrono::steady_clock::now())));
+}, poses.state(), frame_out);
+```
+
+The boundary has four rules:
+
+- The tick owns its state. The world has one accessor, the tick's step node,
+  and no frame node declares it.
+- Inputs are sampled at the tick's start. Whatever the frame staged before the
+  step's commit belongs to that tick, anything later to the next one: up to a
+  tick of latency from input to simulation.
+- Outputs are published at the tick's end. The frame reads the last published
+  version, so what it shows trails the simulation by up to a tick, which
+  interpolation between the two newest versions smooths.
+- Everything that crosses is a staged command or published data, never a call
+  from one graph's body into the other's state.
+
+This is the logical-execution-time model from real-time control: a task reads
+its inputs at release and publishes its outputs at its deadline, whatever its
+actual duration. The frame graph keeps one shape, the number of ticks per
+frame is the clock's business, the tick's chain leaves the frame's critical
+path, and the tick is deterministic given its sequence of input cuts.
+
+The tick has a deadline and the frame has long bodies. Give the tick graph
+`high` priority (`set_default_priority`) and put yield points in long frame
+work (§10.1), so a tick that comes due while every worker runs frame work
+starts within one yield interval. Runs of different graphs may overlap; the
+pipe serializes their conflicting accesses, and the two boundary objects are
+the only state both graphs touch.
+
+`sample/fixed_rate.cpp` is the minimal version, checking itself as it runs.
+The `game_frame` sample's `fixed_rate` variant moves its physics pipeline to a
+60 Hz graph and its networking to a 30 Hz graph.
+
 ---
 
 ## 7. `parallel_for`
@@ -1250,6 +1346,11 @@ is what makes nested `parallel_for`, a parallel loop inside a parallel loop's
 body, deadlock-free even when every worker is occupied. Chunks inherit the
 caller's access grants, so a `parallel_for` inside a graph node may touch the
 node's declared objects.
+
+Chunk boundaries are yield points (§10.1). When work of a higher class than
+the loop's is queued, the thread that finishes a chunk runs one such task
+before claiming the next chunk, so a long `normal` loop does not hold off
+urgent work for its whole duration.
 
 Cross-item mutation, where item *i* writes item *j*, is not synchronized by
 `parallel_for` itself; see the WIP note in §13 and the staging tools in §9,
@@ -1662,6 +1763,37 @@ Key properties:
   run is the sanctioned pattern, and it is checked rather than just
   documented.
 
+`Versioned<T, ts::History::current_and_previous>` also keeps the version
+published before the current one. `read_last_versions()` returns both, with
+their publish instants, under one read grant:
+
+```cpp
+ts::Versioned<Poses, ts::History::current_and_previous> poses{ ts::Named{"poses"} };
+
+auto [previous, current, stamps] = poses.read_last_versions();
+draw(lerp(previous, current, stamps.fraction_at(std::chrono::steady_clock::now())));
+```
+
+`stamps.fraction_at(t)` is 0 at the previous publish and 1 at the current one,
+clamped to that range. The returned view is the grant: it lives as long as the
+bindings, both versions pass the harness while it does, and in a coroutine a
+`co_await` while it is alive is fatal, as with any held guard. Where the
+context already grants the front, such as a node that declared
+`poses.state()`, the read is lent and takes no turn of its own. On a blue
+thread it takes a read turn. Inside a task that holds nothing, use
+`co_await ts::read_last_versions(poses)`; the blocking form is fatal there.
+The view extends the running access context by one entry, the previous
+version, when the read is lent, and by two otherwise. A context holds at most
+`Access_context::max_entries` objects, so a node that already declares that
+many, or one fewer for an unlent read, cannot take a view: the overflow is
+fatal.
+
+The history costs a third replica, rotated at every publish, and it requires
+`Resync::copy` (the default for this history) or `Resync::overwrite`: after the
+rotation the shadow holds the version before last, which one replayed batch
+cannot bring forward. Without the history, `read_last_versions` does not
+exist.
+
 ### 9.3 Choosing between them
 
 | your state | use |
@@ -1733,6 +1865,39 @@ queued; it starts on the caller's thread and resumes on the thread that
 settled what it awaited. It inherits the priority of the task that created
 it, which matters only for what the body launches. A `parallel_for` inside a
 coroutine called from a `high` node dispatches its helpers at `high`.
+
+Priority orders the queues, but it cannot evict work already running, so a
+long `normal` body can hold off a `high` task that became ready while every
+worker was busy. `ts::yield()` is the remedy: when work of a higher class
+than the calling task's is queued, it runs one such task on the current thread
+and returns, and the yielding body then continues on the same stack. With
+nothing queued it costs two relaxed loads of one cache line, so it can sit in
+an inner loop:
+
+```cpp
+for (Chunk& chunk : chunks)
+{
+    process(chunk);
+    ts::yield();   // A tick that came due runs here; then the loop continues.
+}
+```
+
+A `normal` task yields to queued `high` work. A `low` task yields to `high`
+work and to `normal` work in the scheduler's global queue, which holds
+submissions from outside the workers and overflow from their local queues.
+`normal` work a worker queued on its own local queue is left to idle workers
+to steal. A `high` task never yields.
+
+The task run at a yield point runs as a worker would run it. If its
+completion resumes a coroutine, the coroutine resumes right there, also when
+the yield point is itself inside a resumed coroutine. Yield points reached
+inside that task do nothing, so nesting is one level deep.
+
+It never suspends, so it is legal in any body, including a functor node and a
+`parallel_for` body, and grants held across it are safe: the task it runs was
+queued with its own turns already taken, so it cannot wait on them. It is a
+no-op off a worker and in worker-less mode. Chunk boundaries of
+`parallel_for` are yield points already (§7).
 
 ### 10.2 Scheduler configuration
 
@@ -1883,6 +2048,44 @@ compiler flag where a flag can express it, as a usage requirement, and a link
 that mixes the two settings fails with a `_HAS_EXCEPTIONS` mismatch instead
 of corrupting quietly.
 
+### 10.6 Timers
+
+`ts::sleep(duration)` and `ts::sleep_until(deadline)` (`ts/timer.h`, in the
+umbrella header) return a task that settles at the deadline:
+
+```cpp
+co_await ts::sleep(100ms);                                          // In a coroutine.
+ts::sleep_until(deadline, { .token = stop.token() }).sync();        // On a blue thread.
+```
+
+A token cancels the wait promptly, settling the task cancelled rather than at
+the deadline. The priority option sets the priority of the task that delivers
+the wakeup, which is where an awaiting coroutine resumes; unset, it is the
+calling task's.
+
+`ts::Periodic` is a fixed-rate tick source. Its deadlines sit on a grid fixed
+at construction, so late delivery never drifts the rate, and `next()` reports
+how many grid points passed since the previous call: 1 in steady state, more
+when the consumer fell behind, 0 once its token is requested. What to do with a
+count above 1, whether to run the missed ticks, drop them, or slow simulated
+time, is the consumer's policy (§6.6 shows one):
+
+```cpp
+ts::Periodic tick{ 16'667us, { .token = stop.token(), .priority = ts::Priority::high } };
+int due = co_await tick.next();
+```
+
+One timer thread keeps the deadlines. It is created on first use, stopped by
+`destroy_scheduler`, and never runs user code: a wakeup is delivered as a task
+on a worker. That task is the one the call returned, so a wait costs one
+allocation. On Windows it waits on a high-resolution waitable timer, so a
+deadline is not rounded up to the system timer tick. An armed sleep counts as
+an external wait for the deadlock net (§5.0.3), so a program idle while it
+waits is not reported as deadlocked. Two constraints: worker-less mode has no
+worker to deliver on, so a sleep there is fatal, and every sleep must be
+awaited or cancelled before `destroy_scheduler` (fatal under
+`TS_SAFETY_CHECKS`).
+
 ---
 
 ## 11. Patterns and rules of thumb
@@ -1925,6 +2128,10 @@ result, completion, or cancellation.
 | ordering gate between phases | `Signal` |
 | reusing a sub-graph inside a frame | `co_await inner.execute()` (§6.3) |
 | realigning cross-frame work to a frame start | `Frame_gate` (§10.4) |
+| a subsystem on its own fixed clock | a fixed-rate graph (§6.6) |
+| interpolating between the two newest versions | `Versioned<T, History::current_and_previous>` (§9.2) |
+| a long body that must not hold off urgent work | `ts::yield()` (§10.1) |
+| waiting for a time, or a periodic tick | `ts::sleep`, `ts::Periodic` (§10.6) |
 
 ---
 
@@ -1979,6 +2186,11 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
   (checked, §6.3), so a sub-graph shared by two concurrently running parents
   needs one instance per caller. Queued and pipelined runs are on the
   roadmap.
+- Timers need workers. In worker-less mode a sleep is fatal; a virtual clock
+  the program advances, for deterministic tests, is planned.
+- Yield points work only on workers. A `low` task's yield point reaches
+  `normal` work in the global queue but not work a worker queued on its own
+  local queue, which is left to stealing.
 
 ---
 

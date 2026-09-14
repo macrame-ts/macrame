@@ -82,6 +82,35 @@ struct Task_control_block;
 // other diagnostics.
 [[noreturn]] void escaped_exception_diagnose(const char* what) noexcept;
 
+// Entries queued where a yield point can take them, maintained by the scheduler: each count is
+// incremented before the push and decremented after a successful pop, so it never under-counts
+// a queued entry. `high` counts the `high` queue; `normal_global` counts the global `normal`
+// queue (external submits and deque overflow), not the per-worker deques, whose pushes stay
+// free of shared writes. Every worker reads this line at each yield point and each
+// `parallel_for` chunk claim, so it holds nothing else: a neighbour written elsewhere would
+// invalidate it in every reader's cache.
+struct alignas(64) Yield_signal
+{
+    std::atomic<int> high{ 0 };
+    std::atomic<int> normal_global{ 0 };
+};
+static_assert(sizeof(Yield_signal) == 64, "Yield_signal must own its cache line");
+inline Yield_signal yield_signal;
+
+// Whether anything a yield point could run is queued: the whole cost of a yield point with
+// nothing pending. Relaxed - a stale answer costs one missed or one empty slow path.
+inline bool yield_work_queued() noexcept
+{
+    return (yield_signal.high.load(std::memory_order_relaxed)
+          | yield_signal.normal_global.load(std::memory_order_relaxed)) != 0;
+}
+
+// The slow half of a yield point (defined in scheduler.cpp): on a worker, run one queued task
+// of a class above `own` on this thread, then return. `normal` yields to `high`; `low` yields
+// to `high`, then to the global `normal` queue; `high` never yields. A no-op off a worker, and
+// inside a task that is itself running at a yield point.
+void yield_to_higher(Priority own) noexcept;
+
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
 // Work that only a non-worker thread can complete, currently outstanding (see
 // `ts::External_wait`). The deadlock net's second predicate: quiescence with a nonzero count
@@ -419,8 +448,19 @@ struct Task_control_block
     public:
         static void push_and_drain(const Task_ptr& blk);   // noinline: see the definition
 
+        // A drain's state, set aside while a task runs at a yield point and put back when it
+        // returns - `Resume_queue::Drain_state`'s counterpart, for inline dispatches.
+        struct Drain_state
+        {
+            std::vector<Task_ptr> pending;
+            bool draining = false;
+        };
+        static Drain_state detach() noexcept;             // noinline: see the definition
+        static void reattach(Drain_state state) noexcept;   // noinline: see the definition
+
     private:
         inline static thread_local std::vector<Task_ptr> pending_;
+        inline static thread_local std::vector<Task_ptr> spare_;   // a nested drain's buffer (`detach`)
         inline static thread_local bool draining_ = false;
     };
 
@@ -616,6 +656,26 @@ TS_DETAIL_NO_INLINE inline void Task_control_block::Inline_queue::push_and_drain
     }
     pending_.clear();   // retains capacity
     draining_ = false;
+}
+
+// See `Resume_queue::detach`: the same contract for the inline-dispatch drain.
+TS_DETAIL_NO_INLINE inline Task_control_block::Inline_queue::Drain_state
+Task_control_block::Inline_queue::detach() noexcept
+{
+    Drain_state state{ std::exchange(pending_, std::move(spare_)), draining_ };
+    pending_.clear();   // `spare_` is empty; a moved-from vector only promises valid
+    draining_ = false;
+    return state;
+}
+
+TS_DETAIL_NO_INLINE inline void Task_control_block::Inline_queue::reattach(Drain_state state) noexcept
+{
+#if TS_SAFETY_CHECKS
+    if (draining_ || !pending_.empty())
+        ts::fatal("Inline_queue::reattach over an unfinished drain - a nested drain did not complete");
+#endif
+    spare_ = std::exchange(pending_, std::move(state.pending));
+    draining_ = state.draining;
 }
 
 // `Task_ptr` refcount ops (block is complete here). `dec` at 0 runs the wrapper's `destroy`.

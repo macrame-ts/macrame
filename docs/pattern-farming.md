@@ -228,7 +228,7 @@ over drop-cancellation systems.
 
 #### 2.2 Timer / delayed-dispatch primitive — **foundational, we have none**
 
-**Status: 🔬 design delegated — doc ready: [timer-primitive-design.md](internals/timer-primitive-design.md).**
+**Status: ✅ landed (2026-09) as `ts::sleep` / `ts::sleep_until` / `ts::Periodic` (`ts/timer.h`); design and deviations in [timer-primitive-design.md](internals/timer-primitive-design.md).**
 Recommendation: a lazily-created, scheduler-owned **timer thread with a
 `steady_clock` min-heap**, each fire delivered as a `Signal` trigger handed to the
 scheduler via a low-priority `launch` — structurally identical to

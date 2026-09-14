@@ -12,6 +12,7 @@ namespace sample
 {
 void game_frame_stats(int frames, float time_scale, double& avg_ms, double& serial_ms, float& transform0);
 void game_frame_free_stats(int frames, float time_scale, double& avg_ms, double& serial_ms, float& transform0);
+void game_frame_fixed_stats(int frames, float time_scale, double& avg_ms, double& serial_ms, float& transform0);
 }
 
 namespace
@@ -70,4 +71,12 @@ void run_game_frame_bench()
     report_frame("free 1.0", heavy_free, heavy_graph);
     report_frame("graph .05", light_graph, 0.0);
     report_frame("free .05", light_free, light_graph);
+
+    // The optimised frame with physics and networking on their own clocks: a different
+    // composition, not a different schedule of the same one, so the delta mixes the optimised
+    // levers with the physics chain leaving the frame. The trace separates the two.
+    double heavy_fixed = frame_us(&sample::game_frame_fixed_stats, 20, 1.0f);
+    double light_fixed = frame_us(&sample::game_frame_fixed_stats, 200, 0.05f);
+    report_frame("fixed 1.0", heavy_fixed, heavy_graph);
+    report_frame("fixed .05", light_fixed, light_graph);
 }

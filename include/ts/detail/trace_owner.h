@@ -67,6 +67,11 @@ struct Trace_owner_state : Tls_scalar<Trace_owner_state, int, -1> {};
 // reads it to book orchestration only for a top-level `execute()` (not one nested inside a body).
 struct In_functor_state : Tls_scalar<In_functor_state, bool> {};
 
+// Ticks this thread has spent in tasks run inside yield points (`ts::yield`), a running sum. A
+// `Trace_busy_scope` subtracts its growth over the scope, so a yielding body is credited only
+// its own time; the nested task's own scope credits the rest.
+struct Nested_span_state : Tls_scalar<Nested_span_state, long long> {};
+
 inline int trace_owner() noexcept { return Trace_owner_state::load(); }
 
 // Set the owning node for a scope (save/restore, so inline-nested runs and inherited
@@ -103,6 +108,7 @@ public:
             active_ = true;
             owner_ = Trace_owner_state::load();
             in_functor_prev_ = In_functor_state::exchange(true);
+            nested0_ = Nested_span_state::load();
             t0_ = std::chrono::steady_clock::now().time_since_epoch().count();
         }
     }
@@ -111,6 +117,8 @@ public:
         if (active_)
         {
             long long dt = std::chrono::steady_clock::now().time_since_epoch().count() - t0_;
+            dt -= Nested_span_state::load() - nested0_;   // tasks run inside this body's yield points
+
             In_functor_state::store(in_functor_prev_);
             if (trace_body_add)
                 trace_body_add(dt);                    // B += dt (machinery = busy - B is derived)
@@ -126,6 +134,7 @@ private:
     bool in_functor_prev_ = false;
     int owner_ = -1;
     long long t0_ = 0;
+    long long nested0_ = 0;   // `Nested_span_state` at the scope's start
 };
 
 // Brackets a graph run's per-run setup + initial dispatch (link binding, node re-arm,

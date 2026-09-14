@@ -26,7 +26,8 @@ namespace ts
 // dynamic stage-vs-cut race).
 
 template<typename T> class Deferred;
-template<typename T> class Versioned;
+enum class History;   // versioned.h
+template<typename T, History history> class Versioned;
 
 namespace detail
 {

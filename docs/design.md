@@ -493,6 +493,82 @@ relaxations would be explicit staleness opt-ins, and the real
 reader-throughput answer is structural (`Versioned<T>`, §6) rather than
 queue policy.
 
+#### Yield points
+
+Priority orders queues but cannot evict a running task, so a ready `high` task
+can wait behind long `normal` bodies for their whole duration. The game-frame
+dry runs measured exactly that
+([profiler-guided-optimization.md](internals/profiler-guided-optimization.md),
+experiment 1), and a fixed-rate graph with a deadline (§6.1) turns it from a
+tuning question into a requirement. The cooperative remedy is a yield point,
+and the design question was what a yield point does.
+
+The obvious shape suspends the yielding task, requeues it, and lets the worker
+take the urgent one. That pays a requeue and a resume hop per yield, lets a
+thief move the continuation to a cold core, and needs a coroutine. The shape
+taken runs the urgent task inline instead: `ts::yield()` pops one queued
+entry of a higher class than the yielder's and executes it on the yielding
+worker's stack, then returns. The continuation never leaves the stack, and the
+yield works in a plain functor body. `normal` yields to `high`; `low` yields to
+`high` and then to the global `normal` queue; `high` never yields. A worker's
+own `normal` deque stays invisible to a `low` yielder: counting its entries
+would add a shared write to the deque push, the scheduler's fast path, and
+idle workers steal from it anyway. The common case, nothing queued, reads two
+relaxed counters the scheduler keeps for the `high` queue and the global
+`normal` queue, each incremented before a push and decremented after a pop, so
+neither under-counts. The pair sits alone on one cache line, which every
+worker reads at every yield point.
+
+Three properties make the nesting safe. A queued entry has already taken its
+pipe turns, so it cannot wait on grants the yielder holds. The nested dispatch
+runs inside a scope that clears the thread's ambient task state (current task,
+grants, scope children, rule relaxation, trace owner), sets aside the pending
+work of the resume and inline-dispatch trampolines, and restores both
+afterwards, so the nested task starts as it would at the top of the worker
+loop. And yield points reached inside the nested task do nothing, so nesting
+is one level deep.
+
+The trampoline part is what lets a yield point release a coroutine. A resumed
+coroutine segment runs inside the resume trampoline's drain, and a resume
+queued during a drain runs when the drain reaches it. Without the set-aside, a
+resume the nested task causes from a yield point inside a resumed segment
+would wait for the yielding segment to return, so a tick driver released at a
+yield point would wait for the body it was meant to interrupt. With it, the
+resume starts a drain of its own at the yield point, and the outer drain
+continues where it stood once the nested task returns. The one-level bound is
+what keeps that finite: a coroutine resumed at a yield point could otherwise
+yield in turn and run another task, one stack level per queued task.
+
+Running a resume at a yield point adds no interleaving the settle paths do not
+already face. The awaiter handshake decides which thread resumes a coroutine,
+not when, and a resume that runs while its settler is still on the stack is
+the ordinary case at the top of a worker loop: `Signal::trigger` keeps its
+block alive across the settle, and a graph run's last node keeps the run's
+completion handle alive across it, for exactly that reason. The yielding
+segment's own pending resumes are delayed by the nested task, as they would
+be by any longer segment. The trace subtracts the nested span from the
+yielding body's credited time, so body time is counted once. `parallel_for` has a yield point at every chunk claim, which
+covers the most common long body without a change to user code.
+
+#### The timer thread
+
+Deadlines are kept by one timer thread with a min-heap, created on first use
+([timer-primitive-design.md](internals/timer-primitive-design.md)). The
+alternative considered was folding the heap into the scheduler, as Go and
+Tokio do: workers check it before the queues and park with a timeout to the
+nearest deadline. That saves a thread and one wake hop per fire, but the
+eventcount park has no timed wait in standard C++, the `spin` and `handoff`
+idle policies would each need their own polling, and deadline ownership would
+move between parked workers. On Windows it also costs timing quality: a parked
+worker's timeout has the system timer's granularity, while a dedicated thread
+can wait on a high-resolution waitable timer. For a 60 Hz tick the saved hop is
+tens of microseconds against a 16.7 ms period, well below the jitter that
+granularity would add, so the dedicated thread stays. It never runs user code:
+a fire is delivered as a task at the sleep's priority, for the same reason
+`Frame_gate::open()` releases through the scheduler. The delivered task is the
+one the sleep returned, whose block also carries the timer's bookkeeping, so a
+wait is one allocation and a fire queues no second task.
+
 ---
 
 ## 4. The task core
@@ -1093,6 +1169,21 @@ and `publish()` flips atomically. The load-bearing choices:
   provides per-worker slots for staging from inside a `parallel_for`, is the
   explicit, localized surrender of cross-thread reproducibility.
 
+`History::current_and_previous` adds a third replica, the version before the
+current one, so a consumer can interpolate between the two newest versions of
+a producer that publishes on its own clock. The swap becomes a rotation under
+the same write grant, with front, shadow and previous exchanging contents, and
+the publish stamps its instant and serial. Two choices follow. The resync is by
+copy: after the rotation the shadow holds the version before last, and
+replaying one batch would bring it only as far as the previous version. And the
+pair is read through a view that is itself the read grant, the `Access_guard`
+shape, so both references are valid for exactly the bindings' lifetime. The
+history is a template parameter, so the third replica and the pair read exist
+only where asked for. An earlier sketch took the reading instant as an
+argument, which read as a lookup by time although the versions returned never
+depend on it; the stamps and a `fraction_at` helper keep the choice of instant
+with the caller.
+
 The UE research grounded several choices. `ENQUEUE_RENDER_COMMAND`'s
 linear-allocated coarse queue and its splice-in-submit-order parallel
 recording, where determinism comes from splice position rather than thread
@@ -1101,6 +1192,31 @@ commands from a per-list linear allocator is the planned typed-command/arena
 tier. The Render Dependency Graph, with passes declaring resource access and
 order derived, is production validation of this library's central premise,
 applied to GPU resources.
+
+### 6.1 Fixed-rate graphs
+
+A fixed-rate subsystem is a second compiled graph with its own clock, beside
+the frame graph on the same scheduler, and the boundary between them is one
+`Deferred` for inputs and one `Versioned` for outputs. That is the logical
+execution time model of real-time control (Giotto, AUTOSAR's timing
+extensions): a task reads its inputs at release and publishes its outputs at
+its deadline, whatever its actual duration. The time-triggered architecture's
+state message, a version replaced at a known instant and read without
+blocking, is what `Versioned` already is. The game-loop accumulator is the
+special case where the schedule is inferred from the measured frame time,
+which is also why it can spiral: a slow tick raises the next frame's tick
+count, which slows the tick further. With a clock of its own, the overload
+policy, whether to run missed ticks, drop them or slow simulated time, is one
+decision in the driver, separate from rendering.
+
+The library supplies mechanisms only: the timer, the history on `Versioned`,
+the graph default priority, and yield points. There is no fixed-rate-graph
+type. Which state a subsystem owns, what crosses the boundary, the overload
+policy, and how the tick relates to networking are engine decisions a bundled
+type would have to guess, and the composition is a few lines
+(`sample/fixed_rate.cpp`). The substantial cost of the model sits in the
+engine, not the library: a subsystem whose gameplay code writes the same state
+from both rates has to be split into owned state and published versions first.
 
 ---
 

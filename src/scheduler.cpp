@@ -1,4 +1,6 @@
 #include "ts/scheduler.h"
+#include "ts/coroutine_support.h"   // the resume trampoline a yield point's nested dispatch detaches
+#include "ts/detail/task_block.h"   // the ambient task state a yield point's nested dispatch resets
 #include "ts/detail/worker_thread.h"
 
 #include <cstddef>
@@ -169,6 +171,11 @@ void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
         return;
     }
 
+    // The yield-point counts, before the push so they never under-count (see `Yield_signal`).
+    if (priority == Priority::high)
+        detail::yield_signal.high.fetch_add(1, std::memory_order_relaxed);
+    else if (priority == Priority::normal)
+        detail::yield_signal.normal_global.fetch_add(1, std::memory_order_relaxed);
     queues_[static_cast<std::size_t>(priority)].push({ func, data });
 
     signal_submit();
@@ -289,6 +296,7 @@ bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
 
     if (queues_[0].pop(out))                                   // global high (strict)
     {
+        detail::yield_signal.high.fetch_sub(1, std::memory_order_relaxed);
         ++since_low;
         return true;
     }
@@ -314,6 +322,7 @@ bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
         since_global = 0;
         if (queues_[1].pop(out))
         {
+            detail::yield_signal.normal_global.fetch_sub(1, std::memory_order_relaxed);
             ++since_low;
             return true;
         }
@@ -326,6 +335,7 @@ bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
     }
     if (queues_[1].pop(out))                                   // global normal (overflow + external)
     {
+        detail::yield_signal.normal_global.fetch_sub(1, std::memory_order_relaxed);
         ++since_low;
         since_global = 0;
         return true;
@@ -464,5 +474,128 @@ bool Scheduler::all_empty() const
     }
     return true;
 }
+
+namespace detail
+{
+
+namespace
+{
+
+// Set while this thread runs a task at a yield point. A yield point reached inside that task,
+// or inside a coroutine its completion resumes here, is then a no-op, so nesting stays one
+// level deep however many tasks are queued. Touched only from this translation unit, which
+// defines no coroutine, so no frame can hold its address.
+struct Yield_nesting : Tls_scalar<Yield_nesting, bool> {};
+
+// Makes a task run at a yield point start as it would at the top of the worker loop, and
+// restores the yielding code's state when it returns.
+//  - Cleared: the current task, grants, scope children, rule relaxation and trace owner. The
+//    nested task's own dispatch installs what it needs.
+//  - Detached: the resume and inline-dispatch trampolines. The yielding code may be running
+//    inside a drain of either (a resumed coroutine segment, an inline-dispatched node), and a
+//    resume or inline dispatch the nested task causes would then queue behind the yielding
+//    code and run only after it returns - a tick released at a yield point would wait for the
+//    very body it was meant to interrupt. Detached, it starts its own drain here, nested, as
+//    at the top of the loop, and the outer drain carries on from where it was once the scope
+//    ends. The destroy trampoline stays attached: deferring a free is harmless.
+//  - Bounded: `Yield_nesting` makes yield points inside the nested task no-ops. Without it a
+//    coroutine resumed here could yield, run another task, resume another coroutine, and so
+//    on, one stack level per queued task; the deferral the detach removes used to be what
+//    stopped that.
+// Under a traced run the nested span is added to `Nested_span_state`, which the yielding
+// body's `Trace_busy_scope` subtracts, so the span is credited as body time once - by the
+// nested task's own scope.
+class Nested_dispatch_scope
+{
+public:
+    Nested_dispatch_scope() noexcept
+        : task_(Current_task::exchange(Task_ptr{}))
+        , access_(access_load())
+        , scope_children_(Scope_children::exchange(nullptr))
+        , resume_drain_(Resume_queue::detach())
+        , inline_drain_(Task_control_block::Inline_queue::detach())
+    {
+        Yield_nesting::store(true);
+        access_store(nullptr);
+#if TS_RULES_ANY
+        relaxed_ = relaxed_load();
+        relaxed_store(0);
+#endif
+#if TS_PROFILING
+        owner_ = Trace_owner_state::exchange(-1);
+        in_functor_ = In_functor_state::exchange(false);
+        if (trace_owner_armed.load(std::memory_order_relaxed) != 0)
+            t0_ = std::chrono::steady_clock::now().time_since_epoch().count();
+#endif
+    }
+
+    ~Nested_dispatch_scope()
+    {
+#if TS_PROFILING
+        if (t0_ != 0)
+            Nested_span_state::add(std::chrono::steady_clock::now().time_since_epoch().count() - t0_);
+        In_functor_state::store(in_functor_);
+        Trace_owner_state::store(owner_);
+#endif
+#if TS_RULES_ANY
+        relaxed_store(relaxed_);
+#endif
+        Task_control_block::Inline_queue::reattach(std::move(inline_drain_));
+        Resume_queue::reattach(std::move(resume_drain_));
+        Scope_children::store(scope_children_);
+        access_store(access_);
+        (void)Current_task::exchange(std::move(task_));
+        Yield_nesting::store(false);
+    }
+
+    Nested_dispatch_scope(const Nested_dispatch_scope&) = delete;
+    Nested_dispatch_scope& operator=(const Nested_dispatch_scope&) = delete;
+
+private:
+    Task_ptr task_;
+    const Access_context* access_;
+    std::vector<Task_ptr>* scope_children_;
+    Resume_queue::Drain_state resume_drain_;
+    Task_control_block::Inline_queue::Drain_state inline_drain_;
+#if TS_RULES_ANY
+    unsigned relaxed_ = 0;
+#endif
+#if TS_PROFILING
+    int owner_ = -1;
+    bool in_functor_ = false;
+    long long t0_ = 0;
+#endif
+};
+
+} // namespace
+
+// One entry per call, run exactly as a worker would run it, minus the busy timing: the
+// yielding task's `run_task` span already covers this thread. The queues are tried in
+// `find_work`'s order among the classes the caller may yield to: `high` first, then, for a
+// `low` caller, the global `normal` queue. An entry taken by another worker since the counts
+// were read leaves nothing to run, and the call returns.
+void yield_to_higher(Priority own) noexcept
+{
+    if (own == Priority::high || Yield_nesting::load() || current_worker_index() < 0)
+        return;
+    Scheduler& scheduler = global_scheduler();
+    Task_entry task;
+    if (scheduler.queues_[static_cast<std::size_t>(Priority::high)].pop(task))
+    {
+        yield_signal.high.fetch_sub(1, std::memory_order_relaxed);
+    }
+    else if (own == Priority::low && scheduler.queues_[static_cast<std::size_t>(Priority::normal)].pop(task))
+    {
+        yield_signal.normal_global.fetch_sub(1, std::memory_order_relaxed);
+    }
+    else
+    {
+        return;
+    }
+    Nested_dispatch_scope scope;
+    task.func_(task.data_);
+}
+
+} // namespace detail
 
 } // namespace ts

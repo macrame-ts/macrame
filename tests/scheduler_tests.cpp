@@ -1,10 +1,13 @@
 #include "scheduler_scope.h"
 #include "scheduler_tests.h"
+#include "ts/coroutine_support.h"
 #include "ts/scheduler.h"
+#include "ts/task.h"
 #include "harness.h"
 #include "test_util.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <thread>
 #include <vector>
@@ -356,6 +359,227 @@ void test_global_normal_valve()
         std::this_thread::yield();   // drain before the scope tears the pool down
 }
 
+// --- yield points ------------------------------------------------------------------------
+
+// A normal task that reaches a yield point while a high task is queued runs the high task
+// there, on its own thread. With one worker the high task could not run anywhere else before
+// the normal task finished.
+static void test_yield_runs_pending_high()
+{
+    ts::Scheduler_scope pool{ { .num_workers = 1 } };
+    std::atomic<bool> started{ false };
+    std::atomic<bool> high_ran{ false };
+    std::atomic<std::thread::id> high_thread{};
+    std::thread::id normal_thread{};
+    bool high_ran_inside = false;
+    ts::Task<void> normal = ts::launch([&]
+    {
+        normal_thread = std::this_thread::get_id();
+        started.store(true);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!high_ran.load() && std::chrono::steady_clock::now() < deadline)
+            ts::yield();
+        high_ran_inside = high_ran.load();
+    });
+    while (!started.load())
+        std::this_thread::yield();
+    ts::Task<void> high = ts::launch([&]
+    {
+        high_thread.store(std::this_thread::get_id());
+        high_ran.store(true);
+    }, { .priority = ts::Priority::high });
+    normal.sync();
+    high.sync();
+    TS_CHECK(high_ran_inside);
+    TS_CHECK(high_thread.load() == normal_thread);
+}
+
+// With nothing pending a yield point is a load and a branch.
+static void test_yield_without_pending_is_cheap()
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 1'000'000; ++i)
+        ts::yield();
+    TS_CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(500));
+}
+
+// A high task's yield point does not run another high task: order among equals stays the
+// queue's.
+static void test_yield_high_does_not_yield()
+{
+    ts::Scheduler_scope pool{ { .num_workers = 1 } };
+    std::atomic<bool> started{ false };
+    std::atomic<bool> second_ran{ false };
+    bool second_ran_inside = true;
+    ts::Task<void> first = ts::launch([&]
+    {
+        started.store(true);
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+        while (std::chrono::steady_clock::now() < until)
+            ts::yield();
+        second_ran_inside = second_ran.load();
+    }, { .priority = ts::Priority::high });
+    while (!started.load())
+        std::this_thread::yield();
+    ts::Task<void> second = ts::launch([&] { second_ran.store(true); }, { .priority = ts::Priority::high });
+    first.sync();
+    second.sync();
+    TS_CHECK(!second_ran_inside);
+}
+
+// A low task's yield point runs normal work from the global queue: the class above its own.
+static void test_yield_low_to_normal()
+{
+    ts::Scheduler_scope pool{ { .num_workers = 1 } };
+    std::atomic<bool> started{ false };
+    std::atomic<bool> normal_ran{ false };
+    bool normal_ran_inside = false;
+    ts::Task<void> low = ts::launch([&]
+    {
+        started.store(true);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!normal_ran.load() && std::chrono::steady_clock::now() < deadline)
+            ts::yield();
+        normal_ran_inside = normal_ran.load();
+    }, { .priority = ts::Priority::low });
+    while (!started.load())
+        std::this_thread::yield();
+    ts::Task<void> normal = ts::launch([&] { normal_ran.store(true); });
+    low.sync();
+    normal.sync();
+    TS_CHECK(normal_ran_inside);
+}
+
+// A normal task's yield point does not run another normal task.
+static void test_yield_normal_not_to_normal()
+{
+    ts::Scheduler_scope pool{ { .num_workers = 1 } };
+    std::atomic<bool> started{ false };
+    std::atomic<bool> second_ran{ false };
+    bool second_ran_inside = true;
+    ts::Task<void> first = ts::launch([&]
+    {
+        started.store(true);
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+        while (std::chrono::steady_clock::now() < until)
+            ts::yield();
+        second_ran_inside = second_ran.load();
+    });
+    while (!started.load())
+        std::this_thread::yield();
+    ts::Task<void> second = ts::launch([&] { second_ran.store(true); });
+    first.sync();
+    second.sync();
+    TS_CHECK(!second_ran_inside);
+    TS_CHECK(second_ran.load());
+}
+
+static ts::Task<void> await_then_flag(ts::Signal gate, std::atomic<bool>& flag)
+{
+    co_await gate;
+    flag.store(true);
+}
+
+static ts::Task<void> resumed_segment_that_yields(ts::Signal start, std::atomic<bool>& started,
+    std::atomic<bool>& other_ran, bool& saw_other_inside)
+{
+    co_await start;   // resumed on the worker, inside that thread's resume drain
+    started.store(true);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!other_ran.load() && std::chrono::steady_clock::now() < deadline)
+        ts::yield();
+    saw_other_inside = other_ran.load();
+}
+
+// A coroutine resumed by a task that ran at a yield point resumes there, inside the yield -
+// including when the yield point is itself inside a resumed segment, where the resume would
+// otherwise queue on the thread's resume trampoline behind the yielding segment.
+static void test_yield_resume_runs_at_yield_point()
+{
+    ts::Scheduler_scope pool{ { .num_workers = 1 } };
+    ts::Signal gate;
+    ts::Signal start;
+    std::atomic<bool> started{ false };
+    std::atomic<bool> other_ran{ false };
+    bool saw_other_inside = false;
+    ts::Task<void> other = await_then_flag(gate, other_ran);   // suspends on `gate`
+    ts::Task<void> segment = resumed_segment_that_yields(start, started, other_ran, saw_other_inside);
+    ts::Task<void> opener = ts::launch([start]() mutable { start.trigger(); });   // resumes `segment` on the worker
+    while (!started.load())
+        std::this_thread::yield();
+    ts::Task<void> releaser = ts::launch([gate]() mutable { gate.trigger(); }, { .priority = ts::Priority::high });
+    segment.sync();
+    other.sync();
+    opener.sync();
+    releaser.sync();
+    TS_CHECK(saw_other_inside);
+}
+
+static ts::Task<void> resumed_then_yields(ts::Signal gate, std::atomic<bool>& second_ran, bool& second_ran_inside,
+    std::atomic<bool>& done)
+{
+    co_await gate;   // resumed inside the task a yield point runs
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+    while (std::chrono::steady_clock::now() < until)
+        ts::yield();   // one level deep already: a no-op
+    second_ran_inside = second_ran.load();
+    done.store(true);
+}
+
+// A task run at a yield point does not yield in turn: a coroutine its completion resumes runs
+// straight through its own yield points, so nesting stays one level deep.
+static void test_yield_does_not_nest()
+{
+    ts::Scheduler_scope pool{ { .num_workers = 1 } };
+    ts::Signal gate;
+    std::atomic<bool> started{ false };
+    std::atomic<bool> second_ran{ false };
+    std::atomic<bool> done{ false };
+    bool second_ran_inside = true;
+    ts::Task<void> resumed = resumed_then_yields(gate, second_ran, second_ran_inside, done);
+    ts::Task<void> yielder = ts::launch([&]
+    {
+        started.store(true);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!done.load() && std::chrono::steady_clock::now() < deadline)
+            ts::yield();
+    });
+    while (!started.load())
+        std::this_thread::yield();
+    ts::Task<void> first = ts::launch([gate]() mutable { gate.trigger(); }, { .priority = ts::Priority::high });
+    ts::Task<void> second = ts::launch([&] { second_ran.store(true); }, { .priority = ts::Priority::high });
+    yielder.sync();
+    resumed.sync();
+    first.sync();
+    second.sync();
+    TS_CHECK(!second_ran_inside);
+    TS_CHECK(second_ran.load());
+}
+
+// Off a worker a yield point is a no-op: the blue thread does not run queued work.
+static void test_yield_off_worker_is_noop()
+{
+    ts::Scheduler_scope pool{ { .num_workers = 1 } };
+    std::atomic<bool> started{ false };
+    std::atomic<bool> release{ false };
+    ts::Task<void> occupier = ts::launch([&]
+    {
+        started.store(true);
+        while (!release.load())
+            std::this_thread::yield();
+    });
+    while (!started.load())
+        std::this_thread::yield();
+    std::atomic<bool> high_ran{ false };
+    ts::Task<void> high = ts::launch([&] { high_ran.store(true); }, { .priority = ts::Priority::high });
+    ts::yield();
+    TS_CHECK(!high_ran.load());
+    release.store(true);
+    occupier.sync();
+    high.sync();
+    TS_CHECK(high_ran.load());
+}
+
 void run_scheduler_tests()
 {
     std::printf("\n[scheduler] tests\n");
@@ -381,4 +605,12 @@ void run_scheduler_tests()
         []{ TS_CHECK(ts::test::expect_death("scheduler_use_after_destroy")); });
     run("death: destroy_scheduler with none running",
         []{ TS_CHECK(ts::test::expect_death("scheduler_destroy_twice")); });
+    run("yield: a pending high task runs inside a normal task's yield point", test_yield_runs_pending_high);
+    run("yield: with nothing pending it is cheap", test_yield_without_pending_is_cheap);
+    run("yield: a high task does not yield to high", test_yield_high_does_not_yield);
+    run("yield: off a worker it is a no-op", test_yield_off_worker_is_noop);
+    run("yield: a low task yields to queued normal work", test_yield_low_to_normal);
+    run("yield: a normal task does not yield to normal", test_yield_normal_not_to_normal);
+    run("yield: a resume caused at a yield point runs there", test_yield_resume_runs_at_yield_point);
+    run("yield: a task run at a yield point does not yield further", test_yield_does_not_nest);
 }

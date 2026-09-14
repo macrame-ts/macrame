@@ -1,5 +1,16 @@
 # Timer / delayed-dispatch primitive: design study
 
+**Status (2026-09): option (a) landed** as `ts/timer.h` / `src/timer.cpp`: `ts::sleep`,
+`ts::sleep_until`, and `ts::Periodic` (§3.4's `every`, whose `next()` returns the number of
+grid points passed since the previous tick). Deviations from this study: on Windows the timer
+thread waits on a high-resolution waitable timer, because a condition-variable timeout wakes on
+the ~15.6 ms system tick, a whole period of a 60 Hz clock; delivery submits the wait's own
+task block, which embeds the timer bookkeeping (one allocation per wait), at the sleep's own
+priority rather than a `ts::launch` at `low`; worker-less mode is fatal for now rather than
+virtual-clock driven (§4 and §5 remain the plan); `launch_after` and `Deadline` (§3.2, §3.3) are
+not built. The alternative of folding deadlines into the workers' park (§2.3) was reconsidered
+and rejected again; the reasoning is in design.md §3, "The timer thread".
+
 Design-only doc for pattern-farming item **2.2** (the timer / delayed-dispatch
 primitive — "foundational, we have none"). No implementation here; this is the
 option analysis, the recommended shape, and a rigorous performance-impact

@@ -66,6 +66,9 @@
     <ClCompile Include="sample\scope_access.cpp">
       <Filter>sample</Filter>
     </ClCompile>
+    <ClCompile Include="sample\fixed_rate.cpp">
+      <Filter>sample</Filter>
+    </ClCompile>
     <ClCompile Include="tsan\tsan_main.cpp">
       <Filter>tsan</Filter>
     </ClCompile>
@@ -118,6 +121,9 @@
       <Filter>tests</Filter>
     </ClCompile>
     <ClCompile Include="tests\rules_tests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\timer_tests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
   </ItemGroup>
@@ -177,6 +183,9 @@
       <Filter>tests</Filter>
     </ClInclude>
     <ClInclude Include="tests\versioned_tests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="tests\timer_tests.h">
       <Filter>tests</Filter>
     </ClInclude>
   </ItemGroup>

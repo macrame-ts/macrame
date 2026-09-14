@@ -651,8 +651,9 @@ version the output extract, not the machine.**
 - `Access::append` edge derivation (`add_flush_node`) as compile-time sugar
   over hand-wired `after`.
 - Reserved handles from `stage()` (the id-allocator pattern is the documented
-  answer), multi-target buffers, `read_pair()` on `Versioned` for
-  interpolation.
+  answer), multi-target buffers. (`read_pair()` on `Versioned` for
+  interpolation landed 2026-09 as `History::current_and_previous` +
+  `read_last_versions`.)
 - ~~Single-publisher discipline on `Versioned` is documented, not enforced~~
   **Enforced** (follow-up to the initial ship): a graph/inline publish that
   catches a dynamic publish still unresolved is fatal at flip entry under

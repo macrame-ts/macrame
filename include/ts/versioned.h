@@ -1,16 +1,20 @@
 #pragma once
 
 #include "ts/access.h"
+#include "ts/coroutine_support.h"   // the held-grant awaiter `read_last_versions` resumes through
 #include "ts/fatal.h"
 #include "ts/guarded.h"
 #include "ts/recorder.h"
 #include "ts/task.h"
 
+#include <chrono>
 #include <concepts>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <source_location>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -41,6 +45,109 @@ enum class Resync
     overwrite,
 };
 
+// Which published versions a `Versioned` keeps readable. `current` is the double buffer.
+// `current_and_previous` also keeps the version published before it, readable together with
+// the current one through `read_last_versions` - what a consumer interpolating between a
+// fixed-rate producer's outputs needs. The cost is a third replica, rotated at every publish,
+// and a resync by copy: after the rotation the shadow holds the version before last, which one
+// replayed batch cannot bring forward, so `Resync::replay` is rejected (`copy` is the default for
+// this history, `overwrite` is allowed).
+enum class History { current, current_and_previous };
+
+// The publish instants of the two versions `read_last_versions` returns.
+struct Version_stamps
+{
+    std::chrono::steady_clock::time_point previous_published{};
+    std::chrono::steady_clock::time_point current_published{};
+    std::uint64_t current_serial = 0;   // publishes so far - 0 before the first
+
+    // Where `at` falls between the two publishes: 0 at `previous_published`, 1 at
+    // `current_published`, clamped to [0, 1]. 1 when the two coincide (before the second publish).
+    double fraction_at(std::chrono::steady_clock::time_point at) const noexcept;
+};
+
+template<typename T, History history = History::current>
+class Versioned;
+
+namespace detail
+{
+
+template<typename T> struct Version_awaiter;
+struct Versioned_access;
+
+// The storage `History::current_and_previous` adds; empty otherwise (a base, so it costs nothing).
+template<typename T, History history>
+struct Versioned_history
+{
+};
+
+template<typename T>
+struct Versioned_history<T, History::current_and_previous>
+{
+    T previous_{};              // the version published before the front's, rotated in at every swap
+    Version_stamps stamps_{};   // written under the front's write grant, read under a read grant
+};
+
+// `read_last_versions()` from a task that holds no grant on the front would park a worker on
+// the front's pipe - the in-task blocking rule, with the awaitable form as the fix.
+inline void check_version_read_may_block()
+{
+#if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
+    if (Current_task::get() != nullptr && rule_enforced(Rule::in_task_sync))
+    {
+        ts::fatal("Versioned::read_last_versions() inside a task that holds no grant on the front would block "
+                  "a worker - declare state() on the node, or co_await ts::read_last_versions(v)");
+    }
+#endif
+}
+
+} // namespace detail
+
+// The last two published versions of a `Versioned<T, History::current_and_previous>`, held
+// under one read grant on its front for the view's lifetime:
+//
+//   auto [previous, current, stamps] = poses.read_last_versions();
+//   render(lerp(previous, current, stamps.fraction_at(now)));
+//
+// Non-copyable and non-movable: the view is the grant, and it installs its own access context
+// (like `Access_guard`), so both versions pass the harness while it lives and neither does
+// after. In a coroutine it counts as a live guard: `co_await` while one is alive is fatal.
+// Its context is the running one plus `previous` and, when the read is not lent, the front:
+// one or two more of the `Access_context::max_entries` objects a context can hold, so taking
+// a view in a body whose context is at or near that cap overflows it, which is fatal.
+template<typename T>
+class Version_view
+{
+public:
+    const T& previous;
+    const T& current;
+    const Version_stamps stamps;
+
+    ~Version_view();
+
+    Version_view(const Version_view&) = delete;
+    Version_view& operator=(const Version_view&) = delete;
+
+    // Tuple protocol (`std::tuple_size`/`tuple_element` below): 0 = previous, 1 = current,
+    // 2 = stamps.
+    template<std::size_t I>
+    decltype(auto) get() const noexcept;
+
+private:
+    template<typename U, History> friend class Versioned;
+    friend struct detail::Version_awaiter<T>;
+
+    // `held_pipe` is the front's pipe when the view took its own read turn (released at
+    // destruction), null when the calling context already granted the front (the view is lent).
+    Version_view(const T& previous_version, const T& current_version, const Version_stamps& stamps_now,
+                 detail::Pipe* held_pipe) noexcept;
+
+    detail::Pipe* held_pipe_;
+    Access_context ctx_;
+    const Access_context* prev_ = nullptr;
+    bool counted_ = false;   // counted as a live guard of the running coroutine
+};
+
 // `Versioned<T>` - double-buffered state with an atomic publish step: a coarse, batched
 // cousin of RCU / MVCC snapshot isolation. It keeps two copies of `T` behind one
 // `Guarded<T>` "front": readers always see the last published version - a stable
@@ -56,6 +163,9 @@ enum class Resync
 // declare an ordinary read on the front (`state()`), so the harness and any
 // `Static_task_graph` treat it like a normal guarded object. (Swap/resync mechanics:
 // `docs/internals/deferred-versioned-state.md`.)
+//
+// `Versioned<T, History::current_and_previous>` keeps the version before the current one as
+// well, readable as a pair through `read_last_versions` (see `History`).
 //
 // Use (dynamic tasks):
 //   ts::Versioned<Transforms> tf{ ts::Named{"transforms"} };  // owns both replicas
@@ -87,11 +197,16 @@ enum class Resync
 // Sibling `Deferred<T>` shares the same staging journal but applies to a single object
 // with no second replica or snapshot - reach for `Deferred<T>` to batch writes and apply
 // them at a chosen point, `Versioned<T>` when readers need a stable snapshot across a cycle.
-template<typename T>
-class Versioned
+template<typename T, History history>
+class Versioned : private detail::Versioned_history<T, history>
 {
     static_assert(std::default_initializable<T>, "Versioned<T>: T must be default-constructible (both replicas)");
     static_assert(std::swappable<T>, "Versioned<T>: publish swaps the replicas' contents");
+
+    friend struct detail::Versioned_access;
+
+    // Replay cannot resync the rotated shadow of `History::current_and_previous` (see `History`).
+    static constexpr Resync default_resync = history == History::current ? Resync::replay : Resync::copy;
 
 public:
     // Leading `ts::Named` (a literal, or `ts::Named{}` for the construction site) names the
@@ -99,17 +214,12 @@ public:
     // `Guarded`'s: the name is what every diagnostic about this object prints.
     template<typename N>
         requires std::same_as<std::remove_cvref_t<N>, Named>
-    explicit Versioned(N&& name, Resync policy = Resync::replay)
+    explicit Versioned(N&& name, Resync policy = default_resync)
         : front_(name)
         , policy_(policy)
         , front_ptr_(detail::Guarded_access::instance(front_))
     {
-        Signal ready;
-        ready.trigger();
-        chain_ = ready;          // the "previous publish" of the first publish
-#if TS_SAFETY_CHECKS
-        last_publish_ = ready;   // the "last" publish's returned gate - done for a fresh instance
-#endif
+        init();
     }
 
     // With a declared lock rank (`ts::Rank`, access.h), forwarded to the front `Guarded`:
@@ -118,17 +228,12 @@ public:
     // against and such an await cannot be satisfied - graph declarations and `read()` need none.
     template<typename N>
         requires std::same_as<std::remove_cvref_t<N>, Named>
-    explicit Versioned(N&& name, Rank rank, Resync policy = Resync::replay)
+    explicit Versioned(N&& name, Rank rank, Resync policy = default_resync)
         : front_(name, rank)
         , policy_(policy)
         , front_ptr_(detail::Guarded_access::instance(front_))
     {
-        Signal ready;
-        ready.trigger();
-        chain_ = ready;
-#if TS_SAFETY_CHECKS
-        last_publish_ = ready;
-#endif
+        init();
     }
 
     // Two destruction contracts, both fatal under TS_SAFETY_CHECKS (same severity as
@@ -207,6 +312,16 @@ public:
     {
         return std::as_const(front_).access(std::forward<Fn>(fn), opts, site);
     }
+
+    // The last two published versions under one read grant - see `Version_view`. Lent when
+    // the calling context already grants the front (a graph node that declared `state()`, a
+    // body under `read_only`), so no turn is taken. On a blue thread it takes a read turn,
+    // parking behind a writer. A task that holds no grant on the front uses the awaitable
+    // `co_await ts::read_last_versions(v)`; blocking a worker here is fatal under
+    // `Rule::in_task_sync`.
+    [[nodiscard("the view is the read grant: bind it - auto [previous, current, stamps] = ...")]]
+    Version_view<T> read_last_versions()
+        requires (history == History::current_and_previous);
 
     // The front's `Guarded` - for static-graph declarations. Declare read access
     // only; the one sanctioned writer is the publish node (`publish_fn`).
@@ -357,6 +472,30 @@ public:
 private:
     using Batch = std::vector<typename detail::Journal<T>::Command>;
 
+    // The construction tail both constructors share: a resolved publish chain, and for
+    // `History::current_and_previous` the resync check and the initial stamps.
+    void init()
+    {
+        Signal ready;
+        ready.trigger();
+        chain_ = ready;          // the "previous publish" of the first publish
+#if TS_SAFETY_CHECKS
+        last_publish_ = ready;   // the "last" publish's returned gate - done for a fresh instance
+#endif
+        if constexpr (history == History::current_and_previous)
+        {
+            if (policy_ == Resync::replay)
+            {
+                fatal("Versioned<T, History::current_and_previous> with Resync::replay - after the rotation the "
+                      "shadow holds the version before last, which one replayed batch cannot bring forward; "
+                      "use Resync::copy (the default for this history) or Resync::overwrite");
+            }
+            const auto now = std::chrono::steady_clock::now();
+            this->stamps_.previous_published = now;
+            this->stamps_.current_published = now;
+        }
+    }
+
     // Phase 1 work: the shadow is unobservable, so this needs no grant on the
     // front - readers of the current version run concurrently.
     void apply_to_shadow(Batch& batch)
@@ -368,16 +507,27 @@ private:
             cmd(shadow_);
     }
 
-    // Phase 2 work: nanoseconds under the write grant. The scope names both
-    // replicas in case T's swap runs instrumented members.
+    // Phase 2 work: nanoseconds under the write grant. The scope names every
+    // replica it touches in case T's swap runs instrumented members.
     void swap_replicas(T& front)
     {
         Access_context ctx;
         ctx.add(&front, Access::read_write, detail::pipe_epoch(detail::Guarded_access::pipe(front_)), detail::pipe_rank(detail::Guarded_access::pipe(front_)));
         ctx.add(&shadow_, Access::read_write);   // shadow: no pipe - grant-free by design
+        if constexpr (history == History::current_and_previous)
+            ctx.add(&this->previous_, Access::read_write);   // no pipe either: the front's grant covers it
         Access_scope scope(ctx);
         using std::swap;
         swap(front, shadow_);
+        if constexpr (history == History::current_and_previous)
+        {
+            // Rotate: the old front becomes the previous version, and the old previous becomes
+            // the shadow the copy resync then brings to the new version.
+            swap(shadow_, this->previous_);
+            this->stamps_.previous_published = this->stamps_.current_published;
+            this->stamps_.current_published = std::chrono::steady_clock::now();
+            ++this->stamps_.current_serial;
+        }
     }
 
     // Phase 3: bring the new shadow (old front contents) to the new version, as a
@@ -455,21 +605,177 @@ private:
     std::function<std::size_t(const T&)> hash_;
 };
 
+namespace detail
+{
+
+// Reaches the storage `History::current_and_previous` adds, for the free `read_last_versions`.
+struct Versioned_access
+{
+    template<typename T, History history>
+    static T* front(Versioned<T, history>& v) noexcept { return v.front_ptr_; }
+
+    template<typename T, History history>
+    static const T& previous(const Versioned<T, history>& v) noexcept { return v.previous_; }
+
+    template<typename T, History history>
+    static const Version_stamps& stamps(const Versioned<T, history>& v) noexcept { return v.stamps_; }
+};
+
+// The awaiter behind `co_await ts::read_last_versions(v)`: the read-guard awaiter's acquire,
+// resumed into a `Version_view`. A context that already grants the front is lent - ready at
+// once, no turn taken - which is also the await-under-guard rule's stated exemption, an access
+// that cannot suspend.
+template<typename T>
+struct Version_awaiter : Access_awaiter<T, Access::read_only>
+{
+    Version_awaiter(Scheduler& scheduler, Pipe& pipe, T* front, const T& previous,
+                    const Version_stamps& stamps) noexcept
+        : Access_awaiter<T, Access::read_only>(scheduler, pipe, front)
+        , previous_(previous)
+        , stamps_(stamps)
+    {
+    }
+
+    bool await_ready() noexcept
+    {
+        const Access_context* ctx = access_load();
+        lent_ = ctx != nullptr && ctx->grants(this->obj_, Access::read_only);
+        return lent_ || Access_awaiter<T, Access::read_only>::await_ready();
+    }
+
+    Version_view<T> await_resume() noexcept
+    {
+        if (lent_)
+            return Version_view<T>(previous_, *this->obj_, stamps_, nullptr);
+        this->finish_acquire();
+        return Version_view<T>(previous_, *this->obj_, stamps_, &this->pipe_);
+    }
+
+    const T& previous_;
+    const Version_stamps& stamps_;
+    bool lent_ = false;
+};
+
+} // namespace detail
+
+// The awaitable form of `Versioned::read_last_versions()`, for a coroutine: takes a read turn
+// on the front without blocking a worker, or lends one the coroutine already holds.
+//   auto [previous, current, stamps] = co_await ts::read_last_versions(poses);
+template<typename T, History history>
+    requires (history == History::current_and_previous)
+[[nodiscard("co_await it - the view it resumes with is the read grant")]]
+detail::Version_awaiter<T> read_last_versions(Versioned<T, history>& versioned)
+{
+    return detail::Version_awaiter<T>(global_scheduler(), detail::Guarded_access::pipe(versioned.state()),
+        detail::Versioned_access::front(versioned), detail::Versioned_access::previous(versioned),
+        detail::Versioned_access::stamps(versioned));
+}
+
 // The publish step as a graph-node body: declare it with write access on
 // `v.state()` - conflict derivation then orders it against every reader, and the
 // node's grant is exactly what `publish_into` needs.
 //   auto flip = g.add_node("flip", ts::publish_fn(poses), poses.state()).after(sim);
-template<typename T>
+template<typename T, History history = History::current>
 struct Publish_fn
 {
-    Versioned<T>* versioned;
+    Versioned<T, history>* versioned;
     void operator()(T& front) const { versioned->publish_into(front); }
 };
 
-template<typename T>
-Publish_fn<T> publish_fn(Versioned<T>& v)
+template<typename T, History history>
+Publish_fn<T, history> publish_fn(Versioned<T, history>& v)
 {
-    return Publish_fn<T>{ &v };
+    return Publish_fn<T, history>{ &v };
+}
+
+// --- out-of-class definitions ----------------------------------------------------------------
+
+inline double Version_stamps::fraction_at(std::chrono::steady_clock::time_point at) const noexcept
+{
+    if (current_published <= previous_published || at >= current_published)
+        return 1.0;
+    if (at <= previous_published)
+        return 0.0;
+    return std::chrono::duration<double>(at - previous_published)
+         / std::chrono::duration<double>(current_published - previous_published);
+}
+
+template<typename T>
+Version_view<T>::Version_view(const T& previous_version, const T& current_version, const Version_stamps& stamps_now,
+                              detail::Pipe* held_pipe) noexcept
+    : previous(previous_version)
+    , current(current_version)
+    , stamps(stamps_now)
+    , held_pipe_(held_pipe)
+{
+    if (const Access_context* running = detail::access_load())
+        ctx_ = *running;   // extend the running context: a lent view keeps the caller's grant on the front
+    if (held_pipe_ != nullptr)
+        ctx_.add(&current, Access::read_only, detail::pipe_epoch(*held_pipe_), detail::pipe_rank(*held_pipe_));
+    ctx_.add(&previous, Access::read_only);   // no pipe of its own: the front's grant covers it
+    prev_ = detail::access_load();
+    detail::access_store(&ctx_);
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+    if (detail::current_coroutine_block() != nullptr)
+    {
+        detail::guard_depth_add(1);
+        counted_ = true;
+    }
+#endif
+}
+
+template<typename T>
+Version_view<T>::~Version_view()
+{
+    detail::access_store(prev_);
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+    if (counted_)
+        detail::guard_depth_add(-1);
+#endif
+    if (held_pipe_ != nullptr)
+        detail::pipe_release(global_scheduler(), *held_pipe_, Access::read_only);
+}
+
+template<typename T>
+template<std::size_t I>
+decltype(auto) Version_view<T>::get() const noexcept
+{
+    static_assert(I < 3, "a Version_view binds three names: previous, current, stamps");
+    if constexpr (I == 0)
+        return (previous);
+    else if constexpr (I == 1)
+        return (current);
+    else
+        return (stamps);
+}
+
+template<typename T, History history>
+Version_view<T> Versioned<T, history>::read_last_versions()
+    requires (history == History::current_and_previous)
+{
+    const Access_context* ctx = detail::access_load();
+    if (ctx != nullptr && ctx->grants(front_ptr_, Access::read_only))
+        return Version_view<T>(this->previous_, *front_ptr_, this->stamps_, nullptr);
+
+    detail::check_version_read_may_block();
+    detail::Pipe& pipe = detail::Guarded_access::pipe(front_);
+    Signal granted;
+    if (!detail::pipe_acquire(global_scheduler(), pipe, Access::read_only, [granted]() mutable { granted.trigger(); }))
+        granted.sync();
+    return Version_view<T>(this->previous_, *front_ptr_, this->stamps_, &pipe);
 }
 
 } // namespace ts
+
+// Tuple protocol for `Version_view`: `auto [previous, current, stamps] = ...` binds references
+// to the two versions and the stamps through the view's member `get<I>()`.
+template<typename T>
+struct std::tuple_size<ts::Version_view<T>> : std::integral_constant<std::size_t, 3>
+{
+};
+
+template<std::size_t I, typename T>
+struct std::tuple_element<I, ts::Version_view<T>>
+{
+    using type = std::conditional_t<I == 2, const ts::Version_stamps, const T>;
+};
