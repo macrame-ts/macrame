@@ -18,6 +18,7 @@ void game_frame_free_stats(int frames, float time_scale,
 long long game_frame_draw_count();
 void game_frame_fixed_stats(int frames, float time_scale,
                             double& avg_ms, double& serial_ms, float& transform0);
+void game_frame_fixed_tick_counts(long long& physics, long long& network);
 bool fixed_rate_self_check(int frames, float scale);
 std::size_t fixed_rate_physics_hash(int ticks);
 }
@@ -788,17 +789,22 @@ void test_fixed_rate_beside_frame()
 }
 
 // The game frame with physics and networking on their own clocks publishes the same transforms
-// and submits the same draw commands as the baseline frame.
+// and submits the same draw commands as the baseline frame. Enough frames for both clocks to
+// tick - 100 ms or more even on a wide machine - so this checks the clocks, not only the primers.
 void test_engine_fixed_rate()
 {
     double avg_ms = 0.0, serial_ms = 0.0;
     float graph_xf = 0.0f, fixed_xf = 0.0f;
-    sample::game_frame_stats(5, 0.3f, avg_ms, serial_ms, graph_xf);
+    sample::game_frame_stats(60, 0.3f, avg_ms, serial_ms, graph_xf);
     long long graph_drawn = sample::game_frame_draw_count();
-    sample::game_frame_fixed_stats(5, 0.3f, avg_ms, serial_ms, fixed_xf);
+    sample::game_frame_fixed_stats(60, 0.3f, avg_ms, serial_ms, fixed_xf);
     long long fixed_drawn = sample::game_frame_draw_count();
+    long long physics_ticks = 0, network_ticks = 0;
+    sample::game_frame_fixed_tick_counts(physics_ticks, network_ticks);
     TS_CHECK(fixed_xf == 5.0f);
     TS_CHECK(fixed_drawn == graph_drawn);
+    TS_CHECK(physics_ticks >= 3);
+    TS_CHECK(network_ticks >= 1);
 }
 
 // Given the same intent sequence the fixed-rate world is the same, whatever the worker count.

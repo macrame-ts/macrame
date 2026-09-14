@@ -278,8 +278,21 @@ public:
     // chain iteratively.
     static void push_and_drain(Resume_item item);   // noinline: see the definition
 
+    // A drain's state, set aside while a task runs at a yield point and put back when it
+    // returns (`Nested_dispatch_scope`, scheduler.cpp). While detached, a resume starts a
+    // drain of its own, as at the top of a worker loop. By value and out of line, like
+    // `push_and_drain`, so no caller's frame holds the queue's address.
+    struct Drain_state
+    {
+        std::vector<Resume_item> pending;
+        bool draining = false;
+    };
+    static Drain_state detach() noexcept;             // noinline: see the definition
+    static void reattach(Drain_state state) noexcept;   // noinline: see the definition
+
 private:
     inline static thread_local std::vector<Resume_item> pending_;
+    inline static thread_local std::vector<Resume_item> spare_;   // a nested drain's buffer (`detach`)
     inline static thread_local bool draining_ = false;
 };
 
@@ -296,6 +309,29 @@ TS_DETAIL_NO_INLINE inline void Resume_queue::push_and_drain(Resume_item item)
     }
     pending_.clear();   // retains capacity -> no steady-state allocation
     draining_ = false;
+}
+
+// The outer drain's loop reads `pending_` by index after each resume returns, so the whole
+// vector is set aside and put back unchanged; a drain started in between has finished by
+// then, since `push_and_drain` returns only when its chain is empty. The nested drain runs on
+// `spare_`, which keeps its capacity from one yield point to the next, so it allocates nothing
+// in steady state.
+TS_DETAIL_NO_INLINE inline Resume_queue::Drain_state Resume_queue::detach() noexcept
+{
+    Drain_state state{ std::exchange(pending_, std::move(spare_)), draining_ };
+    pending_.clear();   // `spare_` is empty; a moved-from vector only promises valid
+    draining_ = false;
+    return state;
+}
+
+TS_DETAIL_NO_INLINE inline void Resume_queue::reattach(Drain_state state) noexcept
+{
+#if TS_SAFETY_CHECKS
+    if (draining_ || !pending_.empty())
+        ts::fatal("Resume_queue::reattach over an unfinished drain - a nested drain did not complete");
+#endif
+    spare_ = std::exchange(pending_, std::move(state.pending));
+    draining_ = state.draining;
 }
 
 template<typename P>

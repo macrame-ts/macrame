@@ -1061,6 +1061,57 @@ void stress_physics()
     (void)a; (void)b;
 }
 
+ts::Task<void> await_count_and_yield(ts::Signal gate, std::atomic<int>& resumed)
+{
+    co_await gate;   // resumed inside a task a yield point runs
+    resumed.fetch_add(1);
+    for (int i = 0; i < 100; ++i)
+        ts::yield();   // nested one level already: no-ops
+}
+
+// Yield points under concurrency: normal tasks spinning on yield points while high tasks
+// trigger signals that resume coroutines inside those yields - the nested dispatch, its
+// trampoline detach and reattach, and the one-level bound, raced across four workers.
+void stress_yield_resumes()
+{
+    ts::Scheduler_scope pool{ { .num_workers = 4 } };
+    for (int round = 0; round < 50; ++round)
+    {
+        constexpr int n = 16;
+        std::vector<ts::Signal> gates(n);
+        std::atomic<int> resumed{ 0 };
+        std::atomic<int> remaining{ n };
+        std::vector<ts::Task<void>> waiters;
+        std::vector<ts::Task<void>> yielders;
+        std::vector<ts::Task<void>> triggers;
+        for (int i = 0; i < n; ++i)
+            waiters.push_back(await_count_and_yield(gates[static_cast<std::size_t>(i)], resumed));
+        for (int i = 0; i < 4; ++i)
+        {
+            yielders.push_back(ts::launch([&remaining]
+            {
+                while (remaining.load() > 0)
+                    ts::yield();
+            }));
+        }
+        for (int i = 0; i < n; ++i)
+        {
+            triggers.push_back(ts::launch([gate = gates[static_cast<std::size_t>(i)], &remaining]() mutable
+            {
+                gate.trigger();
+                remaining.fetch_sub(1);
+            }, { .priority = ts::Priority::high }));
+        }
+        for (ts::Task<void>& t : triggers)
+            t.sync();
+        for (ts::Task<void>& t : yielders)
+            t.sync();
+        for (ts::Task<void>& t : waiters)
+            t.sync();
+        assert(resumed.load() == n);
+    }
+}
+
 // A fixed-rate graph on its own clock (`ts::Periodic`) beside a frame graph: the timer thread's
 // wakeups, yield points inside the frame's bodies, and the `Versioned` pair read under
 // concurrency. Then the physics graph alone, run-to-run determinism.
@@ -1124,6 +1175,7 @@ int main()
     std::puts("tsan: versioned stress");     stress_versioned();
     std::puts("tsan: physics frames");       stress_physics();
     std::puts("tsan: fixed-rate graph");     stress_fixed_rate();
+    std::puts("tsan: yield resumes");        stress_yield_resumes();
     std::puts("tsan: blackboard frames");    sample::run_blackboard_sample();
     std::puts("tsan: coloring frames");      sample::stress_coloring(10);
     std::puts("tsan: game_frame frames");

@@ -507,21 +507,47 @@ The obvious shape suspends the yielding task, requeues it, and lets the worker
 take the urgent one. That pays a requeue and a resume hop per yield, lets a
 thief move the continuation to a cold core, and needs a coroutine. The shape
 taken runs the urgent task inline instead: `ts::yield()` pops one queued
-`high` entry and executes it on the yielding worker's stack, then returns. The
-continuation never leaves the stack, and the yield works in a plain functor
-body. The common case, nothing queued, reads one relaxed counter the scheduler
-keeps beside the `high` queue, incremented before a push and decremented after
-a pop, so it never under-counts.
+entry of a higher class than the yielder's and executes it on the yielding
+worker's stack, then returns. The continuation never leaves the stack, and the
+yield works in a plain functor body. `normal` yields to `high`; `low` yields to
+`high` and then to the global `normal` queue; `high` never yields. A worker's
+own `normal` deque stays invisible to a `low` yielder: counting its entries
+would add a shared write to the deque push, the scheduler's fast path, and
+idle workers steal from it anyway. The common case, nothing queued, reads two
+relaxed counters the scheduler keeps for the `high` queue and the global
+`normal` queue, each incremented before a push and decremented after a pop, so
+neither under-counts. The pair sits alone on one cache line, which every
+worker reads at every yield point.
 
 Three properties make the nesting safe. A queued entry has already taken its
 pipe turns, so it cannot wait on grants the yielder holds. The nested dispatch
 runs inside a scope that clears the thread's ambient task state (current task,
-grants, scope children, rule relaxation, trace owner) and restores it
+grants, scope children, rule relaxation, trace owner), sets aside the pending
+work of the resume and inline-dispatch trampolines, and restores both
 afterwards, so the nested task starts as it would at the top of the worker
-loop. And a `high` task's yield point does nothing, so nesting is one level
-deep and ordering among `high` tasks stays the queue's. The trace subtracts
-the nested span from the yielding body's credited time, so body time is
-counted once. `parallel_for` has a yield point at every chunk claim, which
+loop. And yield points reached inside the nested task do nothing, so nesting
+is one level deep.
+
+The trampoline part is what lets a yield point release a coroutine. A resumed
+coroutine segment runs inside the resume trampoline's drain, and a resume
+queued during a drain runs when the drain reaches it. Without the set-aside, a
+resume the nested task causes from a yield point inside a resumed segment
+would wait for the yielding segment to return, so a tick driver released at a
+yield point would wait for the body it was meant to interrupt. With it, the
+resume starts a drain of its own at the yield point, and the outer drain
+continues where it stood once the nested task returns. The one-level bound is
+what keeps that finite: a coroutine resumed at a yield point could otherwise
+yield in turn and run another task, one stack level per queued task.
+
+Running a resume at a yield point adds no interleaving the settle paths do not
+already face. The awaiter handshake decides which thread resumes a coroutine,
+not when, and a resume that runs while its settler is still on the stack is
+the ordinary case at the top of a worker loop: `Signal::trigger` keeps its
+block alive across the settle, and a graph run's last node keeps the run's
+completion handle alive across it, for exactly that reason. The yielding
+segment's own pending resumes are delayed by the nested task, as they would
+be by any longer segment. The trace subtracts the nested span from the
+yielding body's credited time, so body time is counted once. `parallel_for` has a yield point at every chunk claim, which
 covers the most common long body without a change to user code.
 
 #### The timer thread
@@ -539,7 +565,9 @@ can wait on a high-resolution waitable timer. For a 60 Hz tick the saved hop is
 tens of microseconds against a 16.7 ms period, well below the jitter that
 granularity would add, so the dedicated thread stays. It never runs user code:
 a fire is delivered as a task at the sleep's priority, for the same reason
-`Frame_gate::open()` releases through the scheduler.
+`Frame_gate::open()` releases through the scheduler. The delivered task is the
+one the sleep returned, whose block also carries the timer's bookkeeping, so a
+wait is one allocation and a fire queues no second task.
 
 ---
 

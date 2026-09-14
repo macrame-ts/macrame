@@ -1405,6 +1405,44 @@ void test_death_nested_run_mode_conflict() { TS_CHECK(ts::test::expect_death("gr
 void test_death_nested_run_unquiet_scope() { TS_CHECK(ts::test::expect_death("graph_lend_unquiet_scope")); }
 void test_death_execute_in_flight()        { TS_CHECK(ts::test::expect_death("graph_execute_in_flight")); }
 
+// A yield point inside an inline-dispatched node runs inside the inline trampoline's drain. A
+// task run at that yield point that makes another inline node ready runs that node there, not
+// after the yielding node returns.
+void test_graph_inline_node_released_at_yield_point()
+{
+    ts::Scheduler_scope pool{ { .num_workers = 1 } };
+    ts::Guarded<int> x{ ts::Named{"x"}, 0 };
+    ts::Guarded<int> y{ ts::Named{"y"}, 0 };
+    std::atomic<bool> yielding{ false };
+    std::atomic<bool> released_ran{ false };
+    bool ran_inside = false;
+
+    ts::Static_task_graph outer;
+    outer.add_node(ts::Named{"opener"}, [](int& v) { v = 1; }, x);
+    outer.add_node(ts::Named{"yielder"}, [&](const int&)
+    {
+        yielding.store(true);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!released_ran.load() && std::chrono::steady_clock::now() < deadline)
+            ts::yield();
+        ran_inside = released_ran.load();
+    }, x).set_inline();   // released by `opener`'s completion on the worker, inside a drain
+    outer.compile();
+
+    ts::Static_task_graph urgent;
+    urgent.add_node(ts::Named{"trigger"}, [](int& v) { v = 1; }, y).set_priority(ts::Priority::high);
+    urgent.add_node(ts::Named{"released"}, [&](const int&) { released_ran.store(true); }, y).set_inline();
+    urgent.compile();
+
+    ts::Task<void> outer_run = outer.execute();
+    while (!yielding.load())
+        std::this_thread::yield();
+    ts::Task<void> urgent_run = urgent.execute();
+    outer_run.sync();
+    urgent_run.sync();
+    TS_CHECK(ran_inside);
+}
+
 // The graph's default priority applies to every node without its own, including nodes added
 // after it was set; a node's own `set_priority` wins.
 void test_graph_default_priority()
@@ -1497,4 +1535,5 @@ void run_graph_tests()
     run_if(with_rule_in_task_sync, "TS_RULE_IN_TASK_SYNC off", "death: sync own object (sharp diagnostic)", test_death_sync_own_object);
     run("lifetime registration balance", test_lifetime_registration_balance);
     run("default priority", test_graph_default_priority);
+    run("an inline node released at a yield point runs there", test_graph_inline_node_released_at_yield_point);
 }

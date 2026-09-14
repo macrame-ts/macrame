@@ -71,6 +71,10 @@ public:
     std::chrono::steady_clock::duration period() const noexcept { return period_; }
 
 private:
+    // Grid points passed since the previous tick, advancing the grid past now; 0 once the
+    // token is requested. The body of the task `next()` returns.
+    int advance() noexcept;
+
     std::chrono::steady_clock::duration period_;
     std::chrono::steady_clock::time_point next_deadline_;
     Sleep_options opts_;

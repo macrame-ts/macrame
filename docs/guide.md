@@ -1347,9 +1347,10 @@ body, deadlock-free even when every worker is occupied. Chunks inherit the
 caller's access grants, so a `parallel_for` inside a graph node may touch the
 node's declared objects.
 
-Chunk boundaries are yield points (§10.1). When a `high` task is queued, the
-thread that finishes a chunk runs it before claiming the next one, so a long
-`normal` loop does not hold off urgent work for its whole duration.
+Chunk boundaries are yield points (§10.1). When work of a higher class than
+the loop's is queued, the thread that finishes a chunk runs one such task
+before claiming the next chunk, so a long `normal` loop does not hold off
+urgent work for its whole duration.
 
 Cross-item mutation, where item *i* writes item *j*, is not synchronized by
 `parallel_for` itself; see the WIP note in §13 and the staging tools in §9,
@@ -1781,6 +1782,11 @@ context already grants the front, such as a node that declared
 `poses.state()`, the read is lent and takes no turn of its own. On a blue
 thread it takes a read turn. Inside a task that holds nothing, use
 `co_await ts::read_last_versions(poses)`; the blocking form is fatal there.
+The view extends the running access context by one entry, the previous
+version, when the read is lent, and by two otherwise. A context holds at most
+`Access_context::max_entries` objects, so a node that already declares that
+many, or one fewer for an unlent read, cannot take a view: the overflow is
+fatal.
 
 The history costs a third replica, rotated at every publish, and it requires
 `Resync::copy` (the default for this history) or `Resync::overwrite`: after the
@@ -1862,10 +1868,11 @@ coroutine called from a `high` node dispatches its helpers at `high`.
 
 Priority orders the queues, but it cannot evict work already running, so a
 long `normal` body can hold off a `high` task that became ready while every
-worker was busy. `ts::yield()` is the remedy: when a `high` task is queued it
-runs that task on the current thread and returns, and the yielding body then
-continues on the same stack. With nothing queued it costs one relaxed load,
-so it can sit in an inner loop:
+worker was busy. `ts::yield()` is the remedy: when work of a higher class
+than the calling task's is queued, it runs one such task on the current thread
+and returns, and the yielding body then continues on the same stack. With
+nothing queued it costs two relaxed loads of one cache line, so it can sit in
+an inner loop:
 
 ```cpp
 for (Chunk& chunk : chunks)
@@ -1875,11 +1882,21 @@ for (Chunk& chunk : chunks)
 }
 ```
 
+A `normal` task yields to queued `high` work. A `low` task yields to `high`
+work and to `normal` work in the scheduler's global queue, which holds
+submissions from outside the workers and overflow from their local queues.
+`normal` work a worker queued on its own local queue is left to idle workers
+to steal. A `high` task never yields.
+
+The task run at a yield point runs as a worker would run it. If its
+completion resumes a coroutine, the coroutine resumes right there, also when
+the yield point is itself inside a resumed coroutine. Yield points reached
+inside that task do nothing, so nesting is one level deep.
+
 It never suspends, so it is legal in any body, including a functor node and a
 `parallel_for` body, and grants held across it are safe: the task it runs was
 queued with its own turns already taken, so it cannot wait on them. It is a
-no-op off a worker, in worker-less mode, and in a task already running at
-`high`, and it runs only queued `high` work. Chunk boundaries of
+no-op off a worker and in worker-less mode. Chunk boundaries of
 `parallel_for` are yield points already (§7).
 
 ### 10.2 Scheduler configuration
@@ -2060,7 +2077,8 @@ int due = co_await tick.next();
 
 One timer thread keeps the deadlines. It is created on first use, stopped by
 `destroy_scheduler`, and never runs user code: a wakeup is delivered as a task
-on a worker. On Windows it waits on a high-resolution waitable timer, so a
+on a worker. That task is the one the call returned, so a wait costs one
+allocation. On Windows it waits on a high-resolution waitable timer, so a
 deadline is not rounded up to the system timer tick. An armed sleep counts as
 an external wait for the deadlock net (§5.0.3), so a program idle while it
 waits is not reported as deadlocked. Two constraints: worker-less mode has no
@@ -2170,10 +2188,9 @@ Stated plainly; each is on the roadmap (`docs/TODO.md`):
   roadmap.
 - Timers need workers. In worker-less mode a sleep is fatal; a virtual clock
   the program advances, for deterministic tests, is planned.
-- Yield points run queued `high` work only, and only on workers. A task run
-  at a yield point that resumes a coroutine hands the resume to the thread's
-  resume trampoline, so when the yield point is itself inside a resumed
-  coroutine segment, that resume waits until the segment returns.
+- Yield points work only on workers. A `low` task's yield point reaches
+  `normal` work in the global queue but not work a worker queued on its own
+  local queue, which is left to stealing.
 
 ---
 

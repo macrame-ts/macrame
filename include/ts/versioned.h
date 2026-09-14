@@ -112,6 +112,9 @@ inline void check_version_read_may_block()
 // Non-copyable and non-movable: the view is the grant, and it installs its own access context
 // (like `Access_guard`), so both versions pass the harness while it lives and neither does
 // after. In a coroutine it counts as a live guard: `co_await` while one is alive is fatal.
+// Its context is the running one plus `previous` and, when the read is not lent, the front:
+// one or two more of the `Access_context::max_entries` objects a context can hold, so taking
+// a view in a body whose context is at or near that cap overflows it, which is fatal.
 template<typename T>
 class Version_view
 {

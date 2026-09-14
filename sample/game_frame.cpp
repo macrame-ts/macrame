@@ -126,6 +126,9 @@ std::atomic<int> streamed{ 0 };
 std::atomic<int> batches{ 0 };
 std::atomic<long long> drawn{ 0 };
 std::atomic<int> hud_snapshots{ 0 };
+// Ticks the fixed-rate variant's two clocks ran in the last run (primers and teardown excluded).
+std::atomic<long long> fixed_physics_ticks{ 0 };
+std::atomic<long long> fixed_network_ticks{ 0 };
 
 // --- the stores -------------------------------------------------------------------
 
@@ -702,6 +705,8 @@ public:
         stop_.request_cancel();
         physics_driver_.sync();
         network_driver_.sync();
+        fixed_physics_ticks.store(physics_ticks_);
+        fixed_network_ticks.store(network_ticks_);
         physics_.execute().sync();
         network_.execute().sync();
     }
@@ -874,6 +879,8 @@ void reset_stats()
     batches.store(0);
     drawn.store(0);
     hud_snapshots.store(0);
+    fixed_physics_ticks.store(0);
+    fixed_network_ticks.store(0);
 }
 
 // Mock a system's CPU cost: spin-wait for the budget. Precise (unlike
@@ -1733,6 +1740,14 @@ void game_frame_fixed_stats(int frames, float scale, double& avg_ms, double& ser
 long long game_frame_draw_count()
 {
     return drawn.load();
+}
+
+// Ticks the fixed-rate variant's clocks ran in the last `game_frame_fixed_stats` run, primers and
+// the teardown tick excluded - how a test tells clocks that ran from clocks that did not.
+void game_frame_fixed_tick_counts(long long& physics, long long& network)
+{
+    physics = fixed_physics_ticks.load();
+    network = fixed_network_ticks.load();
 }
 
 // Compile the frame graph and write its structure as Graphviz DOT (no frames run).

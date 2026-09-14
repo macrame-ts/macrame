@@ -10,6 +10,7 @@
 #include "ts/coroutine_support.h"
 #include "ts/parallel_for.h"
 #include "ts/static_task_graph.h"
+#include "ts/timer.h"
 
 // The game-frame sample is a single self-contained .cpp (no header). Both compositions of
 // the same frame are profiled: the compiled graph amortizes its per-run state, the
@@ -245,6 +246,25 @@ void run_mem_profile()
         measure("graph execute", k, [&graph]
         {
             graph.execute().sync();
+        });
+    }
+
+    // A wait is one allocation: the returned task's block carries the timer's bookkeeping.
+    measure("sleep, passed", k, []
+    {
+        ts::sleep_until(std::chrono::steady_clock::now()).sync();
+    });
+
+    measure("sleep 20us", k / 8, []
+    {
+        ts::sleep(std::chrono::microseconds(20)).sync();
+    });
+
+    {
+        ts::Periodic tick{ std::chrono::microseconds(50) };
+        measure("Periodic::next", k / 8, [&tick]
+        {
+            (void)tick.next().sync();
         });
     }
 

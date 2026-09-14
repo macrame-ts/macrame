@@ -125,10 +125,10 @@ void run_loop(Parallel_state<Body>* st)
 {
     for (;;)
     {
-        // A yield point between chunks (`ts::yield`): a queued `high` task runs here before the
-        // next claim. One relaxed load when nothing is pending.
-        if (high_queued.load(std::memory_order_relaxed) != 0)
-            yield_to_high(st->priority);
+        // A yield point between chunks (`ts::yield`): queued work of a higher class than the
+        // loop's runs here before the next claim. One cache line read when nothing is pending.
+        if (yield_work_queued())
+            yield_to_higher(st->priority);
         int start, stop;
         if (st->token.is_cancel_requested())
         {
@@ -199,9 +199,9 @@ void run_loop(Colored_state<Body>* st)
     {
         // A yield point between chunks, as in the flat loop; the phase is re-read afterwards,
         // since the band may have moved on while the nested task ran.
-        if (high_queued.load(std::memory_order_relaxed) != 0)
+        if (yield_work_queued())
         {
-            yield_to_high(st->priority);
+            yield_to_higher(st->priority);
             cur = st->phase_next.load(std::memory_order_acquire);
         }
         int ph = static_cast<int>(cur >> 32);

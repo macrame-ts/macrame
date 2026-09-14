@@ -1,14 +1,13 @@
 #include "ts/timer.h"
-#include "ts/coroutine_support.h"
 #include "ts/fatal.h"
-#include "ts/guarded.h"   // global_scheduler
+#include "ts/scheduler.h"   // global_scheduler
 
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
-#include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -35,24 +34,80 @@ namespace
 
 using Clock = std::chrono::steady_clock;
 
-// One armed wait. Owned by its heap entry; the cancel callback it carries captures a raw
-// pointer to it, so the callback's lifetime is nested inside the state's.
-struct Sleep_state : detail::Ref_counted<Sleep_state>
+// The timer's bookkeeping, a second base of every timed block. The heap and the cancel
+// callback reach the block through it; the block's own refcount keeps it alive.
+struct Timed_fields
 {
-    detail::Task_ptr block;                 // the returned task's block
-    Priority priority = Priority::normal;   // the delivery task's priority
-    bool live = true;                       // neither fired nor cancelled; guarded by the timer mutex
-    // Held while live: the wakeup comes from a thread the scheduler does not run, so the
-    // deadlock net must not read a quiescent pool as a deadlock (`External_wait`).
-    std::unique_ptr<External_wait> outstanding;
-    std::optional<Cancel_callback> on_cancel;
+    detail::Task_control_block* timer_block = nullptr;   // the block this is a base of
+    bool timer_live = false;   // armed, neither delivered nor cancelled; guarded by the timer mutex
+    bool timer_delivered = false;   // handed to the scheduler, or run in the call; its body will run
+    // Declared last, so destroyed first: its destructor waits out a callback firing on another
+    // thread, and that callback reads the fields above.
+    std::optional<Cancel_callback> timer_on_cancel;
 };
+
+// One allocation per wait: the task the caller holds, its body and result, and the timer's
+// bookkeeping. Delivery submits this block itself, so a wakeup costs no second task.
+template<typename Body, typename R>
+struct Timed_executable : detail::Executable<Body, R>, Timed_fields
+{
+    explicit Timed_executable(Body body)
+        : detail::Executable<Body, R>(std::move(body))
+    {
+        timer_block = this;
+    }
+
+    // A wait dropped by `timer_shutdown` is never delivered, so its body never ran; `Executable`
+    // expects `run` to have destroyed it.
+    ~Timed_executable()
+    {
+        if (!timer_delivered)
+            this->destroy_body();
+    }
+};
+
+template<typename R, typename Body>
+detail::Task_ptr make_timed(Body body, Cancellation_token token, Priority priority, Named name, Timed_fields*& fields)
+{
+    using Exec = detail::Executable<Body, R>;
+    using Wrapper = Timed_executable<Body, R>;
+    auto* timed = new Wrapper(std::move(body));
+    timed->destroy = [](detail::Task_control_block* c) { delete static_cast<Wrapper*>(c); };
+    timed->execute = &Exec::run;
+    timed->token = std::move(token);
+    timed->flags.priority = priority;
+    fields = timed;
+    detail::Task_ptr block(timed);
+    detail::set_task_name(block, name);
+    return block;
+}
+
+// An armed wait counts as an `External_wait` from arm to delivery - its wakeup comes from a
+// thread the scheduler does not run - without storing one.
+void external_wait_add([[maybe_unused]] int delta) noexcept
+{
+#if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
+    detail::outstanding_external_waits.fetch_add(delta, std::memory_order_acq_rel);
+#endif
+}
+
+// Hand a due or cancelled block to the scheduler, never run it here: running it settles the
+// task, and settling resumes awaiting coroutines on the settling thread. `Executable::run`
+// settles a block whose token was requested as cancelled, so a fire and a sleep's cancel share
+// this path. The external-wait registration is released once the block is queued, so the
+// deadlock net never sees a window with neither.
+void deliver(detail::Task_ptr block) noexcept
+{
+    detail::submit_ready(std::move(block));
+    external_wait_add(-1);
+}
 
 struct Entry
 {
     Clock::time_point deadline;
     std::uint64_t serial;   // FIFO among equal deadlines
-    detail::Ref_ptr<Sleep_state> state;
+    detail::Task_ptr block;   // the heap's reference
+    Timed_fields* fields;
 };
 
 // Heap order for `std::push_heap`/`pop_heap`: the earliest deadline at the front.
@@ -64,28 +119,7 @@ struct Later
     }
 };
 
-// A wakeup to deliver once the timer mutex is released.
-struct Wakeup
-{
-    detail::Task_ptr block;
-    Priority priority;
-    std::unique_ptr<External_wait> outstanding;   // released only after the delivery is queued
-};
-
-// Settle `block` from a task at `priority`, never inline: settling resumes awaiting coroutines
-// on the settling thread, and neither the timer thread nor a cancelling thread may run them.
-void deliver(Wakeup wakeup, bool cancelled)
-{
-    (void)ts::launch([block = std::move(wakeup.block), cancelled]() mutable
-    {
-        if (cancelled)
-            block->cancel();
-        else
-            block->complete();
-    }, { .priority = wakeup.priority, .name = "ts::sleep wakeup" });
-}
-
-// The deadline keeper: a min-heap of armed sleeps and the one thread that waits for its head.
+// The deadline keeper: a min-heap of armed waits and the one thread that waits for its head.
 class Timer_service
 {
 public:
@@ -101,8 +135,8 @@ public:
 #endif
     }
 
-    // Arm `state` for `deadline`, starting the thread if it is not running.
-    void arm(Clock::time_point deadline, detail::Ref_ptr<Sleep_state> state)
+    // Arm `block` for `deadline`, starting the thread if it is not running.
+    void arm(Clock::time_point deadline, detail::Task_ptr block, Timed_fields* fields)
     {
         bool earlier;
         {
@@ -112,35 +146,37 @@ public:
                 stopping_ = false;
                 thread_ = std::thread([this] { run(); });
             }
-            state->outstanding = std::make_unique<External_wait>();
+            fields->timer_live = true;
             ++live_;
+            external_wait_add(1);
             earlier = heap_.empty() || deadline < heap_.front().deadline;
-            heap_.push_back(Entry{ deadline, next_serial_++, std::move(state) });
+            heap_.push_back(Entry{ deadline, next_serial_++, std::move(block), fields });
             std::push_heap(heap_.begin(), heap_.end(), Later{});
         }
         if (earlier)
             wake();
     }
 
-    // The cancel callback's body: settle the wait cancelled now. The entry stays in the heap
-    // until its deadline and is dropped there.
-    void cancel(Sleep_state* state)
+    // The cancel callback's body: deliver the wait now. Its entry stays in the heap until the
+    // deadline and is dropped there.
+    void cancel(Timed_fields* fields)
     {
-        Wakeup wakeup;
+        detail::Task_ptr block;
         {
             std::scoped_lock lock(mutex_);
-            if (!state->live)
+            if (!fields->timer_live)
                 return;
-            state->live = false;
+            fields->timer_live = false;
+            fields->timer_delivered = true;
             --live_;
-            wakeup = Wakeup{ state->block, state->priority, std::move(state->outstanding) };
+            block = detail::Task_ptr(fields->timer_block);   // safe: live means the heap still holds a reference
         }
-        deliver(std::move(wakeup), true);
+        deliver(std::move(block));
     }
 
     void shutdown(bool check_armed) noexcept
     {
-        std::vector<Entry> dropped;   // destroyed after the lock: a state's cancel callback takes it
+        std::vector<Entry> dropped;   // released after the lock: a block's cancel callback takes it
         {
             std::scoped_lock lock(mutex_);
             if (!thread_.joinable())
@@ -156,7 +192,13 @@ public:
 #endif
             stopping_ = true;
             for (Entry& e : heap_)
-                e.state->live = false;
+            {
+                if (e.fields->timer_live)
+                {
+                    e.fields->timer_live = false;
+                    external_wait_add(-1);
+                }
+            }
             dropped = std::move(heap_);
             heap_.clear();
             live_ = 0;
@@ -169,7 +211,7 @@ private:
     void run()
     {
         std::vector<Entry> due;
-        std::vector<Wakeup> fire;
+        std::vector<detail::Task_ptr> fire;
         std::unique_lock lock(mutex_);
         while (!stopping_)
         {
@@ -193,18 +235,19 @@ private:
             }
             for (Entry& e : due)
             {
-                if (e.state->live)
+                if (e.fields->timer_live)
                 {
-                    e.state->live = false;
+                    e.fields->timer_live = false;
+                    e.fields->timer_delivered = true;
                     --live_;
-                    fire.push_back(Wakeup{ e.state->block, e.state->priority, std::move(e.state->outstanding) });
+                    fire.push_back(std::move(e.block));
                 }
             }
             lock.unlock();
-            for (Wakeup& wakeup : fire)
-                deliver(std::move(wakeup), false);
+            for (detail::Task_ptr& block : fire)
+                deliver(std::move(block));
             fire.clear();
-            due.clear();
+            due.clear();   // the heap's references to cancelled waits, released outside the lock
             lock.lock();
         }
     }
@@ -287,37 +330,44 @@ Timer_service& timer_service()
     return *fresh;
 }
 
-} // namespace
-
-Task<void> sleep_until(Clock::time_point deadline, Sleep_options opts, std::source_location site)
+void require_workers()
 {
     if (global_scheduler().single_threaded())
     {
         ts::fatal("ts::sleep in worker-less mode - there is no worker to deliver the wakeup on, and the "
                   "timer thread must not run the waiting task itself");
     }
-    detail::Task_ptr block = detail::make_bare_block();
-    detail::set_task_name(block, Named(site));
-    Task<void> result(block);
-    if (opts.token.is_cancel_requested())
-    {
-        block->cancel();
-        return result;
-    }
-    if (deadline <= Clock::now())
-    {
-        block->complete();
-        return result;
-    }
+}
 
-    detail::Ref_ptr<Sleep_state> state = detail::make_ref<Sleep_state>();
-    state->block = block;
-    state->priority = detail::resolved_priority(opts.priority);
+// Arm `block` for `deadline` and register the cancel callback on `token`. Registered after
+// arming, so a token requested in between is caught by the callback, which then runs in its
+// constructor.
+void arm_with_cancel(Clock::time_point deadline, detail::Task_ptr block, Timed_fields* fields,
+    const Cancellation_token& token)
+{
     Timer_service& service = timer_service();
-    service.arm(deadline, state);
-    // Registered after arming, so a token requested in between settles through `cancel`. A
-    // token already requested runs the callback here, in the constructor.
-    state->on_cancel.emplace(opts.token, [&service, raw = state.get()] { service.cancel(raw); });
+    service.arm(deadline, std::move(block), fields);
+    fields->timer_on_cancel.emplace(token, [&service, fields] { service.cancel(fields); });
+}
+
+} // namespace
+
+Task<void> sleep_until(Clock::time_point deadline, Sleep_options opts, std::source_location site)
+{
+    require_workers();
+    Timed_fields* fields = nullptr;
+    // The block carries the caller's token, so `Executable::run` settles it cancelled when the
+    // token was requested - on delivery, or here in the call.
+    const Priority priority = detail::resolved_priority(opts.priority);
+    detail::Task_ptr block = make_timed<void>([] {}, opts.token, priority, Named(site), fields);
+    Task<void> result(block);
+    if (opts.token.is_cancel_requested() || deadline <= Clock::now())
+    {
+        fields->timer_delivered = true;
+        block->execute(block);   // settles in the call
+        return result;
+    }
+    arm_with_cancel(deadline, std::move(block), fields, opts.token);
     return result;
 }
 
@@ -338,19 +388,31 @@ Periodic::Periodic(Clock::duration period, Sleep_options opts, std::source_locat
 
 Task<int> Periodic::next()
 {
-    if (opts_.token.is_cancel_requested())
-        co_return 0;
-    Clock::time_point now = Clock::now();
-    if (now < next_deadline_)
+    require_workers();
+    Timed_fields* fields = nullptr;
+    // An empty token on the block: a cancelled tick settles completed with 0 (`advance`),
+    // never cancelled - awaiting a cancelled value task is fatal.
+    const Priority priority = detail::resolved_priority(opts_.priority);
+    detail::Task_ptr block = make_timed<int>([this] { return advance(); }, {}, priority, Named(site_), fields);
+    Task<int> result(block);
+    if (opts_.token.is_cancel_requested() || Clock::now() >= next_deadline_)
     {
-        co_await sleep_until(next_deadline_, opts_, site_);
-        if (opts_.token.is_cancel_requested())
-            co_return 0;
-        now = Clock::now();
+        fields->timer_delivered = true;
+        block->execute(block);   // settles in the call
+        return result;
     }
+    arm_with_cancel(next_deadline_, std::move(block), fields, opts_.token);
+    return result;
+}
+
+int Periodic::advance() noexcept
+{
+    if (opts_.token.is_cancel_requested())
+        return 0;
+    const Clock::time_point now = Clock::now();
     const int due = 1 + static_cast<int>((now - next_deadline_) / period_);
     next_deadline_ += period_ * due;
-    co_return due;
+    return due;
 }
 
 void Periodic::reset()

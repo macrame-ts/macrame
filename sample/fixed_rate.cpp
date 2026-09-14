@@ -16,11 +16,12 @@
 // every `parallel_for` chunk boundary are yield points (`ts::yield`), so a tick that comes due
 // while the workers are busy with frame work starts within one chunk of the frame's.
 //
-// Checked every run: ticks run one at a time in order, the interpolated pair is always two
-// consecutive ticks, the interpolation fraction stays within [0, 1], and every staged intent is
-// applied exactly once. Which tick picks up a given intent depends on wall time, as it would with
-// a real input device, so the full run is not bit-reproducible; the physics graph alone, driven
-// by a tick-indexed intent script, is (`fixed_rate_physics_hash`).
+// Checked every run: the clock kept up with the periods that passed (ticking or dropping them
+// by policy), ticks run one at a time in order, the interpolated pair is always two consecutive
+// ticks whose stamps agree with them, and every staged intent is applied exactly once. Which
+// tick picks up a given intent depends on wall time, as it would with a real input device, so
+// the full run is not bit-reproducible; the physics graph alone, driven by a tick-indexed
+// intent script, is (`fixed_rate_physics_hash`).
 
 #include "ts/coroutine_support.h"
 #include "ts/deferred.h"
@@ -191,7 +192,7 @@ struct Run_stats
     std::atomic<long long> intents_staged{ 0 };
     std::atomic<long long> render_frames{ 0 };
     std::atomic<long long> pairs_not_consecutive{ 0 };
-    std::atomic<long long> fraction_out_of_range{ 0 };
+    std::atomic<long long> stamps_inconsistent{ 0 };
     long long ticks = 0;     // written by the driver only
     long long wakes = 0;
     long long dropped = 0;
@@ -270,8 +271,9 @@ ts::Static_task_graph build_frame_graph(Domains& domains, Costs costs, Run_stats
             const double alpha = stamps.fraction_at(Clock::now());
             if (current.tick() != previous.tick() + 1)
                 stats.pairs_not_consecutive.fetch_add(1, std::memory_order_relaxed);
-            if (alpha < 0.0 || alpha > 1.0)
-                stats.fraction_out_of_range.fetch_add(1, std::memory_order_relaxed);
+            // Every tick publishes exactly once, so the newest version's serial is its tick.
+            if (stamps.previous_published > stamps.current_published || stamps.current_serial != current.tick())
+                stats.stamps_inconsistent.fetch_add(1, std::memory_order_relaxed);
             const float y0 = previous.at(0).y;
             const float y1 = current.at(0).y;
             render.body0_y = y0 + static_cast<float>(alpha) * (y1 - y0);
@@ -349,14 +351,23 @@ Outcome run_domains(int frames, float scale, bool print)
         return std::pair{ static_cast<long long>(world.tick()), world.impulses_applied() };
     }).sync();
 
+    // The clock ran: the ticks run or dropped by the overload policy cover the grid points that
+    // passed while the frames ran, short of those still undelivered at the end. That shortfall
+    // is bounded by the wake latency, which a loaded machine stretches to several periods, so
+    // the check asks for half - a stalled clock still fails it.
+    const double period_s = std::chrono::duration<double>(tick_period).count();
+    const long long grid_points = static_cast<long long>(elapsed_s / period_s);
+    const bool clock_ran = grid_points < 4 || stats.ticks + stats.dropped >= grid_points / 2;
+
     Outcome outcome;
     outcome.frame_ms = 1000.0 * elapsed_s / frames;
     outcome.ticks_per_second = elapsed_s > 0.0 ? static_cast<double>(stats.ticks) / elapsed_s : 0.0;
     outcome.ok = world_ticks == ticks_total
         && applied == stats.intents_staged.load()
         && stats.pairs_not_consecutive.load() == 0
-        && stats.fraction_out_of_range.load() == 0
-        && stats.render_frames.load() == frames;
+        && stats.stamps_inconsistent.load() == 0
+        && stats.render_frames.load() == frames
+        && clock_ran;
 
     if (print)
     {
@@ -369,9 +380,11 @@ Outcome run_domains(int frames, float scale, bool print)
             std::printf("  wake intervals %.2f .. %.2f ms, %lld ticks dropped by the overload policy\n",
                 ms(stats.shortest_wake_interval), ms(stats.longest_wake_interval), stats.dropped);
         }
-        std::printf("  %lld intents staged, %lld applied; pairs consecutive: %s; fraction in [0, 1]: %s -> %s\n",
-            stats.intents_staged.load(), applied, stats.pairs_not_consecutive.load() == 0 ? "yes" : "no",
-            stats.fraction_out_of_range.load() == 0 ? "yes" : "no", outcome.ok ? "ok" : "FAILED");
+        std::printf("  %lld grid points passed, %lld ticked or dropped; %lld intents staged, %lld applied; "
+                    "pairs consecutive: %s; stamps consistent: %s -> %s\n",
+            grid_points, stats.ticks + stats.dropped, stats.intents_staged.load(), applied,
+            stats.pairs_not_consecutive.load() == 0 ? "yes" : "no",
+            stats.stamps_inconsistent.load() == 0 ? "yes" : "no", outcome.ok ? "ok" : "FAILED");
     }
     return outcome;
 }
@@ -397,7 +410,6 @@ bool fixed_rate_self_check(int frames, float scale)
 // count - the determinism a fixed-rate graph keeps when its input cut sequence is fixed.
 std::size_t fixed_rate_physics_hash(int ticks)
 {
-    Run_stats stats;
     Domains domains;
     ts::Static_task_graph physics = build_physics_graph(domains, costs_at(0.02f));
     {

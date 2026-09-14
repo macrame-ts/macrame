@@ -305,18 +305,22 @@ auto launch(Fn&& fn, Dispatch_options opts = {},
     return detail::build_bare_task(std::forward<Fn>(fn), std::move(opts), site);
 }
 
-// A yield point for long-running work: if a `Priority::high` task is queued, run it now, on
-// this thread, and return; otherwise return at once. With nothing pending the cost is one
-// relaxed load, so it can sit in an inner loop. It never suspends, so it is legal in any body
-// (a functor node, a `parallel_for` body, a coroutine segment), and grants held across it are
-// safe: the task it runs was queued with its own turns already taken, so it cannot wait on
-// them. The yielding work continues on the same stack afterwards. A no-op off a worker, in
-// worker-less mode (nothing queues there), and in a task already running at `high`. Only
-// queued `high` work is run; `normal` and `low` work never preempts through a yield point.
+// A yield point for long-running work: if work of a higher class than the calling task's is
+// queued, run one such task now, on this thread, and return; otherwise return at once. A
+// `normal` task yields to queued `high` work; a `low` task also to `normal` work in the global
+// queue (external submits and deque overflow - `normal` work in a worker's own deque is left
+// to stealing); a `high` task never yields. With nothing queued the cost is two relaxed loads
+// of one cache line, so it can sit in an inner loop. It never suspends, so it is legal in any
+// body (a functor node, a `parallel_for` body, a coroutine segment), and grants held across it
+// are safe: the task it runs was queued with its own turns already taken, so it cannot wait on
+// them. That task runs as a worker would run it - a coroutine its completion resumes is resumed
+// here too - and the yielding work continues on the same stack afterwards. Yield points reached
+// inside it are no-ops, so nesting is one level deep. A no-op off a worker and in worker-less
+// mode, where nothing queues.
 inline void yield()
 {
-    if (detail::high_queued.load(std::memory_order_relaxed) != 0)
-        detail::yield_to_high(detail::resolved_priority(std::nullopt));
+    if (detail::yield_work_queued())
+        detail::yield_to_higher(detail::resolved_priority(std::nullopt));
 }
 
 // Declares that something the task system is waiting on will be completed by a thread the

@@ -138,9 +138,9 @@ namespace detail
 // `create_scheduler`. Returns a `unique_ptr` because `Scheduler` is non-movable.
 std::unique_ptr<Scheduler> make_scheduler(Scheduler_config config = {});
 
-// A yield point's slow half (declared again beside `high_queued` in task_block.h, defined in
-// scheduler.cpp); a friend of `Scheduler` so it can pop the `high` queue directly.
-void yield_to_high(Priority own) noexcept;
+// A yield point's slow half (declared again beside `yield_signal` in task_block.h, defined in
+// scheduler.cpp); a friend of `Scheduler` so it can pop the queues directly.
+void yield_to_higher(Priority own) noexcept;
 
 // The slot behind `ts::current_worker_index()`, written only by a worker thread's entry and
 // exit. Behind the thread-local barrier (ts/detail/thread_local.h) like every other
@@ -160,7 +160,7 @@ class Scheduler
 {
     friend class detail::Worker_thread;
     friend std::unique_ptr<Scheduler> detail::make_scheduler(Scheduler_config);
-    friend void detail::yield_to_high(Priority own) noexcept;
+    friend void detail::yield_to_higher(Priority own) noexcept;
 
 public:
     ~Scheduler();
