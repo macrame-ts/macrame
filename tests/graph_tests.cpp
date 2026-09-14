@@ -1405,6 +1405,26 @@ void test_death_nested_run_mode_conflict() { TS_CHECK(ts::test::expect_death("gr
 void test_death_nested_run_unquiet_scope() { TS_CHECK(ts::test::expect_death("graph_lend_unquiet_scope")); }
 void test_death_execute_in_flight()        { TS_CHECK(ts::test::expect_death("graph_execute_in_flight")); }
 
+// The graph's default priority applies to every node without its own, including nodes added
+// after it was set; a node's own `set_priority` wins.
+void test_graph_default_priority()
+{
+    auto running_priority = [] { return static_cast<int>(ts::detail::resolved_priority(std::nullopt)); };
+    std::atomic<int> a_priority{ -1 };
+    std::atomic<int> b_priority{ -1 };
+    std::atomic<int> c_priority{ -1 };
+    ts::Static_task_graph graph;
+    graph.add_node("a", [&] { a_priority.store(running_priority()); });
+    graph.add_node("b", [&] { b_priority.store(running_priority()); }).set_priority(ts::Priority::low);
+    graph.set_default_priority(ts::Priority::high);
+    graph.add_node("c", [&] { c_priority.store(running_priority()); });
+    graph.compile();
+    graph.execute().sync();
+    TS_CHECK(a_priority.load() == static_cast<int>(ts::Priority::high));
+    TS_CHECK(b_priority.load() == static_cast<int>(ts::Priority::low));
+    TS_CHECK(c_priority.load() == static_cast<int>(ts::Priority::high));
+}
+
 } // namespace
 
 void run_graph_tests()
@@ -1476,4 +1496,5 @@ void run_graph_tests()
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "death: graph move-constructed mid-run", test_death_graph_moved_mid_run);
     run_if(with_rule_in_task_sync, "TS_RULE_IN_TASK_SYNC off", "death: sync own object (sharp diagnostic)", test_death_sync_own_object);
     run("lifetime registration balance", test_lifetime_registration_balance);
+    run("default priority", test_graph_default_priority);
 }

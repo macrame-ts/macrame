@@ -36,6 +36,9 @@
     <ClCompile Include="src\worker_thread.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="src\timer.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\ts\access.h">
@@ -138,6 +141,9 @@
       <Filter>include\ts</Filter>
     </ClInclude>
     <ClInclude Include="include\ts\rules.h">
+      <Filter>include\ts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ts\timer.h">
       <Filter>include\ts</Filter>
     </ClInclude>
     <ClInclude Include="include\ts\detail\pipe_link.h">

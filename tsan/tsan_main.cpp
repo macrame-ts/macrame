@@ -21,6 +21,10 @@ void stress_game_frame_optimised(int frames, int workers);
 void run_blackboard_sample();
 void stress_coloring(int frames);
 std::size_t physics_pose_hash(int frames);   // final snapshot hash after `frames` frames
+void stress_fixed_rate(int frames);
+std::size_t fixed_rate_physics_hash(int ticks);
+void game_frame_fixed_stats(int frames, float time_scale,
+                            double& avg_ms, double& serial_ms, float& transform0);
 }
 #include "ts/parallel_for.h"
 #include "ts/scheduler.h"
@@ -1057,6 +1061,18 @@ void stress_physics()
     (void)a; (void)b;
 }
 
+// A fixed-rate graph on its own clock (`ts::Periodic`) beside a frame graph: the timer thread's
+// wakeups, yield points inside the frame's bodies, and the `Versioned` pair read under
+// concurrency. Then the physics graph alone, run-to-run determinism.
+void stress_fixed_rate()
+{
+    sample::stress_fixed_rate(200);
+    std::size_t a = sample::fixed_rate_physics_hash(30);
+    std::size_t b = sample::fixed_rate_physics_hash(30);
+    assert(a == b);
+    (void)a; (void)b;
+}
+
 } // namespace
 
 // The entry point, renamed when this TU is compiled into the Windows binary.
@@ -1107,6 +1123,7 @@ int main()
     std::puts("tsan: deferred stress");      stress_deferred();
     std::puts("tsan: versioned stress");     stress_versioned();
     std::puts("tsan: physics frames");       stress_physics();
+    std::puts("tsan: fixed-rate graph");     stress_fixed_rate();
     std::puts("tsan: blackboard frames");    sample::run_blackboard_sample();
     std::puts("tsan: coloring frames");      sample::stress_coloring(10);
     std::puts("tsan: game_frame frames");
@@ -1125,6 +1142,15 @@ int main()
         double avg = 0.0, serial = 0.0;
         float xf = 0.0f;
         sample::game_frame_free_stats(20, 0.2f, avg, serial, xf);
+    }
+    std::puts("tsan: game_frame fixed-rate frames");
+    for (int i = 0; i < 5; ++i)
+    {
+        // Physics at 60 Hz and networking at 30 Hz on their own clocks beside the frame graph:
+        // two tick graphs concurrent with it, their staged inputs and published snapshots.
+        double avg = 0.0, serial = 0.0;
+        float xf = 0.0f;
+        sample::game_frame_fixed_stats(20, 0.2f, avg, serial, xf);
     }
     std::puts("tsan: game_frame optimised frames");
     sample::stress_game_frame_optimised(40, 4);   // gameplay Versioned + Deferred staging

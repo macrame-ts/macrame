@@ -18,5 +18,6 @@
 #include "ts/access.h"             // TS_CHECK_ACCESS, Access_context (for instrumenting guarded types)
 #include "ts/rules.h"              // ts::Rule, Relaxed_scope - the waiting-rule check policy
 #include "ts/frame_gate.h"         // ts::Frame_gate - re-enter at the next frame boundary
+#include "ts/timer.h"              // ts::sleep, ts::sleep_until, ts::Periodic - time-driven waits
 
 #include "ts/coroutine_support.h"  // co_await a Task, ts::read_only/ts::read_write access guards

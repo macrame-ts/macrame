@@ -1,4 +1,5 @@
 #include "ts/scheduler.h"
+#include "ts/detail/task_block.h"   // the ambient task state a yield point's nested dispatch resets
 #include "ts/detail/worker_thread.h"
 
 #include <cstddef>
@@ -169,6 +170,8 @@ void Scheduler::submit(Task_func_ptr func, void* data, Priority priority)
         return;
     }
 
+    if (priority == Priority::high)
+        detail::high_queued.fetch_add(1, std::memory_order_relaxed);   // before the push: never under-counts
     queues_[static_cast<std::size_t>(priority)].push({ func, data });
 
     signal_submit();
@@ -289,6 +292,7 @@ bool Scheduler::find_work(int worker_index, detail::Task_entry& out)
 
     if (queues_[0].pop(out))                                   // global high (strict)
     {
+        detail::high_queued.fetch_sub(1, std::memory_order_relaxed);
         ++since_low;
         return true;
     }
@@ -464,5 +468,92 @@ bool Scheduler::all_empty() const
     }
     return true;
 }
+
+namespace detail
+{
+
+namespace
+{
+
+// Clears the thread's ambient task state for a task run inside another task's yield point and
+// restores it afterwards, so the nested task starts as it would at the top of the worker loop:
+// no current task, no grants, no scope children, no rule relaxation, no trace owner. Its own
+// dispatch installs what it needs. Under a traced run the nested span is added to
+// `Nested_span_state`, which the yielding body's `Trace_busy_scope` subtracts, so the span is
+// credited as body time once - by the nested task's own scope.
+class Nested_dispatch_scope
+{
+public:
+    Nested_dispatch_scope() noexcept
+        : task_(Current_task::exchange(Task_ptr{}))
+        , access_(access_load())
+        , scope_children_(Scope_children::exchange(nullptr))
+    {
+        access_store(nullptr);
+#if TS_RULES_ANY
+        relaxed_ = relaxed_load();
+        relaxed_store(0);
+#endif
+#if TS_PROFILING
+        owner_ = Trace_owner_state::exchange(-1);
+        in_functor_ = In_functor_state::exchange(false);
+        if (trace_owner_armed.load(std::memory_order_relaxed) != 0)
+            t0_ = std::chrono::steady_clock::now().time_since_epoch().count();
+#endif
+    }
+
+    ~Nested_dispatch_scope()
+    {
+#if TS_PROFILING
+        if (t0_ != 0)
+            Nested_span_state::add(std::chrono::steady_clock::now().time_since_epoch().count() - t0_);
+        In_functor_state::store(in_functor_);
+        Trace_owner_state::store(owner_);
+#endif
+#if TS_RULES_ANY
+        relaxed_store(relaxed_);
+#endif
+        Scope_children::store(scope_children_);
+        access_store(access_);
+        (void)Current_task::exchange(std::move(task_));
+    }
+
+    Nested_dispatch_scope(const Nested_dispatch_scope&) = delete;
+    Nested_dispatch_scope& operator=(const Nested_dispatch_scope&) = delete;
+
+private:
+    Task_ptr task_;
+    const Access_context* access_;
+    std::vector<Task_ptr>* scope_children_;
+#if TS_RULES_ANY
+    unsigned relaxed_ = 0;
+#endif
+#if TS_PROFILING
+    int owner_ = -1;
+    bool in_functor_ = false;
+    long long t0_ = 0;
+#endif
+};
+
+} // namespace
+
+// The entry runs exactly as a worker would run it, minus the busy timing: the yielding task's
+// `run_task` span already covers this thread. One entry per call, so a yield point's latency
+// is bounded by one task. A task it runs that settles a coroutine hands the resume to this
+// thread's resume trampoline; if the yield point is itself inside a resumed segment, that
+// resume runs once the yielding segment returns to the trampoline.
+void yield_to_high(Priority own) noexcept
+{
+    if (own == Priority::high || current_worker_index() < 0)
+        return;
+    Task_entry task;
+    if (!global_scheduler().queues_[static_cast<std::size_t>(Priority::high)].pop(task))
+        return;   // taken by another worker since the counter was read
+    high_queued.fetch_sub(1, std::memory_order_relaxed);
+    Nested_dispatch_scope scope;
+    task.func_(task.data_);
+}
+
+} // namespace detail
 
 } // namespace ts

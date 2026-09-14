@@ -6,8 +6,12 @@
 #include "test_util.h"
 
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstddef>
+#include <mutex>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -510,6 +514,156 @@ void test_read_queued_option()
     TS_CHECK(body_thread.load() != caller);
 }
 
+// --- History::current_and_previous ---------------------------------------------------
+
+using Versioned_pair = ts::Versioned<int, ts::History::current_and_previous>;
+
+template<typename V>
+concept Has_last_versions = requires(V& v) { v.read_last_versions(); };
+
+static_assert(!Has_last_versions<ts::Versioned<int>>, "the pair read exists only with the previous version kept");
+static_assert(Has_last_versions<Versioned_pair>);
+static_assert(std::tuple_size_v<ts::Version_view<int>> == 3);
+
+// Each publish rotates: the view reads the last two versions, and the stamps advance with them.
+void test_last_versions_rotate()
+{
+    Versioned_pair v{ ts::Named{} };
+    auto rec = v.recorder();
+    {
+        auto [previous, current, stamps] = v.read_last_versions();
+        TS_CHECK(previous == 0 && current == 0 && stamps.current_serial == 0);
+    }
+    rec.stage([](int& x) { x = 1; });
+    v.publish().sync();
+    rec.stage([](int& x) { x = 2; });
+    v.publish().sync();
+    ts::Version_stamps after_two;
+    {
+        auto [previous, current, stamps] = v.read_last_versions();
+        TS_CHECK(previous == 1 && current == 2);
+        TS_CHECK(stamps.current_serial == 2);
+        TS_CHECK(stamps.previous_published <= stamps.current_published);
+        after_two = stamps;
+    }
+    rec.stage([](int& x) { x = 3; });
+    v.publish().sync();
+    auto [previous, current, stamps] = v.read_last_versions();
+    TS_CHECK(previous == 2 && current == 3);
+    TS_CHECK(stamps.previous_published == after_two.current_published);
+}
+
+void test_version_stamps_fraction()
+{
+    using std::chrono::milliseconds;
+    const auto t = std::chrono::steady_clock::now();
+    ts::Version_stamps stamps{ t, t + milliseconds(10), 2 };
+    TS_CHECK(std::abs(stamps.fraction_at(t + milliseconds(5)) - 0.5) < 1e-9);
+    TS_CHECK(stamps.fraction_at(t - milliseconds(1)) == 0.0);
+    TS_CHECK(stamps.fraction_at(t + milliseconds(20)) == 1.0);
+    ts::Version_stamps coinciding{ t, t, 0 };
+    TS_CHECK(coinciding.fraction_at(t) == 1.0);
+}
+
+// A node that declared the front reads the pair lent: it takes no read turn of its own, so the
+// front's pipe shows one reader - the node - while the view is alive.
+void test_last_versions_lent_in_node()
+{
+    Versioned_pair v{ ts::Named{} };
+    auto rec = v.recorder();
+    rec.stage([](int& x) { x = 5; });
+    v.publish().sync();
+    ts::detail::Pipe& pipe = ts::detail::Guarded_access::pipe(v.state());
+    pipe.wait_until_idle();   // the copy resync's read has released the front
+
+    int seen_previous = -1;
+    int seen_current = -1;
+    int readers = -1;
+    ts::Static_task_graph graph;
+    graph.add_node("reader", [&v, &pipe, &seen_previous, &seen_current, &readers](const int&)
+    {
+        auto [previous, current, stamps] = v.read_last_versions();
+        seen_previous = previous;
+        seen_current = current;
+        std::scoped_lock lock(pipe.mutex);
+        readers = pipe.active_readers;
+    }, v.state());
+    graph.compile();
+    graph.execute().sync();
+    TS_CHECK(seen_previous == 0 && seen_current == 5);
+    TS_CHECK(readers == 1);
+}
+
+ts::Task<int> read_pair_awaited(Versioned_pair& v)
+{
+    [[maybe_unused]] auto [previous, current, stamps] = co_await ts::read_last_versions(v);
+    co_return previous * 100 + current;
+}
+
+// A coroutine that holds nothing awaits the pair: it queues behind a writer on the front and
+// resumes with the view once the writer releases.
+void test_last_versions_awaited()
+{
+    Versioned_pair v{ ts::Named{} };
+    auto rec = v.recorder();
+    rec.stage([](int& x) { x = 7; });
+    v.publish().sync();
+    std::atomic<bool> release{ false };
+    ts::Task<void> blocker = v.state().async([&release](int&)
+    {
+        while (!release.load())
+            std::this_thread::yield();
+    });
+    ts::Task<int> reader = read_pair_awaited(v);
+    TS_CHECK(!reader.is_done());
+    release.store(true);
+    blocker.sync();
+    TS_CHECK(reader.sync() == 7);
+}
+
+// The blocking form on a blue thread takes its own read turn, so it waits out a writer.
+void test_last_versions_blue_thread_parks()
+{
+    Versioned_pair v{ ts::Named{} };
+    std::atomic<bool> release{ false };
+    ts::Task<void> blocker = v.state().async([&release](int&)
+    {
+        while (!release.load())
+            std::this_thread::yield();
+    });
+    std::thread releaser([&release]
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        release.store(true);
+    });
+    {
+        [[maybe_unused]] auto [previous, current, stamps] = v.read_last_versions();
+        TS_CHECK(release.load());   // granted only after the writer let go
+    }
+    releaser.join();
+    blocker.sync();
+}
+
+void test_history_with_replay_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("versioned_history_replay"));
+}
+
+void test_last_versions_blocking_in_task_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("versioned_last_versions_in_task"));
+}
+
+void test_previous_after_view_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("versioned_previous_after_view"));
+}
+
+void test_await_under_version_view_is_fatal()
+{
+    TS_CHECK(ts::test::expect_death("versioned_await_under_view"));
+}
+
 } // namespace
 
 void run_versioned_tests()
@@ -542,4 +696,16 @@ void run_versioned_tests()
     run("versioned: awaited read", test_read_awaited);
     run("versioned: read with .queued enqueues", test_read_queued_option);
     run_if(with_harness, "TS_SAFETY_CHECKS=0", "versioned: destroy with a publish in flight is fatal", test_dtor_inflight_publish_is_fatal);
+    run("versioned: last versions rotate with each publish", test_last_versions_rotate);
+    run("versioned: stamps fraction", test_version_stamps_fraction);
+    run("versioned: last versions are lent inside a node", test_last_versions_lent_in_node);
+    run("versioned: last versions awaited behind a writer", test_last_versions_awaited);
+    run("versioned: last versions on a blue thread park behind a writer", test_last_versions_blue_thread_parks);
+    run("versioned: previous-version history with replay is fatal", test_history_with_replay_is_fatal);
+    run_if(with_rule_in_task_sync, "TS_ENABLED_RULES without in_task_sync",
+        "versioned: blocking last-versions read in a task is fatal", test_last_versions_blocking_in_task_is_fatal);
+    run_if(with_harness, "TS_SAFETY_CHECKS=0", "versioned: previous version after the view is fatal",
+        test_previous_after_view_is_fatal);
+    run_if(with_rule_await_under_guard, "TS_ENABLED_RULES without await_under_guard",
+        "versioned: co_await under a live version view is fatal", test_await_under_version_view_is_fatal);
 }

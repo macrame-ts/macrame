@@ -24,8 +24,10 @@
 #include "deferred_tests.h"
 #include "versioned_tests.h"
 #include "event_bus_tests.h"
+#include "timer_tests.h"
 
 #include "ts/deferred.h"
+#include "ts/timer.h"
 #include "ts/versioned.h"
 
 #include <atomic>
@@ -52,12 +54,32 @@ void run_all_tests()
     run_deferred_tests();
     run_versioned_tests();
     run_event_bus_tests();
+    run_timer_tests();
 }
 
 // Death scenario body: acquire a `Guarded` write guard, then `co_await` other work while
 // still holding it - the pipe-held-across-suspension anti-pattern. Runs eagerly, so the fatal
 // fires during the call below, before `sync()`. `never` is never triggered, so `co_await never`
 // always reaches `await_suspend` (the detector) rather than escaping.
+// A `Versioned` payload whose reads the harness checks, for the version-view death scenarios.
+struct Checked_value
+{
+    int read() const
+    {
+        TS_CHECK_ACCESS();
+        return value;
+    }
+    int value = 0;
+};
+
+// Death scenario body: `co_await` while a version view is live - the view is a held grant, so
+// this is the same anti-pattern as awaiting under an `Access_guard`.
+static ts::Task<void> await_under_version_view(ts::Versioned<int, ts::History::current_and_previous>& v)
+{
+    [[maybe_unused]] auto [previous, current, stamps] = co_await ts::read_last_versions(v);
+    co_await ts::launch([] {});
+}
+
 static ts::Task<int> coro_await_under_guard(ts::Guarded<tests::Counter>& w, ts::Signal& never)
 {
     auto g = co_await ts::read_write(w);
@@ -695,6 +717,39 @@ void run_death_scenario(const char* name)
         ts::Access_scope scope(ctx);
         v.publish_into(other);   // not this Versioned's front -> fatal
     }
+    else if (std::strcmp(name, "versioned_history_replay") == 0)
+    {
+        // The rotated shadow is two versions behind; one replayed batch cannot resync it -> fatal
+        ts::Versioned<int, ts::History::current_and_previous> v{ ts::Named{}, ts::Resync::replay };
+    }
+#if TS_RULE_ON(TS_RULE_IN_TASK_SYNC)
+    else if (std::strcmp(name, "versioned_last_versions_in_task") == 0)
+    {
+        ts::Versioned<int, ts::History::current_and_previous> v{ ts::Named{} };
+        ts::launch([&v]
+        {
+            [[maybe_unused]] auto [previous, current, stamps] = v.read_last_versions();   // no grant -> fatal
+        }).sync();
+    }
+#endif
+    else if (std::strcmp(name, "versioned_previous_after_view") == 0)
+    {
+        ts::Versioned<Checked_value, ts::History::current_and_previous> v{ ts::Named{} };
+        const Checked_value* previous_ptr = nullptr;
+        {
+            [[maybe_unused]] auto [previous, current, stamps] = v.read_last_versions();
+            previous_ptr = &previous;
+            (void)previous.read();   // granted while the view lives
+        }
+        (void)previous_ptr->read();  // no grant once the view is gone -> fatal
+    }
+#if TS_RULE_ON(TS_RULE_AWAIT_UNDER_GUARD)
+    else if (std::strcmp(name, "versioned_await_under_view") == 0)
+    {
+        ts::Versioned<int, ts::History::current_and_previous> v{ ts::Named{} };
+        await_under_version_view(v).sync();   // co_await while the view is live -> fatal
+    }
+#endif
     else if (std::strcmp(name, "coro_await_under_guard") == 0)
     {
         ts::Guarded<Counter> w{ ts::Named{} };
@@ -888,6 +943,18 @@ void run_death_scenario(const char* name)
         ts::destroy_scheduler();
         ts::destroy_scheduler();   // none running -> fatal
     }
+    else if (std::strcmp(name, "timer_worker_less") == 0)
+    {
+        ts::Scheduler_scope inline_scope{ { .single_threaded = true } };
+        (void)ts::sleep(std::chrono::milliseconds(1));   // no worker to deliver on -> fatal
+    }
+#if TS_SAFETY_CHECKS
+    else if (std::strcmp(name, "timer_destroy_armed") == 0)
+    {
+        ts::Task<void> pending = ts::sleep(std::chrono::seconds(10));
+        ts::destroy_scheduler();   // a sleep is still armed -> fatal
+    }
+#endif
 #if defined(__cpp_exceptions) || defined(_CPPUNWIND)
     // The body boundary (`detail::invoke_user_body`): an exception must not leave a body, on
     // any of the paths that invoke one. Each of these dies in the seam, not by unwinding into

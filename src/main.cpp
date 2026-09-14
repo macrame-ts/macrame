@@ -22,6 +22,8 @@ void run_events_sample();
 void run_coloring_sample();
 void run_scope_access_sample();
 void run_lazy_BVH_sample();
+void run_fixed_rate_sample(int frames);
+void stress_fixed_rate(int frames);
 }
 
 #include <cstdio>
@@ -75,6 +77,7 @@ int main(int argc, char** argv)
             "                 width, which on a wide machine hides the contended interleavings\n"
             "                 a 2-core CI runner produces every time\n"
             "  --bench        run the benchmarks only\n"
+            "  --fixed-rate [n] run the fixed-rate sample n frames (default 600)\n"
             "  --stress       run the sample many frames at a fast scale (for sanitizers)\n"
             "  --dot [path]   write the game_frame graph structure as Graphviz DOT\n"
             "                 (default sample_game_frame.dot; render with show_graph.bat)\n"
@@ -141,10 +144,19 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    // Stress entry: just the sample, many frames, fast scale (for sanitizers).
+    // The fixed-rate sample alone: a 60 Hz physics graph on its own clock beside the frame loop.
+    if (argc >= 2 && std::strcmp(argv[1], "--fixed-rate") == 0)
+    {
+        int frames = argc >= 3 ? std::atoi(argv[2]) : 600;
+        sample::run_fixed_rate_sample(frames > 0 ? frames : 600);
+        return exit_checking_ensure_failures(0);
+    }
+
+    // Stress entry: just the samples, many frames, fast scale (for sanitizers).
     if (argc >= 2 && std::strcmp(argv[1], "--stress") == 0)
     {
         sample::run_game_frame_sample(2000, 0.2f);
+        sample::stress_fixed_rate(400);
         return exit_checking_ensure_failures(0);
     }
 
@@ -192,6 +204,7 @@ int main(int argc, char** argv)
     run_all_tests();
     sample::run_game_frame_sample();
     sample::run_physics_sample();
+    sample::run_fixed_rate_sample(600);
     sample::run_blackboard_sample();
     sample::run_events_sample();
     sample::run_coloring_sample();

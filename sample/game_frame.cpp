@@ -28,6 +28,14 @@
 //     "what does the static graph buy me" - the pipe still gives safety, the graph
 //     gives the schedule.
 //
+//   Frame_variant::fixed_rate - the optimised frame with physics and networking on
+//     their own clocks: a 60 Hz physics graph (broadphase -> narrowphase -> solver ->
+//     finalize) and a 30 Hz network graph, each driven by a `ts::Periodic`, beside the
+//     variable-rate frame graph (`Fixed_rate_ticks`). The frame reaches them only
+//     through staged inputs (`Deferred`) and published snapshots (`Versioned`), and
+//     propagation interpolates the last two physics ticks. The physics chain leaves the
+//     frame's critical path; how many ticks fall into a frame is the clocks' business.
+//
 // What the layers show:
 //   - `Static_task_graph` - nodes over guarded stores; every edge derived from
 //     parameter const-ness. A real render frame's worth of nodes: a gameplay
@@ -71,15 +79,18 @@
 #include "ts/coroutine_support.h"
 #include "ts/static_task_graph.h"
 #include "ts/task.h"
+#include "ts/timer.h"
 #include "ts/versioned.h"
 
 #if TS_PROFILING
 #include "graph_trace.h"   // tools/: the aggregating runtime trace (see trace_game_frame)
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -92,7 +103,8 @@ namespace sample
 // levers the trace makes obvious. `build_frame_graph` takes either. `graph_free` is
 // not a graph at all - the same baseline frame hand-composed with coroutines and the
 // access verbs (`run_frame_graph_free`), the comparison case for what `compile()` buys.
-enum class Frame_variant { baseline, optimised, graph_free };
+// `fixed_rate` is the optimised frame with physics and networking on their own clocks.
+enum class Frame_variant { baseline, optimised, graph_free, fixed_rate };
 
 namespace
 {
@@ -123,11 +135,16 @@ std::atomic<int> hud_snapshots{ 0 };
 class Float_store
 {
 public:
+    Float_store() = default;   // empty: the fixed-rate variant's snapshots before their first publish
     explicit Float_store(int entities) : data_(entities, 0.0f) {}
 
     int size() const { TS_CHECK_ACCESS(); return static_cast<int>(data_.size()); }
     float get(int i) const { TS_CHECK_ACCESS(); return data_[i]; }
     void set(int i, float v) { TS_CHECK_ACCESS(); data_[i] = v; }
+
+    // The whole store as a batch - how the fixed-rate variant's ticks publish their snapshots.
+    std::vector<float> values() const { TS_CHECK_ACCESS(); return data_; }
+    void assign(const std::vector<float>& values) { TS_CHECK_ACCESS(); data_ = values; }
 
 private:
     std::vector<float> data_;
@@ -277,6 +294,17 @@ struct World
     ts::Guarded<Draw_lists> draw_lists{ ts::Named{"draw_lists"} };
     ts::Deferred<Draw_lists> draw_staged{ draw_lists };   // references an earlier member - fine
 
+    // The fixed-rate variant's boundary objects, unused by the others. Physics publishes its
+    // bodies after every tick, the last two readable together for interpolation, and takes
+    // its inputs from the frame as staged commands. The network tick takes what the frame
+    // sends through an outbox and publishes its state for the frame's readers.
+    ts::Versioned<Bodies, ts::History::current_and_previous> body_snapshot{ ts::Named{"body_snapshot"} };
+    ts::Guarded<Float_store> physics_inputs{ ts::Named{"physics_inputs"}, entity_count };
+    ts::Deferred<Float_store> physics_intents{ physics_inputs };
+    ts::Versioned<Net> net_snapshot{ ts::Named{"net_snapshot"} };
+    ts::Guarded<Float_store> net_outbox{ ts::Named{"net_outbox"}, entity_count };
+    ts::Deferred<Float_store> net_outbox_stream{ net_outbox };
+
     // Streaming loads run detached and can finish after the frame that launched them, so at
     // teardown some may still be staging into `assets_stream`. Flush on shutdown: wait for the
     // in-flight loaders to drain, then apply the final batch as one write - leaving no staged
@@ -351,6 +379,9 @@ void tick_solver(const Contacts&, const Combat&, Velocities&);
 void tick_finalize(const Velocities&, Bodies&);
 // transform propagation (stages this frame's transforms; the flip publishes)
 void tick_propagation(const Local_xf&, const Bodies&, const Velocities&, ts::Recorder<Transforms>&);
+// (fixed-rate variant: bodies interpolated between the physics tick's last two snapshots)
+void tick_propagation_interpolated(const Local_xf&, const Bodies& previous_bodies, const Bodies& current_bodies,
+    double fraction, ts::Recorder<Transforms>&);
 // render pipeline (reads last frame's transforms)
 void tick_frustum_cull(const Transforms& prev_xf, const Camera&, const Renderables&, Visibility&);
 void tick_occlusion_cull(const Transforms& prev_xf, const Visibility&, Vis_final&);
@@ -386,6 +417,10 @@ ts::Graph_node add_submit(ts::Static_task_graph&, World&, bool opt);
 ts::Graph_node add_navigation(ts::Static_task_graph&, World&);
 ts::Graph_node add_AI(ts::Static_task_graph&, World&, bool opt);
 
+// the fixed-rate variant's two tick graphs (definitions below build_frame_graph)
+ts::Static_task_graph build_physics_tick_graph(World&);
+ts::Static_task_graph build_network_tick_graph(World&);
+
 // --- the frame graph --------------------------------------------------------------
 
 // Build the frame. Construction is shared; `opt` branches the few nodes whose access
@@ -393,7 +428,12 @@ ts::Graph_node add_AI(ts::Static_task_graph&, World&, bool opt);
 // body-level splits (combat, ik_post).
 ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, const char* DOT_path = nullptr)
 {
-    const bool opt = variant == Frame_variant::optimised;
+    // The fixed-rate variant is the optimised frame with physics and networking moved onto
+    // their own clocks: their nodes leave this graph, and the frame reads their snapshots.
+    const bool fixed = variant == Frame_variant::fixed_rate;
+    const bool opt = variant == Frame_variant::optimised || fixed;
+    ts::Guarded<Net>& net = fixed ? world.net_snapshot.state() : world.net;
+    ts::Guarded<Bodies>& bodies = fixed ? world.body_snapshot.state() : world.bodies;
     ts::Static_task_graph graph;
 
     // Priorities model importance, not measured wins, and are identical in both
@@ -402,10 +442,24 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     // longest pole and the present deadline.
 
     // Frame head.
-    graph.add_node("input", &tick_input, world.input);
+    if (fixed)   // the network tick reads what the frame sends it, never the live input store
+    {
+        graph.add_node("input",
+            [rec = world.net_outbox_stream.recorder()](Input& in) mutable
+            {
+                tick_input(in);
+                rec.stage([](Float_store& outbox) { outbox.set(0, 1.0f); });
+            },
+            world.input);
+    }
+    else
+    {
+        graph.add_node("input", &tick_input, world.input);
+    }
     graph.add_node("camera", &tick_camera, world.input, world.camera);
-    graph.add_node("networking", &tick_networking, world.input, world.net);
-    graph.add_node("scripting", &tick_scripting, world.input, world.net, world.script_events);
+    if (!fixed)
+        graph.add_node("networking", &tick_networking, world.input, world.net);
+    graph.add_node("scripting", &tick_scripting, world.input, net, world.script_events);
     // Streaming declares only `input`: it stages loaded assets into `assets_stream` (grant-free)
     // and reads `asset_source` through its own async loads - neither is a declared node access.
     graph.add_node("streaming",
@@ -416,12 +470,26 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
 
     // Gameplay trio: shared inputs, disjoint outputs -> runs in parallel. Combat is
     // parallelised in the optimised variant (a critical bar); economy/quests stay serial.
-    graph.add_node("combat",   // L2: per-entity split when opt
-        [opt](const Transforms& xf, const Input& in, const Net& net, const Script_events& ev, Combat& c)
-        { tick_combat(xf, in, net, ev, c, opt); },
-        world.transforms.state(), world.input, world.net, world.script_events, world.combat);
-    graph.add_node("economy", &tick_economy, world.transforms.state(), world.input, world.net, world.script_events, world.economy);
-    graph.add_node("quests", &tick_quests, world.transforms.state(), world.input, world.net, world.script_events, world.quests);
+    if (fixed)
+    {
+        graph.add_node("combat",   // L2, and its impulses reach the physics tick as staged inputs
+            [rec = world.physics_intents.recorder()](const Transforms& xf, const Input& in, const Net& n,
+                const Script_events& ev, Combat& c) mutable
+            {
+                tick_combat(xf, in, n, ev, c, true);
+                rec.stage([](Float_store& inputs) { inputs.set(0, 1.0f); });
+            },
+            world.transforms.state(), world.input, net, world.script_events, world.combat);
+    }
+    else
+    {
+        graph.add_node("combat",   // L2: per-entity split when opt
+            [opt](const Transforms& xf, const Input& in, const Net& n, const Script_events& ev, Combat& c)
+            { tick_combat(xf, in, n, ev, c, opt); },
+            world.transforms.state(), world.input, net, world.script_events, world.combat);
+    }
+    graph.add_node("economy", &tick_economy, world.transforms.state(), world.input, net, world.script_events, world.economy);
+    graph.add_node("quests", &tick_quests, world.transforms.state(), world.input, net, world.script_events, world.quests);
 
     // Navigation + AI. Baseline AI reads this frame's trio (the trio binds AI on the
     // critical path); optimised reads last frame's gameplay snapshot instead, deleting
@@ -448,18 +516,39 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
         world.anim_pose, world.local_xf);
     graph.add_node("skinning", &tick_skinning, world.local_xf, world.skin_matrices);
 
-    // Physics pipeline.
-    graph.add_node("broadphase", &tick_broadphase, world.bodies, world.broad_pairs);
-    graph.add_node("narrowphase", &tick_narrowphase, world.broad_pairs, world.contacts);
-    graph.add_node("solver", &tick_solver, world.contacts, world.combat, world.velocities).set_priority(ts::Priority::high);
-    graph.add_node("finalize", &tick_finalize, world.velocities, world.bodies);
+    // Physics pipeline (the fixed-rate variant runs it in its own graph, see
+    // `build_physics_tick_graph`).
+    if (!fixed)
+    {
+        graph.add_node("broadphase", &tick_broadphase, world.bodies, world.broad_pairs);
+        graph.add_node("narrowphase", &tick_narrowphase, world.broad_pairs, world.contacts);
+        graph.add_node("solver", &tick_solver, world.contacts, world.combat, world.velocities).set_priority(ts::Priority::high);
+        graph.add_node("finalize", &tick_finalize, world.velocities, world.bodies);
+    }
 
     // Propagation: this frame's transforms from animation + physics, staged grant-free
-    // (the physics->propagation edge derives from two conflicts: bodies + velocities).
-    auto propagation = graph.add_node("propagation",
-        [rec = world.transforms.recorder()](const Local_xf& lx, const Bodies& b, const Velocities& v) mutable
-        { tick_propagation(lx, b, v, rec); },
-        world.local_xf, world.bodies, world.velocities);
+    // (the physics->propagation edge derives from two conflicts: bodies + velocities). The
+    // fixed-rate variant has no such edge: it interpolates the physics tick's last two
+    // published snapshots, read lent under this node's read of the snapshot front.
+    ts::Graph_node propagation;
+    if (fixed)
+    {
+        propagation = graph.add_node("propagation",
+            [&world, rec = world.transforms.recorder()](const Local_xf& lx, const Bodies&) mutable
+            {
+                auto [previous, current, stamps] = world.body_snapshot.read_last_versions();
+                tick_propagation_interpolated(lx, previous, current,
+                    stamps.fraction_at(std::chrono::steady_clock::now()), rec);
+            },
+            world.local_xf, world.body_snapshot.state());
+    }
+    else
+    {
+        propagation = graph.add_node("propagation",
+            [rec = world.transforms.recorder()](const Local_xf& lx, const Bodies& b, const Velocities& v) mutable
+            { tick_propagation(lx, b, v, rec); },
+            world.local_xf, world.bodies, world.velocities);
+    }
 
     // Render pipeline - reads last frame's transforms (so it overlaps this frame's
     // simulation), which means every node here must run before the flip. That is intent, so
@@ -483,8 +572,22 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     // Off-path leaves.
     auto audio = graph.add_node("audio", &tick_audio, world.transforms.state(), world.audio_out).set_priority(ts::Priority::low);
     auto vfx = graph.add_node("vfx", &tick_vfx, world.transforms.state(), world.particles, world.vfx);
-    graph.add_node("replication", &tick_replication, world.combat, world.economy, world.quests, world.intents, world.replication);
-    graph.add_node("stats", &tick_stats, world.combat, world.economy, world.bodies, world.visibility, world.stats);
+    if (fixed)   // the packed snapshot leaves through the network tick's outbox
+    {
+        graph.add_node("replication",
+            [rec = world.net_outbox_stream.recorder()](const Combat& c, const Economy& e, const Quests& q,
+                const Intents& i, Replication& r) mutable
+            {
+                tick_replication(c, e, q, i, r);
+                rec.stage([](Float_store& outbox) { outbox.set(1, 1.0f); });
+            },
+            world.combat, world.economy, world.quests, world.intents, world.replication);
+    }
+    else
+    {
+        graph.add_node("replication", &tick_replication, world.combat, world.economy, world.quests, world.intents, world.replication);
+    }
+    graph.add_node("stats", &tick_stats, world.combat, world.economy, bodies, world.visibility, world.stats);
     // The streaming commit slot: applies the assets staged so far as one write. It writes
     // `assets`, so the conflict edge to gc (which reads `assets`) orders it before gc; it has no
     // edge to streaming (staging is grant-free), so it commits whatever has arrived - last
@@ -523,6 +626,116 @@ ts::Static_task_graph build_frame_graph(World& world, Frame_variant variant, con
     graph.compile(DOT_path);
     return graph;
 }
+
+// --- the fixed-rate graphs (Frame_variant::fixed_rate) ----------------------------
+
+// One physics tick: the four-stage pipeline the other variants run inside the frame, then the
+// extract. The solver commits the inputs the frame staged since the last tick (it holds the
+// write grant, so the commit applies inline); the extract publishes the bodies the frame reads.
+ts::Static_task_graph build_physics_tick_graph(World& world)
+{
+    ts::Static_task_graph graph;
+    graph.add_node("broadphase", &tick_broadphase, world.bodies, world.broad_pairs);
+    graph.add_node("narrowphase", &tick_narrowphase, world.broad_pairs, world.contacts);
+    graph.add_node("solver",
+        [&world](const Contacts& contacts, Float_store& inputs, Velocities& velocities)
+        {
+            (void)world.physics_intents.commit();
+            tick_solver(contacts, inputs, velocities);
+        },
+        world.contacts, world.physics_inputs, world.velocities);
+    auto finalize = graph.add_node("finalize", &tick_finalize, world.velocities, world.bodies);
+    auto extract = graph.add_node("physics_extract",
+        [rec = world.body_snapshot.recorder()](const Bodies& b) mutable
+        {
+            rec.stage([values = b.values()](Bodies& snapshot) { snapshot.assign(values); });
+        },
+        world.bodies);
+    extract.after(finalize);
+    graph.add_node("physics_publish", ts::publish_fn(world.body_snapshot), world.body_snapshot.state()).after(extract);
+    graph.set_default_priority(ts::Priority::high);
+    graph.compile();
+    return graph;
+}
+
+// One network tick: take what the frame sent (the outbox commit), run the network update, and
+// publish its state for the frame's readers.
+ts::Static_task_graph build_network_tick_graph(World& world)
+{
+    ts::Static_task_graph graph;
+    auto tick = graph.add_node("net_tick",
+        [&world, rec = world.net_snapshot.recorder()](Float_store& outbox, Net& n) mutable
+        {
+            (void)world.net_outbox_stream.commit();
+            tick_networking(outbox, n);
+            rec.stage([values = n.values()](Net& snapshot) { snapshot.assign(values); });
+        },
+        world.net_outbox, world.net);
+    graph.add_node("net_publish", ts::publish_fn(world.net_snapshot), world.net_snapshot.state()).after(tick);
+    graph.set_default_priority(ts::Priority::high);
+    graph.compile();
+    return graph;
+}
+
+// The fixed-rate variant's two clocks, running beside whatever drives the frame graph. Builds
+// both tick graphs, primes them (two physics ticks, so the interpolated pair holds two real
+// versions, and one network tick), then drives each from its own `ts::Periodic`. Destruction
+// stops both clocks and runs one more tick of each, committing whatever the last frames staged.
+class Fixed_rate_ticks
+{
+public:
+    explicit Fixed_rate_ticks(World& world)
+        : physics_(build_physics_tick_graph(world))
+        , network_(build_network_tick_graph(world))
+        , physics_clock_(std::chrono::microseconds(16'667), ts::Sleep_options{ .token = stop_.token(), .priority = ts::Priority::high })
+        , network_clock_(std::chrono::microseconds(33'333), ts::Sleep_options{ .token = stop_.token(), .priority = ts::Priority::high })
+    {
+        physics_.execute().sync();
+        physics_.execute().sync();
+        network_.execute().sync();
+        physics_driver_ = drive(physics_, physics_clock_, physics_ticks_);
+        network_driver_ = drive(network_, network_clock_, network_ticks_);
+    }
+
+    ~Fixed_rate_ticks()
+    {
+        stop_.request_cancel();
+        physics_driver_.sync();
+        network_driver_.sync();
+        physics_.execute().sync();
+        network_.execute().sync();
+    }
+
+    Fixed_rate_ticks(const Fixed_rate_ticks&) = delete;
+    Fixed_rate_ticks& operator=(const Fixed_rate_ticks&) = delete;
+
+private:
+    // Runs the ticks each wake reports, at most two: a clock that fell further behind slows
+    // simulated time down rather than stalling the frame behind a burst of ticks.
+    static ts::Task<void> drive(ts::Static_task_graph& graph, ts::Periodic& clock, long long& ticks)
+    {
+        for (;;)
+        {
+            const int due = co_await clock.next();
+            if (due == 0)
+                co_return;
+            const int run = std::min(due, 2);
+            for (int i = 0; i < run; ++i)
+                co_await graph.execute();
+            ticks += run;
+        }
+    }
+
+    ts::Cancellation_source stop_;   // before the clocks, which take its token
+    ts::Static_task_graph physics_;
+    ts::Static_task_graph network_;
+    ts::Periodic physics_clock_;
+    ts::Periodic network_clock_;
+    long long physics_ticks_ = 0;
+    long long network_ticks_ = 0;
+    ts::Task<void> physics_driver_;
+    ts::Task<void> network_driver_;
+};
 
 // --- the draw-producer node builders ----------------------------------------------
 // The two shapes differ in access, so each branches on `opt`. Baseline writes
@@ -1011,6 +1224,23 @@ void tick_propagation(const Local_xf& local_xf, const Bodies& bodies, const Velo
     rec.stage([batch = std::move(out)](Transforms& t) { t.apply(batch); });
 }
 
+// The fixed-rate variant's propagation: bodies interpolated between the physics tick's last two
+// published snapshots, by where this frame falls between their publish instants.
+void tick_propagation_interpolated(const Local_xf& local_xf, const Bodies& previous_bodies, const Bodies& current_bodies,
+    double fraction, ts::Recorder<Transforms>& rec)
+{
+    const float f = static_cast<float>(fraction);
+    std::vector<float> out(static_cast<std::size_t>(local_xf.size()));
+    for (int i = 0, n = local_xf.size(); i < n; ++i)
+    {
+        const float b0 = previous_bodies.get(i);
+        const float b1 = current_bodies.get(i);
+        out[static_cast<std::size_t>(i)] = local_xf.get(i) + b0 + f * (b1 - b0);
+    }
+    parallel_cost(budget::propagation);
+    rec.stage([batch = std::move(out)](Transforms& t) { t.apply(batch); });
+}
+
 // Render pipeline: consumes last frame's transforms (declared before the flip),
 // so it overlaps this frame's simulation - the render thread with one frame of
 // latency. Its own working stores (visibility, shadows) are this-frame.
@@ -1441,6 +1671,9 @@ void frame_stats(int frames, float scale, Frame_variant variant, double& avg_ms,
     ts::Static_task_graph graph;
     if (!graph_free)
         graph = build_frame_graph(world, variant);
+    std::optional<Fixed_rate_ticks> ticks;   // destroyed before the graph and the world
+    if (variant == Frame_variant::fixed_rate)
+        ticks.emplace(world);
 
     using clock = std::chrono::steady_clock;
     auto t0 = clock::now();
@@ -1482,6 +1715,14 @@ void game_frame_stats(int frames, float scale, double& avg_ms, double& serial_ms
 void game_frame_free_stats(int frames, float scale, double& avg_ms, double& serial_ms, float& transform0)
 {
     frame_stats(frames, scale, Frame_variant::graph_free, avg_ms, serial_ms, transform0);
+}
+
+// The optimised frame with physics and networking on their own clocks (see `Fixed_rate_ticks`).
+// Must produce the same `transform0` and draw count as the baseline. `serial_ms` is the frame
+// variants' serial budget; here the physics and network share of it runs per tick, not per frame.
+void game_frame_fixed_stats(int frames, float scale, double& avg_ms, double& serial_ms, float& transform0)
+{
+    frame_stats(frames, scale, Frame_variant::fixed_rate, avg_ms, serial_ms, transform0);
 }
 
 // Draw commands submitted over the last stats run. `submit` clears the queue, so this counts
@@ -1593,6 +1834,9 @@ void trace_variant(int frames, Frame_variant variant, const char* base_SVG_path,
 
     World world{ entities };
     ts::Static_task_graph graph = build_frame_graph(world, variant, DOT_path);
+    std::optional<Fixed_rate_ticks> ticks;   // the fixed-rate variant's clocks, untraced
+    if (variant == Frame_variant::fixed_rate)
+        ticks.emplace(world);
 
 #if TS_PROFILING
     ts::tools::Graph_trace trace;
@@ -1657,6 +1901,9 @@ void trace_game_frame(int frames, const char* DOT_path, const char* SVG_path)
     ts::Scheduler_scope pool{ { .num_workers = static_cast<uint32_t>(variant_workers) } };
     trace_variant(frames, Frame_variant::baseline, SVG_path, "baseline", DOT_path, gt_baseline);
     trace_variant(frames, Frame_variant::optimised, SVG_path, "optimised", nullptr, gt_optimised);
+    // The frame graph only: its tick graphs run on the same workers, untraced (one traced graph
+    // at a time), and have no worker-less floor since a timer needs workers to deliver on.
+    trace_variant(frames, Frame_variant::fixed_rate, SVG_path, "fixed_rate", nullptr);
 }
 
 // Headless run of the optimised variant on a dedicated `workers`-thread
@@ -1708,6 +1955,14 @@ void run_game_frame_sample(int frames, float scale)
     std::printf("  graph-free composition of the same frame: %.2f ms/frame (%+.1f%%), "
                 "transform0 %.1f, %lld draw commands\n",
         free_ms, 100.0 * (free_ms - avg_ms) / avg_ms, free_transform0, free_drawn);
+
+    // The optimised frame with physics (60 Hz) and networking (30 Hz) on their own clocks.
+    double fixed_ms = 0.0, fixed_serial_ms = 0.0;
+    float fixed_transform0 = 0.0f;
+    game_frame_fixed_stats(frames, scale, fixed_ms, fixed_serial_ms, fixed_transform0);
+    std::printf("  optimised frame with physics at 60 Hz and networking at 30 Hz on their own clocks: "
+                "%.2f ms/frame, transform0 %.1f, %lld draw commands\n",
+        fixed_ms, fixed_transform0, game_frame_draw_count());
 }
 
 } // namespace sample

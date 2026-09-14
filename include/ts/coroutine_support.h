@@ -876,7 +876,9 @@ struct Access_awaiter
         return true;        // suspended; on_acquired will resume when the pipe grants
     }
 
-    Access_guard<T, Mode> await_resume() noexcept
+    // The acquire's bookkeeping, undone once the grant is ours: the wait edge and the
+    // suspension record. Shared with the awaiters that resume into another guard type.
+    void finish_acquire() noexcept
     {
 #if TS_RULE_ON(TS_RULE_CIRCULAR_WAIT)
         if (recorded_)
@@ -889,6 +891,11 @@ struct Access_awaiter
             registered_ = false;
         }
 #endif
+    }
+
+    Access_guard<T, Mode> await_resume() noexcept
+    {
+        finish_acquire();
         return Access_guard<T, Mode>(scheduler_, pipe_, obj_);   // prvalue -> elided into the local
     }
 

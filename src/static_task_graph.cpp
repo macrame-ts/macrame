@@ -67,6 +67,7 @@ Static_task_graph::Static_task_graph(Static_task_graph&& other) noexcept
     , links_lent_(other.links_lent_)
     , run_(std::move(other.run_))
     , compiled_(other.compiled_)
+    , default_priority_(other.default_priority_)
     , trace_(other.trace_)
 {}
 
@@ -140,8 +141,21 @@ Graph_node& Graph_node::before(const Graph_node& successor)
 Graph_node& Graph_node::set_priority(Priority p)
 {
     if (graph_)
+    {
         graph_->nodes_[index_].priority = p;   // applied to the block in execute() (see re-arm)
+        graph_->nodes_[index_].priority_set = true;
+    }
     return *this;
+}
+
+void Static_task_graph::set_default_priority(Priority p)
+{
+    default_priority_ = p;
+    for (Node& node : nodes_)
+    {
+        if (!node.priority_set)
+            node.priority = p;
+    }
 }
 
 Graph_node& Graph_node::set_inline()

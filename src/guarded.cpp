@@ -1,4 +1,5 @@
 #include "ts/guarded.h"
+#include "ts/timer.h"   // the timer thread stops before the workers it delivers to
 #include "ts/detail/suspension_registry.h"
 
 #include <atomic>
@@ -25,6 +26,14 @@ std::mutex g_sched_mutex;
 std::unique_ptr<Scheduler> g_scheduler;
 Scheduler_config g_config;
 std::atomic<Scheduler*> g_fast{ nullptr };
+
+// Program exit without `destroy_scheduler`: the timer thread delivers wakeups through the
+// scheduler, so it is stopped first. Declared after `g_scheduler`, so it is destroyed before it.
+struct Timer_exit_stop
+{
+    ~Timer_exit_stop() { detail::timer_shutdown(false); }
+};
+Timer_exit_stop g_timer_exit_stop;
 }
 
 Scheduler& global_scheduler()
@@ -53,6 +62,8 @@ void destroy_scheduler()
     std::lock_guard lock(g_sched_mutex);
     if (!g_scheduler)
         ts::fatal("destroy_scheduler(): no Scheduler is running");
+    // The timer thread first: it delivers wakeups as tasks on this scheduler.
+    detail::timer_shutdown(true);
     // Join first, publish "none running" second. `~Scheduler` joins the workers in its own
     // body, before any member is torn down, so the object stays fully valid for exactly as
     // long as a worker can still be executing. Clearing `g_fast` first opened a window where

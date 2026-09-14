@@ -41,6 +41,7 @@ set(TS_CORE_SOURCES
     src/guarded.cpp
     src/scheduler.cpp
     src/static_task_graph.cpp
+    src/timer.cpp
     src/worker_thread.cpp
 )
 
@@ -48,6 +49,7 @@ set(TS_SAMPLE_SOURCES
     sample/blackboard.cpp
     sample/coloring.cpp
     sample/events.cpp
+    sample/fixed_rate.cpp
     sample/game_frame.cpp
     sample/lazy_bvh.cpp
     sample/physics.cpp
@@ -80,6 +82,7 @@ set(TS_DRIVER_SOURCES
     tests/scheduler_tests.cpp
     tests/task_tests.cpp
     tests/tests.cpp
+    tests/timer_tests.cpp
     tests/versioned_tests.cpp
 )
 

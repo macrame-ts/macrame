@@ -81,6 +81,7 @@ struct Parallel_base : Task_control_block
     Balance balance;
     std::optional<Access_context> inherited_ctx;
     int inherited_owner;       // trace owner (graph node index), snapshotted like inherited_ctx
+    Priority priority = Priority::normal;   // the helpers' dispatch priority, and the loop's own at its yield points
 #if TS_RULES_ANY
     unsigned inherited_relaxed;   // the caller's `Relaxed_scope` opt-outs, snapshotted alike
 #endif
@@ -124,6 +125,10 @@ void run_loop(Parallel_state<Body>* st)
 {
     for (;;)
     {
+        // A yield point between chunks (`ts::yield`): a queued `high` task runs here before the
+        // next claim. One relaxed load when nothing is pending.
+        if (high_queued.load(std::memory_order_relaxed) != 0)
+            yield_to_high(st->priority);
         int start, stop;
         if (st->token.is_cancel_requested())
         {
@@ -192,6 +197,13 @@ void run_loop(Colored_state<Body>* st)
     std::uint64_t cur = st->phase_next.load(std::memory_order_acquire);
     for (;;)
     {
+        // A yield point between chunks, as in the flat loop; the phase is re-read afterwards,
+        // since the band may have moved on while the nested task ran.
+        if (high_queued.load(std::memory_order_relaxed) != 0)
+        {
+            yield_to_high(st->priority);
+            cur = st->phase_next.load(std::memory_order_acquire);
+        }
         int ph = static_cast<int>(cur >> 32);
         if (ph >= st->total_phases)
             break;
@@ -315,6 +327,7 @@ void run_participants(State* st, std::optional<Priority> priority)
     st->refcount.fetch_add(workers - 1, std::memory_order_relaxed);   // one ref per helper
 
     Priority prio = resolved_priority(priority);   // resolved once, on the calling thread
+    st->priority = prio;
     Scheduler& sched = global_scheduler();
     for (int t = 0; t < workers - 1; ++t)
         sched.submit(&helper_entry<State>, st, prio);
@@ -376,6 +389,7 @@ Task<void> parallel_for_async(int n, Body&& body, Parallel_options opts = {})
     st->refcount.fetch_add(workers, std::memory_order_relaxed);   // one ref per helper
 
     Priority prio = detail::resolved_priority(opts.priority);   // resolved once, on the calling thread
+    st->priority = prio;
     Scheduler& sched = global_scheduler();
     for (int t = 0; t < workers; ++t)
         sched.submit(&detail::helper_entry<State>, st, prio);

@@ -77,7 +77,7 @@ public:
 
 private:
     template<typename> friend class Deferred;
-    template<typename> friend class Versioned;
+    template<typename, History> friend class Versioned;
 
     Recorder(detail::Journal<T>& journal, typename detail::Journal<T>::Slot& slot) noexcept
         : journal_(&journal)
@@ -163,7 +163,7 @@ public:
 
 private:
     template<typename> friend class Deferred;
-    template<typename> friend class Versioned;
+    template<typename, History> friend class Versioned;
 
     Parallel_recorder(detail::Journal<T>& journal, Scheduler& scheduler)
         : journal_(&journal)

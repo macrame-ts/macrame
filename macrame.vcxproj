@@ -21,6 +21,7 @@
     <ClCompile Include="src\scheduler.cpp" />
     <ClCompile Include="src\static_task_graph.cpp" />
     <ClCompile Include="src\worker_thread.cpp" />
+    <ClCompile Include="src\timer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\ts\access.h" />
@@ -61,6 +62,7 @@
     <ClInclude Include="include\ts\detail\work_stealing_deque.h" />
     <ClInclude Include="include\ts\detail\worker_thread.h" />
     <ClInclude Include="include\ts\named.h" />
+    <ClInclude Include="include\ts\timer.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>

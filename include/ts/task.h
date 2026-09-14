@@ -305,6 +305,20 @@ auto launch(Fn&& fn, Dispatch_options opts = {},
     return detail::build_bare_task(std::forward<Fn>(fn), std::move(opts), site);
 }
 
+// A yield point for long-running work: if a `Priority::high` task is queued, run it now, on
+// this thread, and return; otherwise return at once. With nothing pending the cost is one
+// relaxed load, so it can sit in an inner loop. It never suspends, so it is legal in any body
+// (a functor node, a `parallel_for` body, a coroutine segment), and grants held across it are
+// safe: the task it runs was queued with its own turns already taken, so it cannot wait on
+// them. The yielding work continues on the same stack afterwards. A no-op off a worker, in
+// worker-less mode (nothing queues there), and in a task already running at `high`. Only
+// queued `high` work is run; `normal` and `low` work never preempts through a yield point.
+inline void yield()
+{
+    if (detail::high_queued.load(std::memory_order_relaxed) != 0)
+        detail::yield_to_high(detail::resolved_priority(std::nullopt));
+}
+
 // Declares that something the task system is waiting on will be completed by a thread the
 // scheduler does not own - an OS I/O completion, a GPU fence, a `Signal` triggered from a
 // dedicated engine thread, a `Frame_gate`'s next `open()`. Hold one for as long as that

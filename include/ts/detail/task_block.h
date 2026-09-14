@@ -82,6 +82,16 @@ struct Task_control_block;
 // other diagnostics.
 [[noreturn]] void escaped_exception_diagnose(const char* what) noexcept;
 
+// `Priority::high` entries currently queued, maintained by the scheduler: incremented before
+// the push and decremented after a successful pop, so it never under-counts a queued entry.
+// `ts::yield()` reads it relaxed - the whole cost of a yield point with nothing pending.
+inline std::atomic<int> high_queued{ 0 };
+
+// The slow half of a yield point (defined in scheduler.cpp): on a worker, when the caller runs
+// below `high` (`own`), pop one queued `high` entry and run it on this thread, then return.
+// A no-op otherwise.
+void yield_to_high(Priority own) noexcept;
+
 #if TS_RULE_ON(TS_RULE_DEADLOCK_NET)
 // Work that only a non-worker thread can complete, currently outstanding (see
 // `ts::External_wait`). The deadlock net's second predicate: quiescence with a nonzero count

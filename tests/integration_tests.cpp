@@ -16,6 +16,10 @@ void game_frame_stats(int frames, float time_scale,
 void game_frame_free_stats(int frames, float time_scale,
                            double& avg_ms, double& serial_ms, float& transform0);
 long long game_frame_draw_count();
+void game_frame_fixed_stats(int frames, float time_scale,
+                            double& avg_ms, double& serial_ms, float& transform0);
+bool fixed_rate_self_check(int frames, float scale);
+std::size_t fixed_rate_physics_hash(int ticks);
 }
 
 #include <algorithm>
@@ -775,6 +779,42 @@ void test_parallel_for_in_node_no_reports()
 }
 #endif
 
+// A fixed-rate physics graph on its own clock beside the frame graph (sample/fixed_rate.cpp):
+// ticks run one at a time in order, render always interpolates two consecutive ticks, and
+// every intent the frame staged is applied exactly once.
+void test_fixed_rate_beside_frame()
+{
+    TS_CHECK(sample::fixed_rate_self_check(120, 0.05f));
+}
+
+// The game frame with physics and networking on their own clocks publishes the same transforms
+// and submits the same draw commands as the baseline frame.
+void test_engine_fixed_rate()
+{
+    double avg_ms = 0.0, serial_ms = 0.0;
+    float graph_xf = 0.0f, fixed_xf = 0.0f;
+    sample::game_frame_stats(5, 0.3f, avg_ms, serial_ms, graph_xf);
+    long long graph_drawn = sample::game_frame_draw_count();
+    sample::game_frame_fixed_stats(5, 0.3f, avg_ms, serial_ms, fixed_xf);
+    long long fixed_drawn = sample::game_frame_draw_count();
+    TS_CHECK(fixed_xf == 5.0f);
+    TS_CHECK(fixed_drawn == graph_drawn);
+}
+
+// Given the same intent sequence the fixed-rate world is the same, whatever the worker count.
+void test_fixed_rate_physics_deterministic()
+{
+    const std::size_t reference = sample::fixed_rate_physics_hash(40);
+    {
+        ts::Scheduler_scope pool{ { .num_workers = 1 } };
+        TS_CHECK(sample::fixed_rate_physics_hash(40) == reference);
+    }
+    {
+        ts::Scheduler_scope pool{ { .num_workers = 4 } };
+        TS_CHECK(sample::fixed_rate_physics_hash(40) == reference);
+    }
+}
+
 void run_integration_tests()
 {
     std::printf("\n[integration] tests\n");
@@ -811,4 +851,7 @@ void run_integration_tests()
     run("engine frame without a graph", test_engine_graph_free);
     run("oversubscription no deadlock", test_oversubscription_no_deadlock);
     run("deep await chain no deadlock", test_deep_await_chain_no_deadlock);
+    run("fixed-rate graph beside a frame graph", test_fixed_rate_beside_frame);
+    run("fixed-rate physics is deterministic", test_fixed_rate_physics_deterministic);
+    run("engine frame with fixed-rate physics and networking", test_engine_fixed_rate);
 }

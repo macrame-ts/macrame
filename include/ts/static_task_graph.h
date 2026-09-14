@@ -63,7 +63,8 @@ public:
         requires (sizeof...(Nodes) > 0) && (std::is_same_v<Nodes, Graph_node> && ...)
     Graph_node& before(const Graph_node& successor, const Nodes&... more);
 
-    // Queue priority for this node when it is dispatched each run.
+    // Queue priority for this node when it is dispatched each run. Overrides the graph's
+    // default (`Static_task_graph::set_default_priority`).
     Graph_node& set_priority(Priority p);
 
     // Dispatch this node inline: when it becomes ready, run it on the thread that settled
@@ -220,6 +221,11 @@ public:
     // records nothing (stamps and fold compile out).
     void set_trace(tools::Graph_trace* trace);
 
+    // Queue priority for every node that has not set its own (`Graph_node::set_priority`),
+    // including nodes added later - the spelling for a graph whose whole run is urgent, such as
+    // a fixed-rate graph with a deadline. Applied at each run's re-arm, like a node's own.
+    void set_default_priority(Priority p);
+
     int node_count() const { return static_cast<int>(nodes_.size()); }
 
 private:
@@ -242,6 +248,7 @@ private:
         // is build-once, so it is never needed again).
         std::vector<detail::Pipe*> pipes;
         Priority priority = Priority::normal;   // applied to `block` at each run's re-arm
+        bool priority_set = false;              // set by `Graph_node::set_priority`; else follows the graph default
         bool inline_dispatch = false;           // run on the settling thread if its acquires all succeed synchronously
 
         // --- derived by `compile()` / used by the run machinery --------------------------
@@ -342,6 +349,7 @@ private:
     bool links_lent_ = false;
     std::unique_ptr<Run_state> run_;                   // reused across execute() runs (one run at a time)
     bool compiled_ = false;
+    Priority default_priority_ = Priority::normal;   // see `set_default_priority`
     // Attached via set_trace; not owned. Unconditional (one pointer) so the run logic
     // needs no `TS_PROFILING` blocks; without profiling it is stored but never read.
     tools::Graph_trace* trace_ = nullptr;
@@ -397,6 +405,7 @@ Graph_node Static_task_graph::add_node(Named name, Fn&& fn, Objs&&... objs)
     }
 
     node.name = name;
+    node.priority = default_priority_;
     int index = static_cast<int>(nodes_.size());
     nodes_.push_back(std::move(node));
 
